@@ -1,6 +1,6 @@
 # 단타봇
 
-- **Coinone API** 를 활용하여 다양한 거래 자동화 기법을 테스트해본다.
+- **KIS open-trading-api MCP**를 활용하여 다양한 거래 자동화 기법을 테스트해본다.
 
 ## KIS MCP
 - https://github.com/koreainvestment/open-trading-api
