@@ -30,7 +30,7 @@
 
 ### Harness Engineering을 통한 거래 Skill 작성
 
-- /sample 폴더 참조
+- [sample 폴더](./sample/) 참조
 
 ## MCP를 활용한 Rule base 거래 테스트
 
