@@ -6,6 +6,7 @@
 - https://github.com/koreainvestment/open-trading-api
 - https://apiportal.koreainvestment.com/tools
 - https://apiportal.koreainvestment.com/tools-trading
+- https://github.com/koreainvestment/open-trading-api/blob/main/MCP/Kis%20Trading%20MCP/Readme.md
 
 ## Harness Engineering
 
