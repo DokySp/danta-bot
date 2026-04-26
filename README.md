@@ -2,6 +2,11 @@
 
 - **Coinone API** 를 활용하여 다양한 거래 자동화 기법을 테스트해본다.
 
+## KIS MCP
+- https://github.com/koreainvestment/open-trading-api
+- https://apiportal.koreainvestment.com/tools
+- https://apiportal.koreainvestment.com/tools-trading
+
 ## Harness Engineering
 
 ### 개요
