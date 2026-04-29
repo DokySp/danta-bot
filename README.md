@@ -8,6 +8,12 @@
 - https://apiportal.koreainvestment.com/tools-trading
 - https://github.com/koreainvestment/open-trading-api/blob/main/MCP/Kis%20Trading%20MCP/Readme.md
 
+## Codex CLI
+
+### 개요
+- [Codex CLI 정리](./codex-cli.md)
+- 로컬에서 구동되는 agent로, MCP를 연결 및 채널 설정 등 다양한 기능을 지원합니다.
+
 ## Harness Engineering
 
 ### 개요
