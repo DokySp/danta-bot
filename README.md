@@ -8,6 +8,23 @@
 - https://apiportal.koreainvestment.com/tools-trading
 - https://github.com/koreainvestment/open-trading-api/blob/main/MCP/Kis%20Trading%20MCP/Readme.md
 
+## Docker 구성
+- telegram-gateway: 텔레그램 송수신 컨테이너
+- codex-exec: codex 예약 및 작업 수행 컨테이너. 버전별로 스킬 및 스케줄링 관리.
+- kis-trading-mcp: 한국투자증권에서 제작한 컨테이너.
+
+## Docker 이미지 빌드
+
+```bash
+
+# TODO: 도커 빌드 명령어도 추가가 필요함
+# 도커 빌드를 그냥 하면 기존에 빌드된 컨테이너가 교체가 되는 것인지?
+
+$ mkdir -p images
+$ docker save -o images/telegram-gateway-1.0.0.tar telegram-gateway:1.0.0
+$ docker save -o images/codex-exec-1.0.0.tar codex-exec:1.0.0
+```
+
 ## Codex CLI
 
 ### 개요

@@ -1,0 +1,82 @@
+x-codex-exec-common: &codex-exec-common
+
+  ## TODO: 여기 이해 안감
+  image: codex-exec:1.0.0
+  environment: &codex-exec-environment
+    CODEX_HOME: /codex-home
+    STATE_DIR: /state
+    WORKSPACE_DIR: /workspace
+    SCHEDULE_FILE: /app/config/schedules.yaml
+    TELEGRAM_GATEWAY_URL: http://telegram-gateway:8080/sendMessage
+    TELEGRAM_ROUTE: v2
+    CODEX_MODEL: gpt-5.5
+    CODEX_REASONING_EFFORT: xhigh
+    CODEX_TIMEOUT_SECONDS: 3600
+    CODEX_BYPASS_APPROVALS_AND_SANDBOX: "true"
+    BUNDLED_SKILLS_DIR: /app/skills
+    CODEX_SYNC_SKILLS: "true"
+    CODEX_SYNC_SKILLS_ONCE: "true"
+    CODEX_SYNC_SKILLS_OVERWRITE: "false"
+    LOG_LEVEL: INFO
+  depends_on:
+    - telegram-gateway
+  restart: unless-stopped
+
+services:
+  # 게이트웨이
+  telegram-gateway:
+    container_name: telegram-gateway
+    image: telegram-gateway:1.0.0
+    environment:
+      GATEWAY_ROUTES_FILE: /app/config/routes.yaml
+      GATEWAY_HOST: 0.0.0.0
+      GATEWAY_PORT: 8080
+      HTTP_TIMEOUT: 10
+      LOG_LEVEL: INFO
+    ports:
+      - "127.0.0.1:8088:8080"
+    volumes:
+      - ./telegram-gateway/config/routes.yaml:/app/config/routes.yaml:ro
+      - ./telegram-gateway/envs:/app/envs:ro
+    restart: unless-stopped
+
+  # KIS Trade MCP
+  kis-trade-mcp-1:
+    image: kis-trade-mcp:latest
+    container_name: kis-trade-mcp-v1
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    env_file:
+      - ./trade/.env.glob
+      - ./trade/.env/v1
+
+  kis-trade-mcp-2:
+    image: kis-trade-mcp:latest
+    container_name: kis-trade-mcp-v2
+    restart: unless-stopped
+    ports:
+      - "3002:3000"
+    env_file:
+      - ./trade/.env.glob
+      - ./trade/.env.v2
+
+  # =====================================================================
+  # 실행기
+  codex-exec-stock-v1:
+    <<: *codex-exec-common
+    container_name: codex-exec-stock-v1
+    environment:
+      <<: *codex-exec-environment
+    ports:
+      - "127.0.0.1:8090:8080"
+    volumes:
+      - codex-home-stock-v1:/codex-home
+      - codex-state-stock-v1:/state
+      - ./:/workspace
+
+
+
+volumes:
+  codex-home-stock-v1:
+  codex-state-stock-v1:

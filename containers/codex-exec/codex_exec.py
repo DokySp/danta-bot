@@ -1,0 +1,606 @@
+#!/usr/bin/env python3
+import html
+import json
+import logging
+import os
+import queue
+import shutil
+import shlex
+import signal
+import subprocess
+import threading
+import time
+import uuid
+from dataclasses import dataclass
+from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+import yaml
+
+
+HTML_PROMPT_SUFFIX = (
+    "\n\n결과는 telegram으로 보낼거기 때문에 마크다운이 아니라 "
+    "parse_mode=HTML에 맞춰서 출력해줘. Telegram HTML에서 지원되는 "
+    "<b>, <i>, <u>, <s>, <code>, <pre>, <a> 태그 위주로 사용하고 "
+    "전체 메시지는 가능한 4096자 안쪽으로 요약해줘."
+)
+
+
+def env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    return int(raw)
+
+
+@dataclass(frozen=True)
+class Config:
+    host: str
+    port: int
+    codex_bin: str
+    codex_home: Path
+    state_dir: Path
+    workspace_dir: Path
+    schedule_file: Path
+    telegram_gateway_url: str
+    telegram_route: str | None
+    model: str
+    reasoning_effort: str
+    codex_timeout_seconds: int
+    scheduler_poll_seconds: int
+    bypass_sandbox: bool
+    new_session_prompt: str
+    bundled_skills_dir: Path
+    sync_skills: bool
+    sync_skills_once: bool
+    sync_skills_overwrite: bool
+
+    @classmethod
+    def from_env(cls) -> "Config":
+        return cls(
+            host=os.getenv("CODEX_EXEC_HOST", "0.0.0.0"),
+            port=env_int("CODEX_EXEC_PORT", 8080),
+            codex_bin=os.getenv("CODEX_BIN", "codex"),
+            codex_home=Path(os.getenv("CODEX_HOME", "/codex-home")),
+            state_dir=Path(os.getenv("STATE_DIR", "/state")),
+            workspace_dir=Path(os.getenv("WORKSPACE_DIR", "/workspace")),
+            schedule_file=Path(os.getenv("SCHEDULE_FILE", "/app/config/schedules.yaml")),
+            telegram_gateway_url=os.getenv(
+                "TELEGRAM_GATEWAY_URL",
+                "http://telegram-gateway:8080/sendMessage",
+            ),
+            telegram_route=os.getenv("TELEGRAM_ROUTE", "").strip() or None,
+            model=os.getenv("CODEX_MODEL", "gpt-5.5"),
+            reasoning_effort=os.getenv("CODEX_REASONING_EFFORT", "xhigh"),
+            codex_timeout_seconds=env_int("CODEX_TIMEOUT_SECONDS", 1800),
+            scheduler_poll_seconds=env_int("SCHEDULER_POLL_SECONDS", 15),
+            bypass_sandbox=env_bool("CODEX_BYPASS_APPROVALS_AND_SANDBOX", True),
+            new_session_prompt=os.getenv("NEW_SESSION_PROMPT", "새 대화 시작"),
+            bundled_skills_dir=Path(os.getenv("BUNDLED_SKILLS_DIR", "/app/skills")),
+            sync_skills=env_bool("CODEX_SYNC_SKILLS", True),
+            sync_skills_once=env_bool("CODEX_SYNC_SKILLS_ONCE", True),
+            sync_skills_overwrite=env_bool("CODEX_SYNC_SKILLS_OVERWRITE", False),
+        )
+
+
+class StateStore:
+    def __init__(self, config: Config) -> None:
+        self.config = config
+        self.path = config.state_dir / "default_session.json"
+        self.lock = threading.Lock()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def get_default_session(self) -> str | None:
+        with self.lock:
+            if not self.path.exists():
+                return None
+            try:
+                data = json.loads(self.path.read_text())
+            except (OSError, json.JSONDecodeError):
+                logging.exception("failed to read session state")
+                return None
+            value = data.get("session_id")
+            return str(value) if value else None
+
+    def set_default_session(self, session_id: str) -> None:
+        payload = {
+            "session_id": session_id,
+            "updated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        }
+        tmp = self.path.with_suffix(".json.tmp")
+        with self.lock:
+            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+            tmp.replace(self.path)
+
+
+class TelegramGateway:
+    def __init__(self, config: Config) -> None:
+        self.config = config
+
+    def send_message(
+        self,
+        text: str,
+        chat_id: str | None = None,
+        route: str | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "text": text or "<i>No output</i>",
+            "parse_mode": "HTML",
+            "escape": False,
+        }
+        if chat_id:
+            payload["chat_id"] = chat_id
+        outbound_route = route or self.config.telegram_route
+        if outbound_route:
+            payload["route"] = outbound_route
+
+        body = json.dumps(payload).encode("utf-8")
+        request = Request(
+            self.config.telegram_gateway_url,
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=20) as response:
+                response.read()
+        except HTTPError as exc:
+            raw = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"telegram-gateway failed: HTTP {exc.code}: {raw}") from exc
+        except URLError as exc:
+            raise RuntimeError(f"telegram-gateway failed: {exc}") from exc
+
+
+class CodexRunner:
+    def __init__(self, config: Config) -> None:
+        self.config = config
+        self.tmp_dir = Path(os.getenv("CODEX_EXEC_TMP_DIR", "/tmp/codex-exec"))
+        self.tmp_dir.mkdir(parents=True, exist_ok=True)
+        self.config.codex_home.mkdir(parents=True, exist_ok=True)
+        self._sync_bundled_skills()
+
+    def run_new_session(self, prompt: str) -> tuple[str, str]:
+        before = self._session_ids()
+        output = self._run_codex(["exec"], prompt)
+        session_id = self._detect_new_session_id(before)
+        if not session_id:
+            raise RuntimeError("codex finished but new session id was not found")
+        return session_id, output
+
+    def run_resume(self, session_id: str, prompt: str) -> str:
+        return self._run_codex(["exec", "resume", session_id], prompt)
+
+    def run_once(self, prompt: str) -> str:
+        return self._run_codex(["exec"], prompt)
+
+    def _run_codex(self, subcommand: list[str], prompt: str) -> str:
+        run_id = datetime.utcnow().strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:8]
+        output_file = self.tmp_dir / f"{run_id}.txt"
+        full_prompt = prompt.rstrip() + HTML_PROMPT_SUFFIX
+
+        cmd = [
+            self.config.codex_bin,
+            *subcommand,
+            "-m",
+            self.config.model,
+            "-c",
+            f'model_reasoning_effort="{self.config.reasoning_effort}"',
+            "--skip-git-repo-check",
+            "-o",
+            str(output_file),
+        ]
+        if self.config.bypass_sandbox:
+            cmd.append("--dangerously-bypass-approvals-and-sandbox")
+        cmd.append(full_prompt)
+
+        env = os.environ.copy()
+        env["CODEX_HOME"] = str(self.config.codex_home)
+
+        logging.info("running codex command=%s", " ".join(shlex.quote(part) for part in cmd[:-1]))
+        result = subprocess.run(
+            cmd,
+            cwd=self.config.workspace_dir,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=self.config.codex_timeout_seconds,
+            check=False,
+        )
+
+        if result.returncode != 0:
+            stderr = result.stderr[-2000:] if result.stderr else ""
+            raise RuntimeError(f"codex exited with {result.returncode}: {stderr}")
+
+        if output_file.exists():
+            output = output_file.read_text()
+        else:
+            output = result.stdout.strip()
+        return output.strip() or "<i>Codex completed without output.</i>"
+
+    def _session_ids(self) -> list[str]:
+        path = self.config.codex_home / "session_index.jsonl"
+        if not path.exists():
+            return []
+        ids: list[str] = []
+        for line in path.read_text().splitlines():
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            value = item.get("id")
+            if value:
+                ids.append(str(value))
+        return ids
+
+    def _detect_new_session_id(self, before: list[str]) -> str | None:
+        after = self._session_ids()
+        before_set = set(before)
+        created = [session_id for session_id in after if session_id not in before_set]
+        if created:
+            return created[-1]
+        if after and (not before or after[-1] != before[-1]):
+            return after[-1]
+        return None
+
+    def _sync_bundled_skills(self) -> None:
+        if not self.config.sync_skills:
+            return
+        source = self.config.bundled_skills_dir
+        if not source.exists():
+            logging.info("bundled skills dir does not exist: %s", source)
+            return
+
+        target_root = self.config.codex_home / "skills"
+        marker = self.config.codex_home / ".bundled_skills_initialized"
+
+        if self.config.sync_skills_once:
+            if marker.exists():
+                logging.info("bundled skills already initialized; skipping sync marker=%s", marker)
+                return
+            if target_root.exists() and any(target_root.iterdir()):
+                self._write_skills_marker(marker, copied=0, skipped_existing=True)
+                logging.info(
+                    "skills dir already exists; marked initialized without touching skills target=%s",
+                    target_root,
+                )
+                return
+
+        target_root.mkdir(parents=True, exist_ok=True)
+
+        copied = 0
+        for skill_dir in sorted(path for path in source.iterdir() if path.is_dir()):
+            target = target_root / skill_dir.name
+            if target.exists() and self.config.sync_skills_overwrite:
+                shutil.rmtree(target)
+            if target.exists():
+                continue
+            shutil.copytree(skill_dir, target)
+            copied += 1
+
+        if self.config.sync_skills_once:
+            self._write_skills_marker(marker, copied=copied, skipped_existing=False)
+
+        logging.info("synced bundled skills count=%s source=%s target=%s", copied, source, target_root)
+
+    def _write_skills_marker(self, marker: Path, copied: int, skipped_existing: bool) -> None:
+        payload = {
+            "source": str(self.config.bundled_skills_dir),
+            "target": str(self.config.codex_home / "skills"),
+            "copied": copied,
+            "skipped_existing": skipped_existing,
+            "initialized_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        }
+        marker.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+@dataclass(frozen=True)
+class TelegramTask:
+    chat_id: str | None
+    text: str
+    route: str | None = None
+    message_id: Any = None
+
+
+class TelegramWorker:
+    def __init__(self, config: Config, state: StateStore, runner: CodexRunner, gateway: TelegramGateway) -> None:
+        self.config = config
+        self.state = state
+        self.runner = runner
+        self.gateway = gateway
+        self.queue: queue.Queue[TelegramTask] = queue.Queue()
+        self.thread = threading.Thread(target=self._work, name="telegram-worker", daemon=True)
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def submit(self, task: TelegramTask) -> None:
+        self.queue.put(task)
+
+    def _work(self) -> None:
+        while True:
+            task = self.queue.get()
+            try:
+                self._handle(task)
+            except Exception as exc:  # noqa: BLE001 - report task failures to Telegram
+                logging.exception("telegram task failed")
+                self.gateway.send_message(self._error_message(exc), task.chat_id, task.route)
+            finally:
+                self.queue.task_done()
+
+    def _handle(self, task: TelegramTask) -> None:
+        text = task.text.strip()
+        logging.info("handling telegram task message_id=%s text=%r", task.message_id, text)
+
+        if text.startswith("/new "):
+            self.gateway.send_message(
+                "사용법: <code>/new</code>\n새 세션 생성 명령은 메시지를 함께 받지 않습니다.",
+                task.chat_id,
+                task.route,
+            )
+            return
+
+        if text == "/new":
+            session_id, output = self.runner.run_new_session(self.config.new_session_prompt)
+            self.state.set_default_session(session_id)
+            logging.info("new default session_id=%s", session_id)
+            self.gateway.send_message(output, task.chat_id, task.route)
+            return
+
+        session_id = self.state.get_default_session()
+        if not session_id:
+            self.gateway.send_message(
+                "기본 Codex 세션이 없습니다.\n먼저 <code>/new</code>로 새 세션을 시작해주세요.",
+                task.chat_id,
+                task.route,
+            )
+            return
+
+        output = self.runner.run_resume(session_id, text)
+        self.gateway.send_message(output, task.chat_id, task.route)
+
+    @staticmethod
+    def _error_message(exc: Exception) -> str:
+        return f"<b>codex-exec failed</b>\n<pre>{html.escape(str(exc))}</pre>"
+
+
+def parse_yaml_schedule(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    data = yaml.safe_load(path.read_text()) or {}
+    schedules = data.get("schedules", [])
+    if not isinstance(schedules, list):
+        raise ValueError("schedule file must contain a schedules list")
+    return [item for item in schedules if isinstance(item, dict)]
+
+
+def cron_matches(expr: str, now: datetime) -> bool:
+    aliases = {
+        "@hourly": "0 * * * *",
+        "@daily": "0 0 * * *",
+        "@weekly": "0 0 * * 0",
+    }
+    expr = aliases.get(expr.strip(), expr.strip())
+    fields = expr.split()
+    if len(fields) != 5:
+        raise ValueError(f"unsupported cron expression: {expr}")
+
+    minute, hour, day, month, weekday = fields
+    cron_weekday = (now.weekday() + 1) % 7
+    return (
+        _field_matches(minute, now.minute, 0, 59)
+        and _field_matches(hour, now.hour, 0, 23)
+        and _field_matches(day, now.day, 1, 31)
+        and _field_matches(month, now.month, 1, 12)
+        and _field_matches(weekday, cron_weekday, 0, 7)
+    )
+
+
+def _field_matches(expr: str, value: int, minimum: int, maximum: int) -> bool:
+    for part in expr.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        base, step = (part.split("/", 1) + ["1"])[:2] if "/" in part else (part, "1")
+        step_int = int(step)
+        if base == "*":
+            start, end = minimum, maximum
+        elif "-" in base:
+            start_text, end_text = base.split("-", 1)
+            start, end = int(start_text), int(end_text)
+        else:
+            start = end = int(base)
+        if maximum == 7 and value == 0 and start == end == 7:
+            return True
+        if start <= value <= end and (value - start) % step_int == 0:
+            return True
+    return False
+
+
+class Scheduler:
+    def __init__(self, config: Config, runner: CodexRunner, gateway: TelegramGateway) -> None:
+        self.config = config
+        self.runner = runner
+        self.gateway = gateway
+        self.stop_event = threading.Event()
+        self.last_run_keys: set[tuple[str, str]] = set()
+        self.thread = threading.Thread(target=self._loop, name="scheduler", daemon=True)
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+
+    def _loop(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                self._tick()
+            except Exception:
+                logging.exception("scheduler tick failed")
+            self.stop_event.wait(self.config.scheduler_poll_seconds)
+
+    def _tick(self) -> None:
+        now = datetime.now()
+        minute_key = now.strftime("%Y%m%d%H%M")
+        for item in parse_yaml_schedule(self.config.schedule_file):
+            job_id = str(item.get("id", "")).strip()
+            if not job_id:
+                continue
+            if item.get("enabled", True) is False:
+                continue
+            cron = str(item.get("cron", "")).strip()
+            message = str(item.get("message", "")).strip()
+            if not cron or not message:
+                continue
+            key = (job_id, minute_key)
+            if key in self.last_run_keys:
+                continue
+            if cron_matches(cron, now):
+                self.last_run_keys.add(key)
+                thread = threading.Thread(
+                    target=self._run_job,
+                    args=(job_id, message, item.get("chat_id")),
+                    name=f"schedule-{job_id}",
+                    daemon=True,
+                )
+                thread.start()
+
+    def _run_job(self, job_id: str, message: str, chat_id: Any) -> None:
+        logging.info("running scheduled job id=%s", job_id)
+        try:
+            output = self.runner.run_once(message)
+            self.gateway.send_message(output, str(chat_id) if chat_id else None)
+        except Exception as exc:  # noqa: BLE001 - report schedule failures to Telegram
+            logging.exception("scheduled job failed id=%s", job_id)
+            self.gateway.send_message(
+                f"<b>scheduled codex job failed</b>\n<code>{html.escape(job_id)}</code>\n"
+                f"<pre>{html.escape(str(exc))}</pre>",
+                str(chat_id) if chat_id else None,
+            )
+
+
+class App:
+    def __init__(self, config: Config) -> None:
+        self.config = config
+        self.state = StateStore(config)
+        self.runner = CodexRunner(config)
+        self.gateway = TelegramGateway(config)
+        self.telegram_worker = TelegramWorker(config, self.state, self.runner, self.gateway)
+        self.scheduler = Scheduler(config, self.runner, self.gateway)
+
+    def start(self) -> ThreadingHTTPServer:
+        self.telegram_worker.start()
+        self.scheduler.start()
+        return self._serve_http()
+
+    def stop(self) -> None:
+        self.scheduler.stop()
+
+    def _serve_http(self) -> ThreadingHTTPServer:
+        app = self
+
+        class Handler(BaseHTTPRequestHandler):
+            server_version = "codex-exec"
+
+            def do_GET(self) -> None:
+                if self.path != "/healthz":
+                    self._write_json(404, {"ok": False, "error": "not found"})
+                    return
+                self._write_json(200, {"ok": True})
+
+            def do_POST(self) -> None:
+                if self.path != "/telegram":
+                    self._write_json(404, {"ok": False, "error": "not found"})
+                    return
+                try:
+                    payload = self._read_json()
+                    text = str(payload.get("text", "")).strip()
+                    if not text:
+                        self._write_json(400, {"ok": False, "error": "text is required"})
+                        return
+
+                    app.telegram_worker.submit(
+                        TelegramTask(
+                            chat_id=str(payload.get("chat_id")) if payload.get("chat_id") else None,
+                            text=text,
+                            route=str(payload.get("route")) if payload.get("route") else None,
+                            message_id=payload.get("message_id"),
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001 - expose endpoint failures as JSON
+                    logging.exception("failed to accept telegram payload")
+                    self._write_json(500, {"ok": False, "error": str(exc)})
+                    return
+
+                self._write_json(202, {"ok": True, "queued": True})
+
+            def log_message(self, fmt: str, *args: Any) -> None:
+                logging.info("http %s - %s", self.address_string(), fmt % args)
+
+            def _read_json(self) -> dict[str, Any]:
+                length = int(self.headers.get("Content-Length", "0"))
+                raw = self.rfile.read(length).decode("utf-8")
+                parsed = json.loads(raw or "{}")
+                if not isinstance(parsed, dict):
+                    raise ValueError("request body must be a JSON object")
+                return parsed
+
+            def _write_json(self, status: int, payload: dict[str, Any]) -> None:
+                body = json.dumps(payload).encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        server = ThreadingHTTPServer((self.config.host, self.config.port), Handler)
+        thread = threading.Thread(target=server.serve_forever, name="http-server", daemon=True)
+        thread.start()
+        return server
+
+
+def main() -> None:
+    logging.basicConfig(
+        level=os.getenv("LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
+    config = Config.from_env()
+    app = App(config)
+
+    stop_event = threading.Event()
+
+    def stop(_signum: int, _frame: Any) -> None:
+        stop_event.set()
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+
+    server = app.start()
+    logging.info(
+        "codex-exec listening on %s:%s",
+        config.host,
+        config.port,
+    )
+    try:
+        while not stop_event.wait(1):
+            pass
+    finally:
+        app.stop()
+        server.shutdown()
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main()

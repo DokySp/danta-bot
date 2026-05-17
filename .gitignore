@@ -1,7 +1,10 @@
-
-
 /secret.py
 /secret
+
+# Local environment files
+containers/telegram-gateway/config/routes.yaml
+containers/telegram-gateway/envs/*
+containers/!telegram-gateway/envs/.env.example
 
 # Created by https://www.toptal.com/developers/gitignore/api/macos,python,vscode
 # Edit at https://www.toptal.com/developers/gitignore?templates=macos,python,vscode
@@ -143,6 +146,8 @@ celerybeat.pid
 
 # Environments
 .env
+.env.*
+!.env*.example
 .venv
 env/
 venv/
