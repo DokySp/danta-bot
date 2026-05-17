@@ -14,8 +14,10 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV CODEX_HOME=/codex-home
 ENV STATE_DIR=/state
 ENV WORKSPACE_DIR=/workspace
-ENV SCHEDULE_FILE=/app/config/schedules.yaml
+ENV SCHEDULE_FILE=/app/configs/schedules.yaml
 ENV BUNDLED_SKILLS_DIR=/app/skills
+ENV CODEX_CONFIG_SNIPPET_DIR=/app/codex-config.d
+ENV CODEX_CONFIG_FILE=/codex-home/config.toml
 ENV CODEX_SYNC_SKILLS=true
 ENV CODEX_SYNC_SKILLS_ONCE=true
 ENV CODEX_SYNC_SKILLS_OVERWRITE=false
@@ -25,7 +27,7 @@ ENV CODEX_EXEC_PORT=8080
 WORKDIR /app
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl git ripgrep \
+  && apt-get install -y --no-install-recommends ca-certificates curl git nodejs npm ripgrep \
   && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir PyYAML==6.0.2
@@ -47,12 +49,17 @@ RUN set -eux; \
 
 RUN groupadd --gid 1000 app \
   && useradd --uid 1000 --gid app --create-home app \
-  && mkdir -p /app/config /codex-home /state /workspace /tmp/codex-exec \
-  && chown -R app:app /app /codex-home /state /workspace /tmp/codex-exec
+  && mkdir -p /app/configs /app/codex-config.d /codex-home /state /workspace /tmp/codex-exec /tmp/npm-cache \
+  && chown -R app:app /app /codex-home /state /workspace /tmp/codex-exec /tmp/npm-cache
+
+ENV npm_config_cache=/tmp/npm-cache
 
 COPY --chown=app:app codex_exec.py /app/codex_exec.py
-COPY --chown=app:app config/schedules.yaml /app/config/schedules.yaml
+COPY --chown=app:app configs/schedules.yaml /app/configs/schedules.yaml
+COPY --chown=app:app scripts/merge-codex-config.sh /app/merge-codex-config.sh
 COPY --chown=app:app skills /app/skills
+
+RUN chmod +x /app/merge-codex-config.sh
 
 USER app
 
@@ -61,4 +68,5 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2).read()"
 
+ENTRYPOINT ["/app/merge-codex-config.sh"]
 CMD ["python", "/app/codex_exec.py"]

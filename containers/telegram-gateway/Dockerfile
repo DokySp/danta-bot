@@ -11,13 +11,13 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV GATEWAY_HOST=0.0.0.0
 ENV GATEWAY_PORT=8080
-ENV GATEWAY_ROUTES_FILE=/app/config/routes.yaml
+ENV GATEWAY_ROUTES_FILE=/app/configs/routes.yaml
 
 WORKDIR /app
 
 RUN groupadd --system app \
   && useradd --system --gid app --create-home app \
-  && mkdir -p /app/config \
+  && mkdir -p /app/configs \
   && chown -R app:app /app
 
 RUN pip install --no-cache-dir PyYAML==6.0.2

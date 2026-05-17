@@ -44,6 +44,13 @@ def env_int(name: str, default: int) -> int:
     return int(raw)
 
 
+def env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    return float(raw)
+
+
 @dataclass(frozen=True)
 class Config:
     host: str
@@ -59,6 +66,7 @@ class Config:
     reasoning_effort: str
     codex_timeout_seconds: int
     scheduler_poll_seconds: int
+    telegram_typing_interval_seconds: float
     bypass_sandbox: bool
     new_session_prompt: str
     bundled_skills_dir: Path
@@ -75,7 +83,7 @@ class Config:
             codex_home=Path(os.getenv("CODEX_HOME", "/codex-home")),
             state_dir=Path(os.getenv("STATE_DIR", "/state")),
             workspace_dir=Path(os.getenv("WORKSPACE_DIR", "/workspace")),
-            schedule_file=Path(os.getenv("SCHEDULE_FILE", "/app/config/schedules.yaml")),
+            schedule_file=Path(os.getenv("SCHEDULE_FILE", "/app/configs/schedules.yaml")),
             telegram_gateway_url=os.getenv(
                 "TELEGRAM_GATEWAY_URL",
                 "http://telegram-gateway:8080/sendMessage",
@@ -85,6 +93,7 @@ class Config:
             reasoning_effort=os.getenv("CODEX_REASONING_EFFORT", "xhigh"),
             codex_timeout_seconds=env_int("CODEX_TIMEOUT_SECONDS", 1800),
             scheduler_poll_seconds=env_int("SCHEDULER_POLL_SECONDS", 15),
+            telegram_typing_interval_seconds=env_float("TELEGRAM_TYPING_INTERVAL_SECONDS", 4.0),
             bypass_sandbox=env_bool("CODEX_BYPASS_APPROVALS_AND_SANDBOX", True),
             new_session_prompt=os.getenv("NEW_SESSION_PROMPT", "새 대화 시작"),
             bundled_skills_dir=Path(os.getenv("BUNDLED_SKILLS_DIR", "/app/skills")),
@@ -161,6 +170,81 @@ class TelegramGateway:
         except URLError as exc:
             raise RuntimeError(f"telegram-gateway failed: {exc}") from exc
 
+    def send_chat_action(
+        self,
+        chat_id: str | None,
+        route: str | None = None,
+        action: str = "typing",
+    ) -> None:
+        if not chat_id:
+            return
+        outbound_route = route or self.config.telegram_route
+        if not outbound_route:
+            logging.debug("telegram chat action skipped because route is missing")
+            return
+
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "route": outbound_route,
+            "action": action,
+        }
+        body = json.dumps(payload).encode("utf-8")
+        request = Request(
+            self._gateway_url("/sendChatAction"),
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=10) as response:
+                response.read()
+        except HTTPError as exc:
+            raw = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"telegram-gateway chat action failed: HTTP {exc.code}: {raw}") from exc
+        except URLError as exc:
+            raise RuntimeError(f"telegram-gateway chat action failed: {exc}") from exc
+
+    def _gateway_url(self, endpoint: str) -> str:
+        base = self.config.telegram_gateway_url.rstrip("/")
+        if base.endswith("/sendMessage"):
+            return base.rsplit("/", 1)[0] + endpoint
+        return base + endpoint
+
+
+class TypingIndicator:
+    def __init__(
+        self,
+        gateway: TelegramGateway,
+        chat_id: str | None,
+        route: str | None,
+        interval_seconds: float,
+    ) -> None:
+        self.gateway = gateway
+        self.chat_id = chat_id
+        self.route = route
+        self.interval_seconds = max(1.0, interval_seconds)
+        self.stop_event = threading.Event()
+        self.thread: threading.Thread | None = None
+
+    def __enter__(self) -> "TypingIndicator":
+        if self.chat_id:
+            self.thread = threading.Thread(target=self._loop, name="telegram-typing", daemon=True)
+            self.thread.start()
+        return self
+
+    def __exit__(self, _exc_type: Any, _exc: Any, _tb: Any) -> None:
+        self.stop_event.set()
+        if self.thread:
+            self.thread.join(timeout=1)
+
+    def _loop(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                self.gateway.send_chat_action(self.chat_id, self.route, "typing")
+            except Exception:
+                logging.exception("failed to send telegram typing action")
+            self.stop_event.wait(self.interval_seconds)
+
 
 class CodexRunner:
     def __init__(self, config: Config) -> None:
@@ -230,11 +314,34 @@ class CodexRunner:
         return output.strip() or "<i>Codex completed without output.</i>"
 
     def _session_ids(self) -> list[str]:
-        path = self.config.codex_home / "session_index.jsonl"
-        if not path.exists():
-            return []
         ids: list[str] = []
-        for line in path.read_text().splitlines():
+        index_path = self.config.codex_home / "session_index.jsonl"
+        if index_path.exists():
+            ids.extend(self._session_ids_from_jsonl(index_path))
+
+        sessions_root = self.config.codex_home / "sessions"
+        if sessions_root.exists():
+            session_files = sorted(
+                sessions_root.rglob("*.jsonl"),
+                key=lambda path: (path.stat().st_mtime_ns, str(path)),
+            )
+            for path in session_files:
+                session_id = self._session_id_from_session_file(path)
+                if session_id:
+                    ids.append(session_id)
+
+        seen: set[str] = set()
+        unique_ids: list[str] = []
+        for session_id in ids:
+            if session_id in seen:
+                continue
+            seen.add(session_id)
+            unique_ids.append(session_id)
+        return unique_ids
+
+    def _session_ids_from_jsonl(self, path: Path) -> list[str]:
+        ids: list[str] = []
+        for line in path.read_text(errors="replace").splitlines():
             try:
                 item = json.loads(line)
             except json.JSONDecodeError:
@@ -243,6 +350,33 @@ class CodexRunner:
             if value:
                 ids.append(str(value))
         return ids
+
+    def _session_id_from_session_file(self, path: Path) -> str | None:
+        try:
+            lines = path.read_text(errors="replace").splitlines()
+        except OSError:
+            logging.exception("failed to read codex session file path=%s", path)
+            return None
+
+        for line in lines[:20]:
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if item.get("type") != "session_meta":
+                continue
+            payload = item.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            value = payload.get("id")
+            if value:
+                return str(value)
+
+        stem = path.stem
+        if "-" not in stem:
+            return None
+        candidate = stem.rsplit("-", 5)[-5:]
+        return "-".join(candidate) if len(candidate) == 5 else None
 
     def _detect_new_session_id(self, before: list[str]) -> str | None:
         after = self._session_ids()
@@ -352,7 +486,13 @@ class TelegramWorker:
             return
 
         if text == "/new":
-            session_id, output = self.runner.run_new_session(self.config.new_session_prompt)
+            with TypingIndicator(
+                self.gateway,
+                task.chat_id,
+                task.route,
+                self.config.telegram_typing_interval_seconds,
+            ):
+                session_id, output = self.runner.run_new_session(self.config.new_session_prompt)
             self.state.set_default_session(session_id)
             logging.info("new default session_id=%s", session_id)
             self.gateway.send_message(output, task.chat_id, task.route)
@@ -367,7 +507,13 @@ class TelegramWorker:
             )
             return
 
-        output = self.runner.run_resume(session_id, text)
+        with TypingIndicator(
+            self.gateway,
+            task.chat_id,
+            task.route,
+            self.config.telegram_typing_interval_seconds,
+        ):
+            output = self.runner.run_resume(session_id, text)
         self.gateway.send_message(output, task.chat_id, task.route)
 
     @staticmethod
@@ -471,23 +617,32 @@ class Scheduler:
                 self.last_run_keys.add(key)
                 thread = threading.Thread(
                     target=self._run_job,
-                    args=(job_id, message, item.get("chat_id")),
+                    args=(job_id, message, item.get("chat_id"), item.get("route")),
                     name=f"schedule-{job_id}",
                     daemon=True,
                 )
                 thread.start()
 
-    def _run_job(self, job_id: str, message: str, chat_id: Any) -> None:
+    def _run_job(self, job_id: str, message: str, chat_id: Any, route: Any) -> None:
         logging.info("running scheduled job id=%s", job_id)
+        chat_id_text = str(chat_id) if chat_id else None
+        route_text = str(route) if route else None
         try:
-            output = self.runner.run_once(message)
-            self.gateway.send_message(output, str(chat_id) if chat_id else None)
+            with TypingIndicator(
+                self.gateway,
+                chat_id_text,
+                route_text,
+                self.config.telegram_typing_interval_seconds,
+            ):
+                output = self.runner.run_once(message)
+            self.gateway.send_message(output, chat_id_text, route_text)
         except Exception as exc:  # noqa: BLE001 - report schedule failures to Telegram
             logging.exception("scheduled job failed id=%s", job_id)
             self.gateway.send_message(
                 f"<b>scheduled codex job failed</b>\n<code>{html.escape(job_id)}</code>\n"
                 f"<pre>{html.escape(str(exc))}</pre>",
-                str(chat_id) if chat_id else None,
+                chat_id_text,
+                route_text,
             )
 
 

@@ -88,7 +88,7 @@ class Config:
             http_timeout=env_int("HTTP_TIMEOUT", 10),
             gateway_host=os.getenv("GATEWAY_HOST", "0.0.0.0"),
             gateway_port=env_int("GATEWAY_PORT", 8080),
-            gateway_routes_file=Path(os.getenv("GATEWAY_ROUTES_FILE", "/app/config/routes.yaml")),
+            gateway_routes_file=Path(os.getenv("GATEWAY_ROUTES_FILE", "/app/configs/routes.yaml")),
         )
 
 
@@ -279,6 +279,9 @@ class TelegramClient:
                 payload["parse_mode"] = mode
             self.post_form("sendMessage", payload)
 
+    def send_chat_action(self, chat_id: str, action: str = "typing") -> None:
+        self.post_form("sendChatAction", {"chat_id": chat_id, "action": action})
+
 
 class CodexExecClient:
     def __init__(self, timeout: int) -> None:
@@ -360,12 +363,26 @@ class GatewayApp:
                 )
 
             def do_POST(self) -> None:
-                if self.path not in {"/sendMessage", "/notify"}:
+                if self.path not in {"/sendMessage", "/notify", "/sendChatAction"}:
                     self._write_json(404, {"ok": False, "error": "not found"})
                     return
 
                 try:
                     payload = self._read_json()
+                    if self.path == "/sendChatAction":
+                        route = app.resolve_send_route(payload)
+                        chat_id = str(payload.get("chat_id") or route.default_chat_id or "")
+                        if not chat_id:
+                            self._write_json(400, {"ok": False, "error": "chat_id is required"})
+                            return
+                        action = str(payload.get("action") or "typing").strip()
+                        if not action:
+                            self._write_json(400, {"ok": False, "error": "action is required"})
+                            return
+                        TelegramClient(route).send_chat_action(chat_id, action)
+                        self._write_json(200, {"ok": True})
+                        return
+
                     text = str(payload.get("text", ""))
                     if not text:
                         self._write_json(400, {"ok": False, "error": "text is required"})

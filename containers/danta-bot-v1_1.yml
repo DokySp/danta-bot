@@ -1,0 +1,46 @@
+services:
+  # KIS Trade MCP
+  # 모의 혹은 실전 계좌 별로 하나씩 생성
+  kis-trade-mcp-1:
+    image: kis-trade-mcp:latest
+    container_name: kis-trade-mcp-v1
+    restart: unless-stopped
+    env_file:
+      - ./trade/envs/.env.v1
+
+  # kis-trade-mcp-2:
+  #   image: kis-trade-mcp:latest
+  #   container_name: kis-trade-mcp-v2
+  #   restart: unless-stopped
+  #   env_file:
+  #     - ./trade/envs/.env.v2
+
+  # ========================================================
+  # 실행기
+  codex-exec-stock-v1:
+    container_name: codex-exec-stock-v1
+    image: codex-exec:1.0.0
+    environment:
+      TELEGRAM_ROUTE: v1
+    env_file:
+      - ./codex-exec/envs/.env.common
+      - ./codex-exec/envs/.env.mcp
+    depends_on:
+      - kis-trade-mcp-1
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8090:8080"
+    volumes:
+      - codex-home-stock-v1:/codex-home
+      - codex-state-stock-v1:/state
+      - ./codex-exec/configs/schedules.yaml:/app/configs/schedules.yaml:ro
+      - ./:/workspace
+
+volumes:
+  codex-home-stock-v1:
+  codex-state-stock-v1:
+
+networks:
+  default:
+    name: danta-bot-net
+    external: true
