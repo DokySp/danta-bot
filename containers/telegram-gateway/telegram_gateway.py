@@ -88,7 +88,7 @@ class Config:
             http_timeout=env_int("HTTP_TIMEOUT", 10),
             gateway_host=os.getenv("GATEWAY_HOST", "0.0.0.0"),
             gateway_port=env_int("GATEWAY_PORT", 8080),
-            gateway_routes_file=Path(os.getenv("GATEWAY_ROUTES_FILE", "/app/configs/routes.yaml")),
+            gateway_routes_file=Path(os.getenv("GATEWAY_ROUTES_FILE", "/app/config/routes.yaml")),
         )
 
 

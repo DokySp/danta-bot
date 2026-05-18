@@ -17,16 +17,16 @@
 
 ```bash
 $ docker build -t telegram-gateway:1.0.0 ./containers/telegram-gateway
-$ docker build -t codex-exec:1.0.0 ./containers/codex-exec
+$ docker build -t codex-exec-v1_1:1.0.0 ./containers/v1_1/codex-exec
 
-$ docker save -o ./containers/images/telegram-gateway-1.0.0.tar telegram-gateway:1.0.0
-$ docker save -o ./containers/images/codex-exec-1.0.0.tar codex-exec:1.0.0
+$ docker save -o './containers/*images/telegram-gateway-1.0.0.tar' telegram-gateway:1.0.0
+$ docker save -o './containers/*images/codex-exec-v1_1-1.0.0.tar' codex-exec-v1_1:1.0.0
 ```
 
 ## Docker 내에 Codex CLI 로그인
 
 ```bash
-$ docker exec -it codex-exec-stock-v1 bash
+$ docker exec -it codex-exec-stock-v1_1 bash
 ```
 
 ## Docker Compose 실행
@@ -37,13 +37,13 @@ $ docker exec -it codex-exec-stock-v1 bash
 $ cd containers
 $ docker network create danta-bot-net
 $ docker compose -f telegram-gateway/telegram-gateway.yml up -d
-$ docker compose -f danta-bot-v1_1.yml up -d
+$ docker compose -f v1_1/danta-bot.yml up -d
 ```
 
 이미 네트워크가 있으면 `docker network create`는 한 번만 실행하면 됩니다.
 
 ```bash
-$ docker compose -f danta-bot-v1_1.yml down
+$ docker compose -f v1_1/danta-bot.yml down
 $ docker compose -f telegram-gateway/telegram-gateway.yml down
 ```
 
@@ -51,25 +51,20 @@ $ docker compose -f telegram-gateway/telegram-gateway.yml down
 
 ```
 containers/
-  danta-bot-v1_1.yml
+  danta-bot-v{version}.yml
 
   telegram-gateway/
     telegram-gateway.yml
-    configs/
-      routes.yaml     # 라우팅 설정
-    envs/
-      .env.v1         # telegram 봇 연결을 위한 환경변수 설정
+    config/
+      routes.yaml            # 라우팅 설정
+      telegram-v1.env        # telegram 봇 연결을 위한 환경변수 설정
     ...
 
   codex-exec/
-    envs/
-      .env.common     # Codex 환경 설정
-      .env.mcp        # kis-trade-mcp에 대한 MCP 설정
-    configs/
-      schedules.yaml  # 스케줄링 설정
-
-  trade/
-    envs/.env.v1      # kis-trade-mcp 환경변수 설정
+    config/
+      codex-exec.env         # Codex 실행 및 MCP 연결 환경변수 설정
+      kis-trade-mcp.env      # kis-trade-mcp 환경변수 설정
+      schedules.yaml         # 스케줄링 설정
     ...
 ```
 

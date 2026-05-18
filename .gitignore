@@ -2,11 +2,11 @@
 /secret
 
 # Local environment files
-containers/telegram-gateway/configs/routes.yaml
-containers/telegram-gateway/envs/*
-!containers/telegram-gateway/envs/.env.example
-containers/codex-exec/envs/*
-!containers/codex-exec/envs/.env*.example
+containers/telegram-gateway/config/routes.yaml
+containers/telegram-gateway/config/*.env
+!containers/telegram-gateway/config/*.env.example
+containers/v1_1/codex-exec/config/*.env
+!containers/v1_1/codex-exec/config/*.env.example
 
 # Created by https://www.toptal.com/developers/gitignore/api/macos,python,vscode
 # Edit at https://www.toptal.com/developers/gitignore?templates=macos,python,vscode

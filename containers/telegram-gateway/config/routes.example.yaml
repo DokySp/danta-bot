@@ -1,0 +1,10 @@
+routes:
+  # stock worker v1 through bot v1
+  v1:
+    env_file: /app/config/telegram-v1.env
+    url: http://codex-exec-stock-v1_1:8080/telegram
+
+  # stock worker v1 through bot v2
+  v2:
+    env_file: /app/config/telegram-v2.env
+    url: http://codex-exec-stock-v1_1:8080/telegram

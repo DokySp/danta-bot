@@ -2,4 +2,3 @@ __pycache__/
 *.pyc
 config/*.env
 !config/*.env.example
-config/routes.yaml

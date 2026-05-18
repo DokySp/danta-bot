@@ -4,7 +4,7 @@ ARG APP_VERSION=1.0.0
 ARG CODEX_VERSION=0.130.0
 ARG TARGETARCH
 
-LABEL org.opencontainers.image.title="codex-exec"
+LABEL org.opencontainers.image.title="codex-exec-v1_1"
 LABEL org.opencontainers.image.version="${APP_VERSION}"
 LABEL org.opencontainers.image.description="Codex exec HTTP and scheduler worker"
 
@@ -55,7 +55,7 @@ RUN groupadd --gid 1000 app \
 ENV npm_config_cache=/tmp/npm-cache
 
 COPY --chown=app:app codex_exec.py /app/codex_exec.py
-COPY --chown=app:app configs/schedules.yaml /app/configs/schedules.yaml
+COPY --chown=app:app config/schedules.yaml /app/configs/schedules.yaml
 COPY --chown=app:app scripts/merge-codex-config.sh /app/merge-codex-config.sh
 COPY --chown=app:app skills /app/skills
 
