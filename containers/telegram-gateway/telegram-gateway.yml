@@ -18,4 +18,3 @@ services:
 networks:
   default:
     name: danta-bot-net
-    external: true
