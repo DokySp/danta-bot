@@ -18,9 +18,11 @@
 ```bash
 $ docker build -t telegram-gateway:1.0.0 ./containers/telegram-gateway
 $ docker build -t codex-exec-v1_1:1.0.0 ./containers/v1_1/codex-exec
+$ docker build -t codex-exec-v2:1.0.0 ./containers/v2/codex-exec
 
 $ docker save -o './containers/*images/telegram-gateway-1.0.0.tar' telegram-gateway:1.0.0
 $ docker save -o './containers/*images/codex-exec-v1_1-1.0.0.tar' codex-exec-v1_1:1.0.0
+$ docker save -o './containers/*images/codex-exec-v2-1.0.0.tar' codex-exec-v2:1.0.0
 ```
 
 ## Docker 내에 Codex CLI 로그인
