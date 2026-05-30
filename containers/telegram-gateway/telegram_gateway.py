@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import html
 import json
 import logging
 import os
@@ -8,6 +9,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -42,6 +44,110 @@ def escape_markdown_v2(text: str) -> str:
     return re.sub(f"([{re.escape(MARKDOWN_V2_SPECIALS)}])", r"\\\1", text)
 
 
+class TelegramHtmlSanitizer(HTMLParser):
+    INLINE_TAGS = {"b", "strong", "i", "em", "u", "ins", "s", "strike", "del", "code", "pre"}
+    LINE_BREAK_TAGS = {"br"}
+    BLOCK_TAGS = {
+        "p",
+        "div",
+        "section",
+        "article",
+        "header",
+        "footer",
+        "ul",
+        "ol",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "blockquote",
+    }
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self.parts: list[str] = []
+        self.open_tags: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        if tag in self.LINE_BREAK_TAGS:
+            self._append_line_break()
+            return
+        if tag == "li":
+            self._append_line_break()
+            self.parts.append("- ")
+            return
+        if tag in self.BLOCK_TAGS:
+            self._append_line_break()
+            return
+        if tag in self.INLINE_TAGS:
+            self.parts.append(f"<{tag}>")
+            self.open_tags.append(tag)
+            return
+        if tag == "a":
+            href = self._attr_value(attrs, "href")
+            if href:
+                self.parts.append(f'<a href="{html.escape(href, quote=True)}">')
+                self.open_tags.append(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag in self.BLOCK_TAGS or tag == "li":
+            self._append_line_break()
+            return
+        if tag not in self.open_tags:
+            return
+        while self.open_tags:
+            opened = self.open_tags.pop()
+            self.parts.append(f"</{opened}>")
+            if opened == tag:
+                return
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+        if tag.lower() not in self.LINE_BREAK_TAGS:
+            self.handle_endtag(tag)
+
+    def handle_data(self, data: str) -> None:
+        self.parts.append(html.escape(data, quote=False))
+
+    def handle_entityref(self, name: str) -> None:
+        self.parts.append(f"&{name};")
+
+    def handle_charref(self, name: str) -> None:
+        self.parts.append(f"&#{name};")
+
+    def get_html(self) -> str:
+        while self.open_tags:
+            self.parts.append(f"</{self.open_tags.pop()}>")
+        return "".join(self.parts)
+
+    def _append_line_break(self) -> None:
+        if not self.parts or self.parts[-1].endswith("\n"):
+            return
+        self.parts.append("\n")
+
+    @staticmethod
+    def _attr_value(attrs: list[tuple[str, str | None]], attr_name: str) -> str | None:
+        for key, value in attrs:
+            if key.lower() == attr_name and value:
+                return value
+        return None
+
+
+def sanitize_telegram_html(text: str) -> str:
+    sanitizer = TelegramHtmlSanitizer()
+    try:
+        sanitizer.feed(text)
+        sanitizer.close()
+    except Exception:
+        logging.exception("failed to sanitize Telegram HTML; falling back to escaped text")
+        return html.escape(text, quote=False)
+    return sanitizer.get_html()
+
+
 def split_telegram_text(text: str, limit: int = 4096) -> list[str]:
     if len(text) <= limit:
         return [text]
@@ -51,6 +157,259 @@ def split_telegram_text(text: str, limit: int = 4096) -> list[str]:
         chunks.append(text[start : start + limit])
         start += limit
     return chunks
+
+
+TELEGRAM_CONTEXT_TEXT_LIMIT = 2000
+TELEGRAM_CONTEXT_CONTENT_FIELDS = (
+    "animation",
+    "audio",
+    "checklist",
+    "contact",
+    "dice",
+    "document",
+    "game",
+    "invoice",
+    "live_photo",
+    "location",
+    "paid_media",
+    "photo",
+    "poll",
+    "sticker",
+    "story",
+    "venue",
+    "video",
+    "video_note",
+    "voice",
+    "web_app_data",
+)
+
+
+def build_codex_input_text(text: str, message: dict[str, Any]) -> str:
+    if is_gateway_command(text):
+        return text
+
+    context = telegram_reply_context(message)
+    if not context:
+        return text
+
+    context_json = json.dumps(context, ensure_ascii=False, indent=2)
+    return (
+        "아래 Telegram context는 사용자의 현재 메시지와 함께 전달된 reply 관련 메타데이터입니다. "
+        "reply_to_message, external_reply, quote 등이 있으면 사용자가 해당 대상에 답장한 것으로 보고 함께 처리하세요.\n"
+        "<telegram_context>\n"
+        f"{context_json}\n"
+        "</telegram_context>\n\n"
+        "<user_message>\n"
+        f"{text}\n"
+        "</user_message>"
+    )
+
+
+def is_gateway_command(text: str) -> bool:
+    stripped = text.strip()
+    return stripped == "/new" or stripped.startswith("/new ") or stripped == "/usage"
+
+
+def telegram_reply_context(message: dict[str, Any]) -> dict[str, Any]:
+    context: dict[str, Any] = {}
+
+    reply_to_message = message.get("reply_to_message")
+    if isinstance(reply_to_message, dict):
+        context["reply_to_message"] = summarize_telegram_message(reply_to_message)
+
+    external_reply = message.get("external_reply")
+    if isinstance(external_reply, dict):
+        context["external_reply"] = summarize_external_reply(external_reply)
+
+    quote = message.get("quote")
+    if isinstance(quote, dict):
+        context["quote"] = summarize_text_quote(quote)
+
+    reply_to_story = message.get("reply_to_story")
+    if isinstance(reply_to_story, dict):
+        context["reply_to_story"] = compact_telegram_value(reply_to_story)
+
+    for key in ("reply_to_checklist_task_id", "reply_to_poll_option_id"):
+        if message.get(key) is not None:
+            context[key] = message.get(key)
+
+    return context
+
+
+def summarize_telegram_message(message: dict[str, Any]) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    for key in ("message_id", "date"):
+        if message.get(key) is not None:
+            summary[key] = message.get(key)
+
+    sender = summarize_telegram_user(message.get("from"))
+    if sender:
+        summary["from"] = sender
+    sender_chat = summarize_telegram_chat(message.get("sender_chat"))
+    if sender_chat:
+        summary["sender_chat"] = sender_chat
+    chat = summarize_telegram_chat(message.get("chat"))
+    if chat:
+        summary["chat"] = chat
+
+    if isinstance(message.get("text"), str):
+        summary["text"] = trim_telegram_text(message["text"])
+    if isinstance(message.get("caption"), str):
+        summary["caption"] = trim_telegram_text(message["caption"])
+
+    content_types = [field for field in TELEGRAM_CONTEXT_CONTENT_FIELDS if field in message]
+    if content_types:
+        summary["content_types"] = content_types
+
+    poll = message.get("poll")
+    if isinstance(poll, dict):
+        summary["poll"] = summarize_poll(poll)
+    checklist = message.get("checklist")
+    if isinstance(checklist, dict):
+        summary["checklist"] = summarize_checklist(checklist)
+
+    return summary
+
+
+def summarize_external_reply(external_reply: dict[str, Any]) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    for key in ("message_id", "date"):
+        if external_reply.get(key) is not None:
+            summary[key] = external_reply.get(key)
+
+    origin = external_reply.get("origin")
+    if isinstance(origin, dict):
+        summary["origin"] = compact_telegram_value(origin)
+    chat = summarize_telegram_chat(external_reply.get("chat"))
+    if chat:
+        summary["chat"] = chat
+
+    if isinstance(external_reply.get("text"), str):
+        summary["text"] = trim_telegram_text(external_reply["text"])
+    if isinstance(external_reply.get("caption"), str):
+        summary["caption"] = trim_telegram_text(external_reply["caption"])
+
+    content_types = [field for field in TELEGRAM_CONTEXT_CONTENT_FIELDS if field in external_reply]
+    if content_types:
+        summary["content_types"] = content_types
+    return summary
+
+
+def summarize_text_quote(quote: dict[str, Any]) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    if isinstance(quote.get("text"), str):
+        summary["text"] = trim_telegram_text(quote["text"])
+    for key in ("position", "is_manual"):
+        if quote.get(key) is not None:
+            summary[key] = quote.get(key)
+    return summary
+
+
+def summarize_poll(poll: dict[str, Any]) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    if isinstance(poll.get("question"), str):
+        summary["question"] = trim_telegram_text(poll["question"])
+    options = poll.get("options")
+    if isinstance(options, list):
+        summary["options"] = [
+            {
+                key: trim_telegram_text(value) if isinstance(value, str) else value
+                for key, value in option.items()
+                if key in {"persistent_id", "text", "voter_count"} and value is not None
+            }
+            for option in options
+            if isinstance(option, dict)
+        ]
+    return summary
+
+
+def summarize_checklist(checklist: dict[str, Any]) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    if isinstance(checklist.get("title"), str):
+        summary["title"] = trim_telegram_text(checklist["title"])
+    tasks = checklist.get("tasks")
+    if isinstance(tasks, list):
+        summary["tasks"] = [
+            compact_telegram_value(task)
+            for task in tasks
+            if isinstance(task, dict)
+        ]
+    return summary
+
+
+def summarize_telegram_user(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        key: value[key]
+        for key in ("id", "is_bot", "username", "first_name", "last_name")
+        if value.get(key) is not None
+    }
+
+
+def summarize_telegram_chat(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        key: value[key]
+        for key in ("id", "type", "title", "username", "first_name", "last_name")
+        if value.get(key) is not None
+    }
+
+
+def compact_telegram_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return trim_telegram_text(value)
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    if isinstance(value, list):
+        return [compact_telegram_value(item) for item in value[:5]]
+    if not isinstance(value, dict):
+        return str(value)
+
+    scalar_keys = {
+        "id",
+        "type",
+        "message_id",
+        "date",
+        "title",
+        "username",
+        "first_name",
+        "last_name",
+        "text",
+        "question",
+        "name",
+        "file_name",
+        "mime_type",
+        "duration",
+        "width",
+        "height",
+        "is_manual",
+        "position",
+    }
+    nested_keys = {
+        "from",
+        "sender_user",
+        "sender_chat",
+        "chat",
+        "author_chat",
+        "user",
+        "added_by_user",
+        "added_by_chat",
+    }
+    compact: dict[str, Any] = {}
+    for key, item in value.items():
+        if key in scalar_keys:
+            compact[key] = compact_telegram_value(item)
+        elif key in nested_keys and isinstance(item, dict):
+            compact[key] = compact_telegram_value(item)
+    return compact
+
+
+def trim_telegram_text(text: str) -> str:
+    if len(text) <= TELEGRAM_CONTEXT_TEXT_LIMIT:
+        return text
+    return text[:TELEGRAM_CONTEXT_TEXT_LIMIT].rstrip() + "... [truncated]"
 
 
 def parse_env_file(path: Path) -> dict[str, str]:
@@ -272,6 +631,8 @@ class TelegramClient:
     ) -> None:
         mode = parse_mode if parse_mode is not None else self.route.parse_mode
         outbound_text = escape_markdown_v2(text) if escape and mode == "MarkdownV2" else text
+        if mode and mode.lower() == "html":
+            outbound_text = sanitize_telegram_html(outbound_text)
 
         for chunk in split_telegram_text(outbound_text):
             payload: dict[str, Any] = {"chat_id": chat_id, "text": chunk}
@@ -518,6 +879,7 @@ class GatewayApp:
             return
 
         resolved = self.router.resolve(route.route_id, text)
+        codex_text = build_codex_input_text(resolved.text, message)
         payload = {
             "source": "telegram",
             "gateway_version": self.config.version,
@@ -527,7 +889,7 @@ class GatewayApp:
             "chat_id": chat_id,
             "user_id": user_id,
             "username": username,
-            "text": resolved.text,
+            "text": codex_text,
             "raw_message": message,
         }
 

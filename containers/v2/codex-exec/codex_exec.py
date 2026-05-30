@@ -51,6 +51,85 @@ def env_float(name: str, default: float) -> float:
     return float(raw)
 
 
+ERROR_LOG_LIMIT = 2000
+
+
+class UserFacingError(RuntimeError):
+    def __init__(self, log_message: str, html_message: str) -> None:
+        super().__init__(log_message)
+        self.html_message = html_message
+
+
+class CodexAuthError(UserFacingError):
+    def __init__(self) -> None:
+        super().__init__(
+            "codex authentication failed",
+            "Codex 계정 설정이 되어있지 않거나 인증이 만료되었습니다.\n"
+            "컨테이너에서 <code>codex login</code>을 먼저 실행하거나 "
+            "<code>OPENAI_API_KEY</code> 설정을 확인해주세요.",
+        )
+
+
+class CodexUsageLimitError(UserFacingError):
+    def __init__(self, log_excerpt: str) -> None:
+        log_block = f"\n<pre>{html.escape(log_excerpt)}</pre>" if log_excerpt else ""
+        super().__init__(
+            "codex usage limit reached",
+            "<b>Codex 사용 한도에 도달했습니다.</b>\n"
+            "사용 가능 시간이 지나면 다시 시도하거나 Codex 사용량/크레딧 설정을 확인해주세요."
+            f"{log_block}",
+        )
+
+
+class UnknownCodexError(UserFacingError):
+    def __init__(self, returncode: int, log_excerpt: str) -> None:
+        log_block = html.escape(log_excerpt or "no stderr/stdout captured")
+        super().__init__(
+            f"codex exited with {returncode}",
+            "<b>알 수 없는 에러가 발생했습니다.</b>\n"
+            f"<code>exit_code={returncode}</code>\n"
+            f"<pre>{log_block}</pre>",
+        )
+
+
+def classify_codex_error(returncode: int, stdout: str, stderr: str) -> UserFacingError:
+    log_excerpt = codex_error_log(stdout, stderr)
+    if is_codex_usage_limit_error(log_excerpt):
+        return CodexUsageLimitError(log_excerpt)
+    if is_codex_auth_error(log_excerpt):
+        return CodexAuthError()
+    return UnknownCodexError(returncode, log_excerpt)
+
+
+def codex_error_log(stdout: str, stderr: str) -> str:
+    parts = []
+    if stderr.strip():
+        parts.append(stderr.strip())
+    if stdout.strip():
+        parts.append(stdout.strip())
+    combined = "\n".join(parts).strip()
+    return combined[-ERROR_LOG_LIMIT:] if combined else ""
+
+
+def is_codex_usage_limit_error(text: str) -> bool:
+    lowered = text.lower()
+    return (
+        "you've hit your usage limit" in lowered
+        or "you have hit your usage limit" in lowered
+        or ("usage limit" in lowered and "try again" in lowered)
+        or ("purchase more credits" in lowered and "try again" in lowered)
+    )
+
+
+def is_codex_auth_error(text: str) -> bool:
+    text = text.lower()
+    return (
+        "401 unauthorized" in text
+        or "missing bearer or basic authentication" in text
+        or ("unauthorized" in text and "api.openai.com/v1/responses" in text)
+    )
+
+
 @dataclass(frozen=True)
 class Config:
     host: str
@@ -69,6 +148,8 @@ class Config:
     telegram_typing_interval_seconds: float
     bypass_sandbox: bool
     new_session_prompt: str
+    usage_script: Path
+    usage_timeout_seconds: int
     bundled_skills_dir: Path
     sync_skills: bool
     sync_skills_once: bool
@@ -96,6 +177,8 @@ class Config:
             telegram_typing_interval_seconds=env_float("TELEGRAM_TYPING_INTERVAL_SECONDS", 4.0),
             bypass_sandbox=env_bool("CODEX_BYPASS_APPROVALS_AND_SANDBOX", True),
             new_session_prompt=os.getenv("NEW_SESSION_PROMPT", "새 대화 시작"),
+            usage_script=Path(os.getenv("CODEX_USAGE_SCRIPT", "/app/codex_usage")),
+            usage_timeout_seconds=env_int("CODEX_USAGE_TIMEOUT_SECONDS", 20),
             bundled_skills_dir=Path(os.getenv("BUNDLED_SKILLS_DIR", "/app/skills")),
             sync_skills=env_bool("CODEX_SYNC_SKILLS", True),
             sync_skills_once=env_bool("CODEX_SYNC_SKILLS_ONCE", True),
@@ -268,6 +351,40 @@ class CodexRunner:
     def run_once(self, prompt: str) -> str:
         return self._run_codex(["exec"], prompt)
 
+    def run_usage(self) -> str:
+        if not self.config.usage_script.exists():
+            raise RuntimeError(f"codex usage script not found: {self.config.usage_script}")
+
+        cmd = [
+            str(self.config.usage_script),
+            "--timeout",
+            str(self.config.usage_timeout_seconds),
+        ]
+        env = os.environ.copy()
+        env["CODEX_HOME"] = str(self.config.codex_home)
+        env["CODEX_BIN"] = self.config.codex_bin
+
+        logging.info("running codex usage command=%s", " ".join(shlex.quote(part) for part in cmd))
+        result = subprocess.run(
+            cmd,
+            cwd=self.config.workspace_dir,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=self.config.usage_timeout_seconds + 5,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise classify_codex_error(result.returncode, result.stdout, result.stderr)
+
+        output = result.stdout.strip()
+        if not output:
+            return "<i>Codex usage returned no output.</i>"
+        if len(output) > 3500:
+            output = "... truncated ...\n" + output[-3500:]
+        return f"<b>Codex usage</b>\n<pre>{html.escape(output)}</pre>"
+
     def _run_codex(self, subcommand: list[str], prompt: str) -> str:
         run_id = datetime.utcnow().strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:8]
         output_file = self.tmp_dir / f"{run_id}.txt"
@@ -304,8 +421,7 @@ class CodexRunner:
         )
 
         if result.returncode != 0:
-            stderr = result.stderr[-2000:] if result.stderr else ""
-            raise RuntimeError(f"codex exited with {result.returncode}: {stderr}")
+            raise classify_codex_error(result.returncode, result.stdout, result.stderr)
 
         if output_file.exists():
             output = output_file.read_text()
@@ -468,7 +584,10 @@ class TelegramWorker:
             try:
                 self._handle(task)
             except Exception as exc:  # noqa: BLE001 - report task failures to Telegram
-                logging.exception("telegram task failed")
+                if isinstance(exc, UserFacingError):
+                    logging.warning("telegram task failed: %s", exc)
+                else:
+                    logging.exception("telegram task failed")
                 self.gateway.send_message(self._error_message(exc), task.chat_id, task.route)
             finally:
                 self.queue.task_done()
@@ -498,6 +617,17 @@ class TelegramWorker:
             self.gateway.send_message(output, task.chat_id, task.route)
             return
 
+        if text == "/usage":
+            with TypingIndicator(
+                self.gateway,
+                task.chat_id,
+                task.route,
+                self.config.telegram_typing_interval_seconds,
+            ):
+                output = self.runner.run_usage()
+            self.gateway.send_message(output, task.chat_id, task.route)
+            return
+
         session_id = self.state.get_default_session()
         if not session_id:
             self.gateway.send_message(
@@ -518,7 +648,9 @@ class TelegramWorker:
 
     @staticmethod
     def _error_message(exc: Exception) -> str:
-        return f"<b>codex-exec failed</b>\n<pre>{html.escape(str(exc))}</pre>"
+        if isinstance(exc, UserFacingError):
+            return exc.html_message
+        return f"<b>알 수 없는 에러가 발생했습니다.</b>\n<pre>{html.escape(str(exc))}</pre>"
 
 
 def parse_yaml_schedule(path: Path) -> list[dict[str, Any]]:
@@ -637,10 +769,19 @@ class Scheduler:
                 output = self.runner.run_once(message)
             self.gateway.send_message(output, chat_id_text, route_text)
         except Exception as exc:  # noqa: BLE001 - report schedule failures to Telegram
-            logging.exception("scheduled job failed id=%s", job_id)
+            if isinstance(exc, UserFacingError):
+                logging.warning("scheduled job failed id=%s: %s", job_id, exc)
+            else:
+                logging.exception("scheduled job failed id=%s", job_id)
+            if isinstance(exc, UserFacingError):
+                message = exc.html_message
+            else:
+                message = (
+                    f"<b>알 수 없는 에러가 발생했습니다.</b>\n<code>{html.escape(job_id)}</code>\n"
+                    f"<pre>{html.escape(str(exc))}</pre>"
+                )
             self.gateway.send_message(
-                f"<b>scheduled codex job failed</b>\n<code>{html.escape(job_id)}</code>\n"
-                f"<pre>{html.escape(str(exc))}</pre>",
+                message,
                 chat_id_text,
                 route_text,
             )

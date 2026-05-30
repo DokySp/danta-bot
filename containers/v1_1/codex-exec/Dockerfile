@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 
 ARG APP_VERSION=1.0.0
-ARG CODEX_VERSION=0.130.0
+ARG CODEX_VERSION=0.135.0
 ARG TARGETARCH
 
 LABEL org.opencontainers.image.title="codex-exec-v1_1"
@@ -34,8 +34,8 @@ RUN pip install --no-cache-dir PyYAML==6.0.2
 
 RUN set -eux; \
   case "${TARGETARCH:-amd64}" in \
-    amd64) codex_arch="x86_64"; codex_sha="16779e7b7857508a768a36d7d4e084eec336ec23946ed70a9b09489b8f861190" ;; \
-    arm64) codex_arch="aarch64"; codex_sha="1d7e00f2c22c3016b5bcb71c61010947b022a90e2901bc6baafe82256492c767" ;; \
+    amd64) codex_arch="x86_64"; codex_sha="a15e7dad657da4a0e120eede29556fee6d50e8c919759cc2ecba3c99099363e2" ;; \
+    arm64) codex_arch="aarch64"; codex_sha="568bce1d593ef25ffdf5549369a8606085652294646a5c4961547a894ea2f76d" ;; \
     *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
   esac; \
   curl -fsSL -o /tmp/codex.tar.gz "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-${codex_arch}-unknown-linux-musl.tar.gz"; \

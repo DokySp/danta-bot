@@ -12,7 +12,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -49,6 +49,85 @@ def env_float(name: str, default: float) -> float:
     if raw is None or raw == "":
         return default
     return float(raw)
+
+
+ERROR_LOG_LIMIT = 2000
+
+
+class UserFacingError(RuntimeError):
+    def __init__(self, log_message: str, html_message: str) -> None:
+        super().__init__(log_message)
+        self.html_message = html_message
+
+
+class CodexAuthError(UserFacingError):
+    def __init__(self) -> None:
+        super().__init__(
+            "codex authentication failed",
+            "Codex 로그인이 되어있지 않거나 API 키가 설정되지 않았습니다.\n"
+            "컨테이너에서 <code>codex login</code>을 먼저 실행하거나 "
+            "<code>OPENAI_API_KEY</code> 설정을 확인해주세요.",
+        )
+
+
+class CodexUsageLimitError(UserFacingError):
+    def __init__(self, log_excerpt: str) -> None:
+        log_block = f"\n<pre>{html.escape(log_excerpt)}</pre>" if log_excerpt else ""
+        super().__init__(
+            "codex usage limit reached",
+            "<b>Codex 사용 한도에 도달했습니다.</b>\n"
+            "사용 가능 시간이 지나면 다시 시도하거나 Codex 사용량/크레딧 설정을 확인해주세요."
+            f"{log_block}",
+        )
+
+
+class UnknownCodexError(UserFacingError):
+    def __init__(self, returncode: int, log_excerpt: str) -> None:
+        log_block = html.escape(log_excerpt or "no stderr/stdout captured")
+        super().__init__(
+            f"codex exited with {returncode}",
+            "<b>알 수 없는 에러가 발생했습니다.</b>\n"
+            f"<code>exit_code={returncode}</code>\n"
+            f"<pre>{log_block}</pre>",
+        )
+
+
+def classify_codex_error(returncode: int, stdout: str, stderr: str) -> UserFacingError:
+    log_excerpt = codex_error_log(stdout, stderr)
+    if is_codex_usage_limit_error(log_excerpt):
+        return CodexUsageLimitError(log_excerpt)
+    if is_codex_auth_error(log_excerpt):
+        return CodexAuthError()
+    return UnknownCodexError(returncode, log_excerpt)
+
+
+def codex_error_log(stdout: str, stderr: str) -> str:
+    parts = []
+    if stderr.strip():
+        parts.append(stderr.strip())
+    if stdout.strip():
+        parts.append(stdout.strip())
+    combined = "\n".join(parts).strip()
+    return combined[-ERROR_LOG_LIMIT:] if combined else ""
+
+
+def is_codex_usage_limit_error(text: str) -> bool:
+    lowered = text.lower()
+    return (
+        "you've hit your usage limit" in lowered
+        or "you have hit your usage limit" in lowered
+        or ("usage limit" in lowered and "try again" in lowered)
+        or ("purchase more credits" in lowered and "try again" in lowered)
+    )
+
+
+def is_codex_auth_error(text: str) -> bool:
+    text = text.lower()
+    return (
+        "401 unauthorized" in text
+        or "missing bearer or basic authentication" in text
+        or ("unauthorized" in text and "api.openai.com/v1/responses" in text)
+    )
 
 
 @dataclass(frozen=True)
@@ -269,7 +348,7 @@ class CodexRunner:
         return self._run_codex(["exec"], prompt)
 
     def _run_codex(self, subcommand: list[str], prompt: str) -> str:
-        run_id = datetime.utcnow().strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:8]
+        run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:8]
         output_file = self.tmp_dir / f"{run_id}.txt"
         full_prompt = prompt.rstrip() + HTML_PROMPT_SUFFIX
 
@@ -304,8 +383,7 @@ class CodexRunner:
         )
 
         if result.returncode != 0:
-            stderr = result.stderr[-2000:] if result.stderr else ""
-            raise RuntimeError(f"codex exited with {result.returncode}: {stderr}")
+            raise classify_codex_error(result.returncode, result.stdout, result.stderr)
 
         if output_file.exists():
             output = output_file.read_text()
@@ -468,7 +546,10 @@ class TelegramWorker:
             try:
                 self._handle(task)
             except Exception as exc:  # noqa: BLE001 - report task failures to Telegram
-                logging.exception("telegram task failed")
+                if isinstance(exc, UserFacingError):
+                    logging.warning("telegram task failed: %s", exc)
+                else:
+                    logging.exception("telegram task failed")
                 self.gateway.send_message(self._error_message(exc), task.chat_id, task.route)
             finally:
                 self.queue.task_done()
@@ -518,7 +599,9 @@ class TelegramWorker:
 
     @staticmethod
     def _error_message(exc: Exception) -> str:
-        return f"<b>codex-exec failed</b>\n<pre>{html.escape(str(exc))}</pre>"
+        if isinstance(exc, UserFacingError):
+            return exc.html_message
+        return f"<b>알 수 없는 에러가 발생했습니다.</b>\n<pre>{html.escape(str(exc))}</pre>"
 
 
 def parse_yaml_schedule(path: Path) -> list[dict[str, Any]]:
@@ -637,10 +720,19 @@ class Scheduler:
                 output = self.runner.run_once(message)
             self.gateway.send_message(output, chat_id_text, route_text)
         except Exception as exc:  # noqa: BLE001 - report schedule failures to Telegram
-            logging.exception("scheduled job failed id=%s", job_id)
+            if isinstance(exc, UserFacingError):
+                logging.warning("scheduled job failed id=%s: %s", job_id, exc)
+            else:
+                logging.exception("scheduled job failed id=%s", job_id)
+            if isinstance(exc, UserFacingError):
+                message = exc.html_message
+            else:
+                message = (
+                    f"<b>알 수 없는 에러가 발생했습니다.</b>\n<code>{html.escape(job_id)}</code>\n"
+                    f"<pre>{html.escape(str(exc))}</pre>"
+                )
             self.gateway.send_message(
-                f"<b>scheduled codex job failed</b>\n<code>{html.escape(job_id)}</code>\n"
-                f"<pre>{html.escape(str(exc))}</pre>",
+                message,
                 chat_id_text,
                 route_text,
             )
