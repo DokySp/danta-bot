@@ -13,17 +13,61 @@
 - codex-exec: codex 예약 및 작업 수행 컨테이너. 버전별로 스킬 및 스케줄링 관리.
 - kis-trading-mcp: 한국투자증권에서 제작한 컨테이너.
 
-## Docker 이미지 빌드
+## Docker 이미지 빌드/배포
 
 ```bash
-$ docker build -t telegram-gateway:1.0.0 ./containers/telegram-gateway
-$ docker build -t codex-exec-v1_1:1.0.0 ./containers/v1_1/codex-exec
-$ docker build -t codex-exec-v2:1.0.0 ./containers/v2/codex-exec
+$ export TELEGRAM_GATEWAY_VERSION=1.1.0
+$ export CODEX_EXEC_V1_1_VERSION=1.1.0
+$ export CODEX_EXEC_V2_VERSION=2.1.0
 
-$ docker save -o './containers/*images/telegram-gateway-1.0.0.tar' telegram-gateway:1.0.0
-$ docker save -o './containers/*images/codex-exec-v1_1-1.0.0.tar' codex-exec-v1_1:1.0.0
-$ docker save -o './containers/*images/codex-exec-v2-1.0.0.tar' codex-exec-v2:1.0.0
+$ docker build --build-arg APP_VERSION=$TELEGRAM_GATEWAY_VERSION -t telegram-gateway:$TELEGRAM_GATEWAY_VERSION ./containers/telegram-gateway
+$ docker build --build-arg APP_VERSION=$CODEX_EXEC_V1_1_VERSION -t codex-exec-v1_1:$CODEX_EXEC_V1_1_VERSION ./containers/v1_1/codex-exec
+$ docker build --build-arg APP_VERSION=$CODEX_EXEC_V2_VERSION -t codex-exec-v2:$CODEX_EXEC_V2_VERSION ./containers/v2/codex-exec
 ```
+
+`APP_VERSION`은 필수 빌드 인자이며 이미지 내부 메타데이터입니다. Dockerfile에서
+`org.opencontainers.image.version` 라벨과 컨테이너 환경변수 `APP_VERSION`으로 들어갑니다.
+값을 넘기지 않으면 Dockerfile의 `RUN test -n "$APP_VERSION"` 단계에서 빌드가 실패합니다.
+이미지 태그는 Docker가 이미지를 찾고 배포할 때 쓰는 외부 이름입니다.
+둘은 기술적으로 독립적이지만, 운영 혼선을 줄이려면 같은 값으로 맞춥니다.
+
+기존 tar 파일 배포 방식:
+
+```bash
+$ docker save -o "./containers/*images/telegram-gateway-$TELEGRAM_GATEWAY_VERSION.tar" telegram-gateway:$TELEGRAM_GATEWAY_VERSION
+$ docker save -o "./containers/*images/codex-exec-v1_1-$CODEX_EXEC_V1_1_VERSION.tar" codex-exec-v1_1:$CODEX_EXEC_V1_1_VERSION
+$ docker save -o "./containers/*images/codex-exec-v2-$CODEX_EXEC_V2_VERSION.tar" codex-exec-v2:$CODEX_EXEC_V2_VERSION
+```
+
+Docker Hub 배포 방식:
+
+```bash
+$ export DOCKERHUB_NAMESPACE=dokysp  # dokysp namespace는 예시입니다.
+
+$ docker login -u $DOCKERHUB_NAMESPACE
+
+$ docker tag telegram-gateway:$TELEGRAM_GATEWAY_VERSION $DOCKERHUB_NAMESPACE/telegram-gateway:$TELEGRAM_GATEWAY_VERSION
+$ docker tag codex-exec-v1_1:$CODEX_EXEC_V1_1_VERSION $DOCKERHUB_NAMESPACE/codex-exec-v1_1:$CODEX_EXEC_V1_1_VERSION
+$ docker tag codex-exec-v2:$CODEX_EXEC_V2_VERSION $DOCKERHUB_NAMESPACE/codex-exec-v2:$CODEX_EXEC_V2_VERSION
+
+$ docker push $DOCKERHUB_NAMESPACE/telegram-gateway:$TELEGRAM_GATEWAY_VERSION
+$ docker push $DOCKERHUB_NAMESPACE/codex-exec-v1_1:$CODEX_EXEC_V1_1_VERSION
+$ docker push $DOCKERHUB_NAMESPACE/codex-exec-v2:$CODEX_EXEC_V2_VERSION
+```
+
+배포 대상 서버에서는 tar 파일 대신 pull합니다.
+
+```bash
+$ export DOCKERHUB_NAMESPACE=dokysp
+
+$ docker login -u $DOCKERHUB_NAMESPACE
+$ docker pull $DOCKERHUB_NAMESPACE/telegram-gateway:$TELEGRAM_GATEWAY_VERSION
+$ docker pull $DOCKERHUB_NAMESPACE/codex-exec-v1_1:$CODEX_EXEC_V1_1_VERSION
+$ docker pull $DOCKERHUB_NAMESPACE/codex-exec-v2:$CODEX_EXEC_V2_VERSION
+```
+
+Compose의 `image:` 값은 Docker Hub의 `dokysp/<repository>:<tag>` 이미지를 직접 사용합니다.
+배포 명령에서는 같은 namespace를 `DOCKERHUB_NAMESPACE=dokysp`로 설정해서 사용합니다.
 
 ## Docker 내에 Codex CLI 로그인
 
@@ -33,11 +77,12 @@ $ docker exec -it codex-exec-stock-v1_1 bash
 
 ## Docker Compose 실행
 
-`telegram-gateway`와 `danta-bot-v1_1`은 분리해서 실행합니다. 두 compose는 외부 공용 네트워크 `danta-bot-net`을 사용하므로 최초 1회 네트워크를 먼저 만듭니다.
+`telegram-gateway`, `kis-trade-mcp`, `danta-bot-v1_1`은 분리해서 실행합니다. 각 compose는 공용 네트워크 `danta-bot-net`을 사용하므로 최초 1회 네트워크를 먼저 만듭니다.
 
 ```bash
 $ cd containers
 $ docker network create danta-bot-net
+$ docker compose -f kis-trade-mcp/danta-bot.yml up -d
 $ docker compose -f telegram-gateway/telegram-gateway.yml up -d
 $ docker compose -f v1_1/danta-bot.yml up -d
 ```
@@ -47,6 +92,7 @@ $ docker compose -f v1_1/danta-bot.yml up -d
 ```bash
 $ docker compose -f v1_1/danta-bot.yml down
 $ docker compose -f telegram-gateway/telegram-gateway.yml down
+$ docker compose -f kis-trade-mcp/danta-bot.yml down
 ```
 
 ## 배포 시, 환경 구조
@@ -62,10 +108,15 @@ containers/
       telegram-v1.env        # telegram 봇 연결을 위한 환경변수 설정
     ...
 
+  kis-trade-mcp/
+    danta-bot.yml
+    config/
+      kis-trade-mcp.env      # kis-trade-mcp 환경변수 설정
+      kis-trade-mcp.env.example
+
   codex-exec/
     config/
       codex-exec.env         # Codex 실행 및 MCP 연결 환경변수 설정
-      kis-trade-mcp.env      # kis-trade-mcp 환경변수 설정
       schedules.yaml         # 스케줄링 설정
     ...
 ```

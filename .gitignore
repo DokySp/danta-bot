@@ -1,12 +1,17 @@
 /secret.py
 /secret
 
+/containers/images
+/containers/*images
+
 # Local environment files
 containers/telegram-gateway/config/routes.yaml
 containers/telegram-gateway/config/*.env
 !containers/telegram-gateway/config/*.env.example
 containers/v1_1/codex-exec/config/*.env
 !containers/v1_1/codex-exec/config/*.env.example
+containers/kis-trade-mcp/config/*.env
+!containers/kis-trade-mcp/config/*.env.example
 
 # Created by https://www.toptal.com/developers/gitignore/api/macos,python,vscode
 # Edit at https://www.toptal.com/developers/gitignore?templates=macos,python,vscode

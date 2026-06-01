@@ -29,6 +29,8 @@ HTML_PROMPT_SUFFIX = (
     "전체 메시지는 가능한 4096자 안쪽으로 요약해줘."
 )
 
+MCP_TRADING_ENV_VALUES = {"paper", "acct"}
+
 
 def env_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
@@ -49,6 +51,33 @@ def env_float(name: str, default: float) -> float:
     if raw is None or raw == "":
         return default
     return float(raw)
+
+
+def env_choice(name: str, default: str, allowed: set[str]) -> str:
+    raw = os.getenv(name)
+    value = default if raw is None or raw.strip() == "" else raw.strip().lower()
+    if value not in allowed:
+        allowed_text = ", ".join(sorted(allowed))
+        raise ValueError(f"{name} must be one of: {allowed_text}")
+    return value
+
+
+def mcp_trading_env_prompt(mcp_trading_env: str) -> str:
+    if mcp_trading_env == "paper":
+        env_dv = "demo"
+        mode_text = "모의투자/모의거래"
+    elif mcp_trading_env == "acct":
+        env_dv = "real"
+        mode_text = "실전 계좌"
+    else:
+        raise ValueError(f"unsupported CODEX_MCP_TRADING_ENV={mcp_trading_env}")
+
+    return (
+        "\n\n[KIS MCP 거래환경]\n"
+        f"- CODEX_MCP_TRADING_ENV={mcp_trading_env} ({mode_text}).\n"
+        "- 이 설정은 사용자 요청, 스케줄 메시지, 스킬 문서의 모의/실전 표현보다 우선한다.\n"
+        f"- 한국투자증권 MCP 도구 호출에서 env_dv 파라미터가 있으면 반드시 env_dv=\"{env_dv}\"를 사용한다.\n"
+    )
 
 
 ERROR_LOG_LIMIT = 2000
@@ -141,6 +170,7 @@ class Config:
     schedule_file: Path
     telegram_gateway_url: str
     telegram_route: str | None
+    mcp_trading_env: str
     model: str
     reasoning_effort: str
     codex_timeout_seconds: int
@@ -168,6 +198,11 @@ class Config:
                 "http://telegram-gateway:8080/sendMessage",
             ),
             telegram_route=os.getenv("TELEGRAM_ROUTE", "").strip() or None,
+            mcp_trading_env=env_choice(
+                "CODEX_MCP_TRADING_ENV",
+                "paper",
+                MCP_TRADING_ENV_VALUES,
+            ),
             model=os.getenv("CODEX_MODEL", "gpt-5.5"),
             reasoning_effort=os.getenv("CODEX_REASONING_EFFORT", "xhigh"),
             codex_timeout_seconds=env_int("CODEX_TIMEOUT_SECONDS", 1800),
@@ -347,10 +382,17 @@ class CodexRunner:
     def run_once(self, prompt: str) -> str:
         return self._run_codex(["exec"], prompt)
 
+    def _build_prompt(self, prompt: str) -> str:
+        return (
+            prompt.rstrip()
+            + mcp_trading_env_prompt(self.config.mcp_trading_env)
+            + HTML_PROMPT_SUFFIX
+        )
+
     def _run_codex(self, subcommand: list[str], prompt: str) -> str:
         run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:8]
         output_file = self.tmp_dir / f"{run_id}.txt"
-        full_prompt = prompt.rstrip() + HTML_PROMPT_SUFFIX
+        full_prompt = self._build_prompt(prompt)
 
         cmd = [
             self.config.codex_bin,
@@ -369,6 +411,7 @@ class CodexRunner:
 
         env = os.environ.copy()
         env["CODEX_HOME"] = str(self.config.codex_home)
+        env["CODEX_MCP_TRADING_ENV"] = self.config.mcp_trading_env
 
         logging.info("running codex command=%s", " ".join(shlex.quote(part) for part in cmd[:-1]))
         result = subprocess.run(

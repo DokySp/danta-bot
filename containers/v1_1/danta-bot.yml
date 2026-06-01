@@ -1,22 +1,11 @@
 services:
-  # KIS Trade MCP
-  kis-trade-mcp-1:
-    image: kis-trade-mcp:latest
-    container_name: kis-trade-mcp-v1
-    restart: unless-stopped
-    env_file:
-      - ./codex-exec/config/kis-trade-mcp.env
-
-  # 실행기
   codex-exec-stock-v1_1:
     container_name: codex-exec-stock-v1_1
-    image: codex-exec-v1_1:1.0.0
+    image: dokysp/codex-exec-v1_1:${CODEX_EXEC_V1_1_VERSION}
     environment:
       TELEGRAM_ROUTE: v1
     env_file:
       - ./codex-exec/config/codex-exec.env
-    depends_on:
-      - kis-trade-mcp-1
     restart: unless-stopped
     ports:
       - "127.0.0.1:8090:8080"

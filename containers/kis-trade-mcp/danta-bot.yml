@@ -1,0 +1,11 @@
+services:
+  kis-trade-mcp:
+    image: dokysp/kis-trade-mcp:latest
+    container_name: kis-trade-mcp
+    restart: unless-stopped
+    env_file:
+      - ./config/kis-trade-mcp.env
+
+networks:
+  default:
+    name: danta-bot-net

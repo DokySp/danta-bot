@@ -1,6 +1,7 @@
 FROM python:3.12-slim
 
-ARG APP_VERSION=1.0.0
+ARG APP_VERSION
+RUN test -n "$APP_VERSION" || (echo "APP_VERSION build arg is required" >&2; exit 1)
 
 LABEL org.opencontainers.image.title="telegram-gateway"
 LABEL org.opencontainers.image.version="${APP_VERSION}"
