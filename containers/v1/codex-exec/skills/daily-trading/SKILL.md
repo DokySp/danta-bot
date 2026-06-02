@@ -1,5 +1,5 @@
 ---
-name: trading-mcp-v1
+name: daily-trading
 description: 한국 주식투자 의사결정 리포트를 법정 평결 형식으로 작성하고, KIS OAuth 접근토큰 만료를 확인해 재발급한 뒤 명시 요청 시 보유 현금·보유수량 기준의 적극적 모의거래 주문 또는 실전거래 주문 티켓을 준비한다. Use when the user asks for /stock-trial, stock-trial, KIS MCP 기반 투자 판단, KIS auth_token 재발급, sub agent 기반 분석가·배심원·판사 오케스트레이션, 매수/보유/매도 평결 리포트, 적극적 주문 수량 산정, 모의거래 실행, 실전거래 예약주문 검토. For ordinary Korean stock analysis requests that do not mention /stock-trial or sub agent execution, ask before spawning sub agents.
 ---
 

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Daily Trading"
+  short_description: "Stock trials with active sizing"
+  default_prompt: "Use $daily-trading to refresh KIS auth if needed, run a stock trial report for 005930, and size any requested demo reservation order from available cash."
