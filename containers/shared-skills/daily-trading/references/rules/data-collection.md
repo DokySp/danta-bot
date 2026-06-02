@@ -8,11 +8,20 @@
 - 실행 전 `find_api_detail`로 최신 파라미터를 다시 확인한다. 확정되지 않은 반환 필드는 실행 시점 MCP 응답으로 확인해 기록한다.
 - KIS API 호출 전 `auth-token.md`의 인증 프리플라이트를 수행한다. 접근토큰이 없거나 만료되었거나 만료 임박이면 `auth(api_type="auth_token")`으로 재발급한다.
 
+## 호출 속도 제한
+
+- KIS MCP 호출은 기본적으로 순차 실행한다.
+- 일반 시세 API도 호출 사이에 최소 1초 간격을 둔다.
+- 계좌·잔고·주문·주문가능·체결조회처럼 원장을 조회하거나 변경하는 API는 병렬 호출하지 않고 호출 사이에 최소 1초, 가능하면 1.2초 이상 간격을 둔다.
+- `EGW00201` 또는 `원장에서 허용 가능한 초당 거래건수를 초과` 오류가 발생하면 즉시 반복 호출하지 않는다. 최소 3초 대기 후 같은 API를 최대 2회만 재시도한다.
+- 다수 종목 현재가는 가능하면 `intstock_multprice` 같은 멀티 조회 API를 우선 사용해 호출 수를 줄인다.
+- `multi_tool_use.parallel`로 KIS MCP 도구를 묶지 않는다. 파일 읽기나 로컬 셸 조회처럼 KIS 서버와 무관한 작업에만 병렬화를 사용한다.
+
 ## 필수 수집 순서
 
 1. `auth-token.md` 기준으로 요청 환경의 접근토큰 상태를 확인하고 필요 시 재발급한다.
 2. `domestic_stock(api_type="find_stock_code")`로 종목명과 6자리 종목코드를 확인한다.
-3. `domestic_stock(api_type="inquire_price")`로 현재가와 핵심 밸류에이션을 수집한다.
+3. `domestic_stock(api_type="inquire_price")` 또는 다수 종목이면 `domestic_stock(api_type="intstock_multprice")`로 현재가와 핵심 가격 데이터를 수집한다.
 4. `domestic_stock(api_type="inquire_daily_itemchartprice")`로 일봉, 주봉, 월봉을 각각 수집한다.
 5. `domestic_stock(api_type="inquire_asking_price_exp_ccn")`과 `domestic_stock(api_type="inquire_ccnl")`로 호가와 체결을 수집한다.
 6. `domestic_stock(api_type="inquire_investor")`, `domestic_stock(api_type="investor_trade_by_stock_daily")`, `domestic_stock(api_type="foreign_institution_total")`로 수급을 수집한다.
