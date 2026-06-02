@@ -17,7 +17,7 @@
 
 ```bash
 $ export TELEGRAM_GATEWAY_VERSION=1.1.0
-$ export CODEX_EXEC_V1_VERSION=1.1.0
+$ export CODEX_EXEC_V1_VERSION=1.1.1
 $ export CODEX_EXEC_V2_VERSION=2.1.0
 
 $ docker build --build-arg APP_VERSION=$TELEGRAM_GATEWAY_VERSION -t telegram-gateway:$TELEGRAM_GATEWAY_VERSION ./containers/telegram-gateway
