@@ -21,7 +21,7 @@ $ export CODEX_EXEC_V1_VERSION=1.1.0
 $ export CODEX_EXEC_V2_VERSION=2.1.0
 
 $ docker build --build-arg APP_VERSION=$TELEGRAM_GATEWAY_VERSION -t telegram-gateway:$TELEGRAM_GATEWAY_VERSION ./containers/telegram-gateway
-$ docker build --build-arg APP_VERSION=$CODEX_EXEC_V1_VERSION -t codex-exec-v1:$CODEX_EXEC_V1_VERSION ./containers/v1_1/codex-exec
+$ docker build --build-arg APP_VERSION=$CODEX_EXEC_V1_VERSION -t codex-exec-v1:$CODEX_EXEC_V1_VERSION ./containers/v1/codex-exec
 $ docker build --build-arg APP_VERSION=$CODEX_EXEC_V2_VERSION -t codex-exec-v2:$CODEX_EXEC_V2_VERSION ./containers/v2/codex-exec
 ```
 
@@ -88,13 +88,13 @@ $ cd containers
 $ docker network create danta-bot-net
 $ docker compose -f kis-trade-mcp/compose.yaml up -d
 $ docker compose -f telegram-gateway/compose.yaml up -d
-$ docker compose -f v1_1/compose.yaml up -d
+$ docker compose -f v1/compose.yaml up -d
 ```
 
 이미 네트워크가 있으면 `docker network create`는 한 번만 실행하면 됩니다.
 
 ```bash
-$ docker compose -f v1_1/compose.yaml down
+$ docker compose -f v1/compose.yaml down
 $ docker compose -f telegram-gateway/compose.yaml down
 $ docker compose -f kis-trade-mcp/compose.yaml down
 ```
@@ -116,7 +116,7 @@ containers/
       kis-trade-mcp.env      # kis-trade-mcp 환경변수 설정
       kis-trade-mcp.env.example
 
-  v1_1/
+  v1/
     compose.yaml
     codex-exec/
       config/

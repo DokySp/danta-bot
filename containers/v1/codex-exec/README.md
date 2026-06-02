@@ -5,7 +5,7 @@
 ## Build
 
 ```bash
-docker build -t codex-exec-v1:1.0.0 ./v1_1/codex-exec
+docker build -t codex-exec-v1:1.0.0 ./v1/codex-exec
 ```
 
 ## First Login
