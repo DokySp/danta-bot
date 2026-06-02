@@ -1,6 +1,6 @@
 # kis-trade-mcp
 
-공용 KIS MCP 서버 compose입니다. v1_1과 v2의 codex-exec는 같은 Docker 네트워크에서
+공용 KIS MCP 서버 compose입니다. v1과 v2의 codex-exec는 같은 Docker 네트워크에서
 `http://kis-trade-mcp:3000/sse`로 이 서버에 접속합니다.
 
 ## Runtime Env

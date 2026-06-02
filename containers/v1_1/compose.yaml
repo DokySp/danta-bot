@@ -1,7 +1,7 @@
 services:
-  codex-exec-stock-v1_1:
-    container_name: codex-exec-stock-v1_1
-    image: dokysp/codex-exec-v1_1:${CODEX_EXEC_V1_1_VERSION}
+  codex-exec-stock-v1:
+    container_name: codex-exec-stock-v1
+    image: dokysp/codex-exec-v1:${CODEX_EXEC_V1_VERSION}
     environment:
       TELEGRAM_ROUTE: v1
     env_file:
@@ -10,14 +10,14 @@ services:
     ports:
       - "127.0.0.1:8090:8080"
     volumes:
-      - codex-home-stock-v1_1:/codex-home
-      - codex-state-stock-v1_1:/state
+      - codex-home-stock-v1:/codex-home
+      - codex-state-stock-v1:/state
       - ./codex-exec/config/schedules.yaml:/app/configs/schedules.yaml:ro
       - ./:/workspace
 
 volumes:
-  codex-home-stock-v1_1:
-  codex-state-stock-v1_1:
+  codex-home-stock-v1:
+  codex-state-stock-v1:
 
 networks:
   default:

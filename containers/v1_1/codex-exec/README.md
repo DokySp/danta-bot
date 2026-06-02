@@ -1,28 +1,28 @@
-# codex-exec-v1_1
+# codex-exec-v1
 
 `telegram-gateway`에서 받은 메시지와 YAML 스케줄을 Codex CLI로 실행하는 상주형 worker입니다.
 
 ## Build
 
 ```bash
-docker build -t codex-exec-v1_1:1.0.0 ./v1_1/codex-exec
+docker build -t codex-exec-v1:1.0.0 ./v1_1/codex-exec
 ```
 
 ## First Login
 
 `CODEX_HOME`은 이미지에 넣지 않고 Docker volume에 저장합니다.
-이미지에 포함된 `codex-exec-v1_1/skills` 폴더는 컨테이너 시작 시
+이미지에 포함된 `codex-exec-v1/skills` 폴더는 컨테이너 시작 시
 `$CODEX_HOME/skills`가 비어 있을 때만 한 번 복사됩니다.
 복사 후에는 `$CODEX_HOME/.bundled_skills_initialized` 마커가 생기며,
 다음 시작부터 Docker는 `$CODEX_HOME/skills`를 건드리지 않습니다.
 
 ```bash
-docker volume create codex-home-stock-v1_1
+docker volume create codex-home-stock-v1
 
 docker run --rm -it \
   -e CODEX_HOME=/codex-home \
-  -v codex-home-stock-v1_1:/codex-home \
-  codex-exec-v1_1:1.0.0 \
+  -v codex-home-stock-v1:/codex-home \
+  codex-exec-v1:1.0.0 \
   codex login --device-auth
 ```
 
@@ -33,8 +33,8 @@ read -s OPENAI_API_KEY
 
 printf '%s' "$OPENAI_API_KEY" | docker run --rm -i \
   -e CODEX_HOME=/codex-home \
-  -v codex-home-stock-v1_1:/codex-home \
-  codex-exec-v1_1:1.0.0 \
+  -v codex-home-stock-v1:/codex-home \
+  codex-exec-v1:1.0.0 \
   codex login --with-api-key
 ```
 
@@ -43,8 +43,8 @@ printf '%s' "$OPENAI_API_KEY" | docker run --rm -i \
 ```bash
 docker run --rm \
   -e CODEX_HOME=/codex-home \
-  -v codex-home-stock-v1_1:/codex-home \
-  codex-exec-v1_1:1.0.0 \
+  -v codex-home-stock-v1:/codex-home \
+  codex-exec-v1:1.0.0 \
   codex login status
 ```
 

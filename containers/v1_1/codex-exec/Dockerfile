@@ -5,7 +5,7 @@ RUN test -n "$APP_VERSION" || (echo "APP_VERSION build arg is required" >&2; exi
 ARG CODEX_VERSION=0.135.0
 ARG TARGETARCH
 
-LABEL org.opencontainers.image.title="codex-exec-v1_1"
+LABEL org.opencontainers.image.title="codex-exec-v1"
 LABEL org.opencontainers.image.version="${APP_VERSION}"
 LABEL org.opencontainers.image.description="Codex exec HTTP and scheduler worker"
 
