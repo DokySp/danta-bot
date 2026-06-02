@@ -21,8 +21,8 @@ $ export CODEX_EXEC_V1_VERSION=1.1.1
 $ export CODEX_EXEC_V2_VERSION=2.1.0
 
 $ docker build --build-arg APP_VERSION=$TELEGRAM_GATEWAY_VERSION -t telegram-gateway:$TELEGRAM_GATEWAY_VERSION ./containers/telegram-gateway
-$ docker build -f ./containers/v1/codex-exec/Dockerfile --build-arg APP_VERSION=$CODEX_EXEC_V1_VERSION -t codex-exec-v1:$CODEX_EXEC_V1_VERSION ./containers
-$ docker build -f ./containers/v2/codex-exec/Dockerfile --build-arg APP_VERSION=$CODEX_EXEC_V2_VERSION -t codex-exec-v2:$CODEX_EXEC_V2_VERSION ./containers
+$ docker build -f ./containers/codex-exec-v1/Dockerfile --build-arg APP_VERSION=$CODEX_EXEC_V1_VERSION -t codex-exec-v1:$CODEX_EXEC_V1_VERSION ./containers
+$ docker build -f ./containers/codex-exec-v2/Dockerfile --build-arg APP_VERSION=$CODEX_EXEC_V2_VERSION -t codex-exec-v2:$CODEX_EXEC_V2_VERSION ./containers
 ```
 
 `APP_VERSION`은 필수 빌드 인자이며 이미지 내부 메타데이터입니다. Dockerfile에서
@@ -88,13 +88,13 @@ $ cd containers
 $ docker network create danta-bot-net
 $ docker compose -f kis-trade-mcp/compose.yaml up -d
 $ docker compose -f telegram-gateway/compose.yaml up -d
-$ docker compose -f v1/compose.yaml up -d
+$ docker compose -f codex-exec-v1/compose.yaml up -d
 ```
 
 이미 네트워크가 있으면 `docker network create`는 한 번만 실행하면 됩니다.
 
 ```bash
-$ docker compose -f v1/compose.yaml down
+$ docker compose -f codex-exec-v1/compose.yaml down
 $ docker compose -f telegram-gateway/compose.yaml down
 $ docker compose -f kis-trade-mcp/compose.yaml down
 ```
@@ -116,21 +116,29 @@ containers/
       kis-trade-mcp.env      # kis-trade-mcp 환경변수 설정
       kis-trade-mcp.env.example
 
-  v1/
-    compose.yaml
-    codex-exec/
-      config/
-        codex-exec.env       # Codex 실행 및 MCP 연결 환경변수 설정
-        schedules.yaml       # 스케줄링 설정
-      ...
+  _shared-skills/
+    daily-trading/
 
-  v2/
+  codex-exec-v1/
     compose.yaml
-    codex-exec/
-      config/
-        codex-exec.env       # Codex 실행 및 MCP 연결 환경변수 설정
-        schedules.yaml       # 스케줄링 설정
-      ...
+    Dockerfile
+    README.md
+    codex_exec.py
+    config/
+      codex-exec.env         # Codex 실행 및 MCP 연결 환경변수 설정
+      schedules.yaml         # 스케줄링 설정
+    scripts/
+    skills/
+
+  codex-exec-v2/
+    compose.yaml
+    Dockerfile
+    codex_exec.py
+    config/
+      codex-exec.env         # Codex 실행 및 MCP 연결 환경변수 설정
+      schedules.yaml         # 스케줄링 설정
+    scripts/
+    skills/
 ```
 
 ## Codex CLI

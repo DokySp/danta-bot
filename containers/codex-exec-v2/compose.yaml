@@ -5,14 +5,14 @@ services:
     environment:
       TELEGRAM_ROUTE: v2
     env_file:
-      - ./codex-exec/config/codex-exec.env
+      - ./config/codex-exec.env
     restart: unless-stopped
     ports:
       - "127.0.0.1:8091:8080"
     volumes:
       - codex-home-v2:/codex-home
       - codex-state-v2:/state
-      - ./codex-exec/config/schedules.yaml:/app/configs/schedules.yaml:ro
+      - ./config/schedules.yaml:/app/configs/schedules.yaml:ro
       - ./:/workspace
 
 volumes:

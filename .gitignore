@@ -8,8 +8,10 @@
 containers/telegram-gateway/config/routes.yaml
 containers/telegram-gateway/config/*.env
 !containers/telegram-gateway/config/*.env.example
-containers/v1/codex-exec/config/*.env
-!containers/v1/codex-exec/config/*.env.example
+containers/codex-exec-v1/config/*.env
+!containers/codex-exec-v1/config/*.env.example
+containers/codex-exec-v2/config/*.env
+!containers/codex-exec-v2/config/*.env.example
 containers/kis-trade-mcp/config/*.env
 !containers/kis-trade-mcp/config/*.env.example
 

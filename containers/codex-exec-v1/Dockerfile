@@ -55,11 +55,11 @@ RUN groupadd --gid 1000 app \
 
 ENV npm_config_cache=/tmp/npm-cache
 
-COPY --chown=app:app v1/codex-exec/codex_exec.py /app/codex_exec.py
-COPY --chown=app:app v1/codex-exec/config/schedules.yaml /app/configs/schedules.yaml
-COPY --chown=app:app v1/codex-exec/scripts/merge-codex-config.sh /app/merge-codex-config.sh
-COPY --chown=app:app shared-skills /app/skills
-COPY --chown=app:app v1/codex-exec/skills /app/version-skills
+COPY --chown=app:app codex-exec-v1/codex_exec.py /app/codex_exec.py
+COPY --chown=app:app codex-exec-v1/config/schedules.yaml /app/configs/schedules.yaml
+COPY --chown=app:app codex-exec-v1/scripts/merge-codex-config.sh /app/merge-codex-config.sh
+COPY --chown=app:app _shared-skills /app/skills
+COPY --chown=app:app codex-exec-v1/skills /app/version-skills
 
 RUN set -eux; \
   for skill_dir in /app/version-skills/*; do \
