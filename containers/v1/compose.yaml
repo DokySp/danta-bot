@@ -1,7 +1,7 @@
 services:
   codex-exec-v1:
     container_name: codex-exec-v1
-    image: dokysp/codex-exec-v1:${CODEX_EXEC_V1_VERSION}
+    image: dokysp/codex-exec-v1:1.1.0
     environment:
       TELEGRAM_ROUTE: v1
     env_file:
