@@ -76,7 +76,7 @@ Compose의 `image:` 값은 Docker Hub의 `dokysp/<repository>:<tag>` 이미지�
 ## Docker 내에 Codex CLI 로그인
 
 ```bash
-$ docker exec -it codex-exec-stock-v1 bash
+$ docker exec -it codex-exec-v1 bash
 ```
 
 ## Docker Compose 실행

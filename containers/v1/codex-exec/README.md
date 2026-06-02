@@ -17,11 +17,11 @@ docker build -t codex-exec-v1:1.0.0 ./v1/codex-exec
 다음 시작부터 Docker는 `$CODEX_HOME/skills`를 건드리지 않습니다.
 
 ```bash
-docker volume create codex-home-stock-v1
+docker volume create codex-home-v1
 
 docker run --rm -it \
   -e CODEX_HOME=/codex-home \
-  -v codex-home-stock-v1:/codex-home \
+  -v codex-home-v1:/codex-home \
   codex-exec-v1:1.0.0 \
   codex login --device-auth
 ```
@@ -33,7 +33,7 @@ read -s OPENAI_API_KEY
 
 printf '%s' "$OPENAI_API_KEY" | docker run --rm -i \
   -e CODEX_HOME=/codex-home \
-  -v codex-home-stock-v1:/codex-home \
+  -v codex-home-v1:/codex-home \
   codex-exec-v1:1.0.0 \
   codex login --with-api-key
 ```
@@ -43,7 +43,7 @@ printf '%s' "$OPENAI_API_KEY" | docker run --rm -i \
 ```bash
 docker run --rm \
   -e CODEX_HOME=/codex-home \
-  -v codex-home-stock-v1:/codex-home \
+  -v codex-home-v1:/codex-home \
   codex-exec-v1:1.0.0 \
   codex login status
 ```
