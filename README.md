@@ -21,8 +21,8 @@ $ export CODEX_EXEC_V1_VERSION=1.1.0
 $ export CODEX_EXEC_V2_VERSION=2.1.0
 
 $ docker build --build-arg APP_VERSION=$TELEGRAM_GATEWAY_VERSION -t telegram-gateway:$TELEGRAM_GATEWAY_VERSION ./containers/telegram-gateway
-$ docker build --build-arg APP_VERSION=$CODEX_EXEC_V1_VERSION -t codex-exec-v1:$CODEX_EXEC_V1_VERSION ./containers/v1/codex-exec
-$ docker build --build-arg APP_VERSION=$CODEX_EXEC_V2_VERSION -t codex-exec-v2:$CODEX_EXEC_V2_VERSION ./containers/v2/codex-exec
+$ docker build -f ./containers/v1/codex-exec/Dockerfile --build-arg APP_VERSION=$CODEX_EXEC_V1_VERSION -t codex-exec-v1:$CODEX_EXEC_V1_VERSION ./containers
+$ docker build -f ./containers/v2/codex-exec/Dockerfile --build-arg APP_VERSION=$CODEX_EXEC_V2_VERSION -t codex-exec-v2:$CODEX_EXEC_V2_VERSION ./containers
 ```
 
 `APP_VERSION`은 필수 빌드 인자이며 이미지 내부 메타데이터입니다. Dockerfile에서

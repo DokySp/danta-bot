@@ -55,11 +55,24 @@ RUN groupadd --gid 1000 app \
 
 ENV npm_config_cache=/tmp/npm-cache
 
-COPY --chown=app:app codex_exec.py /app/codex_exec.py
-COPY --chown=app:app config/schedules.yaml /app/configs/schedules.yaml
-COPY --chown=app:app scripts/merge-codex-config.sh /app/merge-codex-config.sh
-COPY --chown=app:app scripts/codex_usage /app/codex_usage
-COPY --chown=app:app skills /app/skills
+COPY --chown=app:app v2/codex-exec/codex_exec.py /app/codex_exec.py
+COPY --chown=app:app v2/codex-exec/config/schedules.yaml /app/configs/schedules.yaml
+COPY --chown=app:app v2/codex-exec/scripts/merge-codex-config.sh /app/merge-codex-config.sh
+COPY --chown=app:app v2/codex-exec/scripts/codex_usage /app/codex_usage
+COPY --chown=app:app shared-skills /app/skills
+COPY --chown=app:app v2/codex-exec/skills /app/version-skills
+
+RUN set -eux; \
+  for skill_dir in /app/version-skills/*; do \
+    [ -d "$skill_dir" ] || continue; \
+    skill_name="$(basename "$skill_dir")"; \
+    if [ -e "/app/skills/$skill_name" ]; then \
+      echo "version-specific skill collides with shared skill: $skill_name" >&2; \
+      exit 1; \
+    fi; \
+    cp -a "$skill_dir" "/app/skills/$skill_name"; \
+  done; \
+  rm -rf /app/version-skills
 
 RUN chmod +x /app/merge-codex-config.sh /app/codex_usage
 

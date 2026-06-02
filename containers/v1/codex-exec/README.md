@@ -5,13 +5,16 @@
 ## Build
 
 ```bash
-docker build -t codex-exec-v1:1.0.0 ./v1/codex-exec
+docker build -f ./containers/v1/codex-exec/Dockerfile \
+  --build-arg APP_VERSION=1.0.0 \
+  -t codex-exec-v1:1.0.0 \
+  ./containers
 ```
 
 ## First Login
 
 `CODEX_HOME`은 이미지에 넣지 않고 Docker volume에 저장합니다.
-이미지에 포함된 `codex-exec-v1/skills` 폴더는 컨테이너 시작 시
+이미지에 포함된 공용 `containers/shared-skills`와 버전별 `containers/v1/codex-exec/skills`는 컨테이너 시작 시
 `$CODEX_HOME/skills`가 비어 있을 때만 한 번 복사됩니다.
 복사 후에는 `$CODEX_HOME/.bundled_skills_initialized` 마커가 생기며,
 다음 시작부터 Docker는 `$CODEX_HOME/skills`를 건드리지 않습니다.
