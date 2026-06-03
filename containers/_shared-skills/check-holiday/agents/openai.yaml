@@ -1,0 +1,4 @@
+interface:
+  display_name: "Check Holiday"
+  short_description: "KIS holiday gate with daily cache"
+  default_prompt: "Use $check-holiday to decide whether today is a Korean market holiday before trading."

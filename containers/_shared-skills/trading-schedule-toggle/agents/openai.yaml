@@ -1,0 +1,4 @@
+interface:
+  display_name: "Trading Schedule Toggle"
+  short_description: "Toggle daily trading schedules"
+  default_prompt: "Use $trading-schedule-toggle to enable daily trading schedules on an open Korean market day, or disable them on a closed day."

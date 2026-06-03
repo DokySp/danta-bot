@@ -1,0 +1,4 @@
+interface:
+  display_name: "Check Portfolio"
+  short_description: "Read configured portfolio text"
+  default_prompt: "Use $check-portfolio to read the configured portfolio file."

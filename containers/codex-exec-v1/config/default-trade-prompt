@@ -1,0 +1,2 @@
+$daily-trading에 사용할 종목번호를 $check-portfolio 를 통해 확인한 후,
+뉴스 정보와 $daily-trading 스킬로 현재 주식 상황 판단 후, 실전(acct) 거래를 실제로 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.

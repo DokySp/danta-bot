@@ -1,0 +1,4 @@
+interface:
+  display_name: "Execute Trade"
+  short_description: "Run configured trade prompt"
+  default_prompt: "Use $execute-trade to execute the configured default trade prompt."
