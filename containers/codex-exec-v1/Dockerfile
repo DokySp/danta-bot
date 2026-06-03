@@ -15,7 +15,9 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV CODEX_HOME=/codex-home
 ENV STATE_DIR=/state
 ENV WORKSPACE_DIR=/workspace
-ENV SCHEDULE_FILE=/app/configs/schedules.yaml
+ENV SCHEDULE_FILE=/app/config/schedules.yaml
+ENV PORTFOLIO_FILE=/app/config/portfolio.txt
+ENV DEFAULT_TRADE_PROMPT_FILE=/app/config/default-trade-prompt
 ENV BUNDLED_SKILLS_DIR=/app/skills
 ENV CODEX_CONFIG_SNIPPET_DIR=/app/codex-config.d
 ENV CODEX_CONFIG_FILE=/codex-home/config.toml
@@ -50,14 +52,17 @@ RUN set -eux; \
 
 RUN groupadd --gid 1000 app \
   && useradd --uid 1000 --gid app --create-home app \
-  && mkdir -p /app/configs /app/codex-config.d /codex-home /state /workspace /tmp/codex-exec /tmp/npm-cache \
+  && mkdir -p /app/config /app/codex-config.d /codex-home /state /workspace /tmp/codex-exec /tmp/npm-cache \
   && chown -R app:app /app /codex-home /state /workspace /tmp/codex-exec /tmp/npm-cache
 
 ENV npm_config_cache=/tmp/npm-cache
 
 COPY --chown=app:app codex-exec-v1/codex_exec.py /app/codex_exec.py
-COPY --chown=app:app codex-exec-v1/config/schedules.yaml /app/configs/schedules.yaml
+COPY --chown=app:app codex-exec-v1/config/schedules.yaml /app/config/schedules.yaml
+COPY --chown=app:app codex-exec-v1/config/portfolio.txt /app/config/portfolio.txt
+COPY --chown=app:app codex-exec-v1/config/default-trade-prompt /app/config/default-trade-prompt
 COPY --chown=app:app codex-exec-v1/scripts/merge-codex-config.sh /app/merge-codex-config.sh
+COPY --chown=app:app codex-exec-v1/scripts/codex_usage /app/codex_usage
 COPY --chown=app:app _shared-skills /app/skills
 COPY --chown=app:app codex-exec-v1/skills /app/version-skills
 
@@ -73,7 +78,7 @@ RUN set -eux; \
   done; \
   rm -rf /app/version-skills
 
-RUN chmod +x /app/merge-codex-config.sh
+RUN chmod +x /app/merge-codex-config.sh /app/codex_usage
 
 USER app
 

@@ -178,6 +178,8 @@ class Config:
     telegram_typing_interval_seconds: float
     bypass_sandbox: bool
     new_session_prompt: str
+    usage_script: Path
+    usage_timeout_seconds: int
     bundled_skills_dir: Path
     sync_skills: bool
     sync_skills_once: bool
@@ -192,7 +194,7 @@ class Config:
             codex_home=Path(os.getenv("CODEX_HOME", "/codex-home")),
             state_dir=Path(os.getenv("STATE_DIR", "/state")),
             workspace_dir=Path(os.getenv("WORKSPACE_DIR", "/workspace")),
-            schedule_file=Path(os.getenv("SCHEDULE_FILE", "/app/configs/schedules.yaml")),
+            schedule_file=Path(os.getenv("SCHEDULE_FILE", "/app/config/schedules.yaml")),
             telegram_gateway_url=os.getenv(
                 "TELEGRAM_GATEWAY_URL",
                 "http://telegram-gateway:8080/sendMessage",
@@ -210,6 +212,8 @@ class Config:
             telegram_typing_interval_seconds=env_float("TELEGRAM_TYPING_INTERVAL_SECONDS", 4.0),
             bypass_sandbox=env_bool("CODEX_BYPASS_APPROVALS_AND_SANDBOX", True),
             new_session_prompt=os.getenv("NEW_SESSION_PROMPT", "새 대화 시작"),
+            usage_script=Path(os.getenv("CODEX_USAGE_SCRIPT", "/app/codex_usage")),
+            usage_timeout_seconds=env_int("CODEX_USAGE_TIMEOUT_SECONDS", 20),
             bundled_skills_dir=Path(os.getenv("BUNDLED_SKILLS_DIR", "/app/skills")),
             sync_skills=env_bool("CODEX_SYNC_SKILLS", True),
             sync_skills_once=env_bool("CODEX_SYNC_SKILLS_ONCE", True),
@@ -381,6 +385,40 @@ class CodexRunner:
 
     def run_once(self, prompt: str) -> str:
         return self._run_codex(["exec"], prompt)
+
+    def run_usage(self) -> str:
+        if not self.config.usage_script.exists():
+            raise RuntimeError(f"codex usage script not found: {self.config.usage_script}")
+
+        cmd = [
+            str(self.config.usage_script),
+            "--timeout",
+            str(self.config.usage_timeout_seconds),
+        ]
+        env = os.environ.copy()
+        env["CODEX_HOME"] = str(self.config.codex_home)
+        env["CODEX_BIN"] = self.config.codex_bin
+
+        logging.info("running codex usage command=%s", " ".join(shlex.quote(part) for part in cmd))
+        result = subprocess.run(
+            cmd,
+            cwd=self.config.workspace_dir,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=self.config.usage_timeout_seconds + 5,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise classify_codex_error(result.returncode, result.stdout, result.stderr)
+
+        output = result.stdout.strip()
+        if not output:
+            return "<i>Codex usage returned no output.</i>"
+        if len(output) > 3500:
+            output = "... truncated ...\n" + output[-3500:]
+        return f"<b>Codex usage</b>\n<pre>{html.escape(output)}</pre>"
 
     def _build_prompt(self, prompt: str) -> str:
         return (
@@ -619,6 +657,17 @@ class TelegramWorker:
                 session_id, output = self.runner.run_new_session(self.config.new_session_prompt)
             self.state.set_default_session(session_id)
             logging.info("new default session_id=%s", session_id)
+            self.gateway.send_message(output, task.chat_id, task.route)
+            return
+
+        if text == "/usage":
+            with TypingIndicator(
+                self.gateway,
+                task.chat_id,
+                task.route,
+                self.config.telegram_typing_interval_seconds,
+            ):
+                output = self.runner.run_usage()
             self.gateway.send_message(output, task.chat_id, task.route)
             return
 
