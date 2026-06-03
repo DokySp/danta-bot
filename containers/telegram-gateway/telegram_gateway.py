@@ -21,6 +21,7 @@ import yaml
 
 
 MARKDOWN_V2_SPECIALS = r"_*[]()~`>#+-=|{}.!"
+BOT_COMMAND_RE = re.compile(r"^[a-z0-9_]{1,32}$")
 
 
 def env_int(name: str, default: int) -> int:
@@ -433,6 +434,77 @@ def parse_env_file(path: Path) -> dict[str, str]:
 
 
 @dataclass(frozen=True)
+class BotCommand:
+    command: str
+    description: str
+    text: str | None = None
+
+    def telegram_payload(self) -> dict[str, str]:
+        return {"command": self.command, "description": self.description}
+
+
+def parse_bot_commands(raw_commands: Any, *, source: str) -> tuple[BotCommand, ...]:
+    if not isinstance(raw_commands, list):
+        raise ValueError(f"{source} must be a list")
+
+    commands: list[BotCommand] = []
+    seen: set[str] = set()
+    for index, item in enumerate(raw_commands):
+        item_source = f"{source}[{index}]"
+        if not isinstance(item, dict):
+            raise ValueError(f"{item_source} must be an object")
+
+        command = str(item.get("command", "")).strip()
+        description = str(item.get("description", "")).strip()
+        text_value = item.get("text")
+        text = str(text_value).strip() if text_value is not None else None
+        if text == "":
+            text = None
+
+        if not command:
+            raise ValueError(f"{item_source}.command is required")
+        if not BOT_COMMAND_RE.fullmatch(command):
+            raise ValueError(
+                f"{item_source}.command must be 1-32 chars of lowercase English letters, digits, or underscores"
+            )
+        if command in seen:
+            raise ValueError(f"{item_source}.command is duplicated: {command}")
+        if not description:
+            raise ValueError(f"{item_source}.description is required")
+        if len(description) > 256:
+            raise ValueError(f"{item_source}.description must be 256 chars or fewer")
+
+        seen.add(command)
+        commands.append(BotCommand(command=command, description=description, text=text))
+
+    return tuple(commands)
+
+
+def route_bot_commands(raw_config: dict[str, Any], route_id: str) -> tuple[BotCommand, ...]:
+    if "bot_commands" in raw_config:
+        return parse_bot_commands(raw_config.get("bot_commands"), source=f"route {route_id} bot_commands")
+    return ()
+
+
+def apply_bot_command_alias(route: "RouteConfig", text: str) -> str:
+    stripped = text.strip()
+    if not stripped.startswith("/"):
+        return text
+
+    for command in route.bot_commands:
+        if not command.text:
+            continue
+
+        source = f"/{command.command}"
+        if stripped == source:
+            return command.text
+        if stripped.startswith(f"{source} "):
+            return f"{command.text}{stripped[len(source):]}"
+
+    return text
+
+
+@dataclass(frozen=True)
 class Config:
     version: str
     http_timeout: int
@@ -465,6 +537,7 @@ class RouteConfig:
     http_timeout: int
     ack_text: str | None
     echo_mode: bool
+    bot_commands: tuple[BotCommand, ...]
 
 
 @dataclass(frozen=True)
@@ -575,6 +648,7 @@ def load_routing_table(path: Path) -> RoutingTable:
             http_timeout=int(values.get("HTTP_TIMEOUT", "10") or "10"),
             ack_text=values.get("TELEGRAM_ACK_TEXT", "").strip() or None,
             echo_mode=env_bool_value(values.get("TELEGRAM_ECHO_MODE"), False),
+            bot_commands=route_bot_commands(raw_config, route_id),
         )
 
     if not routes:
@@ -621,6 +695,15 @@ class TelegramClient:
         response = self.post_form("getUpdates", payload, timeout=timeout)
         result = response.get("result", [])
         return result if isinstance(result, list) else []
+
+    def set_my_commands(self) -> None:
+        payload = {
+            "commands": json.dumps(
+                [command.telegram_payload() for command in self.route.bot_commands],
+                ensure_ascii=False,
+            )
+        }
+        self.post_form("setMyCommands", payload)
 
     def send_message(
         self,
@@ -803,6 +886,23 @@ class GatewayApp:
 
         raise ValueError("route is required")
 
+    def register_bot_commands(self) -> None:
+        routing = self.routing_store.get()
+        for route in routing.routes.values():
+            if not route.bot_commands:
+                logging.info("skipping Telegram bot command registration route=%s", route.route_id)
+                continue
+            try:
+                TelegramClient(route).set_my_commands()
+            except Exception:
+                logging.exception("failed to register Telegram bot commands route=%s", route.route_id)
+                continue
+            logging.info(
+                "registered Telegram bot commands route=%s commands=%s",
+                route.route_id,
+                ",".join(command.command for command in route.bot_commands),
+            )
+
     def poll_forever(self) -> None:
         while not self.stop_event.is_set():
             try:
@@ -859,6 +959,7 @@ class GatewayApp:
             logging.warning("ignored unauthorized chat_id=%s route=%s", chat_id, route.route_id)
             return
 
+        routed_text = apply_bot_command_alias(route, text)
         user_id = str(sender.get("id", ""))
         username = sender.get("username")
         message_id = message.get("message_id")
@@ -871,6 +972,13 @@ class GatewayApp:
             message_id,
             text,
         )
+        if routed_text != text:
+            logging.info(
+                "applied bot command alias route=%s text=%r routed_text=%r",
+                route.route_id,
+                text,
+                routed_text,
+            )
 
         client = TelegramClient(route)
         if route.echo_mode:
@@ -878,7 +986,7 @@ class GatewayApp:
             client.send_message(chat_id, text)
             return
 
-        resolved = self.router.resolve(route.route_id, text)
+        resolved = self.router.resolve(route.route_id, routed_text)
         codex_text = build_codex_input_text(resolved.text, message)
         payload = {
             "source": "telegram",
@@ -926,6 +1034,7 @@ def main() -> None:
 
     server = app.serve_http()
     logging.info("telegram-gateway %s listening on %s:%s", config.version, config.gateway_host, config.gateway_port)
+    app.register_bot_commands()
     try:
         app.poll_forever()
     finally:
