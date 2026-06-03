@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 ARG APP_VERSION
 RUN test -n "$APP_VERSION" || (echo "APP_VERSION build arg is required" >&2; exit 1)
-ARG CODEX_VERSION=0.135.0
+ARG CODEX_VERSION=latest
 ARG TARGETARCH
 
 LABEL org.opencontainers.image.title="codex-exec-v1"
@@ -37,12 +37,16 @@ RUN pip install --no-cache-dir PyYAML==6.0.2
 
 RUN set -eux; \
   case "${TARGETARCH:-amd64}" in \
-    amd64) codex_arch="x86_64"; codex_sha="a15e7dad657da4a0e120eede29556fee6d50e8c919759cc2ecba3c99099363e2" ;; \
-    arm64) codex_arch="aarch64"; codex_sha="568bce1d593ef25ffdf5549369a8606085652294646a5c4961547a894ea2f76d" ;; \
+    amd64) codex_arch="x86_64" ;; \
+    arm64) codex_arch="aarch64" ;; \
     *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
   esac; \
-  curl -fsSL -o /tmp/codex.tar.gz "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-${codex_arch}-unknown-linux-musl.tar.gz"; \
-  echo "${codex_sha}  /tmp/codex.tar.gz" | sha256sum -c -; \
+  if [ "${CODEX_VERSION}" = "latest" ]; then \
+    codex_url="https://github.com/openai/codex/releases/latest/download/codex-${codex_arch}-unknown-linux-musl.tar.gz"; \
+  else \
+    codex_url="https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-${codex_arch}-unknown-linux-musl.tar.gz"; \
+  fi; \
+  curl -fsSL -o /tmp/codex.tar.gz "${codex_url}"; \
   tar -xzf /tmp/codex.tar.gz -C /usr/local/bin; \
   mv "/usr/local/bin/codex-${codex_arch}-unknown-linux-musl" /usr/local/bin/codex; \
   chmod +x /usr/local/bin/codex; \
