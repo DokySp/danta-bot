@@ -16,8 +16,8 @@
 ## Docker 이미지 빌드/배포
 
 ```bash
-$ export TELEGRAM_GATEWAY_VERSION=1.1.1
-$ export CODEX_EXEC_V1_VERSION=1.2.0
+$ export TELEGRAM_GATEWAY_VERSION=1.1.2
+$ export CODEX_EXEC_V1_VERSION=1.2.1
 $ export CODEX_EXEC_V2_VERSION=2.1.1
 
 $ docker build --build-arg APP_VERSION=$TELEGRAM_GATEWAY_VERSION -t telegram-gateway:$TELEGRAM_GATEWAY_VERSION ./containers/telegram-gateway
