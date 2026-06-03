@@ -12,7 +12,7 @@ services:
     volumes:
       - codex-home-v2:/codex-home
       - codex-state-v2:/state
-      - ./config/schedules.yaml:/app/configs/schedules.yaml:ro
+      - ./config/schedules.yaml:/app/config/schedules.yaml:ro
       - ./:/workspace
 
 volumes:

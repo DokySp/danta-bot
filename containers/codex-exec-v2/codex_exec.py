@@ -194,7 +194,7 @@ class Config:
             codex_home=Path(os.getenv("CODEX_HOME", "/codex-home")),
             state_dir=Path(os.getenv("STATE_DIR", "/state")),
             workspace_dir=Path(os.getenv("WORKSPACE_DIR", "/workspace")),
-            schedule_file=Path(os.getenv("SCHEDULE_FILE", "/app/configs/schedules.yaml")),
+            schedule_file=Path(os.getenv("SCHEDULE_FILE", "/app/config/schedules.yaml")),
             telegram_gateway_url=os.getenv(
                 "TELEGRAM_GATEWAY_URL",
                 "http://telegram-gateway:8080/sendMessage",

@@ -84,18 +84,33 @@ def format_reset(epoch_seconds):
     return dt.datetime.fromtimestamp(epoch_seconds).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def format_remaining_percent(used_percent):
+    if used_percent is None:
+        return "n/a"
+    if isinstance(used_percent, str):
+        used_percent = used_percent.strip().removesuffix("%").strip()
+    try:
+        remaining = 100.0 - float(used_percent)
+    except (TypeError, ValueError):
+        return "n/a"
+    remaining = min(100.0, max(0.0, remaining))
+    if remaining.is_integer():
+        return str(int(remaining))
+    return f"{remaining:.1f}".rstrip("0").rstrip(".")
+
+
 def print_window(label, window):
     if not window:
         print(f"{label}: n/a")
         return
-    used = window.get("usedPercent")
+    remaining = format_remaining_percent(window.get("usedPercent"))
     reset_at = format_reset(window.get("resetsAt"))
     mins = window.get("windowDurationMins")
-    print(f"{label}: {used}% used, window {mins} min, reset {reset_at}")
+    print(f"{label}: {remaining}% remaining, window {mins} min, reset {reset_at}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Show Codex 5h and weekly usage.")
+    parser = argparse.ArgumentParser(description="Show Codex 5h and weekly remaining quota.")
     parser.add_argument("--json", action="store_true", help="print raw JSON response")
     parser.add_argument("--timeout", type=int, default=20, help="RPC timeout in seconds")
     args = parser.parse_args()
