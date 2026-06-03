@@ -15,9 +15,9 @@ docker build -f ./containers/codex-exec-v1/Dockerfile \
 
 `CODEX_HOME`은 이미지에 넣지 않고 Docker volume에 저장합니다.
 이미지에 포함된 공용 `containers/_shared-skills`와 버전별 `containers/codex-exec-v1/skills`는 컨테이너 시작 시
-`$CODEX_HOME/skills`가 비어 있을 때만 한 번 복사됩니다.
-복사 후에는 `$CODEX_HOME/.bundled_skills_initialized` 마커가 생기며,
-다음 시작부터 Docker는 `$CODEX_HOME/skills`를 건드리지 않습니다.
+`$CODEX_HOME/skills`에 없는 항목만 보충됩니다.
+기존 스킬은 `CODEX_SYNC_SKILLS_OVERWRITE=true`가 아니면 덮어쓰지 않습니다.
+동기화 후에는 `$CODEX_HOME/.bundled_skills_initialized` 마커에 복사/스킵 수가 기록됩니다.
 
 ```bash
 docker volume create codex-home-v1
@@ -51,9 +51,8 @@ docker run --rm \
   codex login status
 ```
 
-스킬을 이미지 기준으로 다시 초기화하고 싶으면 volume 안의
-`$CODEX_HOME/skills`와 `$CODEX_HOME/.bundled_skills_initialized`를 직접 정리한 뒤
-컨테이너를 다시 시작해야 합니다.
+스킬 내용을 이미지 기준으로 강제로 다시 맞추고 싶으면
+`CODEX_SYNC_SKILLS_OVERWRITE=true`로 컨테이너를 시작합니다.
 
 ## Runtime Env
 

@@ -117,7 +117,9 @@ containers/
       kis-trade-mcp.env.example
 
   _shared-skills/
+    check-holiday/
     daily-trading/
+    trading-schedule-toggle/
 
   codex-exec-v1/
     compose.yaml

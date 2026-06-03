@@ -558,41 +558,37 @@ class CodexRunner:
         target_root = self.config.codex_home / "skills"
         marker = self.config.codex_home / ".bundled_skills_initialized"
 
-        if self.config.sync_skills_once:
-            if marker.exists():
-                logging.info("bundled skills already initialized; skipping sync marker=%s", marker)
-                return
-            if target_root.exists() and any(target_root.iterdir()):
-                self._write_skills_marker(marker, copied=0, skipped_existing=True)
-                logging.info(
-                    "skills dir already exists; marked initialized without touching skills target=%s",
-                    target_root,
-                )
-                return
-
         target_root.mkdir(parents=True, exist_ok=True)
 
         copied = 0
+        skipped = 0
         for skill_dir in sorted(path for path in source.iterdir() if path.is_dir()):
             target = target_root / skill_dir.name
             if target.exists() and self.config.sync_skills_overwrite:
                 shutil.rmtree(target)
             if target.exists():
+                skipped += 1
                 continue
             shutil.copytree(skill_dir, target)
             copied += 1
 
         if self.config.sync_skills_once:
-            self._write_skills_marker(marker, copied=copied, skipped_existing=False)
+            self._write_skills_marker(marker, copied=copied, skipped=skipped)
 
-        logging.info("synced bundled skills count=%s source=%s target=%s", copied, source, target_root)
+        logging.info(
+            "synced bundled skills copied=%s skipped_existing=%s source=%s target=%s",
+            copied,
+            skipped,
+            source,
+            target_root,
+        )
 
-    def _write_skills_marker(self, marker: Path, copied: int, skipped_existing: bool) -> None:
+    def _write_skills_marker(self, marker: Path, copied: int, skipped: int) -> None:
         payload = {
             "source": str(self.config.bundled_skills_dir),
             "target": str(self.config.codex_home / "skills"),
             "copied": copied,
-            "skipped_existing": skipped_existing,
+            "skipped_existing": skipped,
             "initialized_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         }
         marker.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
