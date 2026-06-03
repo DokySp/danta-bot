@@ -8,7 +8,7 @@ import signal
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -554,6 +554,7 @@ class RoutingConfigStore:
         self.lock = threading.Lock()
         self.watched_mtimes: dict[Path, int] = {}
         self.routing: RoutingTable | None = None
+        self.generation = 0
         self.reload(initial=True)
 
     def get(self) -> RoutingTable:
@@ -584,6 +585,7 @@ class RoutingConfigStore:
         with self.lock:
             self.routing = loaded
             self.watched_mtimes = watched_mtimes
+            self.generation += 1
         logging.info(
             "loaded routing config path=%s routes=%s",
             self.path,
@@ -596,6 +598,9 @@ class RoutingConfigStore:
     def _mtimes_for_loaded_table(self, routing: RoutingTable) -> dict[Path, int]:
         paths = {self.path, *(route.env_file for route in routing.routes.values())}
         return {path: path.stat().st_mtime_ns for path in paths}
+
+    def current_generation(self) -> int:
+        return self.generation
 
 
 def load_routing_table(path: Path) -> RoutingTable:
@@ -785,6 +790,8 @@ class GatewayApp:
         self.stop_event = threading.Event()
         self.offsets: dict[str, int | None] = {}
         self.offsets_lock = threading.Lock()
+        self.bot_commands_generation = 0
+        self.bot_command_routes: dict[str, RouteConfig] = {}
 
     def serve_http(self) -> ThreadingHTTPServer:
         app = self
@@ -888,25 +895,64 @@ class GatewayApp:
 
     def register_bot_commands(self) -> None:
         routing = self.routing_store.get()
-        for route in routing.routes.values():
-            if not route.bot_commands:
+        current_routes = routing.routes
+        route_ids = set(current_routes) | set(self.bot_command_routes)
+
+        registered_routes: dict[str, RouteConfig] = {}
+        for route_id in sorted(route_ids):
+            route = current_routes.get(route_id)
+            previous_route = self.bot_command_routes.get(route_id)
+            if route is None:
+                if previous_route is None or not previous_route.bot_commands:
+                    continue
+                route = replace(previous_route, bot_commands=())
+
+            should_update = bool(route.bot_commands)
+            if previous_route is not None:
+                should_update = should_update or bool(previous_route.bot_commands)
+                should_update = should_update or route.telegram_bot_token != previous_route.telegram_bot_token
+            if not should_update:
                 logging.info("skipping Telegram bot command registration route=%s", route.route_id)
+                registered_routes[route_id] = route
                 continue
+
+            command_names = ",".join(command.command for command in route.bot_commands)
+            log_commands = command_names or "<none>"
             try:
+                if (
+                    previous_route is not None
+                    and previous_route.bot_commands
+                    and route.telegram_bot_token != previous_route.telegram_bot_token
+                ):
+                    TelegramClient(replace(previous_route, bot_commands=())).set_my_commands()
+                    logging.info("cleared Telegram bot commands route=%s previous_token=true", route.route_id)
                 TelegramClient(route).set_my_commands()
             except Exception:
                 logging.exception("failed to register Telegram bot commands route=%s", route.route_id)
+                if previous_route is not None:
+                    registered_routes[route_id] = previous_route
                 continue
             logging.info(
                 "registered Telegram bot commands route=%s commands=%s",
                 route.route_id,
-                ",".join(command.command for command in route.bot_commands),
+                log_commands,
             )
+            if route_id in current_routes:
+                registered_routes[route_id] = route
+
+        self.bot_command_routes = registered_routes
+        self.bot_commands_generation = self.routing_store.current_generation()
+
+    def register_bot_commands_if_reloaded(self) -> None:
+        if self.bot_commands_generation == self.routing_store.current_generation():
+            return
+        self.register_bot_commands()
 
     def poll_forever(self) -> None:
         while not self.stop_event.is_set():
             try:
                 routing = self.routing_store.get()
+                self.register_bot_commands_if_reloaded()
                 if not routing.routes:
                     logging.warning("no routes configured")
                     self.stop_event.wait(1)
