@@ -9,11 +9,11 @@ if [ -n "${PORTFOLIO_FILE:-}" ]; then
 "
 fi
 candidates="${candidates}/app/config/portfolio.txt
-/workspace/containers/codex-exec-v1/config/portfolio.txt
-containers/codex-exec-v1/config/portfolio.txt"
+/workspace/containers/codex-exec/profiles/base/config/portfolio.txt
+containers/codex-exec/profiles/base/config/portfolio.txt"
 if [ -n "$repo_root" ]; then
   candidates="${candidates}
-${repo_root}/containers/codex-exec-v1/config/portfolio.txt"
+${repo_root}/containers/codex-exec/profiles/base/config/portfolio.txt"
 fi
 
 while IFS= read -r candidate; do

@@ -1,6 +1,6 @@
 ---
 name: execute-trade
-description: "Execute the codex-exec-v1 default trade prompt exactly as written. Use when the user asks to run execute-trade, execute the default trade prompt, or execute the configured trade prompt from default-trade-prompt."
+description: "Execute the codex-exec base default trade prompt exactly as written. Use when the user asks to run execute-trade, execute the default trade prompt, or execute the configured trade prompt from default-trade-prompt."
 ---
 
 # Execute Trade
@@ -15,8 +15,8 @@ Use the first existing path in this order:
 
 1. `DEFAULT_TRADE_PROMPT_FILE` environment variable when set.
 2. `/app/config/default-trade-prompt`.
-3. `/workspace/containers/codex-exec-v1/config/default-trade-prompt`.
-4. `containers/codex-exec-v1/config/default-trade-prompt` when running from a local repository checkout.
+3. `/workspace/containers/codex-exec/profiles/base/config/default-trade-prompt`.
+4. `containers/codex-exec/profiles/base/config/default-trade-prompt` when running from a local repository checkout.
 
 ## Workflow
 

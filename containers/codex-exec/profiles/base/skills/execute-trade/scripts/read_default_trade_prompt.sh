@@ -9,11 +9,11 @@ if [ -n "${DEFAULT_TRADE_PROMPT_FILE:-}" ]; then
 "
 fi
 candidates="${candidates}/app/config/default-trade-prompt
-/workspace/containers/codex-exec-v1/config/default-trade-prompt
-containers/codex-exec-v1/config/default-trade-prompt"
+/workspace/containers/codex-exec/profiles/base/config/default-trade-prompt
+containers/codex-exec/profiles/base/config/default-trade-prompt"
 if [ -n "$repo_root" ]; then
   candidates="${candidates}
-${repo_root}/containers/codex-exec-v1/config/default-trade-prompt"
+${repo_root}/containers/codex-exec/profiles/base/config/default-trade-prompt"
 fi
 
 while IFS= read -r candidate; do

@@ -1,0 +1,44 @@
+services:
+  codex-exec:
+    container_name: codex-exec
+    image: dokysp/codex-exec:1.2.1
+    environment:
+      TELEGRAM_ROUTE: v1
+    env_file:
+      - ./profiles/base/config/codex-exec.env
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8090:8080"
+    volumes:
+      - codex-home:/codex-home
+      - codex-state:/state
+      - ./profiles/base/config/schedules.yaml:/app/config/schedules.yaml:ro
+      - ./profiles/base/config/portfolio.txt:/app/config/portfolio.txt:ro
+      - ./profiles/base/config/default-trade-prompt:/app/config/default-trade-prompt:ro
+      - ./:/workspace
+
+  codex-exec-experimental:
+    container_name: codex-exec-experimental
+    image: dokysp/codex-exec-experimental:2.1.1
+    environment:
+      TELEGRAM_ROUTE: v2
+    env_file:
+      - ./profiles/experimental/config/codex-exec.env
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8091:8080"
+    volumes:
+      - codex-home-experimental:/codex-home
+      - codex-state-experimental:/state
+      - ./profiles/experimental/config/schedules.yaml:/app/config/schedules.yaml:ro
+      - ./:/workspace
+
+volumes:
+  codex-home:
+  codex-state:
+  codex-home-experimental:
+  codex-state-experimental:
+
+networks:
+  default:
+    name: danta-bot-net

@@ -1,11 +1,13 @@
 FROM python:3.12-slim
 
 ARG APP_VERSION
+ARG CODEX_EXEC_PROFILE=base
+ARG IMAGE_TITLE=codex-exec
 RUN test -n "$APP_VERSION" || (echo "APP_VERSION build arg is required" >&2; exit 1)
 ARG CODEX_VERSION=latest
 ARG TARGETARCH
 
-LABEL org.opencontainers.image.title="codex-exec-v2"
+LABEL org.opencontainers.image.title="${IMAGE_TITLE}"
 LABEL org.opencontainers.image.version="${APP_VERSION}"
 LABEL org.opencontainers.image.description="Codex exec HTTP and scheduler worker"
 
@@ -16,6 +18,8 @@ ENV CODEX_HOME=/codex-home
 ENV STATE_DIR=/state
 ENV WORKSPACE_DIR=/workspace
 ENV SCHEDULE_FILE=/app/config/schedules.yaml
+ENV PORTFOLIO_FILE=/app/config/portfolio.txt
+ENV DEFAULT_TRADE_PROMPT_FILE=/app/config/default-trade-prompt
 ENV BUNDLED_SKILLS_DIR=/app/skills
 ENV CODEX_CONFIG_SNIPPET_DIR=/app/codex-config.d
 ENV CODEX_CONFIG_FILE=/codex-home/config.toml
@@ -56,12 +60,12 @@ RUN groupadd --gid 1000 app \
 
 ENV npm_config_cache=/tmp/npm-cache
 
-COPY --chown=app:app codex-exec-v2/codex_exec.py /app/codex_exec.py
-COPY --chown=app:app codex-exec-v2/config/schedules.yaml /app/config/schedules.yaml
-COPY --chown=app:app codex-exec-v2/scripts/merge-codex-config.sh /app/merge-codex-config.sh
-COPY --chown=app:app codex-exec-v2/scripts/codex_usage /app/codex_usage
+COPY --chown=app:app codex-exec/codex_exec.py /app/codex_exec.py
+COPY --chown=app:app codex-exec/profiles/${CODEX_EXEC_PROFILE}/config /app/config
+COPY --chown=app:app codex-exec/scripts/merge-codex-config.sh /app/merge-codex-config.sh
+COPY --chown=app:app codex-exec/scripts/codex_usage /app/codex_usage
 COPY --chown=app:app _shared-skills /app/skills
-COPY --chown=app:app codex-exec-v2/skills /app/version-skills
+COPY --chown=app:app codex-exec/profiles/${CODEX_EXEC_PROFILE}/skills /app/version-skills
 
 RUN set -eux; \
   for skill_dir in /app/version-skills/*; do \

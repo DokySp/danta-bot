@@ -1,8 +1,8 @@
 routes:
-  # stock worker v1 through bot v1
+  # base worker through bot v1
   v1:
     env_file: /app/config/telegram-v1.env
-    url: http://codex-exec-v1:8080/telegram
+    url: http://codex-exec:8080/telegram
     bot_commands:
       - command: new
         description: 새 Codex 세션 생성
@@ -15,10 +15,10 @@ routes:
         description: 일일 거래 스케줄 비활성화
         text: 일일 거래 스케줄 비활성화해줘.
 
-  # stock worker v1 through bot v2
+  # experimental worker through bot v2
   v2:
     env_file: /app/config/telegram-v2.env
-    url: http://codex-exec-v1:8080/telegram
+    url: http://codex-exec-experimental:8080/telegram
     bot_commands:
       - command: new
         description: 새 Codex 세션 생성
