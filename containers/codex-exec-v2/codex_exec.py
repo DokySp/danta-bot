@@ -39,6 +39,18 @@ def env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def required_env_bool(name: str) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        raise ValueError(f"{name} is required")
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "y", "on"}:
+        return True
+    if value in {"0", "false", "no", "n", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean")
+
+
 def env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
     if raw is None or raw == "":
@@ -181,8 +193,6 @@ class Config:
     usage_script: Path
     usage_timeout_seconds: int
     bundled_skills_dir: Path
-    sync_skills: bool
-    sync_skills_once: bool
     sync_skills_overwrite: bool
 
     @classmethod
@@ -215,9 +225,7 @@ class Config:
             usage_script=Path(os.getenv("CODEX_USAGE_SCRIPT", "/app/codex_usage")),
             usage_timeout_seconds=env_int("CODEX_USAGE_TIMEOUT_SECONDS", 20),
             bundled_skills_dir=Path(os.getenv("BUNDLED_SKILLS_DIR", "/app/skills")),
-            sync_skills=env_bool("CODEX_SYNC_SKILLS", True),
-            sync_skills_once=env_bool("CODEX_SYNC_SKILLS_ONCE", True),
-            sync_skills_overwrite=env_bool("CODEX_SYNC_SKILLS_OVERWRITE", False),
+            sync_skills_overwrite=required_env_bool("CODEX_SYNC_SKILLS_OVERWRITE"),
         )
 
 
@@ -548,8 +556,6 @@ class CodexRunner:
         return None
 
     def _sync_bundled_skills(self) -> None:
-        if not self.config.sync_skills:
-            return
         source = self.config.bundled_skills_dir
         if not source.exists():
             logging.info("bundled skills dir does not exist: %s", source)
@@ -561,35 +567,45 @@ class CodexRunner:
         target_root.mkdir(parents=True, exist_ok=True)
 
         copied = 0
+        replaced = 0
         skipped = 0
         for skill_dir in sorted(path for path in source.iterdir() if path.is_dir()):
             target = target_root / skill_dir.name
-            if target.exists() and self.config.sync_skills_overwrite:
-                shutil.rmtree(target)
-            if target.exists():
+            if (target.exists() or target.is_symlink()) and self.config.sync_skills_overwrite:
+                self._remove_existing_skill(target)
+                replaced += 1
+            if target.exists() or target.is_symlink():
                 skipped += 1
                 continue
             shutil.copytree(skill_dir, target)
             copied += 1
 
-        if self.config.sync_skills_once:
-            self._write_skills_marker(marker, copied=copied, skipped=skipped)
+        self._write_skills_marker(marker, copied=copied, replaced=replaced, skipped=skipped)
 
         logging.info(
-            "synced bundled skills copied=%s skipped_existing=%s source=%s target=%s",
+            "synced bundled skills copied=%s replaced_existing=%s skipped_existing=%s source=%s target=%s",
             copied,
+            replaced,
             skipped,
             source,
             target_root,
         )
 
-    def _write_skills_marker(self, marker: Path, copied: int, skipped: int) -> None:
+    @staticmethod
+    def _remove_existing_skill(path: Path) -> None:
+        if path.is_symlink() or not path.is_dir():
+            path.unlink()
+            return
+        shutil.rmtree(path)
+
+    def _write_skills_marker(self, marker: Path, copied: int, replaced: int, skipped: int) -> None:
         payload = {
             "source": str(self.config.bundled_skills_dir),
             "target": str(self.config.codex_home / "skills"),
             "copied": copied,
+            "replaced_existing": replaced,
             "skipped_existing": skipped,
-            "initialized_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "synced_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         }
         marker.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
 

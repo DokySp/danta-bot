@@ -15,15 +15,16 @@ docker build -f ./containers/codex-exec-v1/Dockerfile \
 
 `CODEX_HOME`은 이미지에 넣지 않고 Docker volume에 저장합니다.
 이미지에 포함된 공용 `containers/_shared-skills`와 버전별 `containers/codex-exec-v1/skills`는 컨테이너 시작 시
-`$CODEX_HOME/skills`에 없는 항목만 보충됩니다.
-기존 스킬은 `CODEX_SYNC_SKILLS_OVERWRITE=true`가 아니면 덮어쓰지 않습니다.
-동기화 후에는 `$CODEX_HOME/.bundled_skills_initialized` 마커에 복사/스킵 수가 기록됩니다.
+`$CODEX_HOME/skills`로 동기화됩니다.
+기존 스킬은 `CODEX_SYNC_SKILLS_OVERWRITE=true`일 때만 삭제한 뒤 다시 복사됩니다.
+동기화 후에는 `$CODEX_HOME/.bundled_skills_initialized` 마커에 복사/교체/스킵 수가 기록됩니다.
 
 ```bash
 docker volume create codex-home-v1
 
 docker run --rm -it \
   -e CODEX_HOME=/codex-home \
+  -e CODEX_SYNC_SKILLS_OVERWRITE=false \
   -v codex-home-v1:/codex-home \
   codex-exec-v1:1.0.0 \
   codex login --device-auth
@@ -36,6 +37,7 @@ read -s OPENAI_API_KEY
 
 printf '%s' "$OPENAI_API_KEY" | docker run --rm -i \
   -e CODEX_HOME=/codex-home \
+  -e CODEX_SYNC_SKILLS_OVERWRITE=false \
   -v codex-home-v1:/codex-home \
   codex-exec-v1:1.0.0 \
   codex login --with-api-key
@@ -46,13 +48,13 @@ printf '%s' "$OPENAI_API_KEY" | docker run --rm -i \
 ```bash
 docker run --rm \
   -e CODEX_HOME=/codex-home \
+  -e CODEX_SYNC_SKILLS_OVERWRITE=false \
   -v codex-home-v1:/codex-home \
   codex-exec-v1:1.0.0 \
   codex login status
 ```
 
-스킬 내용을 이미지 기준으로 강제로 다시 맞추고 싶으면
-`CODEX_SYNC_SKILLS_OVERWRITE=true`로 컨테이너를 시작합니다.
+스킬 내용을 이미지 기준으로 강제로 다시 맞추려면 `CODEX_SYNC_SKILLS_OVERWRITE=true`로 컨테이너를 시작합니다.
 
 ## Runtime Env
 
