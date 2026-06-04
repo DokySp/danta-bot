@@ -1,0 +1,4 @@
+interface:
+  display_name: "Daily Trading"
+  short_description: "Single-stock verdicts and portfolio screening"
+  default_prompt: "Use $daily-trading to refresh KIS auth if needed, evaluate the configured portfolio, produce a portfolio verdict, and only prepare or submit orders when explicitly requested."

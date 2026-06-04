@@ -20,7 +20,7 @@
 ## 필수 수집 순서
 
 1. `auth-token.md` 기준으로 요청 환경의 접근토큰 상태를 확인하고 필요 시 재발급한다.
-2. `domestic_stock(api_type="find_stock_code")`로 종목명과 6자리 종목코드를 확인한다.
+2. 종목명이 입력된 경우 `domestic_stock(api_type="find_stock_code")`로 식별자를 확인한다. 식별자는 특정 숫자 형식으로 강제하지 않는다.
 3. `domestic_stock(api_type="inquire_price")` 또는 다수 종목이면 `domestic_stock(api_type="intstock_multprice")`로 현재가와 핵심 가격 데이터를 수집한다.
 4. `domestic_stock(api_type="inquire_daily_itemchartprice")`로 일봉, 주봉, 월봉을 각각 수집한다.
 5. `domestic_stock(api_type="inquire_asking_price_exp_ccn")`과 `domestic_stock(api_type="inquire_ccnl")`로 호가와 체결을 수집한다.
@@ -29,13 +29,20 @@
 8. `domestic_stock(api_type="fluctuation")`, `domestic_stock(api_type="volume_rank")`, `domestic_stock(api_type="market_cap")`, `domestic_stock(api_type="volume_power")`로 순위와 시장 상대 위치를 확인한다.
 9. ETF/ETN이면 `etfetn(api_type="inquire_price")`, `etfetn(api_type="nav_comparison_trend")`를 추가한다.
 
+## 다종목 수집 원칙
+
+- 다종목 포트폴리오 모드에서는 모든 후보에 대해 완전한 단일 종목 리포트 수준의 데이터를 수집하려고 하지 않는다.
+- 먼저 현재가, 등락률, 거래량, 52주 고저, 보유수량, 당일 체결/미체결/예약 상태를 수집해 종목 카드를 만든다.
+- 주문검토대상 후보로 남은 종목에 대해서만 차트, 호가/체결, 수급, 재무/추정, ETF/NAV를 추가 수집한다.
+- 호출량 제한으로 생략한 항목은 `누락 데이터`에 남기고, 다른 종목의 데이터로 보완하지 않는다.
+
 ## 실제 도구명 - 용도 - 파라미터 - 반환 필드
 
 | 카테고리 | 실제 도구명 | 용도 | 필수 파라미터 | 반환 필드 |
 |---|---|---|---|---|
 | 인증 | `auth(api_type="auth_token")` | 접근토큰 발급 | `grant_type`, `env_dv` | 토큰 응답. 상세 필드는 실행 시점 MCP 응답으로 확인 |
 | 인증 | `auth(api_type="auth_ws_token")` | 웹소켓 접속키 발급 | `grant_type`, `env_dv` | 웹소켓 접속키. 상세 필드는 실행 시점 MCP 응답으로 확인 |
-| 종목 검색 | `domestic_stock(api_type="find_stock_code")` | 종목명으로 종목코드 검색 | `stock_name` | `name`, `code`, `ex` |
+| 종목 검색 | `domestic_stock(api_type="find_stock_code")` | 종목명으로 식별자 검색 | `stock_name` | `name`, `code`, `ex` |
 | 시세/현재가 | `domestic_stock(api_type="inquire_price")` | 주식현재가 시세 | `env_dv`, `fid_cond_mrkt_div_code`, `fid_input_iscd` | `stck_prpr`, `prdy_vrss`, `prdy_ctrt`, `acml_vol`, `acml_tr_pbmn`, `stck_oprc`, `stck_hgpr`, `stck_lwpr`, `per`, `pbr`, `eps`, `bps`, `hts_avls`, `w52_hgpr`, `w52_lwpr`, `frgn_ntby_qty`, `frgn_hldn_qty` |
 | 차트 | `domestic_stock(api_type="inquire_daily_itemchartprice")` | 국내주식 기간별 시세. 일/주/월/년봉 | `env_dv`, `fid_cond_mrkt_div_code`, `fid_input_iscd`, `fid_input_date_1`, `fid_input_date_2`, `fid_period_div_code`, `fid_org_adj_prc` | `output1`: `hts_kor_isnm`, `stck_prpr`, `per`, `pbr`, `eps`, `hts_avls`; `output2`: `stck_bsop_date`, `stck_clpr`, `stck_oprc`, `stck_hgpr`, `stck_lwpr`, `acml_vol`, `acml_tr_pbmn` |
 | 분봉 | `domestic_stock(api_type="inquire_time_itemchartprice")` | 당일 분봉 조회 | `env_dv`, `fid_cond_mrkt_div_code`, `fid_input_iscd`, `fid_input_hour_1`, `fid_pw_data_incu_yn`, `fid_etc_cls_code` | 분봉 시각, 현재가, 거래량 계열. 상세 필드는 실행 시점 MCP 응답으로 확인 |
