@@ -15,46 +15,62 @@
 
 ## Docker 이미지 빌드/배포
 
-```bash
-$ export TELEGRAM_GATEWAY_VERSION=1.1.2
-$ export CODEX_EXEC_VERSION=1.2.1
-$ export CODEX_EXEC_EXPERIMENTAL_VERSION=1.0.0
+편의 스크립트:
 
-$ docker build --build-arg APP_VERSION=$TELEGRAM_GATEWAY_VERSION -t telegram-gateway:$TELEGRAM_GATEWAY_VERSION ./containers/telegram-gateway
-$ docker build -f ./containers/codex-exec/Dockerfile --build-arg APP_VERSION=$CODEX_EXEC_VERSION --build-arg CODEX_EXEC_PROFILE=base --build-arg IMAGE_TITLE=codex-exec -t codex-exec:$CODEX_EXEC_VERSION ./containers
-$ docker build -f ./containers/codex-exec/Dockerfile --build-arg APP_VERSION=$CODEX_EXEC_EXPERIMENTAL_VERSION --build-arg CODEX_EXEC_PROFILE=experimental --build-arg IMAGE_TITLE=codex-exec-experimental -t codex-exec-experimental:$CODEX_EXEC_EXPERIMENTAL_VERSION ./containers
+```bash
+$ docker login -u dokysp
+
+# version is optional. default is `latest`
+$ ./scripts/deploy-telegram-gateway.sh {workspace} {version}
+$ ./scripts/deploy-codex-exec.sh {workspace} {version}
+$ ./scripts/deploy-codex-exec-experimental.sh {workspace} {version}
+```
+
+스크립트는 Docker Hub namespace를 필수로 받고, 버전 태그는 선택으로 받습니다.
+버전 태그를 생략하면 `latest`로 빌드/배포합니다. 이미지 내부 `APP_VERSION` 메타데이터도 같은 값으로 설정합니다.
+namespace 인자가 없으면 실행하지 않고 사용법을 출력한 뒤 실패합니다.
+
+수동 빌드:
+
+```bash
+$ export IMAGE_TAG=latest
+
+$ docker build --build-arg APP_VERSION=$IMAGE_TAG -t telegram-gateway:$IMAGE_TAG ./containers/telegram-gateway
+$ docker build -f ./containers/codex-exec/Dockerfile --build-arg APP_VERSION=$IMAGE_TAG --build-arg CODEX_EXEC_PROFILE=base --build-arg IMAGE_TITLE=codex-exec -t codex-exec:$IMAGE_TAG ./containers
+$ docker build -f ./containers/codex-exec/Dockerfile --build-arg APP_VERSION=$IMAGE_TAG --build-arg CODEX_EXEC_PROFILE=experimental --build-arg IMAGE_TITLE=codex-exec-experimental -t codex-exec-experimental:$IMAGE_TAG ./containers
 ```
 
 `APP_VERSION`은 필수 빌드 인자이며 이미지 내부 메타데이터입니다. Dockerfile에서
 `org.opencontainers.image.version` 라벨과 컨테이너 환경변수 `APP_VERSION`으로 들어갑니다.
 값을 넘기지 않으면 Dockerfile의 `RUN test -n "$APP_VERSION"` 단계에서 빌드가 실패합니다.
 이미지 태그는 Docker가 이미지를 찾고 배포할 때 쓰는 외부 이름입니다.
-둘은 기술적으로 독립적이지만, 운영 혼선을 줄이려면 같은 값으로 맞춥니다.
+현재 편의 스크립트는 이미지 태그와 `APP_VERSION`을 같은 값으로 맞춥니다.
 
 기존 tar 파일 배포 방식:
 
 ```bash
-$ docker save -o "./containers/*images/telegram-gateway-$TELEGRAM_GATEWAY_VERSION.tar" telegram-gateway:$TELEGRAM_GATEWAY_VERSION
-$ docker save -o "./containers/*images/codex-exec-$CODEX_EXEC_VERSION.tar" codex-exec:$CODEX_EXEC_VERSION
-$ docker save -o "./containers/*images/codex-exec-experimental-$CODEX_EXEC_EXPERIMENTAL_VERSION.tar" codex-exec-experimental:$CODEX_EXEC_EXPERIMENTAL_VERSION
+$ docker save -o "./containers/*images/telegram-gateway-$IMAGE_TAG.tar" telegram-gateway:$IMAGE_TAG
+$ docker save -o "./containers/*images/codex-exec-$IMAGE_TAG.tar" codex-exec:$IMAGE_TAG
+$ docker save -o "./containers/*images/codex-exec-experimental-$IMAGE_TAG.tar" codex-exec-experimental:$IMAGE_TAG
 ```
 
 Docker Hub 배포 방식:
 
 ```bash
 $ export DOCKERHUB_NAMESPACE=dokysp  # dokysp namespace는 예시입니다.
+$ export IMAGE_TAG=latest
 
 $ docker login -u $DOCKERHUB_NAMESPACE
 
-$ docker tag telegram-gateway:$TELEGRAM_GATEWAY_VERSION $DOCKERHUB_NAMESPACE/telegram-gateway:$TELEGRAM_GATEWAY_VERSION
-$ docker tag codex-exec:$CODEX_EXEC_VERSION $DOCKERHUB_NAMESPACE/codex-exec:$CODEX_EXEC_VERSION
-$ docker tag codex-exec-experimental:$CODEX_EXEC_EXPERIMENTAL_VERSION $DOCKERHUB_NAMESPACE/codex-exec-experimental:$CODEX_EXEC_EXPERIMENTAL_VERSION
+$ docker tag telegram-gateway:$IMAGE_TAG $DOCKERHUB_NAMESPACE/telegram-gateway:$IMAGE_TAG
+$ docker tag codex-exec:$IMAGE_TAG $DOCKERHUB_NAMESPACE/codex-exec:$IMAGE_TAG
+$ docker tag codex-exec-experimental:$IMAGE_TAG $DOCKERHUB_NAMESPACE/codex-exec-experimental:$IMAGE_TAG
 # kis-trade-mcp
 $ docker tag kis-trade-mcp:v1.0.0 $DOCKERHUB_NAMESPACE/kis-trade-mcp:v1.0.0
 
-$ docker push $DOCKERHUB_NAMESPACE/telegram-gateway:$TELEGRAM_GATEWAY_VERSION
-$ docker push $DOCKERHUB_NAMESPACE/codex-exec:$CODEX_EXEC_VERSION
-$ docker push $DOCKERHUB_NAMESPACE/codex-exec-experimental:$CODEX_EXEC_EXPERIMENTAL_VERSION
+$ docker push $DOCKERHUB_NAMESPACE/telegram-gateway:$IMAGE_TAG
+$ docker push $DOCKERHUB_NAMESPACE/codex-exec:$IMAGE_TAG
+$ docker push $DOCKERHUB_NAMESPACE/codex-exec-experimental:$IMAGE_TAG
 # kis-trade-mcp
 $ docker push $DOCKERHUB_NAMESPACE/kis-trade-mcp:1.0.0
 ```
@@ -63,15 +79,18 @@ $ docker push $DOCKERHUB_NAMESPACE/kis-trade-mcp:1.0.0
 
 ```bash
 $ export DOCKERHUB_NAMESPACE=dokysp
+$ export IMAGE_TAG=latest
 
 $ docker login -u $DOCKERHUB_NAMESPACE
-$ docker pull $DOCKERHUB_NAMESPACE/telegram-gateway:$TELEGRAM_GATEWAY_VERSION
-$ docker pull $DOCKERHUB_NAMESPACE/codex-exec:$CODEX_EXEC_VERSION
-$ docker pull $DOCKERHUB_NAMESPACE/codex-exec-experimental:$CODEX_EXEC_EXPERIMENTAL_VERSION
+$ docker pull $DOCKERHUB_NAMESPACE/telegram-gateway:$IMAGE_TAG
+$ docker pull $DOCKERHUB_NAMESPACE/codex-exec:$IMAGE_TAG
+$ docker pull $DOCKERHUB_NAMESPACE/codex-exec-experimental:$IMAGE_TAG
 ```
 
 Compose의 `image:` 값은 Docker Hub의 `dokysp/<repository>:<tag>` 이미지를 직접 사용합니다.
-배포 명령에서는 같은 namespace를 `DOCKERHUB_NAMESPACE=dokysp`로 설정해서 사용합니다.
+편의 스크립트는 Docker Hub namespace를 첫 번째 인자로 받고, 수동 명령 예시는 `DOCKERHUB_NAMESPACE` 환경변수로 같은 값을 재사용합니다.
+배포 대상 서버에서는 `docker compose pull`로 새 `latest` 이미지를 받은 뒤 `docker compose up -d`로 재생성합니다.
+`latest`가 아닌 태그로 배포하려면 Compose의 `image:` 태그도 같은 값으로 맞춥니다.
 
 ## Docker 내에 Codex CLI 로그인
 

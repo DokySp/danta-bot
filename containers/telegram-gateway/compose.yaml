@@ -1,7 +1,7 @@
 services:
   telegram-gateway:
     container_name: telegram-gateway
-    image: dokysp/telegram-gateway:1.1.2
+    image: dokysp/telegram-gateway:latest
     user: "0:0"
     environment:
       GATEWAY_ROUTES_FILE: /app/config/routes.yaml
