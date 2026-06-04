@@ -21,9 +21,9 @@
 $ docker login -u dokysp
 
 # version is optional. default is `latest`
-$ ./scripts/deploy-telegram-gateway.sh {workspace} {version}
-$ ./scripts/deploy-codex-exec.sh {workspace} {version}
-$ ./scripts/deploy-codex-exec-experimental.sh {workspace} {version}
+$ ./scripts/deploy-telegram-gateway.sh dokysp
+$ ./scripts/deploy-codex-exec.sh dokysp 1.2.1
+$ ./scripts/deploy-codex-exec-experimental.sh dokysp
 ```
 
 스크립트는 Docker Hub namespace를 필수로 받고, 버전 태그는 선택으로 받습니다.
@@ -89,7 +89,7 @@ $ docker pull $DOCKERHUB_NAMESPACE/codex-exec-experimental:$IMAGE_TAG
 
 Compose의 `image:` 값은 Docker Hub의 `dokysp/<repository>:<tag>` 이미지를 직접 사용합니다.
 편의 스크립트는 Docker Hub namespace를 첫 번째 인자로 받고, 수동 명령 예시는 `DOCKERHUB_NAMESPACE` 환경변수로 같은 값을 재사용합니다.
-배포 대상 서버에서는 `docker compose pull`로 새 `latest` 이미지를 받은 뒤 `docker compose up -d`로 재생성합니다.
+배포 대상 서버에서는 `docker compose pull`로 새 이미지를 받은 뒤 `docker compose up -d`로 재생성합니다.
 `latest`가 아닌 태그로 배포하려면 Compose의 `image:` 태그도 같은 값으로 맞춥니다.
 
 ## Docker 내에 Codex CLI 로그인
@@ -107,13 +107,15 @@ $ cd containers
 $ docker network create danta-bot-net
 $ docker compose -f kis-trade-mcp/compose.yaml up -d
 $ docker compose -f telegram-gateway/compose.yaml up -d
-$ docker compose -f codex-exec/compose.yaml up -d
+$ docker compose -f codex-exec/profiles/base/compose.yaml up -d
+$ docker compose -f codex-exec/profiles/experimental/compose.yaml up -d
 ```
 
 이미 네트워크가 있으면 `docker network create`는 한 번만 실행하면 됩니다.
 
 ```bash
-$ docker compose -f codex-exec/compose.yaml down
+$ docker compose -f codex-exec/profiles/experimental/compose.yaml down
+$ docker compose -f codex-exec/profiles/base/compose.yaml down
 $ docker compose -f telegram-gateway/compose.yaml down
 $ docker compose -f kis-trade-mcp/compose.yaml down
 ```
@@ -135,24 +137,24 @@ containers/
       kis-trade-mcp.env      # kis-trade-mcp 환경변수 설정
       kis-trade-mcp.env.example
 
-  _shared-skills/
-    check-holiday/
-    daily-trading/
-    trading-schedule-toggle/
-
   codex-exec/
-    compose.yaml
     Dockerfile
     README.md
     codex_exec.py
     scripts/
+    shared-skills/
+      check-holiday/
+      daily-trading/
+      trading-schedule-toggle/
     profiles/
       base/
+        compose.yaml
         config/
           codex-exec.env     # 기본 Codex 실행 및 MCP 연결 환경변수 설정
           schedules.yaml     # 기본 스케줄링 설정
         skills/
       experimental/
+        compose.yaml
         config/
           codex-exec.env     # 실험 Codex 실행 및 MCP 연결 환경변수 설정
           schedules.yaml     # 실험 스케줄링 설정

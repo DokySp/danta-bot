@@ -16,7 +16,7 @@ docker build -f ./containers/codex-exec/Dockerfile \
 ## First Login
 
 `CODEX_HOME`은 이미지에 넣지 않고 Docker volume에 저장합니다.
-이미지에 포함된 공용 `containers/_shared-skills`와 프로필별 `containers/codex-exec/profiles/<name>/skills`는 컨테이너 시작 시
+이미지에 포함된 공용 `containers/codex-exec/shared-skills`와 프로필별 `containers/codex-exec/profiles/<name>/skills`는 컨테이너 시작 시
 `$CODEX_HOME/skills`로 동기화됩니다.
 기존 스킬은 `CODEX_SYNC_SKILLS_OVERWRITE=true`일 때만 삭제한 뒤 다시 복사됩니다.
 동기화 후에는 `$CODEX_HOME/.bundled_skills_initialized` 마커에 복사/교체/스킵 수가 기록됩니다.
@@ -61,10 +61,11 @@ docker run --rm \
 ## Runtime Env
 
 Compose 실행 값은 프로필별 `containers/codex-exec/profiles/<name>/config/codex-exec.env`로 주입합니다.
+프로필 Compose 파일은 `containers/codex-exec/profiles/<name>/compose.yaml`에 있으므로, Compose 안에서는 `./config/codex-exec.env`로 참조합니다.
 
 ```yaml
 env_file:
-  - ./profiles/base/config/codex-exec.env
+  - ./config/codex-exec.env
 ```
 
 `codex-exec.env`에는 Codex 실행 값과 해당 인스턴스의 MCP 연결 값을 함께 둡니다.
@@ -78,7 +79,7 @@ KIS app key, secret, 계좌번호는 공용 `containers/kis-trade-mcp/config/kis
 
 ```yaml
 env_file:
-  - ./profiles/base/config/codex-exec.env
+  - ./config/codex-exec.env
 ```
 
 이 방식은 `/codex-home/config.toml`을 덮어씌우지 않습니다. 기존 설정 파일이 있으면 그대로 두고, 아래처럼 표시된 블록만 관리합니다.

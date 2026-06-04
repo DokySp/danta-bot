@@ -1,0 +1,28 @@
+name: codex-exec-experimental
+
+services:
+  codex-exec-experimental:
+    container_name: codex-exec-experimental
+    image: dokysp/codex-exec-experimental:latest
+    environment:
+      TELEGRAM_ROUTE: v2
+    env_file:
+      - ./config/codex-exec.env
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8091:8080"
+    volumes:
+      - codex-home-experimental:/codex-home
+      - codex-state-experimental:/state
+      - ./config/schedules.yaml:/app/config/schedules.yaml:ro
+      - ../../:/workspace
+
+volumes:
+  codex-home-experimental:
+    name: codex-exec_codex-home-experimental
+  codex-state-experimental:
+    name: codex-exec_codex-state-experimental
+
+networks:
+  default:
+    name: danta-bot-net

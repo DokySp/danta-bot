@@ -1,0 +1,30 @@
+name: codex-exec
+
+services:
+  codex-exec:
+    container_name: codex-exec
+    image: dokysp/codex-exec:latest
+    environment:
+      TELEGRAM_ROUTE: v1
+    env_file:
+      - ./config/codex-exec.env
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8090:8080"
+    volumes:
+      - codex-home:/codex-home
+      - codex-state:/state
+      - ./config/schedules.yaml:/app/config/schedules.yaml:ro
+      - ./config/portfolio.txt:/app/config/portfolio.txt:ro
+      - ./config/default-trade-prompt:/app/config/default-trade-prompt:ro
+      - ../../:/workspace
+
+volumes:
+  codex-home:
+    name: codex-exec_codex-home
+  codex-state:
+    name: codex-exec_codex-state
+
+networks:
+  default:
+    name: danta-bot-net
