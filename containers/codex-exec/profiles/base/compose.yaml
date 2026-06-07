@@ -14,9 +14,7 @@ services:
     volumes:
       - codex-home:/codex-home
       - codex-state:/state
-      - ./config/schedules.yaml:/app/config/schedules.yaml:ro
-      - ./config/portfolio.txt:/app/config/portfolio.txt:ro
-      - ./config/default-trade-prompt:/app/config/default-trade-prompt:ro
+      - ./config:/app/config:ro
       - ../../:/workspace
 
 volumes:
