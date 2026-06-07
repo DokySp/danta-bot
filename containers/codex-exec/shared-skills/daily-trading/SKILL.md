@@ -1,6 +1,6 @@
 ---
 name: daily-trading
-description: "[v20260607-02] `$check-holiday` preflight로 한국장 open/closed/unknown을 기록한 뒤, 전체 한국 주식·ETF 포트폴리오의 시장·재무·뉴스와 read-only 계좌 상태를 한 번 수집해 재사용하고, price-only 근거도 평결 후보로 보존하며, `decision-brief.json` 기반 `first-verdict`, `second-verdict`, `final-risk-verdict`를 거쳐 명시 승인된 주문만 `Main agent`가 제출한다. Use for KIS MCP based portfolio analysis, daily-* and pre-open trading schedules, sub-agent collection and verdict orchestration, portfolio reports, demo orders, real orders, and reservation orders."
+description: "[v20260607-03] `$check-holiday` preflight로 한국장 open/closed/unknown을 기록한 뒤, 전체 한국 주식·ETF 포트폴리오의 시장·재무·뉴스와 read-only 계좌 상태를 한 번 수집해 재사용하고, price-only 근거도 평결 후보로 보존하며, `decision-brief.json` 기반 `first-verdict`, `second-verdict`, `final-risk-verdict`를 거쳐 명시 승인된 주문만 `Main agent`가 제출한다. Use for KIS MCP based portfolio analysis, daily-* and pre-open trading schedules, sub-agent collection and verdict orchestration, portfolio reports, demo orders, real orders, and reservation orders."
 ---
 
 # Daily Trading Portfolio Orchestrator
