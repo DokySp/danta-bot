@@ -12,12 +12,13 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo
 
 import yaml
 
@@ -30,6 +31,7 @@ HTML_PROMPT_SUFFIX = (
 )
 
 MCP_TRADING_ENV_VALUES = {"paper", "acct"}
+KST = ZoneInfo("Asia/Seoul")
 
 
 def env_bool(name: str, default: bool) -> bool:
@@ -90,6 +92,60 @@ def mcp_trading_env_prompt(mcp_trading_env: str) -> str:
         "- 이 설정은 사용자 요청, 스케줄 메시지, 스킬 문서의 모의/실전 표현보다 우선한다.\n"
         f"- 한국투자증권 MCP 도구 호출에서 env_dv 파라미터가 있으면 반드시 env_dv=\"{env_dv}\"를 사용한다.\n"
     )
+
+
+@dataclass(frozen=True)
+class CodexRunContext:
+    run_id: str
+    started_at: str
+    started_at_display: str
+
+
+def new_codex_run_context() -> CodexRunContext:
+    started_at = datetime.now(KST)
+    return CodexRunContext(
+        run_id=started_at.strftime("%Y%m%dT%H%M%S%z") + "-" + uuid.uuid4().hex[:8],
+        started_at=started_at.isoformat(timespec="seconds"),
+        started_at_display=started_at.strftime("%Y-%m-%d %H:%M:%S KST"),
+    )
+
+
+def codex_run_context_prompt(context: CodexRunContext) -> str:
+    return (
+        "\n\n[Codex 실행 메타데이터]\n"
+        f"- run_id={context.run_id}\n"
+        f"- started_at={context.started_at}\n"
+        "- daily-trading을 실제 사용하면 이 값을 변경하지 말고 "
+        "reports/runs/<run_id>/ 아티팩트와 최종 작업 시작 시각에 사용한다.\n"
+        "- daily-trading을 실제 사용하지 않으면 최종 응답에 작업 시작 시각을 표시하지 않는다.\n"
+    )
+
+
+def is_explicit_daily_trading_request(prompt: str) -> bool:
+    return "$daily-trading" in prompt or "$execute-trade" in prompt
+
+
+def is_daily_trading_schedule(job_id: str) -> bool:
+    return job_id == "pre-open" or job_id.startswith("daily-")
+
+
+def append_daily_trading_started_at(text: str, context: CodexRunContext) -> str:
+    line = f"작업 시작: {context.started_at_display}"
+    if line in text:
+        return text
+    return f"{text.rstrip()}\n\n{line}"
+
+
+def attach_daily_trading_context(exc: Exception, context: CodexRunContext) -> None:
+    setattr(exc, "daily_trading_run_context", context)
+
+
+def error_message_with_run_context(exc: Exception, fallback: str) -> str:
+    message = exc.html_message if isinstance(exc, UserFacingError) else fallback
+    context = getattr(exc, "daily_trading_run_context", None)
+    if isinstance(context, CodexRunContext):
+        return append_daily_trading_started_at(message, context)
+    return message
 
 
 ERROR_LOG_LIMIT = 2000
@@ -302,18 +358,17 @@ class TelegramGateway:
         route: str | None = None,
         action: str = "typing",
     ) -> None:
-        if not chat_id:
-            return
         outbound_route = route or self.config.telegram_route
         if not outbound_route:
             logging.debug("telegram chat action skipped because route is missing")
             return
 
         payload: dict[str, Any] = {
-            "chat_id": chat_id,
             "route": outbound_route,
             "action": action,
         }
+        if chat_id:
+            payload["chat_id"] = chat_id
         body = json.dumps(payload).encode("utf-8")
         request = Request(
             self._gateway_url("/sendChatAction"),
@@ -353,7 +408,7 @@ class TypingIndicator:
         self.thread: threading.Thread | None = None
 
     def __enter__(self) -> "TypingIndicator":
-        if self.chat_id:
+        if self.chat_id or self.route or self.gateway.config.telegram_route:
             self.thread = threading.Thread(target=self._loop, name="telegram-typing", daemon=True)
             self.thread.start()
         return self
@@ -391,8 +446,8 @@ class CodexRunner:
     def run_resume(self, session_id: str, prompt: str) -> str:
         return self._run_codex(["exec", "resume", session_id], prompt)
 
-    def run_once(self, prompt: str) -> str:
-        return self._run_codex(["exec"], prompt)
+    def run_once(self, prompt: str, daily_trading_hint: bool = False) -> str:
+        return self._run_codex(["exec"], prompt, daily_trading_hint=daily_trading_hint)
 
     def run_usage(self) -> str:
         if not self.config.usage_script.exists():
@@ -428,17 +483,24 @@ class CodexRunner:
             output = "... truncated ...\n" + output[-3500:]
         return f"<b>Codex usage</b>\n<pre>{html.escape(output)}</pre>"
 
-    def _build_prompt(self, prompt: str) -> str:
+    def _build_prompt(self, prompt: str, context: CodexRunContext) -> str:
         return (
             prompt.rstrip()
             + mcp_trading_env_prompt(self.config.mcp_trading_env)
+            + codex_run_context_prompt(context)
             + HTML_PROMPT_SUFFIX
         )
 
-    def _run_codex(self, subcommand: list[str], prompt: str) -> str:
-        run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:8]
-        output_file = self.tmp_dir / f"{run_id}.txt"
-        full_prompt = self._build_prompt(prompt)
+    def _run_codex(
+        self,
+        subcommand: list[str],
+        prompt: str,
+        daily_trading_hint: bool = False,
+    ) -> str:
+        context = new_codex_run_context()
+        output_file = self.tmp_dir / f"{context.run_id}.txt"
+        full_prompt = self._build_prompt(prompt, context)
+        daily_trading_hint = daily_trading_hint or is_explicit_daily_trading_request(prompt)
 
         cmd = [
             self.config.codex_bin,
@@ -460,25 +522,39 @@ class CodexRunner:
         env["CODEX_MCP_TRADING_ENV"] = self.config.mcp_trading_env
 
         logging.info("running codex command=%s", " ".join(shlex.quote(part) for part in cmd[:-1]))
-        result = subprocess.run(
-            cmd,
-            cwd=self.config.workspace_dir,
-            env=env,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=self.config.codex_timeout_seconds,
-            check=False,
-        )
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=self.config.workspace_dir,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=self.config.codex_timeout_seconds,
+                check=False,
+            )
+        except Exception as exc:
+            if daily_trading_hint or self._daily_trading_artifact_exists(context):
+                attach_daily_trading_context(exc, context)
+            raise
 
         if result.returncode != 0:
-            raise classify_codex_error(result.returncode, result.stdout, result.stderr)
+            exc = classify_codex_error(result.returncode, result.stdout, result.stderr)
+            if daily_trading_hint or self._daily_trading_artifact_exists(context):
+                attach_daily_trading_context(exc, context)
+            raise exc
 
         if output_file.exists():
             output = output_file.read_text()
         else:
             output = result.stdout.strip()
-        return output.strip() or "<i>Codex completed without output.</i>"
+        output = output.strip() or "<i>Codex completed without output.</i>"
+        if daily_trading_hint or self._daily_trading_artifact_exists(context):
+            output = append_daily_trading_started_at(output, context)
+        return output
+
+    def _daily_trading_artifact_exists(self, context: CodexRunContext) -> bool:
+        return (self.config.workspace_dir / "reports" / "runs" / context.run_id / "run.json").is_file()
 
     def _session_ids(self) -> list[str]:
         ids: list[str] = []
@@ -703,9 +779,8 @@ class TelegramWorker:
 
     @staticmethod
     def _error_message(exc: Exception) -> str:
-        if isinstance(exc, UserFacingError):
-            return exc.html_message
-        return f"<b>알 수 없는 에러가 발생했습니다.</b>\n<pre>{html.escape(str(exc))}</pre>"
+        fallback = f"<b>알 수 없는 에러가 발생했습니다.</b>\n<pre>{html.escape(str(exc))}</pre>"
+        return error_message_with_run_context(exc, fallback)
 
 
 def parse_yaml_schedule(path: Path) -> list[dict[str, Any]]:
@@ -821,20 +896,21 @@ class Scheduler:
                 route_text,
                 self.config.telegram_typing_interval_seconds,
             ):
-                output = self.runner.run_once(message)
+                output = self.runner.run_once(
+                    message,
+                    daily_trading_hint=is_daily_trading_schedule(job_id),
+                )
             self.gateway.send_message(output, chat_id_text, route_text)
         except Exception as exc:  # noqa: BLE001 - report schedule failures to Telegram
             if isinstance(exc, UserFacingError):
                 logging.warning("scheduled job failed id=%s: %s", job_id, exc)
             else:
                 logging.exception("scheduled job failed id=%s", job_id)
-            if isinstance(exc, UserFacingError):
-                message = exc.html_message
-            else:
-                message = (
-                    f"<b>알 수 없는 에러가 발생했습니다.</b>\n<code>{html.escape(job_id)}</code>\n"
-                    f"<pre>{html.escape(str(exc))}</pre>"
-                )
+            fallback = (
+                f"<b>알 수 없는 에러가 발생했습니다.</b>\n<code>{html.escape(job_id)}</code>\n"
+                f"<pre>{html.escape(str(exc))}</pre>"
+            )
+            message = error_message_with_run_context(exc, fallback)
             self.gateway.send_message(
                 message,
                 chat_id_text,

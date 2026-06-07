@@ -3,8 +3,22 @@ schedules:
     enabled: true
     cron: "0 7 * * 1-5"
     message: |
-      $daily-trading에 사용할 종목번호를 $check-portfolio 를 통해 확인한 후, 
-      뉴스 정보와 $daily-trading 스킬로 현재 주식 상황 판단 후, 실전(acct)으로 예약거래를 진행하고 결과를 요약해서 알려줘.
+      $daily-trading에 사용할 종목번호를 $check-portfolio 를 통해 확인한 후,
+      $daily-trading 스킬 안에서 전체 포트폴리오의 시장·재무·뉴스 정보를 한 번 수집해 현재 상황을 판단하고, 실전(acct)으로 예약거래를 진행한 뒤 결과를 요약해서 알려줘.
+
+  - id: pre-open-weekend-01
+    enabled: true
+    cron: "0 10 * * 0,6"
+    message: |
+      $daily-trading에 사용할 종목번호를 $check-portfolio 를 통해 확인한 후,
+      $daily-trading 스킬 안에서 전체 포트폴리오의 시장·재무·뉴스 정보를 한 번 수집해 현재 상황을 판단하고, 실전(acct)으로 예약거래를 진행한 뒤 결과를 요약해서 알려줘.
+
+  - id: pre-open-weekend-02
+    enabled: true
+    cron: "35 13 * * 0,6"
+    message: |
+      $daily-trading에 사용할 종목번호를 $check-portfolio 를 통해 확인한 후,
+      $daily-trading 스킬 안에서 전체 포트폴리오의 시장·재무·뉴스 정보를 한 번 수집해 현재 상황을 판단하고, 실전(acct)으로 예약거래를 진행한 뒤 결과를 요약해서 알려줘.
 
   - id: trading-toggle
     enabled: true
@@ -16,33 +30,33 @@ schedules:
     enabled: true
     cron: "5 9 * * 1-5"
     message: |
-      $daily-trading에 사용할 종목번호를 $check-portfolio 를 통해 확인한 후, 
-      뉴스 정보, 예약 거래 내역, $daily-trading 스킬로 현재 주식 상황 판단 후, 실전(acct) 거래를 실제로 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
+      $daily-trading에 사용할 종목번호를 $check-portfolio 를 통해 확인한 후,
+      $daily-trading 스킬 안에서 전체 포트폴리오의 시장·재무·뉴스 정보를 한 번 수집하고 예약 거래 내역을 계좌 스냅샷에 포함해 현재 상황을 판단한 뒤, 실전(acct) 거래를 실제로 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
 
   - id: daily-12
     enabled: true
     cron: "15 9 * * 1-5"
     message: |
-      $daily-trading에 사용할 종목번호를 $check-portfolio 를 통해 확인한 후, 
-      뉴스 정보, 예약 거래 내역, $daily-trading 스킬로 현재 주식 상황 판단 후, 실전(acct) 거래를 실제로 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
+      $daily-trading에 사용할 종목번호를 $check-portfolio 를 통해 확인한 후,
+      $daily-trading 스킬 안에서 전체 포트폴리오의 시장·재무·뉴스 정보를 한 번 수집하고 예약 거래 내역을 계좌 스냅샷에 포함해 현재 상황을 판단한 뒤, 실전(acct) 거래를 실제로 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
 
   - id: daily-13
     enabled: true
     cron: "40 9 * * 1-5"
     message: |
-      $daily-trading에 사용할 종목번호를 $check-portfolio 를 통해 확인한 후, 
-      뉴스 정보, 예약 거래 내역, $daily-trading 스킬로 현재 주식 상황 판단 후, 실전(acct) 거래를 실제로 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
+      $daily-trading에 사용할 종목번호를 $check-portfolio 를 통해 확인한 후,
+      $daily-trading 스킬 안에서 전체 포트폴리오의 시장·재무·뉴스 정보를 한 번 수집하고 예약 거래 내역을 계좌 스냅샷에 포함해 현재 상황을 판단한 뒤, 실전(acct) 거래를 실제로 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
 
   - id: daily-20
     enabled: true
     cron: "0 10,11,12,13,14 * * 1-5"
     message: |
-      $daily-trading에 사용할 종목번호를 $check-portfolio 를 통해 확인한 후, 
-      뉴스 정보와 $daily-trading 스킬로 현재 주식 상황 판단 후, 실전(acct) 거래를 실제로 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
+      $daily-trading에 사용할 종목번호를 $check-portfolio 를 통해 확인한 후,
+      $daily-trading 스킬 안에서 전체 포트폴리오의 시장·재무·뉴스 정보를 한 번 수집해 현재 상황을 판단한 뒤, 실전(acct) 거래를 실제로 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
 
   - id: daily-30
     enabled: true
     cron: "15 15 * * 1-5"
     message: |
-      $daily-trading에 사용할 종목번호를 $check-portfolio 를 통해 확인한 후, 
-      뉴스 정보와 $daily-trading 스킬로 현재 주식 상황 판단 후, 리밸런싱을 고려해서 실전(acct) 거래를 실제로 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
+      $daily-trading에 사용할 종목번호를 $check-portfolio 를 통해 확인한 후,
+      $daily-trading 스킬 안에서 전체 포트폴리오의 시장·재무·뉴스 정보를 한 번 수집해 현재 상황을 판단하고 리밸런싱을 고려한 뒤, 실전(acct) 거래를 실제로 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.

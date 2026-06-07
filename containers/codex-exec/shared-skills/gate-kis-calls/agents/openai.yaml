@@ -1,0 +1,4 @@
+interface:
+  display_name: "Gate KIS Calls"
+  short_description: "Serialize KIS MCP calls across collection agents"
+  default_prompt: "Use $gate-kis-calls to serialize every KIS MCP call made by concurrent collection agents."

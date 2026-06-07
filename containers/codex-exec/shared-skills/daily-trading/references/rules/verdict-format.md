@@ -1,112 +1,133 @@
-# 평결 형식 표준
+# Verdict Format
 
-## 분석가 의견서
+## External-Call Ban
 
-```markdown
-## [기관명] 분석 의견서
-- 한줄 결론: 매수/보유/매도
-- 시계열 적합도: 단기/중기/장기 중 어느 시계열에 가장 강한 의견인지
-- 핵심 근거 3가지 (데이터 인용 필수)
-  1.
-  2.
-  3.
-- 리스크 요인 2가지
-  1.
-  2.
-- 목표가/손절가 (산출 근거 포함)
+First- and second-verdict agents use only the immutable snapshots supplied by the main agent. KIS, MCP, web, network, shell, file reads outside supplied persona text, file writes, and recollection are forbidden.
+
+## First Verdict
+
+The seven analyst and ten juror personas independently score every eligible symbol.
+
+Score meanings:
+
+| Score | Meaning |
+|---:|---|
+| `+2` | strong buy candidate |
+| `+1` | buy candidate |
+| `0` | hold / neutral |
+| `-1` | reduce / sell candidate |
+| `-2` | strong sell candidate |
+
+Each agent returns:
+
+```json
+{
+  "agent_id": "",
+  "persona": "",
+  "stage": "first-verdict",
+  "symbols": [
+    {
+      "symbol_id": "",
+      "symbol_name": "",
+      "score": 0,
+      "confidence": 1,
+      "evidence": [],
+      "risks": [],
+      "missing_data": []
+    }
+  ],
+  "errors": []
+}
 ```
 
-## 배심원 투표
+Rules:
 
-```markdown
-## 배심원 NN [성향] 투표
-- 평결: 매수 / 보유 / 매도
-- 확신도: 1~10
-- 추천 비중: 0~100%
-- 사유 (3줄 이내)
-- 본인이 가장 중요하게 본 데이터 1개
+- `score` is one of `-2`, `-1`, `0`, `1`, `2`.
+- `confidence` is an integer from `1` to `10`.
+- Evidence cites fields and observation dates from `merged.json`.
+- One symbol's data cannot support another symbol.
+- An agent cannot see other verdict outputs.
+
+### First-Score Aggregation
+
+For each symbol, ignore structurally invalid agent scores but record their errors.
+
+```text
+mean_score = sum(valid scores) / count(valid scores)
 ```
 
-## 판사 평결문
+Map `mean_score` to the final first score:
 
-```markdown
-## [시계열] 판사 평결문
-- 평결: 매수/보유/매도
-- 확신도: 1~10
-- 다수결 결과 / 채택 여부 / (뒤집은 경우) 사유
-- 목표가, 손절가, 권장 보유 기간
-- 핵심 근거 3가지
-- 반대 의견 요약 (소수 의견 보호)
+| Mean score | Final first score |
+|---:|---:|
+| `>= 1.5` | `+2` |
+| `>= 0.5 and < 1.5` | `+1` |
+| `> -0.5 and < 0.5` | `0` |
+| `> -1.5 and <= -0.5` | `-1` |
+| `<= -1.5` | `-2` |
+
+If no valid score exists, exclude the symbol from the second verdict and trading.
+
+## Second Verdict
+
+The second-verdict set contains eligible `+2` and `+1` symbols plus every eligible current holding. Short-, mid-, and long-term judges independently compare the set at portfolio level.
+
+Each judge returns:
+
+```json
+{
+  "agent_id": "",
+  "persona": "short-term | mid-term | long-term",
+  "stage": "second-verdict",
+  "portfolio": {
+    "target_cash_amount": 0,
+    "cash_rationale": [],
+    "market_view": "",
+    "duplicate_exposure_limits": []
+  },
+  "symbols": [
+    {
+      "symbol_id": "",
+      "symbol_name": "",
+      "target_holding_quantity": 0,
+      "relative_attractiveness_rank": 1,
+      "rationale": [],
+      "risks": [],
+      "same_day_fill_guard": ""
+    }
+  ],
+  "errors": []
+}
 ```
 
-## 다종목 분석가/배심원 반복 평가
+Rules:
 
-다종목 포트폴리오 모드에서 분석가와 배심원 sub agent는 종목 카드 하나마다 아래 형식으로 답한다. 같은 agent가 여러 종목을 순서대로 평가하므로 `종목식별자`와 `종목명`은 반드시 쓴다. 현재 전달받은 카드 1건만 평가하고, 이전 종목 평결을 수정하지 않는다.
+- `target_holding_quantity` is a non-negative integer.
+- Every second-verdict symbol receives a target quantity, including holdings that should be reduced to zero.
+- Consider relative attractiveness, duplicate exposure, current weight, market conditions, and same-day fills.
+- Same-day fills are a repeated-trade guard; do not subtract them from current live holdings.
+- No fixed minimum cash ratio, maximum cash ratio, or fixed investment ratio is allowed.
+- Judges cannot add a symbol that is absent from the second-verdict set.
 
-```markdown
-## 다종목 평가
-- 종목식별자:
-- 종목명:
-- 상품유형: 주식 / ETF / ETN / 기타 / 해석 불가
-- 시계열: 단기 / 중기 / 장기
-- 방향: 매수 / 보유 / 매도
-- 확신도: 1~10
-- 추천 비중: 0~100%
-- agent예비판단: 긍정 / 중립 / 부정
-- 핵심 근거:
-  1.
-  2.
-  3.
-- 핵심 리스크:
-  1.
-  2.
-- 누락 데이터:
-```
+### Reconciliation
 
-## 다종목 판사 최종 평결
+The main agent reconciles valid judge results:
 
-다종목 포트폴리오 모드에서 판사는 자기 시계열의 종목별 최종 row와 포트폴리오 평결을 함께 작성한다. 종목별 주문 방향은 종목별 최종 row를 기준으로 하며, 포트폴리오 평결은 총 비중과 리스크 제한에만 사용한다.
+- Final target holding quantity: median of valid judge target quantities for that symbol, rounded down only if a non-integer can occur.
+- Final target cash amount: median of valid judge target cash amounts.
+- If fewer than two valid judge results exist for a symbol, set no final target and exclude it from orders.
+- Validate the reconciled quantities and cash against `account-before-verdict.json` total assets using the immutable market-snapshot valuation prices.
+- If reconciled holdings plus target cash exceed total assets, reduce only buy-side target quantities in reverse relative-attractiveness order until the targets fit. Do not increase any sell target.
+- If reconciled holdings plus target cash are below total assets, add the unexplained remainder to final target cash. Do not increase target quantities merely to consume cash.
+- Apply explicit user limits and latest account constraints after reconciliation.
+- Record every judge input, valid value, excluded value, and final result in `verdict-second.json`.
 
-```markdown
-## [시계열] 포트폴리오 평결
-- 포트폴리오 평결: 매수 / 보유 / 매도
-- 포트폴리오 확신도: 1~10
-- 총 추천 비중:
-- 총 비중 또는 중복 노출 제한:
+## Allowed Terms
 
-## 종목별 최종 평결
-| 종목식별자 | 종목명 | 방향 | 확신도 | 추천 비중 | 주문검토여부 | 핵심 근거 | 핵심 리스크 | 누락 데이터 |
-|---|---|---|---:|---:|---|---|---|---|
-```
-
-## 종목별 거래계획
-
-종목별 거래계획은 최종 판사 row 이후 메인 Codex가 작성한다. 주문 티켓이 아니라 의사결정 보조 계획이며, 주문 API 제출은 사용자가 명시적으로 거래 처리를 요청한 경우에만 한다.
-
-```markdown
-| 종목식별자 | 종목명 | 최종 방향 | 거래계획 | 기준 시계열 | 확신도 | 목표 비중 | 수량 산정 기준 | 주문검토여부 | 보류 사유 |
-|---|---|---|---|---|---:|---:|---|---|---|
-```
-
-## 용어 규칙
-
-| 항목 | 허용 값 |
+| Field | Allowed values |
 |---|---|
-| 평결 | 매수, 보유, 매도 |
-| 방향 | 매수, 보유, 매도 |
-| 전략 신호 | BUY, SELL, HOLD, ERROR |
-| 확신도 | 1~10 정수 |
-| 추천 비중 | 0~100% |
-| 시계열 | 단기, 중기, 장기. 포트폴리오는 판사 포트폴리오 평결에만 사용 |
-| 정밀수집여부 | 수집, 제외 |
-| agent예비판단 | 긍정, 중립, 부정 |
-| 주문검토여부 | 검토, 제외 |
-| 거래계획 | 신규매수, 추가매수, 부분매도, 전량매도, 유지, 보류 |
-
-## 데이터 인용 규칙
-
-- 숫자 근거는 반드시 데이터 필드명을 함께 쓴다. 예: `stck_prpr`, `per`, `pbr`, `w52_hgpr`, `frgn_ntby_qty`.
-- 누락 데이터는 추정하지 않고 `누락`으로 표시한다.
-- 목표가와 손절가는 산출 근거를 한 줄로 붙인다.
-- 배심원은 분석가와 다른 배심원 의견을 절대 참조하지 않는다.
-- 판사는 다수결을 기본으로 하되 분석가 근거가 객관적으로 우세하면 뒤집을 수 있고, 뒤집은 사유를 반드시 명시한다.
+| artifact status | `success`, `partial`, `failed` |
+| first score | `+2`, `+1`, `0`, `-1`, `-2` |
+| eligibility | `eligible_for_verdict=true/false` |
+| order direction | `buy`, `sell`, `none` |
+| execution result | `submitted`, `skipped`, `blocked`, `failed` |

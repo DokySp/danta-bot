@@ -1,250 +1,181 @@
 ---
 name: daily-trading
-description: "[v20260605-01] 한국 주식·ETF 투자 판단을 단일 종목 법정 평결 또는 다종목 포트폴리오 스크리닝 형식으로 작성하고, KIS OAuth 접근토큰 만료를 확인해 재발급한 뒤 명시 요청 시 보유 현금·보유수량 기준의 모의거래 주문 또는 실전거래 주문을 준비·제출한다. Use when the user asks for KIS MCP 기반 단일/다종목 투자 판단, portfolio 종목 스크리닝, sub agent 기반 분석가·배심원·판사 오케스트레이션, 매수/보유/매도 평결 리포트, 종목별 거래계획과 주문검토대상 산출, 모의거래 실행, 실전거래 예약주문 또는 장중 주문 실행/검토."
+description: "[v20260606-01] 전체 한국 주식·ETF 포트폴리오의 시장·재무·뉴스 정보를 한 번 수집해 재사용하고, 외부 호출 없는 1차 종목 평결과 2차 포트폴리오 평결을 거쳐 목표 보유수량과 주문 목록을 산출한다. Use for KIS MCP based portfolio analysis, daily-* and pre-open trading schedules, sub-agent collection and verdict orchestration, portfolio reports, demo orders, real orders, and reservation orders."
 ---
 
-# 주식 법정 평결 오케스트레이터
+# Daily Trading Portfolio Orchestrator
 
-## 호출
+## Required References
 
-하나 이상의 종목 식별자를 받는다. 식별자는 숫자 코드, 종목명, ETF/ETN 이름, 사용자가 제공한 portfolio 목록이 될 수 있다. 특정 숫자 형식으로 강제하지 않는다.
+Read only the files needed for the current stage.
 
-종목명만 받은 경우 `domestic_stock(api_type="find_stock_code")`로 먼저 식별자를 확인한다. ETF/ETN이면 `etfetn` 규칙을 함께 적용한다. 도구로 해석할 수 없는 식별자는 실패로 중단하지 말고 `해석 불가` 또는 `누락`으로 기록한다.
+- Collection and permissions: `references/rules/data-collection.md`
+- Authentication: `references/rules/auth-token.md`
+- Strategy signals: `references/rules/strategy-mapping.md`
+- Run artifacts and JSON schemas: `references/rules/run-artifacts.md`
+- Verdict output: `references/rules/verdict-format.md`
+- Portfolio report: `references/rules/report-template.md`
+- Target quantity and execution: `references/rules/trade-execution.md`
+- First-verdict personas: `references/personas/analyst-*.md`, `references/personas/juror-*.md`
+- Second-verdict personas: `references/personas/judge-*.md`
 
-## 참조 자료
+## Run Identity And Telegram Start Time
 
-필요한 파일만 읽는다.
+The Codex execution prompt normally injects `run_id` and `started_at`.
 
-- 데이터 수집: `references/rules/data-collection.md`
-- 인증 토큰: `references/rules/auth-token.md`
-- 전략 매핑: `references/rules/strategy-mapping.md`
-- 출력 표준: `references/rules/verdict-format.md`
-- 최종 리포트: `references/rules/report-template.md`
-- 거래계획 및 거래 실행: `references/rules/trade-execution.md`
-- 분석가 페르소나: `references/personas/analyst-*.md`
-- 배심원 페르소나: `references/personas/juror-*.md`
-- 판사 페르소나: `references/personas/judge-*.md`
+1. Preserve the injected values unchanged for the complete run.
+2. If either value is absent, generate both immediately before any daily-trading work:
+   - `run_id`: filesystem-safe unique value
+   - `started_at`: current Asia/Seoul time with timezone
+3. Immediately create `reports/runs/<run_id>/run.json` using `run-artifacts.md`.
+4. Use `reports/runs/<run_id>/` for every intermediate JSON file.
+5. When this skill is actually used, include the following line in the final response on both success and failure:
 
-## 실행 순서
+   ```text
+   작업 시작: YYYY-MM-DD HH:MM:SS KST
+   ```
 
-1. 입력 종목 식별자를 정리한다. 명시 입력이 없고 portfolio 확인 요청이 있으면 `$check-portfolio` 결과를 사용한다.
-2. `references/rules/auth-token.md`를 읽고 프롬프트에 주입된 `CODEX_MCP_TRADING_ENV`를 우선해 요청 환경(`real` 또는 `demo`)의 KIS 접근토큰 상태를 확인한다.
-3. 접근토큰이 없거나 만료되었거나 만료 임박이면 `auth(api_type="auth_token")`으로 재발급한다.
-4. `references/rules/data-collection.md`를 읽고, 실행 전 각 KIS API의 `find_api_detail`로 현재 파라미터를 확인한다.
-5. `kis-trade-mcp` 도구로 필수 데이터를 수집한다. 추측한 파라미터를 쓰지 말고 도구 상세 문서에서 확인된 값을 사용한다. KIS MCP 호출은 기본적으로 순차 실행하고 호출 사이에 최소 1초 간격을 둔다. 특히 계좌·잔고·주문·주문가능·체결조회 같은 원장 API는 병렬 호출하지 않는다.
-6. MCP 미연결, 인증 실패, 도구 응답 누락이 있으면 누락 API와 필드를 정리하고, 인증 재발급 후 한 번만 재시도한다. 그래도 실패하면 부분 평결 진행 여부를 사용자에게 묻는다.
-7. 수집 결과를 단일 종목 데이터 패키지 또는 다종목 `종목 카드` 목록으로 정규화한다.
-8. 단일 종목이면 단일 종목 모드, 여러 종목이면 다종목 포트폴리오 모드로 진행한다.
-9. `references/rules/strategy-mapping.md`를 읽고 가능한 전략 신호를 산출한다. 단일 종목 또는 다종목 정밀수집 이후에는 차트 데이터 기반 신호를 사용한다. 다종목 1차 요약 카드 단계에서는 현재가, 등락률, 거래량, 보유/미체결/예약 상태만 사용한 `초기 필터 신호`로 제한한다.
-10. 아래 sub agent 오케스트레이션 절차에 따라 결과를 수집한다.
-11. 다종목 포트폴리오 모드에서 종목별 거래계획을 만들 때는 `references/rules/trade-execution.md`의 거래 방향 결정과 종목별 거래계획 규칙만 읽는다. 사용자가 명시적으로 모의거래 실행 또는 실전거래 주문 실행/준비를 요청했으면 같은 파일의 주문검토대상과 주문 제출 절차를 이어서 따른다.
-12. `references/rules/report-template.md` 형식으로 단일 종목은 `reports/YYYY-MM-DD_종목명.md`, 다종목은 `reports/YYYY-MM-DD_포트폴리오.md` 파일을 만든다. `reports` 폴더는 실행 시점에만 생성한다.
-13. 사용자에게 저장 경로, 인증 상태 요약, 평결, 주문검토대상, 현재 계좌 및 거래 상태 요약을 짧게 보고한다.
+6. Do not show that line for work that did not use this skill.
 
-## Sub Agent 오케스트레이션
+These rules apply to direct and indirect use, including `daily-*`, `pre-open`, `$execute-trade`, and direct or indirect `$daily-trading` execution.
 
-사용자가 sub agent 기반 실행을 명시한 경우, sub agent 도구가 사용 가능한 환경에서는 반드시 역할별 agent를 생성한다. 일반 종목 분석 요청처럼 sub agent 실행 동의가 불명확한 경우에는 생성 전에 사용자에게 확인한다. Sub agent 도구가 없거나 정책상 사용할 수 없으면 사용자에게 알리고, 단일 Codex 내부 시뮬레이션으로 진행할지 확인한다.
+## Authority Boundaries
 
-### 공통 원칙
+### Main Agent Only
 
-- 메인 Codex만 KIS MCP와 외부 데이터 도구를 호출한다. Sub agent는 추가 API 호출이나 파일 쓰기를 하지 않는다.
-- 단일 종목 sub agent에는 완성된 데이터 패키지, 필요한 전략 신호, 자기 페르소나, 출력 형식만 전달한다. 다종목 sub agent에는 현재 평가할 종목 카드 1건, 필요한 초기 필터 신호 또는 보강 전략 신호, 자기 페르소나, 출력 형식만 전달한다.
-- 단일 종목 모드에서 `fork_context`는 기본적으로 `false`로 둔다. 이전 agent의 추론이나 대화 맥락이 다른 agent에게 새지 않게 한다.
-- Sub agent 프롬프트에는 해당 역할의 산출물만 요구한다. 리포트 파일 생성은 메인 Codex만 수행한다.
-- Sub agent 결과에 누락 데이터가 있으면 추정하지 말고 `누락`으로 유지한다.
+- Create and update files under `reports/`.
+- Determine the complete portfolio universe.
+- Perform KIS authentication preflight and token reissue.
+- Call account, balance, order-available, fill-history, pending-order, reservation-order, and order APIs.
+- Merge collection output, decide exclusions, calculate final target quantities, create final orders, and submit explicitly authorized orders.
+- Remove sensitive fields before writing artifacts or sending sub-agent input.
 
-### 단일 종목 모드
+### Collection Sub-Agents
 
-기존 법정 평결 흐름을 유지한다. 분석가 7명, 배심원 10명, 판사 3명을 사용하고, 판사는 배심원 다수결을 기본으로 따르되 분석가 근거가 객관적으로 우세하면 뒤집을 수 있다. 뒤집을 때는 어떤 분석가의 어떤 데이터 근거가 결정적이었는지 명시한다.
+- Three collection agents run in parallel: `market`, `financial`, and `news`.
+- They receive the complete portfolio universe and collect detailed data for every symbol in their domain.
+- External calls are allowed.
+- Every KIS call must use `$gate-kis-calls`.
+- `financial` must use `$collect-financial-information`.
+- `news` must use `$collect-news-information`.
+- Account, balance, order, order-available, fill-history, pending-order, and reservation-order APIs are forbidden.
+- They return JSON to the main agent and do not write files.
 
-#### 분석가 7명
+### Verdict Sub-Agents
 
-분석가 페르소나 파일 7개를 각각 읽고, 7개의 sub agent를 병렬 생성한다.
+- First-verdict and second-verdict agents cannot call KIS, web, MCP, network, shell, or any external data source.
+- They cannot write files or submit orders.
+- They may use only the exact snapshots supplied by the main agent.
+- Missing data stays missing. Recollection, substitution from another symbol, and guessing are forbidden.
 
-- `references/personas/analyst-blackrock.md`
-- `references/personas/analyst-fidelity.md`
-- `references/personas/analyst-goldman.md`
-- `references/personas/analyst-jpmorgan.md`
-- `references/personas/analyst-morganstanley.md`
-- `references/personas/analyst-statestreet.md`
-- `references/personas/analyst-vanguard.md`
+## Execution Flow
 
-각 분석가 sub agent에 전달할 항목:
+### 1. Initialize
 
-- 데이터 패키지 전체
-- 전략 신호 전체
-- 해당 분석가 페르소나 본문
-- `references/rules/verdict-format.md`의 분석가 의견서 형식
+1. Resolve input symbols from the user request and, when requested, `$check-portfolio`.
+2. Perform authentication preflight using `auth-token.md`.
+3. The main agent captures a sanitized initial account snapshot to identify current holdings and existing orders.
+4. The complete portfolio universe is the union of requested/configured symbols and current holdings. Resolve names and identifiers without dropping unresolved inputs.
+5. Write `account-before-verdict.json`. Account APIs are never delegated.
+6. If the initial account snapshot fails, continue collection and analysis only for requested/configured symbols, mark current holdings as unknown, and block all order preparation and submission.
 
-각 분석가 sub agent에 금지할 항목:
+### 2. Collect Once
 
-- 다른 분석가 결과
-- 배심원 결과
-- 판사 결과
-- 파일 쓰기 또는 주문 실행
+1. Spawn the `market`, `financial`, and `news` collection agents in parallel.
+2. Give each agent the same complete symbol list, `run_id`, `started_at`, environment, required schema, and permission boundary.
+3. Each agent performs one complete domain collection pass for all symbols.
+4. Write each returned payload immediately and exactly once:
+   - `market.json`
+   - `financial.json`
+   - `news.json`
+5. If an agent returns no valid JSON, the main agent writes a `failed` domain envelope containing every symbol and the agent-level error.
+6. If an agent or symbol partially fails, preserve its successful data and errors. Do not discard or overwrite an already-created snapshot.
+7. Do not recollect between first and second verdicts. Both verdict stages reuse these snapshots.
 
-#### 배심원 10명
+The market collector gathers KIS price, chart, order-book/trade, flow, rank, industry, and ETF/NAV data. The financial and news collectors follow their own skills.
 
-분석가 결과를 기다리지 않고, 데이터 패키지가 준비되면 배심원 페르소나 파일 10개를 각각 읽고 10개의 sub agent를 병렬 생성한다.
+### 3. Merge And Exclude
 
-- `references/personas/juror-01-가치투자자.md`
-- `references/personas/juror-02-성장주헌터.md`
-- `references/personas/juror-03-모멘텀트레이더.md`
-- `references/personas/juror-04-배당주신봉자.md`
-- `references/personas/juror-05-역발상.md`
-- `references/personas/juror-06-ESG중시.md`
-- `references/personas/juror-07-매크로탑다운.md`
-- `references/personas/juror-08-퀀트팩터.md`
-- `references/personas/juror-09-차티스트.md`
-- `references/personas/juror-10-보수적은퇴자.md`
+1. Merge domain snapshots and the sanitized initial account snapshot into `merged.json`.
+2. Record source provenance and per-symbol errors.
+3. A symbol with insufficient required information receives `eligible_for_verdict=false`.
+4. An ineligible symbol is excluded from both verdict stages, target-quantity calculation, and trading. Keep it in artifacts and the report with explicit exclusion reasons.
+5. Domain or run status uses only `success`, `partial`, or `failed` as defined in `run-artifacts.md`.
 
-각 배심원 sub agent에 전달할 항목:
+### 4. First Verdict: Independent Symbol Scores
 
-- 데이터 패키지 전체
-- 해당 배심원 페르소나 본문
-- `references/rules/verdict-format.md`의 배심원 투표 형식
+1. Spawn the seven analyst and ten juror personas in parallel.
+2. Give every first-verdict agent the same immutable `merged.json` snapshot and only eligible symbols.
+3. Each agent independently returns one `+2`, `+1`, `0`, `-1`, or `-2` score per symbol using `verdict-format.md`.
+4. Agents cannot see other verdict-agent results.
+5. The main agent aggregates each symbol's valid scores using the thresholds in `verdict-format.md`.
+6. Preserve raw responses, aggregation inputs, excluded symbols, and final first scores in `verdict-first.json`.
+7. If no usable first-verdict result exists, still write `verdict-first.json` with `status="failed"` and stop before the second verdict.
 
-각 배심원 sub agent에 금지할 항목:
+### 5. Second Verdict: Portfolio Targets
 
-- 전략 신호 외 해석 보강 자료
-- 분석가 결과
-- 다른 배심원 결과
-- 판사 결과
-- 파일 쓰기 또는 주문 실행
+1. Build the second-verdict set from:
+   - eligible symbols with first score `+2` or `+1`
+   - every eligible current holding, regardless of first score
+2. Spawn the short-, mid-, and long-term judge personas in parallel.
+3. Give each judge the same immutable collection data, `merged.json`, `verdict-first.json`, and sanitized `account-before-verdict.json`.
+4. Judges perform portfolio-level comparison without external calls and return target quantities for every second-verdict symbol.
+5. They must consider relative attractiveness, duplicate exposure, current weight, market conditions, and same-day fills.
+6. Fixed minimum or maximum cash ratios are forbidden. Target cash is decided from the market and portfolio evidence.
+7. The main agent reconciles judge outputs using `verdict-format.md` and writes `verdict-second.json`.
+8. If no usable second-verdict target exists, still write `verdict-second.json` with `status="failed"` and do not calculate orders.
 
-#### 판사 3명
+### 6. Latest Account Validation And Orders
 
-분석가 7건과 배심원 10표가 모두 수집된 뒤 판사 페르소나 파일 3개를 각각 읽고 3개의 sub agent를 병렬 생성한다.
+1. Read `trade-execution.md`.
+2. If analysis only was requested, write successful `account-before-order.json` and `execution.json` envelopes with `skipped=true` and do not call order APIs.
+3. For order preparation or execution, the main agent refreshes account, holdings, order-available, pending, reservation, and same-day fill state and writes `account-before-order.json`.
+4. For each eligible symbol:
 
-- `references/personas/judge-shortterm.md`
-- `references/personas/judge-midterm.md`
-- `references/personas/judge-longterm.md`
+   ```text
+   expected_holding_quantity =
+     current_live_holding_quantity
+     + pending_and_reserved_buy_quantity
+     - pending_and_reserved_sell_quantity
 
-각 판사 sub agent에 전달할 항목:
+   additional_required_quantity =
+     target_holding_quantity
+     - expected_holding_quantity
+   ```
 
-- 데이터 패키지 전체
-- 전략 신호 전체
-- 분석가 의견서 7건
-- 배심원 투표 10건
-- 해당 판사 페르소나 본문
-- `references/rules/verdict-format.md`의 판사 평결문 형식
+5. Same-day filled quantity is used to prevent repeated trading. It is not subtracted from current live holdings again.
+6. Create the final order list from the additional required quantities and the latest account constraints.
+7. Submit orders only when explicitly authorized and all execution gates pass.
+8. Write `execution.json` even when all orders are skipped, blocked, or fail.
 
-각 판사 sub agent는 자기 시계열만 평결한다. 예를 들어 단기 판사는 단기 평결문만 작성한다.
+### 7. Report And Finalize
 
-#### 결과 수집
+1. Write `reports/YYYY-MM-DD_포트폴리오.md` using `report-template.md`.
+2. Update `run.json` with final status and artifact states. Preserve every partial or failed artifact.
+3. Summarize collection status, exclusions, first scores, second-verdict target quantities, cash decision, latest account state, and actual order submission.
+4. Include the required `작업 시작` line.
 
-1. 분석가 결과 7건과 배심원 결과 10건을 원문 그대로 보존한다.
-2. 배심원 표를 집계해 매수, 보유, 매도 수를 계산한다.
-3. 판사 결과 3건을 검토해 다수결 채택 여부와 뒤집기 사유가 빠졌는지 확인한다.
-4. 빠진 항목이 있으면 해당 역할 sub agent에 한 번만 보완 요청한다.
-5. 보완 후에도 누락된 항목은 메인 Codex가 임의로 채우지 말고 `누락`으로 표시한다.
+## Sub-Agent Result Handling
 
-### 다종목 포트폴리오 모드
+- Use `fork_context=false` when available.
+- Preserve every raw verdict result inside the corresponding verdict JSON.
+- If a verdict response is structurally incomplete, request one correction without adding new data.
+- After one failed correction, record the response error and continue with remaining valid responses.
+- Never let a failed collector or verdict agent silently disappear from artifacts.
 
-다종목 모드는 모든 후보의 요약 카드를 agent에게 먼저 순차 평가하게 하고, 그 결과를 바탕으로 종목별 평결, 종목별 거래계획, 최종 주문계획을 만드는 포트폴리오 스크리닝 절차다.
+## Failure Rules
 
-1. 메인 Codex가 모든 후보의 1차 시세, 뉴스/시장 맥락, 계좌 보유, 당일 체결, 미체결/예약 상태를 수집해 요약 `종목 카드` 목록을 만든다.
-2. 해석 불가, 현재가 누락, 거래 불가 응답 같은 필수 식별·시세 결격은 제외로 표시하되 리포트에는 남긴다. 그 외 후보는 먼저 agent 평가 대상으로 보낸다.
-3. 분석가와 배심원 sub agent를 역할별로 먼저 생성한다.
-4. 살아있는 sub agent에 추가 입력을 보낼 수 있으면 같은 agent에 요약 종목 카드를 하나씩 순서대로 전달한다.
-5. 추가 입력을 보낼 수 없으면 같은 출력 형식을 유지해 종목별 독립 요청으로 대체한다.
-6. 각 분석가와 배심원 응답에는 반드시 `종목식별자`, `종목명`, `agent예비판단`을 포함시킨다. 살아있는 agent는 현재 전달받은 종목 카드 1건만 평가하고, 이전 종목의 평결을 수정하거나 현재 종목의 누락 데이터를 이전 종목 데이터로 보완하지 않는다.
-7. 메인 Codex는 모든 분석가·배심원의 종목별 평가를 원문 보존하고, 종목별 agent 평가 matrix로 집계한다.
-8. 메인 Codex는 agent 평가 matrix를 바탕으로 `정밀수집대상`과 `제외`를 나눈다. `정밀수집대상`은 추가 데이터 수집 대상일 뿐, 주문 제출 전 검증 대상이 아니다. 원칙적으로 `매수` 또는 `매도` 예비 판단이 있거나, 보유 종목의 리스크가 제기되거나, agent 간 의견 충돌이 큰 종목을 포함한다.
-9. 메인 Codex는 `정밀수집대상`에 대해서만 차트, 호가/체결, 수급, 재무/추정, ETF/NAV를 추가 수집해 종목 카드를 보강한다.
-10. 판사 3명은 보강된 종목 카드, 분석가·배심원 종목별 평가 전체, 메인 Codex 집계표를 받아 자기 시계열의 종목별 최종 평결 row와 포트폴리오 평결을 작성한다.
-11. 메인 Codex는 종목별 최종 판사 row를 기준으로 종목별 거래계획을 만든다. 거래계획은 `신규매수`, `추가매수`, `부분매도`, `전량매도`, `유지`, `보류` 중 하나로 분류한다.
-12. 메인 Codex는 종목별 거래계획에서 실제 주문이 필요한 항목만 `주문검토대상`으로 올리고, 계좌·잔고·주문가능·미체결·예약 상태를 검증해 최종 주문계획을 만든다. 포트폴리오 평결은 총 비중, 중복 노출, 상관 리스크 제한에만 사용하고 개별 종목의 주문 방향을 대신하지 않는다.
-13. 상대 비교와 포트폴리오 비중 판단은 허용하지만, 종목별 응답의 누락 데이터를 다른 종목 데이터로 보완하지 않는다.
+- Collection failure: preserve partial snapshots and exclude only symbols lacking required information.
+- Authentication failure: reissue once using `auth-token.md`; if it still fails, block affected KIS, account, and order operations.
+- Initial account snapshot failure: continue analysis only for requested/configured symbols, mark current holdings unknown, and do not calculate or submit orders.
+- Latest account snapshot failure: do not calculate or submit orders. Preserve the failure in `account-before-order.json`.
+- Order failure: do not reallocate the failed order's quantity or budget to another symbol during the same run.
+- Sensitive data found in any payload: remove it before persistence or sub-agent transfer and record a sanitization error without recording the sensitive value.
 
-`정밀수집대상`은 agent 평가 이후 추가 데이터를 수집할 대상이다. `주문검토대상`은 종목별 거래계획이 `신규매수`, `추가매수`, `부분매도`, `전량매도`이고, 근거가 되는 최종 판사 row의 확신도 6 이상이며, 핵심 누락 데이터가 없고, 계좌상 실제 주문 가능성이 있는 종목이다. 메인 Codex는 주문검토대상 전체를 순차 검증한다. 계좌, 잔고, 주문가능, 미체결, 예약주문 조회가 실패하면 해당 종목 주문은 제출하지 않고 보류 사유를 기록한다.
+## Storage Rules
 
-## 데이터 패키지
-
-```markdown
-# 데이터 패키지
-- 종목명:
-- 종목식별자:
-- 수집 시각:
-- 누락 데이터:
-
-## 시세
-- 현재가:
-- 등락률:
-- 거래량:
-- 52주 최고/최저:
-
-## 차트
-- 일봉:
-- 주봉:
-- 월봉:
-
-## 호가/체결
-- 호가:
-- 예상체결:
-- 체결:
-
-## 재무/추정
-- PER/PBR/EPS/BPS:
-- 매출/영업이익/순이익:
-- ROE/부채비율:
-- 배당:
-
-## 수급
-- 외국인:
-- 기관:
-- 개인:
-
-## 순위/업종/ETF
-- 등락률/거래량/시총 순위:
-- 업종:
-- ETF/NAV:
-```
-
-## 종목 카드
-
-다종목 포트폴리오 모드에서는 각 후보를 아래 형식으로 압축한다.
-
-```markdown
-## 종목 카드
-- 종목식별자:
-- 종목명:
-- 상품유형: 주식 / ETF / ETN / 기타 / 해석 불가
-- 카드 단계: 요약 / 정밀수집 후 보강
-- 수집 시각:
-- 현재가 / 등락률 / 거래량:
-- 핵심 차트:
-- 핵심 수급:
-- 핵심 재무 또는 ETF/NAV:
-- 뉴스/시장 맥락:
-- 계좌 보유수량:
-- 매수가능 또는 매도가능 관련 정보:
-- 미체결/예약 주문:
-- 누락 데이터:
-- 메인 Codex 초기 필터 신호: BUY / SELL / HOLD / ERROR
-```
-
-## 오류 처리
-
-- MCP 미연결: `kis-trade-mcp 연결 실패`와 실행하지 못한 도구명을 보고한다.
-- 인증 실패: `references/rules/auth-token.md` 절차에 따라 접근토큰을 재발급하고 한 번만 재시도한다. 재시도 실패 시 `auth_token 재발급 실패`와 실패 환경(`real`/`demo`)을 보고한다.
-- 응답 필드 누락: 누락 필드와 영향받는 분석 역할을 함께 보고한다.
-- 사용자가 부분 평결을 거부하면 리포트를 생성하지 않는다.
-
-## 거래 처리 원칙
-
-- 분석만 요청한 경우에는 어떤 주문도 준비하거나 실행하지 않는다.
-- 프롬프트에 `CODEX_MCP_TRADING_ENV`가 있으면 사용자 표현보다 우선한다. `paper`는 `env_dv="demo"`, `acct`는 `env_dv="real"`을 사용한다.
-- 사용자가 `모의거래로 실행`, `데모로 주문`, `demo 주문`처럼 모의거래를 명시하면 `env_dv="demo"`로만 주문 절차를 진행한다.
-- 사용자가 `실제 거래 실행`, `실전 주문 실행`, `real 주문 제출`처럼 실전거래 실행을 명시하면 모의거래와 동일한 수준의 검증 후 실전 주문 API를 제출할 수 있다. `준비`, `검토`, `티켓 작성`처럼 제출 의사가 불명확한 요청은 주문 티켓, 주문 근거, 계좌·잔고·주문가능 상태, 최종 제출 체크리스트까지만 작성한다.
-- 사용자가 `예약거래`, `예약 거래`, `예약주문`, `예약 주문`을 명시하면 명시적 거래 처리 요청으로 보고 `references/rules/trade-execution.md`를 읽은 뒤 예약주문 절차로 처리한다.
-- 장외 시간 또는 예약 요청 작업은 예약주문 형태로 준비한다. 장중 즉시 주문 요청이 명확하고 주문 조건 검증이 끝난 경우에만 장중 현금주문을 제출할 수 있다.
-- 매수는 `매수가능조회`, 매도는 `잔고조회`와 `매도가능수량조회`를 먼저 확인한다. 확인 실패 시 주문을 진행하지 않는다.
-- 주문 수량은 기본 1주가 아니라 `references/rules/trade-execution.md`의 적극적 비중 산정표에 따라 주문가능금액 또는 매도가능수량 기준으로 계산한다.
-- 응답 마지막에는 현재 계좌 요약, 보유/현금/주문가능 요약, 미체결·예약 주문 상태, 이번 작업에서 실제 제출된 주문 여부를 명시한다.
-
-## 저장 규칙
-
-- 단일 종목은 `reports/YYYY-MM-DD_종목명.md`, 다종목은 `reports/YYYY-MM-DD_포트폴리오.md`로 저장한다.
-- 모든 본문은 한국어로 작성한다.
-- 누락 데이터는 삭제하지 않고 `누락`으로 표시한다.
+- All JSON files are UTF-8 and valid JSON.
+- All Markdown report text is Korean.
+- Never store account numbers, account product codes, access tokens, app keys, app secrets, HTS IDs, or raw authentication headers.
+- Missing data and errors remain explicit.
+- The report must state that it is decision-support analysis, not investment advice.

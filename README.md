@@ -144,7 +144,10 @@ containers/
     scripts/
     shared-skills/
       check-holiday/
+      collect-financial-information/
+      collect-news-information/
       daily-trading/
+      gate-kis-calls/
       trading-schedule-toggle/
     profiles/
       base/

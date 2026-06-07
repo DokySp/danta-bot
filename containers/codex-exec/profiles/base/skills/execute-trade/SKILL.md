@@ -27,4 +27,5 @@ Use the first existing path in this order:
    ```
 
 2. Treat stdout as the complete prompt to execute. Do not summarize, rewrite, expand, normalize, or add extra instructions to that prompt.
-3. If the file does not exist, cannot be read, or is empty after trimming whitespace, say that directly and do not guess the prompt.
+3. Preserve injected `run_id` and `started_at` metadata unchanged. If the prompt invokes `daily-trading`, that skill owns its run artifacts and required Telegram `작업 시작` line.
+4. If the file does not exist, cannot be read, or is empty after trimming whitespace, say that directly and do not guess the prompt.

@@ -1,294 +1,137 @@
-# 거래 실행 규칙
+# Target Quantity And Trade Execution Rules
 
-## 적용 범위
+## Scope
 
-이 문서는 사용자가 투자 판단 이후 명시적으로 거래 처리를 요청한 경우에만 읽는다.
+The second verdict decides portfolio target quantities. Only the main agent converts those targets into orders and calls account or order APIs.
 
-- 모의거래 명시 예: `모의거래로 실행`, `데모로 주문`, `demo 예약주문`, `demo 예약거래`
-- 실전거래 명시 예: `실제 거래로 진행`, `실전 주문 준비`, `real 예약주문 검토`, `실전 예약주문 실행`, `실전 예약거래 실행`, `실전 주문 제출`
-- 예약거래 명시 예: `예약거래`, `예약 거래`, `예약주문`, `예약 주문`
+- Analysis-only request: calculate and report targets, but do not call order APIs. Write skipped `account-before-order.json` and `execution.json`.
+- Preparation or review request: refresh account state and create order tickets, but do not submit.
+- Explicit demo or real execution request: refresh account state, validate every gate, and submit allowed orders.
+- Explicit reservation request: use the reservation-order path.
 
-분석만 요청한 경우에는 이 문서를 읽지 않고 어떤 주문도 준비하지 않는다.
+`CODEX_MCP_TRADING_ENV` overrides conflicting environment wording: `paper` maps to `demo`; `acct` maps to `real`.
 
-## 실행 경계
+## Main-Agent API Boundary
 
-- Codex는 사용자가 실전거래 실행 또는 제출을 명시한 경우 모의거래와 동일한 수준의 검증 후 실전거래 주문 API를 제출할 수 있다.
-- `준비`, `검토`, `티켓 작성`처럼 제출 의사가 불명확한 실전거래 요청은 판결 기반 주문 티켓과 최종 제출 체크리스트까지만 작성하고 주문 API는 제출하지 않는다.
-- 프롬프트에 `CODEX_MCP_TRADING_ENV`가 있으면 사용자 표현보다 우선한다. `paper`는 `env_dv="demo"`, `acct`는 `env_dv="real"`을 사용한다.
-- 모의거래는 사용자가 명시적으로 요청한 경우에만 `env_dv="demo"`로 진행한다.
-- 계좌/주문 API 호출 전 `auth-token.md` 기준으로 해당 환경의 접근토큰을 확인하고, 없거나 만료되었거나 만료 임박이면 재발급한다.
-- 계좌번호, 계좌상품코드, HTS ID처럼 MCP가 자동 처리하는 값은 직접 입력하지 않는다.
-- 판단 근거가 부족하거나 계좌/주문가능 조회가 실패하면 주문을 진행하지 않는다.
-- 수량 산정은 기본 1주가 아니라 주문가능금액 또는 매도가능수량을 기준으로 적극적으로 계산한다. 단, 사용자 지정 최대금액·최대수량·금지 조건은 항상 우선한다.
-- 계좌·잔고·주문가능·주문·체결조회 API는 원장 API로 보고 병렬 호출하지 않는다. 각 호출 사이에 최소 1초, 가능하면 1.2초 이상 간격을 둔다.
-- `EGW00201` 또는 `원장에서 허용 가능한 초당 거래건수를 초과` 오류가 발생하면 최소 3초 대기 후 같은 API를 최대 2회만 재시도한다. 3회 실패하면 주문 제출을 중단하고 원장 초당 거래건수 제한을 보류 사유로 보고한다.
+Collection and verdict sub-agents cannot call any API in this section.
 
-## 장외 시간 기본 정책
+Before order calculation, the main agent sequentially refreshes:
 
-이 스킬은 장외 시간에 작업이 수행될 수 있음을 전제로 한다.
+- `inquire_account_balance`
+- `inquire_balance`
+- `inquire_daily_ccld`
+- pending-order lookup supported by the current KIS API
+- `order_resv_ccnl` when supported
+- `inquire_psbl_order` for buy candidates
+- `inquire_psbl_sell` for sell candidates
 
-- 장외 시간 또는 예약거래 요청의 기본 주문 형태는 예약주문이다.
-- 장중 즉시 주문 요청이 명확하고 현재 파라미터와 주문 조건 검증이 끝난 경우에만 장중 현금주문을 사용할 수 있다.
-- 실행 전 `domestic_stock(api_type="find_api_detail")`로 `order_resv`, `order_cash`, `inquire_balance`, `inquire_account_balance`, `inquire_psbl_order`, `inquire_psbl_sell`, `inquire_daily_ccld`, `order_resv_ccnl`의 현재 파라미터를 확인한다.
-- 예약주문 API가 요청 환경에서 지원되지 않거나 실패하면 주문을 제출하지 말고, 동일 조건의 예약주문 티켓만 작성한다.
-- 사용자가 예약거래 또는 예약주문을 명시하면 장중 여부와 관계없이 `order_resv` 예약주문을 우선한다.
-- 실전거래에서는 주문 조건 검증이 끝나고 사용자가 실행 또는 제출을 명시한 경우에만 주문 API를 제출한다. 조건이 부족하거나 제출 의사가 불명확하면 주문 티켓만 작성한다.
+Inspect current parameters with `find_api_detail`. Do not provide account number, account product code, or HTS ID because the MCP wrapper supplies them. Do not run ledger APIs in parallel.
 
-## 거래 방향 결정
+## Quantity Calculation
 
-단일 종목은 판사 평결을 기준으로 한다.
-
-1. 단기, 중기, 장기 평결을 모두 확인한다.
-2. 기본 실행 판단은 사용자가 지정한 시계열을 우선한다.
-3. 사용자가 시계열을 지정하지 않으면 중기 평결을 기본으로 삼되, 단기와 장기가 정반대면 주문하지 않고 보류한다.
-4. 평결이 `매수`이면 매수 주문 티켓을 준비한다.
-5. 평결이 `매도`이면 보유 잔고 확인 후 매도 주문 티켓을 준비한다.
-6. 평결이 `보유`이거나 확신도 6 미만이면 주문하지 않는다.
-7. 누락 데이터가 핵심 근거에 영향을 주면 주문하지 않는다.
-
-다종목 포트폴리오 모드에서는 종목별 최종 판사 row를 기준으로 한다.
-
-1. 사용자가 시계열을 지정하면 해당 시계열 판사의 종목별 최종 row를 우선한다.
-2. 사용자가 시계열을 지정하지 않으면 중기 판사의 종목별 최종 row를 기본으로 삼는다.
-3. 단기와 장기가 같은 종목에 대해 정반대 방향이면 해당 종목 주문은 보류한다.
-4. 포트폴리오 평결은 총 추천 비중, 중복 노출, 상관 리스크 제한에만 사용하고 개별 종목의 매수/매도 방향을 대신하지 않는다.
-
-## 종목별 거래계획
-
-종목별 거래계획은 최종 판사 row 이후 메인 Codex가 만든다. 주문 티켓이 아니라 의사결정 보조 계획이며, 주문 API 제출은 사용자가 명시적으로 거래 처리를 요청한 경우에만 한다.
-
-- 최종 방향이 `매수`이고 현재 보유수량이 0이면 `신규매수`로 분류한다.
-- 최종 방향이 `매수`이고 현재 보유수량이 있으면 `추가매수`로 분류한다.
-- 최종 방향이 `매도`이고 전량 매도 조건이 명확하면 `전량매도`로 분류한다. 전량 매도 조건은 판사 2명 이상 매도, 확신도 8 이상, 손절가 이탈, 명확한 리스크 이벤트, 사용자 전량매도 지시 중 하나다.
-- 최종 방향이 `매도`이지만 전량 매도 조건이 명확하지 않으면 `부분매도`로 분류한다.
-- 최종 방향이 `보유`이면 `유지`로 분류한다.
-- 핵심 데이터 누락, 판사 평결 충돌, 기존 미체결/예약 주문과의 중복으로 분석 단계의 거래 방향이나 수량 산정 기준이 불명확하면 `보류`로 분류한다.
-
-## 주문검토대상
-
-주문검토대상은 재분석 대상이 아니라 주문 제출 전 계좌/API 검증 대상이다.
-
-- 다종목의 `정밀수집대상`은 주문검토대상이 아니다.
-- 단일 종목의 최종 판사 평결이 `매수` 또는 `매도`이거나, 다종목의 종목별 거래계획이 `신규매수`, `추가매수`, `부분매도`, `전량매도`인 종목만 포함한다.
-- 확신도는 6 이상이어야 한다.
-- 핵심 누락 데이터가 있으면 제외한다.
-- 매수는 주문가능금액과 현금 완충 조건상 실제 주문 가능성이 있어야 한다.
-- 매도는 보유수량과 매도가능수량상 실제 주문 가능성이 있어야 한다.
-- 미체결 또는 예약주문과 중복되는 주문은 제외하거나 수량을 차감한다.
-- 계좌, 잔고, 주문가능, 미체결, 예약주문 조회가 실패하면 해당 종목 주문은 제출하지 않고 보류 사유를 기록한다.
-
-## 계좌 및 주문가능 조회
-
-주문 전 반드시 계좌 상태를 요약한다.
-
-### 공통 조회
-
-- `domestic_stock(api_type="inquire_account_balance")`: 계좌 자산 현황
-- `domestic_stock(api_type="inquire_balance")`: 주식 잔고
-- `domestic_stock(api_type="inquire_daily_ccld")`: 당일 주문체결 또는 미체결 상태
-- `domestic_stock(api_type="order_resv_ccnl")`: 예약주문 조회가 가능한 경우 예약 상태
-
-### 매수 전 조회
-
-- `domestic_stock(api_type="inquire_psbl_order")`: 매수가능금액과 가능수량
-
-매수 수량은 보유 현금과 주문가능금액 기준으로 적극적으로 산정한다.
-
-- 적극적 비중 산정표 기준 수량
-- 매수가능조회 기준 가능수량
-- 사용자가 지정한 최대 금액 또는 최대 수량
-- 기존 예약주문과 미체결 주문을 고려한 실질 주문가능금액
-
-### 매도 전 조회
-
-- `domestic_stock(api_type="inquire_psbl_sell")`: 매도가능수량
-- 보유수량과 매도가능수량 중 작은 값을 초과하지 않는다.
-
-매도 수량은 대상 종목 보유수량과 매도가능수량 기준으로 적극적으로 산정한다.
-
-- 적극적 비중 산정표 기준 수량
-- 매도가능조회 기준 가능수량
-- 사용자가 지정한 최대 수량
-- 기존 예약주문과 미체결 매도 주문을 고려한 실질 매도가능수량
-
-## 적극적 수량 산정
-
-주문 수량은 아래 절차로 계산한다. 목적은 1주 테스트 주문이 아니라, 판결 강도에 맞춰 보유 현금 또는 보유수량을 의미 있게 배분하는 것이다.
-
-### 공통 기준
-
-1. 사용자가 금액, 수량, 비중을 명시하면 그 값을 최우선으로 사용하되 계좌 조회상 가능 한도를 초과하지 않는다.
-2. 사용자가 `최대한`, `가능한 많이`, `적극적으로`, `공격적으로`라고 명시하면 아래 표의 상단 비중을 적용한다.
-3. 사용자 지정 한도가 없으면 확신도와 판결 일치도 기준으로 비중을 계산한다.
-4. 핵심 데이터 누락, 판사 평결 충돌, 인증/계좌 조회 실패가 있으면 주문하지 않는다.
-5. 산출 수량이 1주 미만이면 주문하지 않고 `주문가능금액 부족`으로 표시한다.
-
-### 매수 비중
-
-기준 금액은 `매수가능조회`의 주문가능금액이다. 기존 미체결/예약 매수 주문이 있으면 그 금액을 제외한다.
-
-다종목 매수 후보가 2개 이상이면 후보별로 주문가능금액 전체를 반복 적용하지 않는다.
-
-1. 전체 매수 예산을 먼저 계산한다.
-   - 전체 매수 예산 = 주문가능금액 - 기존 미체결/예약 매수 주문 금액 - 현금 완충분
-   - 같은 실행에서 매도 계획이 있어도 매도 체결 또는 매수가능금액 재조회로 확인되기 전까지 매도 예상 대금을 매수 예산에 포함하지 않는다.
-   - 예약주문끼리는 매도 예약의 미래 체결 대금을 매수 예약 예산에 포함하지 않는다.
-2. 매수 후보별 목표 비중 또는 추천 비중을 합산해 정규화한다.
-3. 각 후보의 배정 예산은 `전체 매수 예산 * 후보 정규화 비중`으로 계산한다.
-4. 후보별 확신도 비중표는 배정 예산의 상한으로만 사용한다.
-5. 포트폴리오 평결의 총 비중 제한이 있으면 전체 매수 예산 또는 후보별 배정 예산을 그 제한 안으로 줄인다.
-
-| 확신도 | 기본 매수 비중 |
-|---:|---:|
-| 6 | 주문가능금액의 30% |
-| 7 | 주문가능금액의 45% |
-| 8 | 주문가능금액의 60% |
-| 9 | 주문가능금액의 75% |
-| 10 | 주문가능금액의 90% |
-
-가감 규칙:
-
-- 판사 3명이 모두 매수이거나 배심원 매수가 7표 이상이고 매도 판사가 없으면 10%p를 더하되 최대 95%를 넘지 않는다.
-- 단기·중기·장기 중 하나라도 매도이면 20%p를 뺀다.
-- 평결이 매수지만 확신도 6 미만이면 주문하지 않는다.
-- 사용자가 `전액`, `올인`을 명시해도 모의거래는 최대 95%, 실전 주문은 최대 90%로 제한한다.
-- 현금 완충분은 기본 5%를 남긴다. 사용자가 명시적으로 더 낮은 완충분을 지시해도 모의거래는 2% 미만, 실전 주문은 5% 미만으로 낮추지 않는다.
-
-수량 산식:
+For each eligible second-verdict symbol:
 
 ```text
-매수대상금액 = floor(주문가능금액 * 적용비중)
-매수수량 = floor(매수대상금액 / 주문단가)
-최종수량 = min(매수수량, 매수가능조회 가능수량, 사용자 지정 최대수량)
+expected_holding_quantity =
+  current_live_holding_quantity
+  + pending_and_reserved_buy_quantity
+  - pending_and_reserved_sell_quantity
+
+additional_required_quantity =
+  target_holding_quantity
+  - expected_holding_quantity
 ```
 
-### 매도 비중
+- Positive `additional_required_quantity`: buy candidate.
+- Negative `additional_required_quantity`: sell candidate using the absolute value.
+- Zero: no order.
+- Current live holdings already include same-day fills. Never subtract same-day filled quantity again.
+- Pending and reserved quantities include only active, non-cancelled quantities.
 
-기준 수량은 대상 종목의 매도가능수량이다. 기존 미체결/예약 매도 주문이 있으면 그 수량을 제외한다.
+## Same-Day Fill Guard
 
-| 확신도 | 기본 매도 비중 |
-|---:|---:|
-| 6 | 매도가능수량의 30% |
-| 7 | 매도가능수량의 45% |
-| 8 | 매도가능수량의 65% |
-| 9 | 매도가능수량의 85% |
-| 10 | 매도가능수량의 100% |
+Same-day fills prevent repeated trading; they do not change the quantity formula.
 
-가감 규칙:
+- Record same-day buy and sell fills per symbol in both account snapshots.
+- If a new order has the same direction as a same-day fill, submit it only when `verdict-second.json` explicitly shows that the reconciled target still requires the remaining delta after considering that fill.
+- If that explicit justification is absent, set the order result to `blocked` with reason `same_day_repeat_guard`.
+- Never reverse a same-day fill solely because another judge used a different horizon.
 
-- 판사 3명이 모두 매도이거나 배심원 매도가 7표 이상이면 10%p를 더하되 최대 100%를 넘지 않는다.
-- 단기·중기·장기 중 하나라도 매수이면 20%p를 뺀다.
-- 손절가 이탈, 명확한 리스크 이벤트, 판사 2명 이상 매도와 확신도 8 이상이 동시에 있으면 100% 매도를 허용한다.
-- 평결이 매도지만 확신도 6 미만이면 주문하지 않는다.
+## Cash Decision
 
-수량 산식:
+- `verdict-second.json` supplies the reconciled target cash amount.
+- There is no fixed minimum cash ratio, maximum cash ratio, or fixed investment ratio.
+- Reconciled target quantities plus target cash must not exceed the initial account total assets. Any unexplained remainder is target cash, not an automatic buy budget.
+- Buy orders cannot exceed the latest order-available amount after active pending/reserved buys and user limits.
+- Expected proceeds from unfilled sells are not available buy cash.
+- If latest account cash is lower than the target or constraints require more cash, reduce or block buys; do not silently increase sells beyond target quantities.
 
-```text
-매도수량 = floor(매도가능수량 * 적용비중)
-최종수량 = min(매도수량, 매도가능조회 가능수량, 사용자 지정 최대수량)
+## Order Constraints
+
+Every order must satisfy all applicable constraints:
+
+- symbol remains eligible and has a valid reconciled target
+- latest account snapshot succeeded
+- direction and quantity match the target delta
+- buy quantity does not exceed `inquire_psbl_order`
+- sell quantity does not exceed current holdings or `inquire_psbl_sell`
+- active pending/reserved quantities were included exactly once
+- same-day fill guard passed
+- user maximum amount, maximum quantity, prohibited symbols, and price limits passed
+- order price and order type were validated using current API details
+- real submission was explicitly requested
+
+If any gate fails, do not submit that order. Record `blocked` and the exact non-sensitive reason.
+
+## Price And Order Type
+
+- User-specified valid price and order type take priority.
+- Explicit reservation requests use `order_resv`.
+- Outside market hours, use `order_resv` when supported; if unsupported, create a ticket and record `blocked`.
+- Explicit intraday immediate execution may use `order_cash`.
+- If price or order type remains ambiguous after current API-detail inspection, block the order.
+
+## Submission Order
+
+1. Validate all candidates against the same latest account snapshot.
+2. Process sells before buys.
+3. Do not count unfilled sell proceeds as buy cash.
+4. Submit orders sequentially with the KIS-required interval.
+5. A failed or blocked order does not transfer its quantity or budget to another symbol in the same run.
+6. After submissions, refresh available order/fill state sequentially and record it in `execution.json`.
+
+## Execution JSON Fields
+
+`execution.json` uses the common envelope from `run-artifacts.md` and contains:
+
+```json
+{
+  "request_type": "analysis | prepare | demo-submit | real-submit",
+  "target_cash_amount": 0,
+  "latest_available_cash": 0,
+  "orders": [
+    {
+      "symbol_id": "",
+      "symbol_name": "",
+      "direction": "buy | sell | none",
+      "current_live_holding_quantity": 0,
+      "pending_and_reserved_buy_quantity": 0,
+      "pending_and_reserved_sell_quantity": 0,
+      "same_day_buy_filled_quantity": 0,
+      "same_day_sell_filled_quantity": 0,
+      "expected_holding_quantity": 0,
+      "target_holding_quantity": 0,
+      "additional_required_quantity": 0,
+      "validated_order_quantity": 0,
+      "order_price": 0,
+      "order_type": "",
+      "result": "submitted | skipped | blocked | failed",
+      "reason": "",
+      "order_or_reservation_id": ""
+    }
+  ],
+  "post_order_state": {}
+}
 ```
 
-### 주문단가
-
-- 사용자가 지정가를 명시하면 그 가격을 우선한다.
-- 지정가가 없으면 장외 예약주문에서는 현재가 또는 최근 종가를 기준으로 한다.
-- 시장가 또는 `ord_unpr=0`이 필요한 주문구분은 실행 전 `find_api_detail`로 해당 주문구분이 허용되는지 확인한다.
-- 가격 기준이 불명확하면 주문을 보류하고 주문 티켓에 필요한 가격 확인 항목을 남긴다.
-
-## 다종목 최종 주문계획
-
-다종목 최종 주문계획은 종목별 거래계획과 계좌/API 검증 결과를 합쳐 작성한다.
-
-1. 분석만 요청한 경우에는 종목별 거래계획까지만 작성하고 주문 티켓이나 주문 API 제출은 하지 않는다.
-2. 주문 준비 또는 검토 요청이면 종목별 주문 티켓, 제출 순서, 보류 사유, 사용자가 확인할 항목까지만 작성한다.
-3. 모의 또는 실전 주문 실행 요청이면 주문검토대상 전체를 순차 검증한다.
-4. 매도와 매수가 함께 있으면 매도 주문검토대상을 먼저 검증한다. 매도 주문을 제출했더라도 체결 또는 매수가능금액 재조회로 확인되기 전까지 매도 예상 대금을 매수 예산에 포함하지 않는다.
-5. 매수 주문검토대상은 전체 매수 예산 배분 후 종목별 수량을 계산한다.
-6. 각 종목 주문 사이에는 최소 1초, 가능하면 1.2초 이상 간격을 둔다.
-7. 한 종목의 주문 제출이 실패해도 다음 종목을 임의로 증액하지 않는다. 실패 종목은 보류로 기록하고 남은 주문은 기존 배정 예산 안에서만 진행한다.
-
-## 주문 티켓 형식
-
-주문 또는 주문 준비 결과는 아래 형식으로 작성한다.
-
-```markdown
-## 주문 티켓
-- 환경: demo / real
-- 제출 방식: 모의 예약주문 제출 / 모의 장중 현금주문 제출 / 실전 예약주문 제출 / 실전 장중 현금주문 제출 / 주문 티켓만 작성 / 주문 보류
-- 종목명:
-- 종목식별자:
-- 방향: 매수 / 매도 / 보류
-- 주문 형태: 예약주문 / 장중 현금주문
-- 주문구분: 지정가 / 시장가 / 장전 시간외
-- 수량 산정 방식: 주문가능금액 기준 / 매도가능수량 기준 / 사용자 지정
-- 적용 비중:
-- 수량:
-- 주문단가:
-- 주문금액:
-- 근거 평결:
-- 확신도:
-- 목표가:
-- 손절가:
-- 주문하지 않은 경우 사유:
-```
-
-## 모의거래 주문 절차
-
-사용자가 모의거래를 명시한 경우에만 진행한다.
-
-1. `env_dv="demo"`를 사용한다.
-2. `auth-token.md` 기준으로 demo 접근토큰을 확인하고 필요 시 재발급한다.
-3. 주문 전 계좌 자산, 잔고, 미체결, 예약주문 상태를 조회한다.
-4. 매수라면 `inquire_psbl_order`로 가능수량을 확인한다.
-5. 매도라면 `inquire_psbl_sell`로 가능수량을 확인한다.
-6. 예약거래 요청 또는 장외 시간에는 `order_resv` 예약주문을 우선 사용한다. 장중 즉시 주문 요청이면 `order_cash`를 사용할 수 있다.
-7. 선택한 주문 API가 모의 환경에서 실패하면 주문을 제출하지 않고 주문 티켓만 작성한다.
-8. 주문 제출 후 당일 주문체결, 미체결, 예약주문 상태를 다시 조회한다.
-
-## 실전거래 주문 제출 절차
-
-사용자가 실전거래를 명시하면 아래 절차로 주문 제출 가능 여부를 판단한다.
-
-1. `env_dv="real"` 기준으로 접근토큰을 확인하고 필요 시 재발급한다.
-2. 최소 1초 간격을 두며 계좌 자산, 잔고, 미체결, 예약주문 상태를 순차 조회해 요약한다.
-3. 매수라면 최소 1초 간격 후 `inquire_psbl_order`로 가능수량을 확인한다.
-4. 매도라면 최소 1초 간격 후 `inquire_psbl_sell`로 가능수량을 확인한다.
-5. 판결 또는 사용자 지시에 따른 주문 티켓을 작성한다.
-6. 종목, 방향, 주문구분, 수량, 단가, 주문금액, 주문 가능 한도, 미체결·예약 중복 여부를 요약한다.
-7. 사용자가 실전 주문 실행 또는 제출을 명시했는지 확인한다.
-8. 실행 또는 제출 의사가 명확하면 최소 1초 간격 후 장외 시간에는 `order_resv`, 장중 즉시 주문 요청에는 `order_cash`를 제출한다. 제출 의사가 불명확하면 주문 API를 제출하지 않는다.
-9. 주문 제출 후 최소 1초 간격을 두고 당일 주문체결, 미체결, 예약주문 상태를 순차 조회하고 주문번호 또는 예약번호를 보고한다.
-
-## 최종 응답 형식
-
-거래 처리 요청이 있었으면 최종 응답에 아래 내용을 반드시 포함한다.
-
-```markdown
-## 계좌 요약
-- 환경: demo / real
-- 인증 상태:
-- 총자산:
-- 현금 또는 주문가능금액:
-- 보유 종목 요약:
-- 대상 종목 보유수량:
-- 미체결 주문:
-- 예약 주문:
-
-## 거래 상태
-- 이번 작업의 주문 제출 여부:
-- 제출된 주문번호 또는 예약번호:
-- 수량 산정 방식:
-- 적용 비중:
-- 주문 티켓:
-- 주문 보류 사유:
-- 실전 제출 의사 확인 여부:
-- 사용자가 직접 확인할 항목:
-```
-
-## 금지 사항
-
-- 실전 제출 의사가 불명확한 주문 API 제출
-- 사용자 지정 최대 수량 또는 최대 금액을 초과하는 주문
-- 계좌/잔고/주문가능 조회 실패 상태에서 주문 제출
-- `매수`, `매도`, `보유` 평결이 충돌하는 상태에서 임의 주문
-- 누락 데이터를 임의로 추정해 수량이나 가격 산정
+Never store account numbers, tokens, app keys, app secrets, HTS IDs, or raw authentication headers.
