@@ -16,7 +16,7 @@
 The Main agent must read the `$check-holiday` result recorded in `run.json` and `decision-brief.json` before order candidate calculation and before any submission.
 
 - `open`: explicitly authorized demo or real submission may continue after all other gates.
-- `closed`: use previous-trading-day snapshot prices for verdicts. If the user or schedule explicitly requested 실전(acct) 예약거래, create reservation-order candidates and use only `order_resv` after every gate passes. Do not use `order_cash`.
+- `closed`: use previous-trading-day snapshot prices for verdicts. If the user or schedule explicitly requested 실전(acct) 예약거래, create reservation-order candidates and use only `order_resv` after every gate passes. Do not use `order_cash`. This status does not affect whether financial or news collection should run.
 - `unknown`: block every real `order_cash` and `order_resv` submission. Analysis, target calculation, and non-submitting preparation may continue.
 
 ## Account Snapshot Boundary
@@ -33,7 +33,7 @@ Before order calculation, the Main agent requests `$collect-account-state` with 
 - `inquire_psbl_order` for buy candidates
 - `inquire_psbl_sell` for sell candidates
 
-The account sub-agent must inspect current parameters with `find_api_detail`, must not provide account number, account product code, or HTS ID because the MCP wrapper supplies them, and must not run ledger APIs in parallel. It returns JSON only. The Main agent sanitizes and writes `account-before-order.json`.
+The account sub-agent must inspect current parameters with `find_api_detail`, must not provide account number, account product code, or HTS ID because the MCP wrapper supplies them, and must not run ledger APIs in parallel. It returns JSON only through the daily-trading sub-agent launcher wrapper. The Main agent sanitizes wrapper `parsed_json` and writes `account-before-order.json`.
 
 If `account-before-order.json` is missing, invalid, or `failed`, the Main agent must block order candidate calculation, `final-risk-verdict`, and submission.
 
@@ -124,7 +124,7 @@ If any gate fails, do not submit that order. Record `blocked` and the exact non-
 
 ## `final-risk-verdict` Gate
 
-After order candidates are created and before any submission, the Main agent spawns the `final-risk-verdict` sub-agent.
+After order candidates are created and before any submission, the Main agent runs the `final-risk-verdict` sub-agent through the daily-trading sub-agent launcher.
 
 Inputs:
 

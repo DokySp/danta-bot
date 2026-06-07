@@ -1,6 +1,6 @@
 ---
 name: daily-trading
-description: "[v20260607-03] `$check-holiday` preflight로 한국장 open/closed/unknown을 기록한 뒤, 전체 한국 주식·ETF 포트폴리오의 시장·재무·뉴스와 read-only 계좌 상태를 한 번 수집해 재사용하고, price-only 근거도 평결 후보로 보존하며, `decision-brief.json` 기반 `first-verdict`, `second-verdict`, `final-risk-verdict`를 거쳐 명시 승인된 주문만 `Main agent`가 제출한다. Use for KIS MCP based portfolio analysis, daily-* and pre-open trading schedules, sub-agent collection and verdict orchestration, portfolio reports, demo orders, real orders, and reservation orders."
+description: "[v20260608-01] `$check-holiday` preflight로 한국장 open/closed/unknown을 기록한 뒤, 전체 한국 주식·ETF 포트폴리오의 시장·재무·뉴스와 read-only 계좌 상태를 한 번 수집해 재사용하고, price-only 근거도 평결 후보로 보존하며, `decision-brief.json` 기반 `first-verdict`, `second-verdict`, `final-risk-verdict`를 거쳐 명시 승인된 주문만 `Main agent`가 제출한다. Use for KIS MCP based portfolio analysis, daily-* and pre-open trading schedules, sub-agent collection and verdict orchestration, portfolio reports, demo orders, real orders, and reservation orders."
 ---
 
 # Daily Trading Portfolio Orchestrator
@@ -75,7 +75,7 @@ These rules apply to direct and indirect use, including `daily-*`, `pre-open`, `
 ### Market Status Rules
 
 - `open`: normal analysis and explicitly authorized demo/real order flow may continue.
-- `closed`: label the run as previous-trading-day snapshot mode. Use the most recent valid trading-day price snapshot for verdicts. If the user or schedule explicitly requested 실전(acct) 예약거래, the Main agent may create reservation-order candidates and use only the `order_resv` path after every risk gate passes. Do not submit intraday `order_cash` while closed.
+- `closed`: label the run as previous-trading-day snapshot mode. Use the most recent valid trading-day price snapshot for verdicts. If the user or schedule explicitly requested 실전(acct) 예약거래, the Main agent may create reservation-order candidates and use only the `order_resv` path after every risk gate passes. Do not submit intraday `order_cash` while closed. This status affects market snapshot mode and order submission type only; it must not skip, downgrade, or suppress financial or news collection.
 - `unknown`: analysis may continue, but 실전 order submission and reservation submission are blocked. Record the unknown reason from `$check-holiday`.
 
 ## Authority Boundaries
@@ -88,29 +88,32 @@ These rules apply to direct and indirect use, including `daily-*`, `pre-open`, `
 - Sanitize every artifact and every sub-agent input.
 - Merge collection output, decide exclusions, build `decision-brief.json`, calculate order candidates, confirm explicit user authorization, and submit authorized orders.
 - Call actual order submission APIs only after every gate passes.
+- Do not collect market, financial, or news domain data directly in place of the assigned collection sub-agents. Price snapshots, symbol market information, financial evidence, and news/disclosure evidence belong to `market`, `financial`, and `news` collection outputs.
 - Never delegate order submission, reservation submission, correction, cancellation, artifact persistence, or sensitive-field handling.
 
 ### Account Sub-Agent
 
-- Use `$collect-account-state` for `account-before-verdict` and `account-before-order`.
+- Run the daily-trading sub-agent launcher for `account-before-verdict` and `account-before-order`; the launcher prompt may invoke `$collect-account-state`.
 - Allowed read-only lookups: account summary, balances, current holdings, same-day fills, pending orders, reservation orders, buy-available amount or quantity, and sell-available quantity.
-- Return JSON only. The Main agent sanitizes again and writes `account-before-verdict.json` or `account-before-order.json`.
-- If the account sub-agent returns `failed`, returns no valid JSON, or misses a required field, the Main agent blocks order preparation and execution.
+- Return JSON only through the launcher wrapper. The Main agent sanitizes `parsed_json` again and writes `account-before-verdict.json` or `account-before-order.json`.
+- If the account sub-agent wrapper returns `failed`, returns no valid `parsed_json`, or misses a required field, the Main agent blocks order preparation and execution.
 - Forbidden: order submission, reservation submission, correction, cancellation, file writes, final target calculation, and sensitive information return.
 
 ### Collection Sub-Agents
 
-- Three collection agents run in parallel: `market`, `financial`, and `news`.
+- Run the daily-trading sub-agent launcher in parallel for the three collection agents: `market`, `financial`, and `news`.
 - They receive the complete portfolio universe and collect detailed data for every symbol in their domain.
 - External calls are allowed only inside each domain's permission boundary.
 - KIS calls are made directly at each call site. Transient gateway, timeout, and rate-limit failures must use the bounded backoff rules in `data-collection.md`.
+- `market` must collect symbol market information and price snapshots. The Main agent must not replace this by directly calling price or quote APIs.
 - `financial` must use `$collect-financial-information`.
 - `news` must use `$collect-news-information` and is KIS news/disclosure only.
 - Account, balance, order, order-available, fill-history, pending-order, reservation-order, correction, and cancellation APIs are forbidden.
-- They return JSON to the Main agent and do not write files.
+- They return JSON only through launcher wrappers and do not write canonical artifact files.
 
 ### Verdict Sub-Agents
 
+- Run every verdict role through the daily-trading sub-agent launcher. Do not use `multi_agent_v1.spawn_agent` for daily-trading stage delegation because the launcher is the model/effort enforcement boundary.
 - `first-verdict`, `second-verdict`, and `final-risk-verdict` agents cannot call KIS, web, MCP, network, shell, or any external data source.
 - They cannot write files or submit orders.
 - Their default input is `decision-brief.json`, not raw `merged.json`.
@@ -124,38 +127,39 @@ These rules apply to direct and indirect use, including `daily-*`, `pre-open`, `
 1. Resolve input symbols from the user request and, when requested, `$check-portfolio`.
 2. Run `$check-holiday` for the Asia/Seoul target date and record the normalized `open | closed | unknown` status.
 3. Perform authentication preflight using `auth-token.md`.
-4. Spawn `$collect-account-state` for `account-before-verdict`.
-5. The Main agent sanitizes and writes `account-before-verdict.json`.
+4. Run the daily-trading sub-agent launcher for `account-before-verdict`.
+5. The Main agent reads the launcher wrapper, sanitizes `parsed_json`, and writes `account-before-verdict.json`.
 6. The complete portfolio universe is the union of requested/configured symbols and current holdings. Resolve names and identifiers without dropping unresolved inputs.
 7. If the initial account snapshot fails, continue collection and analysis only for requested/configured symbols, mark current holdings as unknown, and block order preparation and submission.
 8. Record every step above in `stage-metrics.json`.
 
 ### 2. Collect Once
 
-1. Spawn the `market`, `financial`, and `news` collection agents in parallel.
-2. Give each agent the same complete symbol list, `run_id`, `started_at`, environment, required schema, and permission boundary.
-3. The financial path is cache-first:
+1. Run the daily-trading sub-agent launcher for the `market`, `financial`, and `news` collection agents in parallel.
+2. Give each agent the same complete symbol list, `run_id`, `started_at`, environment, required schema, and permission boundary. The launcher spec must include the same complete list in `symbol_ids` so wrapper validation can reject missing-symbol outputs before the Main agent writes canonical artifacts.
+3. Always run all three domain paths for the complete universe. `closed` market status is not a reason to skip `financial` or `news`, and it is not a reason to mark symbols `price_only`.
+4. The financial path is cache-first:
    - cache location: `reports/cache/financial/<YYYY-MM-DD>.json`
    - validity: one Korea trading day
    - cache hit: generate `financial.json` from cache without external financial calls
    - cache miss or explicit force refresh: collect from KIS/official sources and let the Main agent update the cache
-4. The news path is KIS news/disclosure only. Web search and web news sources are not allowed.
-5. Write each returned payload immediately and exactly once:
+5. The news path is KIS news/disclosure only. Web search and web news sources are not allowed.
+6. Write each returned payload immediately and exactly once:
    - `market.json`
    - `financial.json`
    - `news.json`
-6. If an agent returns no valid JSON, the Main agent writes a `failed` domain envelope containing every symbol and the agent-level error.
-7. If an agent or symbol partially fails, preserve its successful data and errors. Do not discard or overwrite an already-created snapshot.
-8. Do not recollect between `first-verdict`, `second-verdict`, and `final-risk-verdict`. All verdict stages reuse saved artifacts.
+7. If a launcher wrapper is missing, `failed`, or contains no valid `parsed_json`, the Main agent writes a `failed` domain envelope containing every symbol and the agent-level error.
+8. If an agent or symbol partially fails, preserve its successful data and errors. Do not discard or overwrite an already-created snapshot.
+9. Do not recollect between `first-verdict`, `second-verdict`, and `final-risk-verdict`. All verdict stages reuse saved artifacts.
 
-The market collector gathers KIS price, chart, order-book/trade, flow, rank, industry, and ETF/NAV data. The financial and news collectors follow their own skills.
+The market collector gathers KIS price, chart, order-book/trade, flow, rank, industry, and ETF/NAV data. It must return canonical `symbol_id`, `symbol_name`, and `price.current_or_last` / `price.observed_at` fields for every input symbol. Alias-only fields such as `symbol` or `current_or_latest_price` are not valid canonical market evidence. The financial and news collectors follow their own skills.
 
 ### 3. Merge, Exclude, And Brief
 
 1. Merge domain snapshots and the sanitized initial account snapshot into `merged.json`.
 2. Record source provenance and per-symbol errors.
 3. A symbol receives `eligible_for_verdict=false` only when symbol identity is unresolved/ambiguous, usable price or observation time is missing, or market data is too broken to support even a price-only verdict.
-4. Missing financial data, missing news/disclosure data, or completed no-data searches are not exclusion reasons by themselves. If identifier, name, current-or-last price, and observation time exist, keep the symbol eligible with `evidence_mode="price_only"` and explicit warnings.
+4. Missing financial data, missing news/disclosure data, or completed no-data searches are not exclusion reasons by themselves. If identifier, name, current-or-last price, and observation time exist, keep the symbol eligible with `evidence_mode="price_only"` and explicit warnings. Use `price_only` only after the relevant financial/news domain path actually returned missing, failed, or no-data evidence for that symbol; never use it merely because the market is `closed` or because the Main agent skipped a required collector.
 5. An ineligible symbol is excluded from every verdict stage, target-quantity calculation, and trading. Keep it in artifacts and the report with explicit exclusion reasons.
 6. Build `decision-brief.json` from `merged.json`, account exposure, domain summaries, and market status.
 7. `decision-brief.json` includes symbol id/name, eligibility, evidence mode, price and observation time, core market signals, core financial summary when available, core KIS news summary when available, account exposure summary, and missing/error reasons.
@@ -164,7 +168,7 @@ The market collector gathers KIS price, chart, order-book/trade, flow, rank, ind
 
 ### 4. `first-verdict`: Independent Symbol Scores
 
-1. Spawn the seven analyst and ten juror personas in parallel.
+1. Run the daily-trading sub-agent launcher for the seven analyst and ten juror personas in parallel.
 2. Give every first-verdict agent the same immutable `decision-brief.json` and only eligible symbols, including `evidence_mode="price_only"` symbols.
 3. Each agent independently returns one `+2`, `+1`, `0`, `-1`, or `-2` score per symbol using `verdict-format.md`.
 4. Agents cannot see other verdict-agent results.
@@ -177,7 +181,7 @@ The market collector gathers KIS price, chart, order-book/trade, flow, rank, ind
 1. Build the `second-verdict` set from:
    - eligible symbols with first score `+2` or `+1`
    - every eligible current holding, regardless of first score
-2. Spawn the short-, mid-, and long-term judge personas in parallel.
+2. Run the daily-trading sub-agent launcher for the short-, mid-, and long-term judge personas in parallel.
 3. Give each judge the same immutable `decision-brief.json` and `verdict-first.json`.
 4. Judges perform portfolio-level comparison without external calls and return target quantities for every `second-verdict` symbol.
 5. They must consider relative attractiveness, duplicate exposure, current weight, market conditions, and same-day fills from the brief.
@@ -189,8 +193,8 @@ The market collector gathers KIS price, chart, order-book/trade, flow, rank, ind
 
 1. Read `trade-execution.md`.
 2. If analysis only was requested, write successful skipped envelopes for `account-before-order.json`, `final-order-verdict.json`, and `execution.json`; do not call order APIs.
-3. For order preparation or execution, spawn `$collect-account-state` for `account-before-order`.
-4. The Main agent sanitizes and writes `account-before-order.json`.
+3. For order preparation or execution, run the daily-trading sub-agent launcher for `account-before-order`.
+4. The Main agent reads the launcher wrapper, sanitizes `parsed_json`, and writes `account-before-order.json`.
 5. If `account-before-order.json` is missing, invalid, or `failed`, do not calculate or submit orders.
 6. For each eligible symbol:
 
@@ -210,7 +214,7 @@ The market collector gathers KIS price, chart, order-book/trade, flow, rank, ind
 
 ### 7. `final-risk-verdict` And Execution
 
-1. Spawn the `final-risk-verdict` sub-agent after order candidates are built and before any order submission.
+1. Run the daily-trading sub-agent launcher for the `final-risk-verdict` sub-agent after order candidates are built and before any order submission.
 2. Give it `references/personas/final-risk-verdict.md`, `decision-brief.json`, `verdict-second.json`, sanitized `account-before-order.json`, and the Main agent's order candidates.
 3. The `final-risk-verdict` sub-agent may approve or block risk, but cannot recalculate target quantities, replace judge results, alter order candidates, or call order APIs.
 4. Write its result to `final-order-verdict.json`.
@@ -227,7 +231,10 @@ The market collector gathers KIS price, chart, order-book/trade, flow, rank, ind
 
 ## Sub-Agent Result Handling
 
-- Use `fork_context=false` when available.
+- Use the daily-trading sub-agent launcher for account, collection, verdict, and final-risk roles. `fork_context=false` remains the conceptual isolation contract; transfer results through launcher wrapper files and canonical artifacts.
+- Runner input specs are JSON files containing `run_id`, `started_at`, `stage`, `agent_role`, `task_name`, `prompt`, `workspace_dir`, and `output_dir`.
+- The launcher writes `reports/runs/<run_id>/subagents/<task_name>.wrapper.json` and raw text only. The Main agent owns every canonical artifact under `reports/runs/<run_id>/`.
+- Main agent may use only sanitized wrapper `parsed_json` for canonical artifacts. Failed wrappers, invalid JSON, or missing wrappers must be recorded as failed stage evidence in `stage-metrics.json`.
 - Preserve every raw verdict result inside the corresponding verdict JSON.
 - If a verdict response is structurally incomplete, request one correction without adding new data.
 - After one failed correction, record the response error and continue with remaining valid responses.

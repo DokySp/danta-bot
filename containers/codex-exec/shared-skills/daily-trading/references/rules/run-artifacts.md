@@ -12,6 +12,9 @@ reports/
 ├── YYYY-MM-DD_포트폴리오.md
 └── runs/
     └── <run_id>/
+        ├── subagents/
+        │   ├── <task_name>.wrapper.json
+        │   └── <task_name>.raw.txt
         ├── run.json
         ├── stage-metrics.json
         ├── market.json
@@ -30,6 +33,8 @@ reports/
 Create `run.json` and initialize `stage-metrics.json` immediately when daily-trading begins. Write every other file when its stage completes or fails. Domain snapshots are write-once; retries and partial results are retained in an `attempts` array rather than replacing earlier evidence.
 
 Financial cache files live outside `reports/runs/<run_id>/` because they are reused by date. The cache key is the Korea trading date, and the validity period is one Korea trading day.
+
+The daily-trading sub-agent launcher writes only `subagents/<task_name>.wrapper.json` and `subagents/<task_name>.raw.txt`. It does not write canonical artifacts such as `market.json`, `financial.json`, `news.json`, or verdict files. The Main agent reads each wrapper, sanitizes `parsed_json`, writes the canonical artifact, and copies the wrapper metric into `stage-metrics.json`.
 
 ## Status Values
 
@@ -122,6 +127,8 @@ Omit `symbol_id` only for run-wide errors. Do not include sensitive values in er
 
 If exact token usage is available, record actual integer values and `token_source="actual"`. If exact token usage is not available, keep all token fields `null`, set `token_source="unavailable"`, and record a non-sensitive reason such as `runtime did not expose per-stage token usage`.
 
+Launcher wrappers must be treated as failed stage evidence when the wrapper is missing, has `status="failed"`, has a non-zero `returncode`, or has `parsed_json=null`. Failed wrappers must be reflected in `stage-metrics.json` with the launcher's `actual_model` and `actual_effort`; the Main agent must write a failed canonical envelope for the affected stage and block order candidate calculation or order submission when the failed stage is required.
+
 ## File Responsibilities
 
 - `run.json`: input scope, environment, timestamps, stage statuses, final status, artifact paths, `market_holiday.status` (`open`, `closed`, or `unknown`), and validation status.
@@ -171,6 +178,8 @@ If exact token usage is available, record actual integer values and `token_sourc
 ```
 
 Financial or news absence alone does not make a symbol ineligible. If `symbol_id`, `symbol_name`, `price.current_or_last`, and `price.observed_at` exist, keep `eligible_for_verdict=true`, set `evidence_mode="price_only"`, and record the missing domains in `required_missing` or `warnings`.
+
+`price_only` is a fallback for actual financial/news missing, failed, or no-data results after those domain paths ran or a valid financial cache path was checked. It is not a shortcut for `closed` market status, previous-trading-day snapshot mode, or Main-agent-only price lookup.
 
 ## `final-order-verdict.json` Shape
 

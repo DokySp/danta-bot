@@ -5,6 +5,7 @@
 - The complete portfolio universe is collected in detail once per `run_id`.
 - `market`, `financial`, and `news` collection sub-agents run in parallel and each receives the same complete symbol list.
 - Each domain returns one JSON object containing all symbols.
+- The launcher spec for each collection agent must include the complete universe in `symbol_ids` so the wrapper can fail fast when a domain silently drops a symbol.
 - `first-verdict` and `second-verdict` agents reuse the saved snapshots. They never recollect or call external tools.
 - Retries are allowed only to recover failed KIS calls before that domain snapshot is finalized. Preserve all attempts in the domain JSON.
 - If a domain agent fails without valid JSON, the Main agent creates a `failed` envelope and adds the same required agent-level error to every symbol so no symbol silently disappears.
@@ -26,7 +27,7 @@
 Before account snapshots, collection, verdicts, or order preparation, the Main agent runs `$check-holiday` for the Asia/Seoul target date. Record the normalized `status` as `open`, `closed`, or `unknown` in `run.json`, `decision-brief.json`, and the report.
 
 - `open`: collect normal live market snapshots.
-- `closed`: collect or reuse the most recent valid trading-day price snapshot and label `price.snapshot_mode="previous_trading_day"`.
+- `closed`: collect or reuse the most recent valid trading-day price snapshot and label `price.snapshot_mode="previous_trading_day"`. This only changes the market snapshot mode and execution path; it does not skip financial collection, news/disclosure collection, or any collection sub-agent.
 - `unknown`: collection and analysis may continue, but real order and reservation submission are blocked.
 
 ### Market Collector
@@ -35,6 +36,16 @@ Allowed:
 
 - KIS price, daily/weekly/monthly chart, intraday chart, order book, trade, investor flow, rank, industry, and ETF/ETN NAV APIs
 - Local calculations derived only from collected market data
+
+The market collector owns symbol market information and price snapshot lookup. The Main agent must not directly call price, quote, chart, order-book, flow, rank, industry, or ETF/NAV APIs to substitute for the market collector.
+
+The market collector must return the canonical `Market JSON Shape` below. Alias-only fields are not sufficient for canonical artifacts:
+
+- Use `symbol_id`, not `symbol`, `pdno`, `stock_code`, or `code`.
+- Use `symbol_name`, not only `market_identity.name`.
+- Use `price.current_or_last`, `price.observed_at`, and `price.snapshot_mode`, not only `current_or_latest_price`.
+- Use `schema_version="1"`, not numeric `1`, `"1.0"`, or other variants.
+- Include one row for every input `symbol_ids` entry. When a symbol cannot be priced, keep its row, set `eligible_for_verdict=false`, and record the required per-symbol error instead of dropping it.
 
 Required stock information:
 
@@ -60,6 +71,8 @@ Forbidden:
 
 Must use `$collect-financial-information`. KIS and official sources only.
 
+Market status `closed` is not a financial-data condition. Unless a valid cache hit is used, the financial collector must still attempt the portfolio-wide financial collection and return per-symbol results or per-symbol errors.
+
 Financial collection is cache-first:
 
 - Cache path: `reports/cache/financial/<YYYY-MM-DD>.json`
@@ -71,6 +84,8 @@ Financial collection is cache-first:
 ### News Collector
 
 Must use `$collect-news-information`. KIS news and disclosure-related APIs only.
+
+Market status `closed` is not a news-data condition. The news collector must still attempt KIS news/disclosure collection and return per-symbol summaries, empty successful searches, or per-symbol errors.
 
 Forbidden:
 
@@ -130,6 +145,8 @@ Set `eligible_for_verdict=false` only when one of the following prevents even a 
 
 Financial collection failure, missing financial fields, news lookup failure, and no-news results are not exclusion reasons by themselves. If a symbol has a resolved identifier, name, current-or-last price, and observation time, keep `eligible_for_verdict=true`, set `evidence_mode="price_only"`, and record financial/news gaps in `required_missing`, `warnings`, or non-sensitive `errors`.
 
+Use `evidence_mode="price_only"` only after the relevant financial/news collector or cache path actually returned missing, failed, or no-data evidence for that symbol. Do not mark a symbol `price_only` merely because the market is `closed`, because the run uses previous-trading-day prices, or because the Main agent skipped a required collector.
+
 An empty but successfully completed news search is not a failure. Product-specific non-applicable fields are not missing data.
 
 Ineligible symbols remain in every applicable artifact and the final report, but are excluded from both verdict stages, target quantities, and orders.
@@ -182,7 +199,11 @@ Exclude:
       "eligible_for_verdict": true,
       "required_missing": [],
       "market_context": {},
-      "price": {},
+      "price": {
+        "current_or_last": null,
+        "observed_at": "",
+        "snapshot_mode": "live | previous_trading_day"
+      },
       "charts": {"daily": [], "weekly": [], "monthly": []},
       "order_book": {},
       "trades": [],
