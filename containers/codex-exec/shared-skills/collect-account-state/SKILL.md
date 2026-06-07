@@ -29,11 +29,18 @@ Allowed read-only KIS account APIs:
 Rules:
 
 - Use only read-only inquiry APIs. Inspect current parameters with `find_api_detail` before the first use of each API type.
-- Use `$gate-kis-calls` before every KIS call when that skill is available.
+- Call KIS directly. For retryable rate-limit, gateway, transport, and timeout failures, use bounded backoff before marking a lookup failed.
 - Do not provide account number, account product code, or HTS ID; the MCP wrapper supplies them.
 - Do not call order submission, reservation submission, correction, cancellation, or order-revision APIs.
 - Do not write files, submit orders, calculate final target quantities, or make trading decisions.
 - Do not return account numbers, account product codes, access tokens, app keys, app secrets, HTS IDs, raw auth headers, or credential-like values.
+
+## KIS Backoff
+
+- For retryable KIS/MCP API error codes or messages, including rate-limit, temporary gateway/routing, transport, and timeout failures, retry the same API with the same parameters using exponential backoff up to 10 retries after the initial call.
+- Recommended delay sequence is 1, 2, 4, 8, 16, then 30 seconds capped for remaining retries. Add small jitter when the runtime supports it.
+- Preserve every attempt in `attempts`, including API name, non-sensitive parameters, error code/message, delay, and final outcome.
+- Authentication, token, credential, and permission errors are not local backoff targets. Return those errors to the daily-trading Main agent; do not call `auth_token`.
 
 ## Failure Contract
 
@@ -55,6 +62,7 @@ Do not hide partial data. Preserve successful read-only results, non-sensitive A
   "skipped": false,
   "skip_reason": "",
   "environment": "demo | real",
+  "attempts": [],
   "account_summary": {
     "total_assets": null,
     "cash": null,

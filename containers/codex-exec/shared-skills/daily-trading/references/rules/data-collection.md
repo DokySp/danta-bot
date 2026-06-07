@@ -6,16 +6,18 @@
 - `market`, `financial`, and `news` collection sub-agents run in parallel and each receives the same complete symbol list.
 - Each domain returns one JSON object containing all symbols.
 - `first-verdict` and `second-verdict` agents reuse the saved snapshots. They never recollect or call external tools.
-- A retry is allowed only to recover a failed collection call before that domain snapshot is finalized. Preserve all attempts in the domain JSON.
+- Retries are allowed only to recover failed KIS calls before that domain snapshot is finalized. Preserve all attempts in the domain JSON.
 - If a domain agent fails without valid JSON, the Main agent creates a `failed` envelope and adds the same required agent-level error to every symbol so no symbol silently disappears.
 
-## KIS Call Gate
+## KIS Call Backoff
 
-- Every KIS call made by a collection agent must use `$gate-kis-calls`.
-- One gate lease permits exactly one KIS call.
+- KIS calls made by collection agents are direct calls. Do not use a shared KIS call gate.
 - Inspect current parameters with the relevant tool's `find_api_detail` before the first call to each API type.
-- Do not group KIS calls with `multi_tool_use.parallel`.
-- `EGW00201` and rate-limit errors are recorded and retried only within the gate rules.
+- Do not group multiple KIS calls from the same agent with `multi_tool_use.parallel`.
+- For retryable KIS/MCP API error codes or messages, including rate-limit, temporary gateway/routing, transport, and timeout failures, retry the same API with the same parameters using exponential backoff up to 10 retries after the initial call.
+- Recommended delay sequence is 1, 2, 4, 8, 16, then 30 seconds capped for remaining retries. Add small jitter when the runtime supports it.
+- Record every attempt with API name, non-sensitive parameters, error code/message, delay, and final outcome.
+- Authentication, token, credential, and permission errors are not local backoff targets. Return them to the Main agent so `auth-token.md` can handle token reissue centrally.
 
 ## Domain Responsibilities
 

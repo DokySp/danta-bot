@@ -25,15 +25,23 @@ Forbidden sources:
 ## Permissions
 
 - External calls: allowed only through KIS MCP news/disclosure-related APIs.
-- KIS calls: allowed only through `$gate-kis-calls`.
+- KIS calls: direct calls only, with bounded backoff for retryable KIS failures.
 - Account, balance, order-available, fill-history, pending-order, reservation-order, and order APIs: forbidden.
 - File writes and order submission: forbidden.
 - Secrets such as account numbers, tokens, app keys, app secrets, and HTS IDs: never request or return.
 
+## KIS Backoff
+
+- Before the first use of each KIS API type, inspect current parameters with `find_api_detail`.
+- For retryable KIS/MCP API error codes or messages, including rate-limit, temporary gateway/routing, transport, and timeout failures, retry the same API with the same parameters using exponential backoff up to 10 retries after the initial call.
+- Recommended delay sequence is 1, 2, 4, 8, 16, then 30 seconds capped for remaining retries. Add small jitter when the runtime supports it.
+- Preserve every attempt in `attempts`, including API name, non-sensitive parameters, error code/message, delay, and final outcome.
+- Authentication, token, credential, and permission errors are not local backoff targets. Return those errors to the daily-trading Main agent; do not call `auth_token`.
+
 ## Workflow
 
 1. Accept `run_id`, `started_at`, trading environment, and the complete symbol list.
-2. Before every KIS call, use `$gate-kis-calls`; inspect current parameters with `find_api_detail` before the first use of each API.
+2. Call KIS directly and apply the KIS backoff rules before finalizing any failed KIS result.
 3. Search each symbol by identifier and unambiguous name using only KIS news/disclosure-related APIs.
 4. Record market-wide KIS news separately from symbol-specific KIS news.
 5. Deduplicate substantially identical KIS items while preserving distinct KIS identifiers when available.

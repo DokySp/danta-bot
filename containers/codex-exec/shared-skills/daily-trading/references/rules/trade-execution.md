@@ -54,6 +54,16 @@ Forbidden to every sub-agent:
 - cancellation
 - order revision
 
+## Order API Backoff
+
+The Main agent calls order APIs directly. For retryable KIS/MCP API error codes or messages, including rate-limit and temporary gateway/routing errors that clearly indicate the order was not accepted, and transport failures that happened before request submission, retry the same validated order with the same parameters using exponential backoff up to 10 retries after the initial call.
+
+Recommended delay sequence is 1, 2, 4, 8, 16, then 30 seconds capped for remaining retries. Record every order attempt in `execution.json` with non-sensitive API name, symbol, direction, quantity, error code/message, delay, and final outcome.
+
+For timeout, transaction-timeout, or any uncertain order result, do not blindly retry. First refresh order/fill/reservation state through read-only lookup, confirm whether the order or reservation already exists, and retry only if the latest state proves that no order was accepted.
+
+Authentication, token, credential, and permission errors are not order backoff targets. Use `auth-token.md` for the single central token reissue retry, and block the order if that retry fails.
+
 ## Quantity Calculation
 
 For each eligible `second-verdict` symbol:
@@ -147,7 +157,7 @@ The `final-risk-verdict` sub-agent must not recalculate target quantities, chang
 2. Obtain an `approved` result in `final-order-verdict.json`.
 3. Process sells before buys.
 4. Do not count unfilled sell proceeds as buy cash.
-5. Submit orders sequentially with the KIS-required interval.
+5. Submit orders sequentially and apply the order API backoff rules at each call site.
 6. A failed or blocked order does not transfer its quantity or budget to another symbol in the same run.
 7. After submissions, refresh available order/fill state through `$collect-account-state` and record it in `execution.json`.
 

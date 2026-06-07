@@ -20,11 +20,19 @@ Do not use blogs, social media, community posts, unofficial aggregators, or unso
 ## Permissions
 
 - External calls: allowed only for the sources above.
-- KIS calls: allowed only through `$gate-kis-calls`.
+- KIS calls: direct calls only, with bounded backoff for retryable KIS failures.
 - Account, balance, order-available, fill-history, pending-order, reservation-order, and order APIs: forbidden.
 - File writes and order submission: forbidden.
 - Cache writes: forbidden. Return cache update candidates to the caller instead.
 - Secrets such as account numbers, tokens, app keys, app secrets, and HTS IDs: never request or return.
+
+## KIS Backoff
+
+- Before the first use of each KIS API type, inspect current parameters with `find_api_detail`.
+- For retryable KIS/MCP API error codes or messages, including rate-limit, temporary gateway/routing, transport, and timeout failures, retry the same API with the same parameters using exponential backoff up to 10 retries after the initial call.
+- Recommended delay sequence is 1, 2, 4, 8, 16, then 30 seconds capped for remaining retries. Add small jitter when the runtime supports it.
+- Preserve every attempt in `attempts`, including API name, non-sensitive parameters, error code/message, delay, and final outcome.
+- Authentication, token, credential, and permission errors are not local backoff targets. Return those errors to the daily-trading Main agent; do not call `auth_token`.
 
 ## Cache-First Rule
 
@@ -43,7 +51,7 @@ Financial data is valid for one Korea trading day.
 2. Accept `trading_date`, `force_refresh`, and any caller-supplied cache payload.
 3. Validate the cache payload by trading date, schema version, symbol coverage, and absence of failure status.
 4. On valid cache hit, return from cache with `cache.status="hit"` and no external calls.
-5. On cache miss, before every KIS call, use `$gate-kis-calls`; inspect current parameters with `find_api_detail` before the first use of each API.
+5. On cache miss, call KIS directly and apply the KIS backoff rules before finalizing any failed KIS result.
 6. For every symbol, attempt both the applicable KIS financial search and an official-source search.
 7. For stocks, collect available valuation, earnings, balance-sheet, profitability, leverage, dividend, estimate, and official filing data.
 8. For ETFs/ETNs, collect issuer facts and official product data that are financial in nature. Mark stock-only fields `not_applicable`.

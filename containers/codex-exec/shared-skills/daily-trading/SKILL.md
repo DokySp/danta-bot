@@ -103,7 +103,7 @@ These rules apply to direct and indirect use, including `daily-*`, `pre-open`, `
 - Three collection agents run in parallel: `market`, `financial`, and `news`.
 - They receive the complete portfolio universe and collect detailed data for every symbol in their domain.
 - External calls are allowed only inside each domain's permission boundary.
-- Every KIS call must use `$gate-kis-calls`.
+- KIS calls are made directly at each call site. Transient gateway, timeout, and rate-limit failures must use the bounded backoff rules in `data-collection.md`.
 - `financial` must use `$collect-financial-information`.
 - `news` must use `$collect-news-information` and is KIS news/disclosure only.
 - Account, balance, order, order-available, fill-history, pending-order, reservation-order, correction, and cancellation APIs are forbidden.
