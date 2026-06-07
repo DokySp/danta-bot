@@ -12,7 +12,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -307,7 +307,7 @@ class StateStore:
     def set_default_session(self, session_id: str) -> None:
         payload = {
             "session_id": session_id,
-            "updated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "updated_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
         }
         tmp = self.path.with_suffix(".json.tmp")
         with self.lock:
@@ -681,7 +681,7 @@ class CodexRunner:
             "copied": copied,
             "replaced_existing": replaced,
             "skipped_existing": skipped,
-            "synced_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "synced_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
         }
         marker.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
 
