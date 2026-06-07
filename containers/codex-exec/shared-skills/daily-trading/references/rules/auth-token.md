@@ -12,7 +12,7 @@ KIS Open API는 appkey/appsecret과 별도로 OAuth 접근토큰을 사용한다
 - 프롬프트에 `CODEX_MCP_TRADING_ENV`가 있으면 사용자 표현보다 우선한다. `paper`는 `env_dv="demo"`, `acct`는 `env_dv="real"`을 사용한다.
 - 프롬프트에 `CODEX_MCP_TRADING_ENV`가 없을 때만 사용자 표현으로 환경을 결정한다. 이 경우 모의거래는 `env_dv="demo"`, 실전거래 또는 실전 계좌 조회는 `env_dv="real"`을 사용한다.
 - sub agent에는 토큰이나 인증 응답 원문을 전달하지 않는다. 인증 프리플라이트와 재발급은 메인 Codex만 수행한다.
-- 수집 sub agent의 KIS 호출은 허용하지만 반드시 `$gate-kis-calls`를 사용한다. 1차·2차 평결 sub agent의 KIS 호출은 금지한다.
+- 수집 sub agent와 read-only account sub agent의 KIS 호출은 허용하지만 반드시 `$gate-kis-calls`를 사용한다. `first-verdict`·`second-verdict`·`final-risk-verdict` sub agent의 KIS 호출은 금지한다.
 
 ## 토큰 API
 
@@ -90,4 +90,4 @@ API 호출이 인증 문제로 실패하면 다음 순서로 처리한다.
 - 인증 오류 후 무한 재시도
 - `real`과 `demo` 토큰 혼용
 - 수집 sub agent가 `$gate-kis-calls` 없이 KIS API 호출
-- 1차·2차 평결 sub agent의 인증 또는 KIS API 호출
+- `first-verdict`·`second-verdict`·`final-risk-verdict` sub agent의 인증 또는 KIS API 호출

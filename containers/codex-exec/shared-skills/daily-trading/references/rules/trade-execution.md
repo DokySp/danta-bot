@@ -2,7 +2,7 @@
 
 ## Scope
 
-The second verdict decides portfolio target quantities. Only the main agent converts those targets into orders and calls account or order APIs.
+`second-verdict` decides portfolio target quantities. Only the Main agent converts those targets into order candidates and calls actual order submission APIs. Read-only account state is collected through `$collect-account-state`.
 
 - Analysis-only request: calculate and report targets, but do not call order APIs. Write skipped `account-before-order.json` and `execution.json`.
 - Preparation or review request: refresh account state and create order tickets, but do not submit.
@@ -11,11 +11,11 @@ The second verdict decides portfolio target quantities. Only the main agent conv
 
 `CODEX_MCP_TRADING_ENV` overrides conflicting environment wording: `paper` maps to `demo`; `acct` maps to `real`.
 
-## Main-Agent API Boundary
+## Account Snapshot Boundary
 
-Collection and verdict sub-agents cannot call any API in this section.
+Collection, `first-verdict`, `second-verdict`, and `final-risk-verdict` sub-agents cannot call any account or order API.
 
-Before order calculation, the main agent sequentially refreshes:
+Before order calculation, the Main agent requests `$collect-account-state` with `snapshot_type="account-before-order"` to refresh:
 
 - `inquire_account_balance`
 - `inquire_balance`
@@ -25,11 +25,30 @@ Before order calculation, the main agent sequentially refreshes:
 - `inquire_psbl_order` for buy candidates
 - `inquire_psbl_sell` for sell candidates
 
-Inspect current parameters with `find_api_detail`. Do not provide account number, account product code, or HTS ID because the MCP wrapper supplies them. Do not run ledger APIs in parallel.
+The account sub-agent must inspect current parameters with `find_api_detail`, must not provide account number, account product code, or HTS ID because the MCP wrapper supplies them, and must not run ledger APIs in parallel. It returns JSON only. The Main agent sanitizes and writes `account-before-order.json`.
+
+If `account-before-order.json` is missing, invalid, or `failed`, the Main agent must block order candidate calculation, `final-risk-verdict`, and submission.
+
+## Main-Agent Order API Boundary
+
+Only the Main agent may call actual order APIs after explicit authorization and every gate has passed.
+
+Allowed only when explicitly authorized and validated:
+
+- `order_cash`
+- `order_resv`
+
+Forbidden to every sub-agent:
+
+- order submission
+- reservation submission
+- correction
+- cancellation
+- order revision
 
 ## Quantity Calculation
 
-For each eligible second-verdict symbol:
+For each eligible `second-verdict` symbol:
 
 ```text
 expected_holding_quantity =
@@ -79,9 +98,30 @@ Every order must satisfy all applicable constraints:
 - same-day fill guard passed
 - user maximum amount, maximum quantity, prohibited symbols, and price limits passed
 - order price and order type were validated using current API details
+- `final-risk-verdict` result is `approved`
 - real submission was explicitly requested
 
 If any gate fails, do not submit that order. Record `blocked` and the exact non-sensitive reason.
+
+## `final-risk-verdict` Gate
+
+After order candidates are created and before any submission, the Main agent spawns the `final-risk-verdict` sub-agent.
+
+Inputs:
+
+- `decision-brief.json`
+- `verdict-second.json`
+- sanitized `account-before-order.json`
+- order candidates
+
+The `final-risk-verdict` sub-agent can return only `approved`, `blocked`, or `needs_review`.
+
+- `approved`: the Main agent may continue to explicit-authorization and order API gates.
+- `blocked`: the Main agent records blocked execution and submits nothing.
+- `needs_review`: the Main agent records review-needed execution and submits nothing.
+- missing, invalid, or `failed`: the Main agent records blocked execution and submits nothing.
+
+The `final-risk-verdict` sub-agent must not recalculate target quantities, change order candidates, replace judge output, call APIs, or write files.
 
 ## Price And Order Type
 
@@ -94,11 +134,12 @@ If any gate fails, do not submit that order. Record `blocked` and the exact non-
 ## Submission Order
 
 1. Validate all candidates against the same latest account snapshot.
-2. Process sells before buys.
-3. Do not count unfilled sell proceeds as buy cash.
-4. Submit orders sequentially with the KIS-required interval.
-5. A failed or blocked order does not transfer its quantity or budget to another symbol in the same run.
-6. After submissions, refresh available order/fill state sequentially and record it in `execution.json`.
+2. Obtain an `approved` result in `final-order-verdict.json`.
+3. Process sells before buys.
+4. Do not count unfilled sell proceeds as buy cash.
+5. Submit orders sequentially with the KIS-required interval.
+6. A failed or blocked order does not transfer its quantity or budget to another symbol in the same run.
+7. After submissions, refresh available order/fill state through `$collect-account-state` and record it in `execution.json`.
 
 ## Execution JSON Fields
 
@@ -107,6 +148,7 @@ If any gate fails, do not submit that order. Record `blocked` and the exact non-
 ```json
 {
   "request_type": "analysis | prepare | demo-submit | real-submit",
+  "final_order_verdict_result": "approved | blocked | needs_review | skipped",
   "target_cash_amount": 0,
   "latest_available_cash": 0,
   "orders": [

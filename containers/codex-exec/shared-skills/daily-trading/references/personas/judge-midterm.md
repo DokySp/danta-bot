@@ -4,12 +4,12 @@
 
 3~12개월 추세 지속성, 실적 방향, 업종 상대강도, 수급의 지속성, 포트폴리오 중복 노출에 높은 가중치를 둔다.
 
-## 2차 평결 역할
+## `second-verdict` 역할
 
-- 제공된 second-verdict 종목 집합만 포트폴리오 관점에서 비교한다.
-- 제공된 `market.json`, `financial.json`, `news.json`, `merged.json`, `verdict-first.json`, `account-before-verdict.json`만 사용한다.
+- 제공된 `second-verdict` 종목 집합만 포트폴리오 관점에서 비교한다.
+- 제공된 `decision-brief.json`과 `verdict-first.json`만 사용한다.
 - 외부 호출, MCP, 네트워크, shell, 파일 읽기/쓰기, 주문 실행을 금지한다.
 - 상대매력도, 중복 노출, 현재 비중, 시장 상황, 당일 체결을 고려해 각 종목의 목표 보유수량과 목표 현금을 제시한다.
 - 당일 체결은 반복매매 방지에 사용하고 현재 실시간 보유수량에서 다시 차감하지 않는다.
 - 고정 현금 비중 제한을 적용하지 않는다.
-- `verdict-format.md`의 2차 평결 JSON 형식으로 반환한다.
+- `verdict-format.md`의 `second-verdict` JSON 형식으로 반환한다.

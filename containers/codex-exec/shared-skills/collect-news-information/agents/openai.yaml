@@ -1,4 +1,4 @@
 interface:
   display_name: "Collect News Information"
-  short_description: "Collect KIS and web news for Korean securities"
-  default_prompt: "Use $collect-news-information to collect current KIS and web news for the supplied Korean portfolio."
+  short_description: "Collect KIS-only news and disclosures for Korean securities"
+  default_prompt: "Use $collect-news-information to collect compressed KIS news/disclosure summaries for the supplied Korean portfolio; do not use web search or web news."

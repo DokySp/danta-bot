@@ -272,7 +272,7 @@ class Config:
                 MCP_TRADING_ENV_VALUES,
             ),
             model=os.getenv("CODEX_MODEL", "gpt-5.5"),
-            reasoning_effort=os.getenv("CODEX_REASONING_EFFORT", "xhigh"),
+            reasoning_effort=os.getenv("CODEX_REASONING_EFFORT", "medium"),
             codex_timeout_seconds=env_int("CODEX_TIMEOUT_SECONDS", 1800),
             scheduler_poll_seconds=env_int("SCHEDULER_POLL_SECONDS", 15),
             telegram_typing_interval_seconds=env_float("TELEGRAM_TYPING_INTERVAL_SECONDS", 4.0),

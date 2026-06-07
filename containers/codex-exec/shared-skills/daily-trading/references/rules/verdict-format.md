@@ -2,9 +2,15 @@
 
 ## External-Call Ban
 
-First- and second-verdict agents use only the immutable snapshots supplied by the main agent. KIS, MCP, web, network, shell, file reads outside supplied persona text, file writes, and recollection are forbidden.
+`first-verdict`, `second-verdict`, and `final-risk-verdict` agents use only the immutable snapshots supplied by the Main agent. KIS, MCP, web, network, shell, file reads outside supplied persona text, file writes, and recollection are forbidden.
 
-## First Verdict
+## `decision-brief.json` Input
+
+`decision-brief.json` is the default input for all verdict agents. Do not give verdict agents raw `merged.json` unless the user explicitly changes this contract.
+
+The brief contains compact per-symbol market, financial, KIS news/disclosure, account exposure, eligibility, and error summaries. It must not contain long raw API payloads, full article text, repeated source detail, or sensitive account/authentication values.
+
+## `first-verdict`
 
 The seven analyst and ten juror personas independently score every eligible symbol.
 
@@ -44,7 +50,7 @@ Rules:
 
 - `score` is one of `-2`, `-1`, `0`, `1`, `2`.
 - `confidence` is an integer from `1` to `10`.
-- Evidence cites fields and observation dates from `merged.json`.
+- Evidence cites fields and observation dates from `decision-brief.json`.
 - One symbol's data cannot support another symbol.
 - An agent cannot see other verdict outputs.
 
@@ -66,11 +72,11 @@ Map `mean_score` to the final first score:
 | `> -1.5 and <= -0.5` | `-1` |
 | `<= -1.5` | `-2` |
 
-If no valid score exists, exclude the symbol from the second verdict and trading.
+If no valid score exists, exclude the symbol from `second-verdict` and trading.
 
-## Second Verdict
+## `second-verdict`
 
-The second-verdict set contains eligible `+2` and `+1` symbols plus every eligible current holding. Short-, mid-, and long-term judges independently compare the set at portfolio level.
+The `second-verdict` set contains eligible `+2` and `+1` symbols plus every eligible current holding. Short-, mid-, and long-term judges independently compare the set at portfolio level.
 
 Each judge returns:
 
@@ -103,15 +109,15 @@ Each judge returns:
 Rules:
 
 - `target_holding_quantity` is a non-negative integer.
-- Every second-verdict symbol receives a target quantity, including holdings that should be reduced to zero.
+- Every `second-verdict` symbol receives a target quantity, including holdings that should be reduced to zero.
 - Consider relative attractiveness, duplicate exposure, current weight, market conditions, and same-day fills.
 - Same-day fills are a repeated-trade guard; do not subtract them from current live holdings.
 - No fixed minimum cash ratio, maximum cash ratio, or fixed investment ratio is allowed.
-- Judges cannot add a symbol that is absent from the second-verdict set.
+- Judges cannot add a symbol that is absent from the `second-verdict` set.
 
 ### Reconciliation
 
-The main agent reconciles valid judge results:
+The Main agent reconciles valid judge results:
 
 - Final target holding quantity: median of valid judge target quantities for that symbol, rounded down only if a non-integer can occur.
 - Final target cash amount: median of valid judge target cash amounts.
@@ -122,6 +128,58 @@ The main agent reconciles valid judge results:
 - Apply explicit user limits and latest account constraints after reconciliation.
 - Record every judge input, valid value, excluded value, and final result in `verdict-second.json`.
 
+## `final-risk-verdict`
+
+The `final-risk-verdict` sub-agent reviews the Main agent's order candidates after `account-before-order.json` is refreshed and before any order submission.
+
+Inputs:
+
+- `decision-brief.json`
+- `verdict-second.json`
+- sanitized `account-before-order.json`
+- the Main agent's order candidate list
+
+Forbidden:
+
+- recalculating target quantities
+- replacing or overriding judge results
+- adding new order candidates
+- changing direction or quantity
+- calling KIS, MCP, web, network, shell, or any external source
+- submitting, reserving, correcting, or cancelling orders
+- writing files
+
+The `final-risk-verdict` returns:
+
+```json
+{
+  "agent_id": "",
+  "persona": "final-risk",
+  "stage": "final-risk-verdict",
+  "result": "approved | blocked | needs_review",
+  "approved_order_ids": [],
+  "risk_checks": [
+    {
+      "check": "",
+      "status": "pass | fail | review",
+      "evidence": "",
+      "affected_orders": []
+    }
+  ],
+  "blocking_reasons": [],
+  "review_reasons": [],
+  "errors": []
+}
+```
+
+Rules:
+
+- `approved` means every order candidate passed `final-risk-verdict` review as provided.
+- `blocked` means at least one required risk gate failed and no order may be submitted.
+- `needs_review` means the evidence is insufficient or ambiguous and no order may be submitted.
+- Missing, invalid, or `failed` `final-risk-verdict` output blocks order submission.
+- The Main agent writes `final-order-verdict.json` and enforces the block/approval result.
+
 ## Allowed Terms
 
 | Field | Allowed values |
@@ -129,5 +187,6 @@ The main agent reconciles valid judge results:
 | artifact status | `success`, `partial`, `failed` |
 | first score | `+2`, `+1`, `0`, `-1`, `-2` |
 | eligibility | `eligible_for_verdict=true/false` |
+| `final-risk-verdict` result | `approved`, `blocked`, `needs_review` |
 | order direction | `buy`, `sell`, `none` |
 | execution result | `submitted`, `skipped`, `blocked`, `failed` |

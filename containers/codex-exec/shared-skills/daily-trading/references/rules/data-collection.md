@@ -5,9 +5,9 @@
 - The complete portfolio universe is collected in detail once per `run_id`.
 - `market`, `financial`, and `news` collection sub-agents run in parallel and each receives the same complete symbol list.
 - Each domain returns one JSON object containing all symbols.
-- First and second verdict agents reuse the saved snapshots. They never recollect or call external tools.
+- `first-verdict` and `second-verdict` agents reuse the saved snapshots. They never recollect or call external tools.
 - A retry is allowed only to recover a failed collection call before that domain snapshot is finalized. Preserve all attempts in the domain JSON.
-- If a domain agent fails without valid JSON, the main agent creates a `failed` envelope and adds the same required agent-level error to every symbol so no symbol silently disappears.
+- If a domain agent fails without valid JSON, the Main agent creates a `failed` envelope and adds the same required agent-level error to every symbol so no symbol silently disappears.
 
 ## KIS Call Gate
 
@@ -50,13 +50,42 @@ Forbidden:
 
 Must use `$collect-financial-information`. KIS and official sources only.
 
+Financial collection is cache-first:
+
+- Cache path: `reports/cache/financial/<YYYY-MM-DD>.json`
+- Validity: one Korea trading day
+- Cache hit: the Main agent creates `financial.json` from the cache without external financial calls
+- Cache miss or explicit force refresh: the financial collector uses KIS and official sources, returns the fresh envelope, and the Main agent updates the cache
+- The financial collector may return a cache update candidate, but it must not write files directly
+
 ### News Collector
 
-Must use `$collect-news-information`. KIS and current web news are allowed.
+Must use `$collect-news-information`. KIS news and disclosure-related APIs only.
+
+Forbidden:
+
+- web search
+- web news sources
+- issuer, exchange, regulator, or government websites outside KIS-returned news/disclosure data
+- full article text or long raw news payloads
+
+News output is compressed to KIS identifiers, title, publication time, publisher/source, short factual summary, affected symbols, risk tags, opportunity tags, and errors.
 
 ## Account Collection
 
-Only the main agent calls account or ledger APIs.
+The Main agent delegates read-only account lookup to `$collect-account-state`, then sanitizes and writes the returned JSON.
+
+The account sub-agent may query:
+
+- account asset summary
+- current live holdings
+- pending orders
+- reservation orders
+- same-day fills
+- buy-available amount or quantity for buy candidates
+- sell-available quantity for sell candidates
+
+The account sub-agent must not submit, reserve, correct, cancel, write files, return sensitive values, or make trading decisions.
 
 Initial snapshot for `account-before-verdict.json`:
 
@@ -76,9 +105,11 @@ Latest snapshot for `account-before-order.json`:
 
 Current live holdings already reflect same-day fills. Same-day fill quantities are retained only as a repeated-trade guard and are not subtracted from holdings.
 
+If either account snapshot is missing, invalid, or `failed`, the Main agent must block order preparation and execution.
+
 ## Symbol Eligibility
 
-The main agent decides eligibility after merging all three domain snapshots.
+The Main agent decides eligibility after merging all three domain snapshots.
 
 Set `eligible_for_verdict=false` when any of the following prevents an evidence-based verdict:
 
@@ -92,6 +123,30 @@ Set `eligible_for_verdict=false` when any of the following prevents an evidence-
 An empty but successfully completed news search is not a failure. Product-specific non-applicable fields are not missing data.
 
 Ineligible symbols remain in every applicable artifact and the final report, but are excluded from both verdict stages, target quantities, and orders.
+
+## decision-brief.json
+
+After `merged.json` is complete, the Main agent creates `decision-brief.json` for verdict agents.
+
+Include:
+
+- symbol id and name
+- eligibility and exclusion reasons
+- current or most recent valid price and observation timestamp
+- core market signals
+- core financial summary
+- core KIS news/disclosure summary
+- account exposure summary
+- missing fields and non-sensitive errors
+
+Exclude:
+
+- long raw API payloads
+- full article text
+- repeated source details
+- account numbers, account product codes, tokens, app keys, app secrets, HTS IDs, auth headers, and credential-like values
+
+`first-verdict`, `second-verdict`, and `final-risk-verdict` agents use `decision-brief.json` as their default input instead of raw `merged.json`.
 
 ## Market JSON Shape
 

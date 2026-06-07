@@ -1,6 +1,6 @@
 ---
 name: daily-trading
-description: "[v20260606-01] 전체 한국 주식·ETF 포트폴리오의 시장·재무·뉴스 정보를 한 번 수집해 재사용하고, 외부 호출 없는 1차 종목 평결과 2차 포트폴리오 평결을 거쳐 목표 보유수량과 주문 목록을 산출한다. Use for KIS MCP based portfolio analysis, daily-* and pre-open trading schedules, sub-agent collection and verdict orchestration, portfolio reports, demo orders, real orders, and reservation orders."
+description: "[v20260607-01] 전체 한국 주식·ETF 포트폴리오의 시장·재무·뉴스와 read-only 계좌 상태를 한 번 수집해 재사용하고, `decision-brief.json` 기반 `first-verdict`, `second-verdict`, `final-risk-verdict`를 거쳐 명시 승인된 주문만 `Main agent`가 제출한다. Use for KIS MCP based portfolio analysis, daily-* and pre-open trading schedules, sub-agent collection and verdict orchestration, portfolio reports, demo orders, real orders, and reservation orders."
 ---
 
 # Daily Trading Portfolio Orchestrator
@@ -16,10 +16,38 @@ Read only the files needed for the current stage.
 - Verdict output: `references/rules/verdict-format.md`
 - Portfolio report: `references/rules/report-template.md`
 - Target quantity and execution: `references/rules/trade-execution.md`
-- First-verdict personas: `references/personas/analyst-*.md`, `references/personas/juror-*.md`
-- Second-verdict personas: `references/personas/judge-*.md`
+- `first-verdict` personas: `references/personas/analyst-*.md`, `references/personas/juror-*.md`
+- `second-verdict` personas: `references/personas/judge-*.md`
+- `final-risk-verdict` persona: `references/personas/final-risk-verdict.md`
 
-## Run Identity And Telegram Start Time
+## Canonical Terms
+
+| Concept | Canonical term |
+|---|---|
+| Main execution owner | `Main agent` |
+| First independent symbol verdict stage | `first-verdict` |
+| Second portfolio target verdict stage | `second-verdict` |
+| Final order risk approval stage | `final-risk-verdict` |
+| Compact verdict input | `decision-brief.json` |
+| Final order risk artifact | `final-order-verdict.json` |
+
+## Recommended Model Matrix
+
+These are prompt and skill-document recommendations only. The daily-trading skill does not enforce `CODEX_MODEL` or `CODEX_REASONING_EFFORT` in code.
+
+| Stage | Agent | Recommended model | Recommended effort |
+|---|---|---|---|
+| Main orchestration | `Main agent` | `gpt-5.5` | `medium` |
+| Account snapshot | `collect-account-state` sub-agent | `gpt-5.3-codex-spark` | `low` |
+| Market collection | `market` sub-agent | `gpt-5.3-codex-spark` | `low` |
+| News collection | `news` sub-agent | `gpt-5.3-codex-spark` | `low` |
+| Financial collection/cache | `financial` sub-agent | `gpt-5.3-codex-spark` | `low` |
+| `first-verdict` | 7 analyst + 10 juror | `gpt-5.5` | `low` |
+| `second-verdict` | 3 judge | `gpt-5.5` | `high` |
+| `final-risk-verdict` | `final-risk-verdict` sub-agent | `gpt-5.5` | `high` |
+| Real order execution | `Main agent` | `gpt-5.5` | `medium` |
+
+## Run Identity And Metrics
 
 The Codex execution prompt normally injects `run_id` and `started_at`.
 
@@ -28,14 +56,17 @@ The Codex execution prompt normally injects `run_id` and `started_at`.
    - `run_id`: filesystem-safe unique value
    - `started_at`: current Asia/Seoul time with timezone
 3. Immediately create `reports/runs/<run_id>/run.json` using `run-artifacts.md`.
-4. Use `reports/runs/<run_id>/` for every intermediate JSON file.
-5. When this skill is actually used, include the following line in the final response on both success and failure:
+4. Immediately initialize `reports/runs/<run_id>/stage-metrics.json`.
+5. Use `reports/runs/<run_id>/` for every intermediate JSON file.
+6. Record every major stage in `stage-metrics.json` with stage name, agent role, recommended model, recommended effort, `started_at`, `ended_at`, `duration_ms`, and status.
+7. If exact token usage is available, record it. If exact token usage is unavailable, set `input_tokens`, `output_tokens`, and `total_tokens` to `null`, set `token_source="unavailable"`, and record a non-sensitive reason.
+8. When this skill is actually used, include the following line in the final response on both success and failure:
 
    ```text
    작업 시작: YYYY-MM-DD HH:MM:SS KST
    ```
 
-6. Do not show that line for work that did not use this skill.
+9. Do not show that line for work that did not use this skill.
 
 These rules apply to direct and indirect use, including `daily-*`, `pre-open`, `$execute-trade`, and direct or indirect `$daily-trading` execution.
 
@@ -43,30 +74,40 @@ These rules apply to direct and indirect use, including `daily-*`, `pre-open`, `
 
 ### Main Agent Only
 
+- Orchestrate every stage and decide the portfolio universe.
 - Create and update files under `reports/`.
-- Determine the complete portfolio universe.
 - Perform KIS authentication preflight and token reissue.
-- Call account, balance, order-available, fill-history, pending-order, reservation-order, and order APIs.
-- Merge collection output, decide exclusions, calculate final target quantities, create final orders, and submit explicitly authorized orders.
-- Remove sensitive fields before writing artifacts or sending sub-agent input.
+- Sanitize every artifact and every sub-agent input.
+- Merge collection output, decide exclusions, build `decision-brief.json`, calculate order candidates, confirm explicit user authorization, and submit authorized orders.
+- Call actual order submission APIs only after every gate passes.
+- Never delegate order submission, reservation submission, correction, cancellation, artifact persistence, or sensitive-field handling.
+
+### Account Sub-Agent
+
+- Use `$collect-account-state` for `account-before-verdict` and `account-before-order`.
+- Allowed read-only lookups: account summary, balances, current holdings, same-day fills, pending orders, reservation orders, buy-available amount or quantity, and sell-available quantity.
+- Return JSON only. The Main agent sanitizes again and writes `account-before-verdict.json` or `account-before-order.json`.
+- If the account sub-agent returns `failed`, returns no valid JSON, or misses a required field, the Main agent blocks order preparation and execution.
+- Forbidden: order submission, reservation submission, correction, cancellation, file writes, final target calculation, and sensitive information return.
 
 ### Collection Sub-Agents
 
 - Three collection agents run in parallel: `market`, `financial`, and `news`.
 - They receive the complete portfolio universe and collect detailed data for every symbol in their domain.
-- External calls are allowed.
+- External calls are allowed only inside each domain's permission boundary.
 - Every KIS call must use `$gate-kis-calls`.
 - `financial` must use `$collect-financial-information`.
-- `news` must use `$collect-news-information`.
-- Account, balance, order, order-available, fill-history, pending-order, and reservation-order APIs are forbidden.
-- They return JSON to the main agent and do not write files.
+- `news` must use `$collect-news-information` and is KIS news/disclosure only.
+- Account, balance, order, order-available, fill-history, pending-order, reservation-order, correction, and cancellation APIs are forbidden.
+- They return JSON to the Main agent and do not write files.
 
 ### Verdict Sub-Agents
 
-- First-verdict and second-verdict agents cannot call KIS, web, MCP, network, shell, or any external data source.
+- `first-verdict`, `second-verdict`, and `final-risk-verdict` agents cannot call KIS, web, MCP, network, shell, or any external data source.
 - They cannot write files or submit orders.
-- They may use only the exact snapshots supplied by the main agent.
-- Missing data stays missing. Recollection, substitution from another symbol, and guessing are forbidden.
+- Their default input is `decision-brief.json`, not raw `merged.json`.
+- They may use only the exact snapshots, personas, and verdict artifacts supplied by the Main agent.
+- Missing data stays missing. Recollection, substitution from another symbol, target-quantity invention outside the assigned stage, and guessing are forbidden.
 
 ## Execution Flow
 
@@ -74,63 +115,74 @@ These rules apply to direct and indirect use, including `daily-*`, `pre-open`, `
 
 1. Resolve input symbols from the user request and, when requested, `$check-portfolio`.
 2. Perform authentication preflight using `auth-token.md`.
-3. The main agent captures a sanitized initial account snapshot to identify current holdings and existing orders.
-4. The complete portfolio universe is the union of requested/configured symbols and current holdings. Resolve names and identifiers without dropping unresolved inputs.
-5. Write `account-before-verdict.json`. Account APIs are never delegated.
-6. If the initial account snapshot fails, continue collection and analysis only for requested/configured symbols, mark current holdings as unknown, and block all order preparation and submission.
+3. Spawn `$collect-account-state` for `account-before-verdict`.
+4. The Main agent sanitizes and writes `account-before-verdict.json`.
+5. The complete portfolio universe is the union of requested/configured symbols and current holdings. Resolve names and identifiers without dropping unresolved inputs.
+6. If the initial account snapshot fails, continue collection and analysis only for requested/configured symbols, mark current holdings as unknown, and block order preparation and submission.
+7. Record every step above in `stage-metrics.json`.
 
 ### 2. Collect Once
 
 1. Spawn the `market`, `financial`, and `news` collection agents in parallel.
 2. Give each agent the same complete symbol list, `run_id`, `started_at`, environment, required schema, and permission boundary.
-3. Each agent performs one complete domain collection pass for all symbols.
-4. Write each returned payload immediately and exactly once:
+3. The financial path is cache-first:
+   - cache location: `reports/cache/financial/<YYYY-MM-DD>.json`
+   - validity: one Korea trading day
+   - cache hit: generate `financial.json` from cache without external financial calls
+   - cache miss or explicit force refresh: collect from KIS/official sources and let the Main agent update the cache
+4. The news path is KIS news/disclosure only. Web search and web news sources are not allowed.
+5. Write each returned payload immediately and exactly once:
    - `market.json`
    - `financial.json`
    - `news.json`
-5. If an agent returns no valid JSON, the main agent writes a `failed` domain envelope containing every symbol and the agent-level error.
-6. If an agent or symbol partially fails, preserve its successful data and errors. Do not discard or overwrite an already-created snapshot.
-7. Do not recollect between first and second verdicts. Both verdict stages reuse these snapshots.
+6. If an agent returns no valid JSON, the Main agent writes a `failed` domain envelope containing every symbol and the agent-level error.
+7. If an agent or symbol partially fails, preserve its successful data and errors. Do not discard or overwrite an already-created snapshot.
+8. Do not recollect between `first-verdict`, `second-verdict`, and `final-risk-verdict`. All verdict stages reuse saved artifacts.
 
 The market collector gathers KIS price, chart, order-book/trade, flow, rank, industry, and ETF/NAV data. The financial and news collectors follow their own skills.
 
-### 3. Merge And Exclude
+### 3. Merge, Exclude, And Brief
 
 1. Merge domain snapshots and the sanitized initial account snapshot into `merged.json`.
 2. Record source provenance and per-symbol errors.
 3. A symbol with insufficient required information receives `eligible_for_verdict=false`.
-4. An ineligible symbol is excluded from both verdict stages, target-quantity calculation, and trading. Keep it in artifacts and the report with explicit exclusion reasons.
-5. Domain or run status uses only `success`, `partial`, or `failed` as defined in `run-artifacts.md`.
+4. An ineligible symbol is excluded from every verdict stage, target-quantity calculation, and trading. Keep it in artifacts and the report with explicit exclusion reasons.
+5. Build `decision-brief.json` from `merged.json`, account exposure, and domain summaries.
+6. `decision-brief.json` includes symbol id/name, eligibility, price and observation time, core market signals, core financial summary, core KIS news summary, account exposure summary, and missing/error reasons.
+7. `decision-brief.json` excludes long raw API payloads, full article text, repeated source detail, and sensitive information.
+8. Domain or run status uses only `success`, `partial`, or `failed` as defined in `run-artifacts.md`.
 
-### 4. First Verdict: Independent Symbol Scores
+### 4. `first-verdict`: Independent Symbol Scores
 
 1. Spawn the seven analyst and ten juror personas in parallel.
-2. Give every first-verdict agent the same immutable `merged.json` snapshot and only eligible symbols.
+2. Give every first-verdict agent the same immutable `decision-brief.json` and only eligible symbols.
 3. Each agent independently returns one `+2`, `+1`, `0`, `-1`, or `-2` score per symbol using `verdict-format.md`.
 4. Agents cannot see other verdict-agent results.
-5. The main agent aggregates each symbol's valid scores using the thresholds in `verdict-format.md`.
+5. The Main agent aggregates each symbol's valid scores using the thresholds in `verdict-format.md`.
 6. Preserve raw responses, aggregation inputs, excluded symbols, and final first scores in `verdict-first.json`.
-7. If no usable first-verdict result exists, still write `verdict-first.json` with `status="failed"` and stop before the second verdict.
+7. If no usable `first-verdict` result exists, still write `verdict-first.json` with `status="failed"` and stop before `second-verdict`.
 
-### 5. Second Verdict: Portfolio Targets
+### 5. `second-verdict`: Portfolio Targets
 
-1. Build the second-verdict set from:
+1. Build the `second-verdict` set from:
    - eligible symbols with first score `+2` or `+1`
    - every eligible current holding, regardless of first score
 2. Spawn the short-, mid-, and long-term judge personas in parallel.
-3. Give each judge the same immutable collection data, `merged.json`, `verdict-first.json`, and sanitized `account-before-verdict.json`.
-4. Judges perform portfolio-level comparison without external calls and return target quantities for every second-verdict symbol.
-5. They must consider relative attractiveness, duplicate exposure, current weight, market conditions, and same-day fills.
+3. Give each judge the same immutable `decision-brief.json` and `verdict-first.json`.
+4. Judges perform portfolio-level comparison without external calls and return target quantities for every `second-verdict` symbol.
+5. They must consider relative attractiveness, duplicate exposure, current weight, market conditions, and same-day fills from the brief.
 6. Fixed minimum or maximum cash ratios are forbidden. Target cash is decided from the market and portfolio evidence.
-7. The main agent reconciles judge outputs using `verdict-format.md` and writes `verdict-second.json`.
-8. If no usable second-verdict target exists, still write `verdict-second.json` with `status="failed"` and do not calculate orders.
+7. The Main agent reconciles judge outputs using `verdict-format.md` and writes `verdict-second.json`.
+8. If no usable `second-verdict` target exists, still write `verdict-second.json` with `status="failed"` and do not calculate orders.
 
-### 6. Latest Account Validation And Orders
+### 6. Latest Account Validation And Order Candidates
 
 1. Read `trade-execution.md`.
-2. If analysis only was requested, write successful `account-before-order.json` and `execution.json` envelopes with `skipped=true` and do not call order APIs.
-3. For order preparation or execution, the main agent refreshes account, holdings, order-available, pending, reservation, and same-day fill state and writes `account-before-order.json`.
-4. For each eligible symbol:
+2. If analysis only was requested, write successful skipped envelopes for `account-before-order.json`, `final-order-verdict.json`, and `execution.json`; do not call order APIs.
+3. For order preparation or execution, spawn `$collect-account-state` for `account-before-order`.
+4. The Main agent sanitizes and writes `account-before-order.json`.
+5. If `account-before-order.json` is missing, invalid, or `failed`, do not calculate or submit orders.
+6. For each eligible symbol:
 
    ```text
    expected_holding_quantity =
@@ -143,16 +195,24 @@ The market collector gathers KIS price, chart, order-book/trade, flow, rank, ind
      - expected_holding_quantity
    ```
 
-5. Same-day filled quantity is used to prevent repeated trading. It is not subtracted from current live holdings again.
-6. Create the final order list from the additional required quantities and the latest account constraints.
-7. Submit orders only when explicitly authorized and all execution gates pass.
-8. Write `execution.json` even when all orders are skipped, blocked, or fail.
+7. Same-day filled quantity is used to prevent repeated trading. It is not subtracted from current live holdings again.
+8. Create the order candidate list from the additional required quantities and the latest account constraints.
 
-### 7. Report And Finalize
+### 7. `final-risk-verdict` And Execution
+
+1. Spawn the `final-risk-verdict` sub-agent after order candidates are built and before any order submission.
+2. Give it `references/personas/final-risk-verdict.md`, `decision-brief.json`, `verdict-second.json`, sanitized `account-before-order.json`, and the Main agent's order candidates.
+3. The `final-risk-verdict` sub-agent may approve or block risk, but cannot recalculate target quantities, replace judge results, alter order candidates, or call order APIs.
+4. Write its result to `final-order-verdict.json`.
+5. If `final-order-verdict.json` is missing, invalid, `failed`, `blocked`, or `needs_review`, the Main agent must block order submission.
+6. Submit orders only when explicitly authorized, `final-order-verdict.json` is `approved`, and all execution gates pass.
+7. Write `execution.json` even when all orders are skipped, blocked, or fail.
+
+### 8. Report And Finalize
 
 1. Write `reports/YYYY-MM-DD_포트폴리오.md` using `report-template.md`.
 2. Update `run.json` with final status and artifact states. Preserve every partial or failed artifact.
-3. Summarize collection status, exclusions, first scores, second-verdict target quantities, cash decision, latest account state, and actual order submission.
+3. Summarize collection status, exclusions, `first-verdict` scores, `second-verdict` target quantities, `final-risk-verdict`, cash decision, latest account state, stage metrics availability, and actual order submission.
 4. Include the required `작업 시작` line.
 
 ## Sub-Agent Result Handling
@@ -161,7 +221,7 @@ The market collector gathers KIS price, chart, order-book/trade, flow, rank, ind
 - Preserve every raw verdict result inside the corresponding verdict JSON.
 - If a verdict response is structurally incomplete, request one correction without adding new data.
 - After one failed correction, record the response error and continue with remaining valid responses.
-- Never let a failed collector or verdict agent silently disappear from artifacts.
+- Never let a failed account, collector, verdict, or `final-risk-verdict` agent silently disappear from artifacts.
 
 ## Failure Rules
 
@@ -169,6 +229,7 @@ The market collector gathers KIS price, chart, order-book/trade, flow, rank, ind
 - Authentication failure: reissue once using `auth-token.md`; if it still fails, block affected KIS, account, and order operations.
 - Initial account snapshot failure: continue analysis only for requested/configured symbols, mark current holdings unknown, and do not calculate or submit orders.
 - Latest account snapshot failure: do not calculate or submit orders. Preserve the failure in `account-before-order.json`.
+- `final-risk-verdict` missing, invalid, failed, `blocked`, or `needs_review`: do not submit orders.
 - Order failure: do not reallocate the failed order's quantity or budget to another symbol during the same run.
 - Sensitive data found in any payload: remove it before persistence or sub-agent transfer and record a sanitization error without recording the sensitive value.
 

@@ -2,7 +2,7 @@
 
 ## Boundary
 
-Strategy signals are calculated by the market collector from the one-pass market snapshot. After `market.json` is finalized, no strategy tool, KIS API, web call, backtest service, or other external source may be called for either verdict stage.
+Strategy signals are calculated by the market collector from the one-pass market snapshot. After `market.json` is finalized, no strategy tool, KIS API, web call, backtest service, or other external source may be called for any verdict stage, including `final-risk-verdict`.
 
 ## Signals
 

@@ -144,6 +144,7 @@ containers/
     scripts/
     shared-skills/
       check-holiday/
+      collect-account-state/
       collect-financial-information/
       collect-news-information/
       daily-trading/

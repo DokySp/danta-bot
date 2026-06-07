@@ -15,7 +15,7 @@ schedules:
 
   - id: pre-open-weekend-02
     enabled: true
-    cron: "35 13 * * 0,6"
+    cron: "0 20 * * 0,6"
     message: |
       $daily-trading에 사용할 종목번호를 $check-portfolio 를 통해 확인한 후,
       $daily-trading 스킬 안에서 전체 포트폴리오의 시장·재무·뉴스 정보를 한 번 수집해 현재 상황을 판단하고, 실전(acct)으로 예약거래를 진행한 뒤 결과를 요약해서 알려줘.

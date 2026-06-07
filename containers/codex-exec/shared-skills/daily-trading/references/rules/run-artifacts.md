@@ -6,22 +6,30 @@ Every daily-trading run uses the injected or generated `run_id`.
 
 ```text
 reports/
+├── cache/
+│   └── financial/
+│       └── <YYYY-MM-DD>.json
 ├── YYYY-MM-DD_포트폴리오.md
 └── runs/
     └── <run_id>/
         ├── run.json
+        ├── stage-metrics.json
         ├── market.json
         ├── financial.json
         ├── news.json
         ├── account-before-verdict.json
         ├── merged.json
+        ├── decision-brief.json
         ├── verdict-first.json
         ├── verdict-second.json
         ├── account-before-order.json
+        ├── final-order-verdict.json
         └── execution.json
 ```
 
-Create `run.json` immediately when daily-trading begins. Write every other file when its stage completes or fails. Domain snapshots are write-once; retries and partial results are retained in an `attempts` array rather than replacing earlier evidence.
+Create `run.json` and initialize `stage-metrics.json` immediately when daily-trading begins. Write every other file when its stage completes or fails. Domain snapshots are write-once; retries and partial results are retained in an `attempts` array rather than replacing earlier evidence.
+
+Financial cache files live outside `reports/runs/<run_id>/` because they are reused by date. The cache key is the Korea trading date, and the validity period is one Korea trading day.
 
 ## Status Values
 
@@ -41,7 +49,7 @@ Final `run.json` status:
 
 ## Common Envelope
 
-Every JSON file contains:
+Every artifact JSON file except `stage-metrics.json` contains:
 
 ```json
 {
@@ -73,16 +81,105 @@ Each error contains:
 
 Omit `symbol_id` only for run-wide errors. Do not include sensitive values in error messages.
 
+## Stage Metrics
+
+`stage-metrics.json` records the operational envelope for every major stage:
+
+```json
+{
+  "schema_version": "1",
+  "run_id": "",
+  "started_at": "",
+  "generated_at": "",
+  "stage": "stage-metrics",
+  "status": "success | partial | failed",
+  "metrics": [
+    {
+      "stage": "initialize | account-before-verdict | market-collection | financial-collection | news-collection | merge-and-brief | first-verdict | second-verdict | account-before-order | final-risk-verdict | execution | report",
+      "agent_role": "main | account | market | financial | news | analyst | juror | judge | final-risk",
+      "recommended_model": "",
+      "recommended_effort": "low | medium | high",
+      "started_at": "",
+      "ended_at": "",
+      "duration_ms": null,
+      "status": "success | partial | failed",
+      "token_usage": {
+        "input_tokens": null,
+        "output_tokens": null,
+        "total_tokens": null
+      },
+      "token_source": "actual | unavailable",
+      "token_unavailable_reason": ""
+    }
+  ],
+  "errors": []
+}
+```
+
+If exact token usage is available, record actual integer values and `token_source="actual"`. If exact token usage is not available, keep all token fields `null`, set `token_source="unavailable"`, and record a non-sensitive reason such as `runtime did not expose per-stage token usage`.
+
 ## File Responsibilities
 
 - `run.json`: input scope, environment, timestamps, stage statuses, final status, and artifact paths.
+- `stage-metrics.json`: stage timing, recommended model/effort, status, and token usage availability.
 - `market.json`, `financial.json`, `news.json`: one domain file each containing the complete symbol universe and per-symbol errors.
 - `account-before-verdict.json`: sanitized initial account, current holdings, pending/reserved orders, and same-day fills.
 - `merged.json`: immutable verdict input, source provenance, eligibility, and exclusion reasons.
-- `verdict-first.json`: raw first-verdict responses and aggregated `+2..-2` score per eligible symbol.
-- `verdict-second.json`: second-verdict set, raw judge responses, reconciled target quantities, target cash, and rationale.
+- `decision-brief.json`: compact verdict input derived from `merged.json`, account exposure, and domain summaries; excludes raw payloads, full article text, repeated source detail, and sensitive fields.
+- `verdict-first.json`: raw `first-verdict` responses and aggregated `+2..-2` score per eligible symbol.
+- `verdict-second.json`: `second-verdict` set, raw judge responses, reconciled target quantities, target cash, and rationale.
 - `account-before-order.json`: sanitized latest account snapshot or a skipped envelope.
+- `final-order-verdict.json`: `final-risk-verdict` approval result for order candidates; result is `approved`, `blocked`, or `needs_review`.
 - `execution.json`: quantity calculations, final order list, submissions, failures, and post-order state, or a skipped envelope.
+
+## `decision-brief.json` Shape
+
+`decision-brief.json` uses the common envelope and includes:
+
+```json
+{
+  "brief_type": "verdict-input",
+  "source_artifacts": ["market.json", "financial.json", "news.json", "account-before-verdict.json", "merged.json"],
+  "account_exposure_summary": {},
+  "symbols": [
+    {
+      "symbol_id": "",
+      "symbol_name": "",
+      "product_type": "stock | etf | etn | other | unresolved",
+      "eligible_for_verdict": true,
+      "exclusion_reasons": [],
+      "price": {
+        "current_or_last": null,
+        "observed_at": ""
+      },
+      "market_signals": [],
+      "financial_summary": {},
+      "news_summary": [],
+      "account_exposure": {},
+      "required_missing": [],
+      "errors": []
+    }
+  ]
+}
+```
+
+## `final-order-verdict.json` Shape
+
+`final-order-verdict.json` uses the common envelope and contains:
+
+```json
+{
+  "stage": "final-risk-verdict",
+  "result": "approved | blocked | needs_review",
+  "order_candidate_count": 0,
+  "approved_order_count": 0,
+  "risk_checks": [],
+  "blocking_reasons": [],
+  "review_reasons": []
+}
+```
+
+If this file is missing, invalid, `failed`, `blocked`, or `needs_review`, the Main agent must block order submission.
 
 ## Sanitization
 

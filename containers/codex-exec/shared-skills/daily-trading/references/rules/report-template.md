@@ -22,11 +22,17 @@ Write one Korean report at `reports/YYYY-MM-DD_포트폴리오.md`.
 | 종목식별자 | 종목명 | 제외 사유 | 누락 필수 정보 |
 |---|---|---|---|
 
-## 3. 1차 독립 평결
-| 종목식별자 | 종목명 | 평균 점수 | 최종 1차 점수 | 유효 응답 수 | 핵심 근거 | 핵심 리스크 |
+## 3. `decision-brief.json` 요약
+- `decision-brief.json` 생성 여부:
+- 포함된 eligible 종목 수:
+- 제외된 raw payload / 기사 원문 / 민감정보:
+- 핵심 누락 또는 오류:
+
+## 4. `first-verdict` 독립 평결
+| 종목식별자 | 종목명 | 평균 점수 | 최종 `first-verdict` 점수 | 유효 응답 수 | 핵심 근거 | 핵심 리스크 |
 |---|---|---:|---:|---:|---|---|
 
-## 4. 2차 포트폴리오 평결
+## 5. `second-verdict` 포트폴리오 평결
 - 시장 판단:
 - 목표 현금 금액:
 - 현금 판단 근거:
@@ -35,29 +41,43 @@ Write one Korean report at `reports/YYYY-MM-DD_포트폴리오.md`.
 | 종목식별자 | 종목명 | 현재 보유수량 | 목표 보유수량 | 상대매력도 | 핵심 근거 | 핵심 리스크 |
 |---|---|---:|---:|---:|---|---|
 
-## 5. 최신 계좌 검증
+## 6. 최신 계좌 검증
 - 총자산:
 - 현금 또는 주문가능금액:
 - 미체결 매수/매도:
 - 예약 매수/매도:
 - 당일 체결:
 
-## 6. 최종 주문 목록
+## 7. 주문 전 `final-risk-verdict`
+- `final-order-verdict.json` 결과: approved / blocked / needs_review / skipped / failed
+- 승인 주문 수:
+- 차단 사유:
+- 추가 검토 사유:
+
+## 8. 최종 주문 목록
 | 종목식별자 | 종목명 | 방향 | 현재 실시간 보유수량 | 미체결·예약 매수 | 미체결·예약 매도 | 예상 보유수량 | 목표 보유수량 | 추가 필요수량 | 결과 |
 |---|---|---|---:|---:|---:|---:|---:|---:|---|
 
-## 7. 실행 결과
+## 9. 실행 결과
 - 주문 요청 유형: 분석만 / 준비 / 모의 제출 / 실전 제출
 - 실제 제출 여부:
 - 제출된 주문번호 또는 예약번호:
 - 실패 또는 보류 사유:
 
-## 8. 아티팩트
+## 10. Stage Metrics
+| Stage | Agent role | 권장 모델 | 권장 effort | 상태 | 소요시간(ms) | Token source |
+|---|---|---|---|---|---:|---|
+
+## 11. 아티팩트
 - 실행 디렉터리: reports/runs/<run_id>/
 - 보존된 partial / failed 아티팩트:
+- `decision-brief.json`:
+- `final-order-verdict.json`:
+- `stage-metrics.json`:
 
-## 9. 메모
+## 12. 메모
 - 당일 체결수량은 반복매매 방지에 사용했으며 현재 보유수량에서 다시 차감하지 않음
+- `final-risk-verdict`가 blocked, needs_review, missing, failed이면 주문을 제출하지 않음
 - 투자 권유가 아니라 의사결정 보조 분석임
 ```
 

@@ -1,4 +1,4 @@
 interface:
   display_name: "Collect Financial Information"
-  short_description: "Collect official financial data for Korean securities"
-  default_prompt: "Use $collect-financial-information to collect official financial information for the supplied Korean portfolio."
+  short_description: "Collect cache-first official financial data for Korean securities"
+  default_prompt: "Use $collect-financial-information cache-first for the supplied Korean portfolio; return cache hit/miss metadata and never write files."

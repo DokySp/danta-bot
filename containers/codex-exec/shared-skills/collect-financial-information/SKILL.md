@@ -23,17 +23,32 @@ Do not use blogs, social media, community posts, unofficial aggregators, or unso
 - KIS calls: allowed only through `$gate-kis-calls`.
 - Account, balance, order-available, fill-history, pending-order, reservation-order, and order APIs: forbidden.
 - File writes and order submission: forbidden.
+- Cache writes: forbidden. Return cache update candidates to the caller instead.
 - Secrets such as account numbers, tokens, app keys, app secrets, and HTS IDs: never request or return.
+
+## Cache-First Rule
+
+Financial data is valid for one Korea trading day.
+
+- Cache location: `reports/cache/financial/<YYYY-MM-DD>.json`
+- The date is the Korea trading date for the run.
+- If the caller supplies a valid same-trading-day cache payload and `force_refresh=false`, return a `financial.json`-shaped envelope from cache and do not make external financial calls.
+- If no valid cache payload exists, the cache is stale, or `force_refresh=true`, collect from KIS and official sources.
+- On cache miss collection, include `cache_update` in the returned envelope so the daily-trading `Main agent` can persist it.
+- Do not read cache files directly. Never write cache files. The caller provides any cache payload as input and owns filesystem persistence.
 
 ## Workflow
 
 1. Accept `run_id`, `started_at`, trading environment, and the complete symbol list.
-2. Before every KIS call, use `$gate-kis-calls`; inspect current parameters with `find_api_detail` before the first use of each API.
-3. For every symbol, attempt both the applicable KIS financial search and an official-source search.
-4. For stocks, collect available valuation, earnings, balance-sheet, profitability, leverage, dividend, estimate, and official filing data.
-5. For ETFs/ETNs, collect issuer facts and official product data that are financial in nature. Mark stock-only fields `not_applicable`.
-6. Preserve source names, source URLs when available, observation dates, raw KIS field names, missing fields, and per-symbol errors.
-7. Return the JSON envelope below. A symbol with insufficient required financial data must have `eligible_for_verdict=false`.
+2. Accept `trading_date`, `force_refresh`, and any caller-supplied cache payload.
+3. Validate the cache payload by trading date, schema version, symbol coverage, and absence of failure status.
+4. On valid cache hit, return from cache with `cache.status="hit"` and no external calls.
+5. On cache miss, before every KIS call, use `$gate-kis-calls`; inspect current parameters with `find_api_detail` before the first use of each API.
+6. For every symbol, attempt both the applicable KIS financial search and an official-source search.
+7. For stocks, collect available valuation, earnings, balance-sheet, profitability, leverage, dividend, estimate, and official filing data.
+8. For ETFs/ETNs, collect issuer facts and official product data that are financial in nature. Mark stock-only fields `not_applicable`.
+9. Preserve source names, source URLs when available, observation dates, raw KIS field names, missing fields, and per-symbol errors.
+10. Return the JSON envelope below. A symbol with insufficient required financial data must have `eligible_for_verdict=false`.
 
 ## Required Output
 
@@ -48,6 +63,13 @@ Do not use blogs, social media, community posts, unofficial aggregators, or unso
   "status": "success | partial | failed",
   "skipped": false,
   "skip_reason": "",
+  "cache": {
+    "status": "hit | miss | refresh",
+    "trading_date": "<YYYY-MM-DD>",
+    "cache_path": "reports/cache/financial/<YYYY-MM-DD>.json",
+    "used_external_calls": false,
+    "reason": ""
+  },
   "attempts": [],
   "errors": [],
   "symbols": [
@@ -70,7 +92,8 @@ Do not use blogs, social media, community posts, unofficial aggregators, or unso
       "sources": [],
       "errors": []
     }
-  ]
+  ],
+  "cache_update": {}
 }
 ```
 
