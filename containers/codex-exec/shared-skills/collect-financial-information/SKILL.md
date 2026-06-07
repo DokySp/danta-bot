@@ -48,7 +48,7 @@ Financial data is valid for one Korea trading day.
 7. For stocks, collect available valuation, earnings, balance-sheet, profitability, leverage, dividend, estimate, and official filing data.
 8. For ETFs/ETNs, collect issuer facts and official product data that are financial in nature. Mark stock-only fields `not_applicable`.
 9. Preserve source names, source URLs when available, observation dates, raw KIS field names, missing fields, and per-symbol errors.
-10. Return the JSON envelope below. A symbol with insufficient required financial data must have `eligible_for_verdict=false`.
+10. Return the JSON envelope below. Missing financial data is recorded in `required_missing` or `errors`; final daily-trading eligibility is decided by the Main agent after merge and may remain `price_only` when identifier and price snapshot are available.
 
 ## Required Output
 
@@ -97,4 +97,4 @@ Financial data is valid for one Korea trading day.
 }
 ```
 
-Use only `success`, `partial`, or `failed` for `status`. No-data results from a completed official-source search are not invented; record them in `required_missing` or `errors`.
+Use only `success`, `partial`, or `failed` for `status`. No-data results from a completed official-source search are not invented; record them in `required_missing` or `errors`. Do not mark a symbol permanently ineligible solely because financial data is absent; the daily-trading Main agent applies the final price-only eligibility rule.

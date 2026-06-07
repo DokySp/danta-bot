@@ -8,7 +8,9 @@
 
 `decision-brief.json` is the default input for all verdict agents. Do not give verdict agents raw `merged.json` unless the user explicitly changes this contract.
 
-The brief contains compact per-symbol market, financial, KIS news/disclosure, account exposure, eligibility, and error summaries. It must not contain long raw API payloads, full article text, repeated source detail, or sensitive account/authentication values.
+The brief contains compact per-symbol market, financial, KIS news/disclosure, account exposure, eligibility, evidence mode, and error summaries. It must not contain long raw API payloads, full article text, repeated source detail, or sensitive account/authentication values.
+
+`evidence_mode="price_only"` symbols are still eligible when they have a resolved identifier, name, current-or-last price, and observation time. Agents must score them with lower confidence and explicit missing-data notes instead of excluding them solely because financial or news data is absent.
 
 ## `first-verdict`
 
@@ -51,6 +53,7 @@ Rules:
 - `score` is one of `-2`, `-1`, `0`, `1`, `2`.
 - `confidence` is an integer from `1` to `10`.
 - Evidence cites fields and observation dates from `decision-brief.json`.
+- For `price_only` symbols, evidence must cite the price snapshot and observation date, and `missing_data` must mention absent financial/news evidence when absent.
 - One symbol's data cannot support another symbol.
 - An agent cannot see other verdict outputs.
 

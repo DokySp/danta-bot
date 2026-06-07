@@ -19,6 +19,14 @@
 
 ## Domain Responsibilities
 
+### Market Status Preflight
+
+Before account snapshots, collection, verdicts, or order preparation, the Main agent runs `$check-holiday` for the Asia/Seoul target date. Record the normalized `status` as `open`, `closed`, or `unknown` in `run.json`, `decision-brief.json`, and the report.
+
+- `open`: collect normal live market snapshots.
+- `closed`: collect or reuse the most recent valid trading-day price snapshot and label `price.snapshot_mode="previous_trading_day"`.
+- `unknown`: collection and analysis may continue, but real order and reservation submission are blocked.
+
 ### Market Collector
 
 Allowed:
@@ -111,14 +119,14 @@ If either account snapshot is missing, invalid, or `failed`, the Main agent must
 
 The Main agent decides eligibility after merging all three domain snapshots.
 
-Set `eligible_for_verdict=false` when any of the following prevents an evidence-based verdict:
+Set `eligible_for_verdict=false` only when one of the following prevents even a price-based verdict:
 
 - unresolved or ambiguous symbol identity
 - missing usable price and observation time
-- market collection failure that prevents trend/risk assessment
-- stock financial collection failure that prevents fundamental assessment
-- news search failure that prevents event-risk assessment
-- domain errors explicitly marked as required and unresolved
+- market collection failure that prevents price, trend, and risk assessment
+- domain errors explicitly marked as required and unresolved for symbol identity or price
+
+Financial collection failure, missing financial fields, news lookup failure, and no-news results are not exclusion reasons by themselves. If a symbol has a resolved identifier, name, current-or-last price, and observation time, keep `eligible_for_verdict=true`, set `evidence_mode="price_only"`, and record financial/news gaps in `required_missing`, `warnings`, or non-sensitive `errors`.
 
 An empty but successfully completed news search is not a failure. Product-specific non-applicable fields are not missing data.
 
@@ -131,11 +139,12 @@ After `merged.json` is complete, the Main agent creates `decision-brief.json` fo
 Include:
 
 - symbol id and name
-- eligibility and exclusion reasons
+- eligibility, evidence mode, warnings, and exclusion reasons
 - current or most recent valid price and observation timestamp
+- market status and live/previous-trading-day snapshot mode
 - core market signals
-- core financial summary
-- core KIS news/disclosure summary
+- core financial summary when available
+- core KIS news/disclosure summary when available
 - account exposure summary
 - missing fields and non-sensitive errors
 

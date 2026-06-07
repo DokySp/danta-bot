@@ -4,59 +4,75 @@ schedules:
     cron: "0 7 * * 1-5"
     message: |
       $daily-trading에 사용할 종목번호를 $check-portfolio 를 통해 확인한 후,
+      $check-holiday preflight 결과를 run.json, decision-brief.json, 리포트에 open/closed/unknown으로 기록해줘.
       $daily-trading 스킬 안에서 전체 포트폴리오의 시장·재무·뉴스 정보를 한 번 수집해 현재 상황을 판단하고, 실전(acct)으로 예약거래를 진행한 뒤 결과를 요약해서 알려줘.
+      closed이면 직전 거래일 가격 snapshot 기반으로 평결과 예약주문 후보를 만들고 order_resv만 사용해줘. unknown이면 분석은 하되 실전 주문과 예약주문 제출은 차단해줘.
 
   - id: pre-open-weekend-01
     enabled: true
     cron: "0 10 * * 0,6"
     message: |
       $daily-trading에 사용할 종목번호를 $check-portfolio 를 통해 확인한 후,
+      $check-holiday preflight 결과를 run.json, decision-brief.json, 리포트에 open/closed/unknown으로 기록해줘.
       $daily-trading 스킬 안에서 전체 포트폴리오의 시장·재무·뉴스 정보를 한 번 수집해 현재 상황을 판단하고, 실전(acct)으로 예약거래를 진행한 뒤 결과를 요약해서 알려줘.
+      closed이면 직전 거래일 가격 snapshot 기반으로 평결과 예약주문 후보를 만들고 order_resv만 사용해줘. unknown이면 분석은 하되 실전 주문과 예약주문 제출은 차단해줘.
 
   - id: pre-open-weekend-02
     enabled: true
     cron: "0 20 * * 0,6"
     message: |
       $daily-trading에 사용할 종목번호를 $check-portfolio 를 통해 확인한 후,
+      $check-holiday preflight 결과를 run.json, decision-brief.json, 리포트에 open/closed/unknown으로 기록해줘.
       $daily-trading 스킬 안에서 전체 포트폴리오의 시장·재무·뉴스 정보를 한 번 수집해 현재 상황을 판단하고, 실전(acct)으로 예약거래를 진행한 뒤 결과를 요약해서 알려줘.
+      closed이면 직전 거래일 가격 snapshot 기반으로 평결과 예약주문 후보를 만들고 order_resv만 사용해줘. unknown이면 분석은 하되 실전 주문과 예약주문 제출은 차단해줘.
 
   - id: trading-toggle
     enabled: true
     cron: "0 8 * * 1-5"
     message: |
-      $check-holiday 를 통해서 휴장일인지 확인하고, $trading-schedule-toggle 을 통해 휴장일이 아닌 경우 스케줄을 활성화, 휴장일인 경우 스케줄을 비활성화해줘.
+      $check-holiday 를 통해서 휴장일인지 확인하고, $trading-schedule-toggle 을 통해 휴장일이 아닌 경우 daily 스케줄을 활성화, 휴장일인 경우 daily 스케줄을 비활성화해줘. 이 작업은 스케줄 on/off 전용이고, daily-trading 실행의 market status 기록은 $daily-trading 자체 preflight에 맡겨줘.
 
   - id: daily-11
     enabled: true
     cron: "5 9 * * 1-5"
     message: |
       $daily-trading에 사용할 종목번호를 $check-portfolio 를 통해 확인한 후,
-      $daily-trading 스킬 안에서 전체 포트폴리오의 시장·재무·뉴스 정보를 한 번 수집하고 예약 거래 내역을 계좌 스냅샷에 포함해 현재 상황을 판단한 뒤, 실전(acct) 거래를 실제로 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
+      $check-holiday preflight 결과를 run.json, decision-brief.json, 리포트에 open/closed/unknown으로 기록해줘.
+      $daily-trading 스킬 안에서 전체 포트폴리오의 시장·재무·뉴스 정보를 한 번 수집하고 예약 거래 내역을 계좌 스냅샷에 포함해 현재 상황을 판단한 뒤, open일 때만 실전(acct) 거래를 실제로 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
+      closed 또는 unknown이면 일반 실전 주문 제출은 차단하고 분석과 리포트만 남겨줘.
 
   - id: daily-12
     enabled: true
     cron: "15 9 * * 1-5"
     message: |
       $daily-trading에 사용할 종목번호를 $check-portfolio 를 통해 확인한 후,
-      $daily-trading 스킬 안에서 전체 포트폴리오의 시장·재무·뉴스 정보를 한 번 수집하고 예약 거래 내역을 계좌 스냅샷에 포함해 현재 상황을 판단한 뒤, 실전(acct) 거래를 실제로 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
+      $check-holiday preflight 결과를 run.json, decision-brief.json, 리포트에 open/closed/unknown으로 기록해줘.
+      $daily-trading 스킬 안에서 전체 포트폴리오의 시장·재무·뉴스 정보를 한 번 수집하고 예약 거래 내역을 계좌 스냅샷에 포함해 현재 상황을 판단한 뒤, open일 때만 실전(acct) 거래를 실제로 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
+      closed 또는 unknown이면 일반 실전 주문 제출은 차단하고 분석과 리포트만 남겨줘.
 
   - id: daily-13
     enabled: true
     cron: "40 9 * * 1-5"
     message: |
       $daily-trading에 사용할 종목번호를 $check-portfolio 를 통해 확인한 후,
-      $daily-trading 스킬 안에서 전체 포트폴리오의 시장·재무·뉴스 정보를 한 번 수집하고 예약 거래 내역을 계좌 스냅샷에 포함해 현재 상황을 판단한 뒤, 실전(acct) 거래를 실제로 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
+      $check-holiday preflight 결과를 run.json, decision-brief.json, 리포트에 open/closed/unknown으로 기록해줘.
+      $daily-trading 스킬 안에서 전체 포트폴리오의 시장·재무·뉴스 정보를 한 번 수집하고 예약 거래 내역을 계좌 스냅샷에 포함해 현재 상황을 판단한 뒤, open일 때만 실전(acct) 거래를 실제로 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
+      closed 또는 unknown이면 일반 실전 주문 제출은 차단하고 분석과 리포트만 남겨줘.
 
   - id: daily-20
     enabled: true
     cron: "0 10,11,12,13,14 * * 1-5"
     message: |
       $daily-trading에 사용할 종목번호를 $check-portfolio 를 통해 확인한 후,
-      $daily-trading 스킬 안에서 전체 포트폴리오의 시장·재무·뉴스 정보를 한 번 수집해 현재 상황을 판단한 뒤, 실전(acct) 거래를 실제로 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
+      $check-holiday preflight 결과를 run.json, decision-brief.json, 리포트에 open/closed/unknown으로 기록해줘.
+      $daily-trading 스킬 안에서 전체 포트폴리오의 시장·재무·뉴스 정보를 한 번 수집해 현재 상황을 판단한 뒤, open일 때만 실전(acct) 거래를 실제로 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
+      closed 또는 unknown이면 일반 실전 주문 제출은 차단하고 분석과 리포트만 남겨줘.
 
   - id: daily-30
     enabled: true
     cron: "15 15 * * 1-5"
     message: |
       $daily-trading에 사용할 종목번호를 $check-portfolio 를 통해 확인한 후,
-      $daily-trading 스킬 안에서 전체 포트폴리오의 시장·재무·뉴스 정보를 한 번 수집해 현재 상황을 판단하고 리밸런싱을 고려한 뒤, 실전(acct) 거래를 실제로 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
+      $check-holiday preflight 결과를 run.json, decision-brief.json, 리포트에 open/closed/unknown으로 기록해줘.
+      $daily-trading 스킬 안에서 전체 포트폴리오의 시장·재무·뉴스 정보를 한 번 수집해 현재 상황을 판단하고 리밸런싱을 고려한 뒤, open일 때만 실전(acct) 거래를 실제로 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
+      closed 또는 unknown이면 일반 실전 주문 제출은 차단하고 분석과 리포트만 남겨줘.

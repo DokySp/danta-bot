@@ -1,2 +1,4 @@
 $daily-trading에 사용할 종목번호를 $check-portfolio 를 통해 확인한 후,
-$daily-trading 스킬 안에서 전체 포트폴리오의 시장·재무·뉴스 정보를 한 번 수집해 현재 상황을 판단한 뒤, 실전(acct) 거래를 실제로 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
+$check-holiday preflight 결과를 run.json, decision-brief.json, 리포트에 open/closed/unknown으로 기록해줘.
+$daily-trading 스킬 안에서 전체 포트폴리오의 시장·재무·뉴스 정보를 한 번 수집해 현재 상황을 판단한 뒤, open일 때만 실전(acct) 거래를 실제로 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
+closed이면 직전 거래일 가격 snapshot 기반 분석을 남기고, 사용자가 예약거래를 명시한 경우에만 order_resv 예약주문 후보를 진행해줘. unknown이면 분석은 하되 실전 주문과 예약주문 제출은 차단해줘.

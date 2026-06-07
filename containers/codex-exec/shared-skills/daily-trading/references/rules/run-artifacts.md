@@ -47,6 +47,8 @@ Final `run.json` status:
 - `partial`: a usable report exists, but at least one symbol or non-fatal stage is partial, excluded, blocked, or failed.
 - `failed`: no usable merged verdict/report exists, or a required explicitly requested account/order stage failed so the requested result could not be produced.
 
+If runtime artifact validation fails, set `validation_status="failed"`, keep the validation summary in `run.json`, and mark final `status="failed"` with `status_reason="validation_failed"`.
+
 ## Common Envelope
 
 Every artifact JSON file except `stage-metrics.json` contains:
@@ -99,6 +101,8 @@ Omit `symbol_id` only for run-wide errors. Do not include sensitive values in er
       "agent_role": "main | account | market | financial | news | analyst | juror | judge | final-risk",
       "recommended_model": "",
       "recommended_effort": "low | medium | high",
+      "actual_model": "",
+      "actual_effort": "low | medium | high",
       "started_at": "",
       "ended_at": "",
       "duration_ms": null,
@@ -120,8 +124,8 @@ If exact token usage is available, record actual integer values and `token_sourc
 
 ## File Responsibilities
 
-- `run.json`: input scope, environment, timestamps, stage statuses, final status, and artifact paths.
-- `stage-metrics.json`: stage timing, recommended model/effort, status, and token usage availability.
+- `run.json`: input scope, environment, timestamps, stage statuses, final status, artifact paths, `market_holiday.status` (`open`, `closed`, or `unknown`), and validation status.
+- `stage-metrics.json`: stage timing, recommended and actual model/effort, status, and token usage availability.
 - `market.json`, `financial.json`, `news.json`: one domain file each containing the complete symbol universe and per-symbol errors.
 - `account-before-verdict.json`: sanitized initial account, current holdings, pending/reserved orders, and same-day fills.
 - `merged.json`: immutable verdict input, source provenance, eligibility, and exclusion reasons.
@@ -147,21 +151,26 @@ If exact token usage is available, record actual integer values and `token_sourc
       "symbol_name": "",
       "product_type": "stock | etf | etn | other | unresolved",
       "eligible_for_verdict": true,
+      "evidence_mode": "full | price_only",
       "exclusion_reasons": [],
       "price": {
         "current_or_last": null,
-        "observed_at": ""
+        "observed_at": "",
+        "snapshot_mode": "live | previous_trading_day"
       },
       "market_signals": [],
       "financial_summary": {},
       "news_summary": [],
       "account_exposure": {},
       "required_missing": [],
+      "warnings": [],
       "errors": []
     }
   ]
 }
 ```
+
+Financial or news absence alone does not make a symbol ineligible. If `symbol_id`, `symbol_name`, `price.current_or_last`, and `price.observed_at` exist, keep `eligible_for_verdict=true`, set `evidence_mode="price_only"`, and record the missing domains in `required_missing` or `warnings`.
 
 ## `final-order-verdict.json` Shape
 

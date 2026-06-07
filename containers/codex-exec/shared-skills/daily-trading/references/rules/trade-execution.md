@@ -11,6 +11,14 @@
 
 `CODEX_MCP_TRADING_ENV` overrides conflicting environment wording: `paper` maps to `demo`; `acct` maps to `real`.
 
+## Market Status Gate
+
+The Main agent must read the `$check-holiday` result recorded in `run.json` and `decision-brief.json` before order candidate calculation and before any submission.
+
+- `open`: explicitly authorized demo or real submission may continue after all other gates.
+- `closed`: use previous-trading-day snapshot prices for verdicts. If the user or schedule explicitly requested 실전(acct) 예약거래, create reservation-order candidates and use only `order_resv` after every gate passes. Do not use `order_cash`.
+- `unknown`: block every real `order_cash` and `order_resv` submission. Analysis, target calculation, and non-submitting preparation may continue.
+
 ## Account Snapshot Boundary
 
 Collection, `first-verdict`, `second-verdict`, and `final-risk-verdict` sub-agents cannot call any account or order API.
@@ -97,6 +105,7 @@ Every order must satisfy all applicable constraints:
 - active pending/reserved quantities were included exactly once
 - same-day fill guard passed
 - user maximum amount, maximum quantity, prohibited symbols, and price limits passed
+- market status permits the requested submission type
 - order price and order type were validated using current API details
 - `final-risk-verdict` result is `approved`
 - real submission was explicitly requested
@@ -127,7 +136,8 @@ The `final-risk-verdict` sub-agent must not recalculate target quantities, chang
 
 - User-specified valid price and order type take priority.
 - Explicit reservation requests use `order_resv`.
-- Outside market hours, use `order_resv` when supported; if unsupported, create a ticket and record `blocked`.
+- Outside market hours or on `closed` market status, use `order_resv` only when a real reservation request is explicit and supported; if unsupported, create a ticket and record `blocked`.
+- `unknown` market status always blocks real submission, including reservation submission.
 - Explicit intraday immediate execution may use `order_cash`.
 - If price or order type remains ambiguous after current API-detail inspection, block the order.
 
