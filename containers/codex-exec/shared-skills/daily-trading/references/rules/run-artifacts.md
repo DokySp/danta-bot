@@ -32,7 +32,7 @@ reports/
 
 Create `run.json` and initialize `stage-metrics.json` immediately when daily-trading begins. Write every other file when its stage completes or fails. Domain snapshots are write-once; retries and partial results are retained in an `attempts` array rather than replacing earlier evidence.
 
-Financial cache files live outside `reports/runs/<run_id>/` because they are reused by date. The cache key is the Korea trading date, and the validity period is one Korea trading day.
+Financial cache files live outside `reports/runs/<run_id>/` because they are reused by date. By default they live in `~/.cache/codex/collect-financial-information/<YYYY-MM-DD>.json`; `FINANCIAL_CACHE_DIR` overrides the directory. The cache key is the Korea trading date, and the validity period is one Korea trading day. Read and write financial cache files only through `collect-financial-information/scripts/financial_cache.py`; this helper validates date, schema, stage, domain, status, non-empty symbols, and requested-symbol presence before a cache hit or cache write is allowed. Additional cached symbols are allowed.
 
 The daily-trading sub-agent launcher writes only `subagents/<task_name>.wrapper.json` and `subagents/<task_name>.raw.txt`. It does not write canonical artifacts such as `market.json`, `financial.json`, `news.json`, or verdict files. The Main agent reads each wrapper, sanitizes `parsed_json`, writes the canonical artifact, and copies the wrapper metric into `stage-metrics.json`.
 
@@ -102,7 +102,7 @@ Omit `symbol_id` only for run-wide errors. Do not include sensitive values in er
   "status": "success | partial | failed",
   "metrics": [
     {
-      "stage": "initialize | account-before-verdict | market-collection | financial-collection | news-collection | merge-and-brief | first-verdict | second-verdict | account-before-order | final-risk-verdict | execution | report",
+      "stage": "initialize | account-before-verdict | market-collection | financial-collection | news-collection | merge-and-brief | first-verdict | second-verdict | account-before-order | final-risk-verdict | execution | post-order-state | report",
       "agent_role": "main | account | market | financial | news | analyst | juror | judge | final-risk",
       "recommended_model": "",
       "recommended_effort": "low | medium | high",
@@ -141,7 +141,7 @@ Launcher wrappers must be treated as failed stage evidence when the wrapper is m
 - `verdict-second.json`: `second-verdict` set, raw judge responses, reconciled target quantities, target cash, and rationale.
 - `account-before-order.json`: sanitized latest account snapshot or a skipped envelope.
 - `final-order-verdict.json`: `final-risk-verdict` approval result for order candidates; result is `approved`, `blocked`, or `needs_review`.
-- `execution.json`: quantity calculations, final order list, submissions, failures, and post-order state, or a skipped envelope.
+- `execution.json`: quantity calculations, final order list, submissions, failures, and narrow post-order state, or a skipped envelope. Post-order state should contain only the minimum read-only verification needed for submitted orders or reservations.
 
 ## `decision-brief.json` Shape
 

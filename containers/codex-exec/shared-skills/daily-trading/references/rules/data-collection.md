@@ -17,7 +17,7 @@
 - Do not group multiple KIS calls from the same agent with `multi_tool_use.parallel`.
 - For retryable KIS/MCP API error codes or messages, including rate-limit, temporary gateway/routing, transport, and timeout failures, retry the same API with the same parameters using exponential backoff up to 10 retries after the initial call.
 - Recommended delay sequence is 1, 2, 4, 8, 16, then 30 seconds capped for remaining retries. Add small jitter when the runtime supports it.
-- Record every attempt with API name, non-sensitive parameters, error code/message, delay, and final outcome.
+- Record only APIs actually called in `attempts`, with API name, non-sensitive parameters, error code/message, delay, and final outcome. Do not add `attempts` entries for APIs that were considered but not called; record those as per-symbol `required_missing` or `errors` instead.
 - Authentication, token, credential, and permission errors are not local backoff targets. Return them to the Main agent so `auth-token.md` can handle token reissue centrally.
 
 ## Domain Responsibilities
@@ -52,8 +52,8 @@ Required stock information:
 - resolvable identifier and name
 - current or most recent valid price
 - observation timestamp
-- daily, weekly, and monthly chart data sufficient for local signals
-- investor flow or an explicit missing/error result
+- daily, weekly, and monthly chart data sufficient for local signals when collected
+- investor flow or an explicit missing/error result when collected
 
 Required ETF/ETN information:
 
@@ -61,6 +61,8 @@ Required ETF/ETN information:
 - current or most recent valid price
 - observation timestamp
 - NAV or an explicit missing/error result
+
+If the market collector is constrained by time or KIS call volume, prioritize identity and price coverage for every input symbol first. It may return `status="partial"` with chart, order book, investor flow, rank, industry, or NAV gaps in per-symbol `required_missing`, but it must not inflate `attempts` with uncalled APIs.
 
 Forbidden:
 
@@ -75,11 +77,35 @@ Market status `closed` is not a financial-data condition. Unless a valid cache h
 
 Financial collection is cache-first:
 
-- Cache path: `reports/cache/financial/<YYYY-MM-DD>.json`
+- Cache path: `~/.cache/codex/collect-financial-information/<YYYY-MM-DD>.json`
+- `FINANCIAL_CACHE_DIR` overrides the cache directory
 - Validity: one Korea trading day
-- Cache hit: the Main agent creates `financial.json` from the cache without external financial calls
-- Cache miss or explicit force refresh: the financial collector uses KIS and official sources, returns the fresh envelope, and the Main agent updates the cache
-- The financial collector may return a cache update candidate, but it must not write files directly
+- Cache validation helper: `collect-financial-information/scripts/financial_cache.py`
+- Cache hit: the Main agent creates `financial.json` from the helper-validated payload without external financial calls
+- Cache miss or explicit force refresh: the financial collector uses KIS and official sources, returns the fresh envelope, and the Main agent updates the cache only through the helper
+- The financial collector may return a cache update candidate, but it must not write files directly while running as a `daily-trading` sub-agent
+- Failed, malformed, empty, wrong-date, wrong-stage, wrong-domain, or missing-requested-symbol cache payloads are cache misses and must not overwrite an existing cache
+
+Before launching `financial-collection`, the Main agent runs:
+
+```bash
+python3 <collect-financial-information-skill-dir>/scripts/financial_cache.py get \
+  --date <YYYY-MM-DD> \
+  --symbols "<comma-separated complete universe>"
+```
+
+If the helper exits successfully, use its `payload` as the complete `financial.json` source and skip the financial sub-agent. The helper may read a larger date-level cache, but it returns only the requested symbols when `--symbols` is supplied. If it exits non-zero, preserve the non-sensitive reason in `stage-metrics.json` or `run.json` and launch the financial sub-agent.
+
+After a cache-miss financial sub-agent returns `parsed_json`, the Main agent runs:
+
+```bash
+python3 <collect-financial-information-skill-dir>/scripts/financial_cache.py put \
+  --date <YYYY-MM-DD> \
+  --symbols "<comma-separated complete universe>" \
+  < financial.json
+```
+
+Store the cache only if the helper exits successfully. Do not write cache files by hand, do not store `failed` financial envelopes, and do not replace an existing valid cache with an invalid or missing-requested-symbol payload.
 
 ### News Collector
 
@@ -175,6 +201,15 @@ Exclude:
 - account numbers, account product codes, tokens, app keys, app secrets, HTS IDs, auth headers, and credential-like values
 
 `first-verdict`, `second-verdict`, and `final-risk-verdict` agents use `decision-brief.json` as their default input instead of raw `merged.json`.
+
+Keep `decision-brief.json` compact enough for fan-out verdict stages:
+
+- include at most five market signals per symbol
+- include at most three financial summary bullets per symbol
+- include at most three KIS news/disclosure summary items per symbol
+- include at most five warnings/errors per symbol
+- summarize repeated missing-domain reasons once at the run or domain level and reference the domain status from each symbol
+- never include raw API payloads, raw account lookup attempts, full article text, or repeated source metadata
 
 ## Market JSON Shape
 

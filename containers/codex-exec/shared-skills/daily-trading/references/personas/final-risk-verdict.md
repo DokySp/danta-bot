@@ -26,6 +26,10 @@
 - 당일 체결 반복매매 guard가 명확히 통과했는지 확인한다.
 - 미체결·예약 주문 수량이 중복 반영되지 않았는지 확인한다.
 - 매수가능금액과 매도가능수량 제약 위반이 없는지 확인한다.
+- `expected_holding_quantity`는 현재 후보 주문 제출 전, 이미 존재하는 미체결·예약 수량만 반영한 예상 보유수량이다. `target_holding_quantity`와 다르다는 이유만으로 후보를 불일치로 판단하지 않는다.
+- 주문 후보 수량 일관성은 `target_holding_quantity = expected_holding_quantity + additional_required_quantity`와 `validated_order_quantity = abs(additional_required_quantity)`로 확인한다.
+- `evidence_mode="price_only"` 자체, 또는 재무/뉴스 evidence의 missing·partial·failed·no-data 상태 자체는 주문 차단 사유가 아니다. 종목이 eligible이고 가격 관측값, 목표수량, 계좌 제약, 장 상태, 주문유형, 사용자 제한, 당일 반복매매 guard를 통과하면 `price_only`는 warning 또는 낮은 확신 근거로만 기록한다.
+- 위 `price_only` 규칙은 `order_cash`, `order_resv`, demo, real 제출에 동일하게 적용한다.
 - `final-risk-verdict` 증거가 부족하거나 모호하면 `needs_review`를 반환한다.
 - 필수 gate 위반이 있으면 `blocked`를 반환한다.
 - 모든 주문 후보가 제공된 증거 기준으로 통과할 때만 `approved`를 반환한다.

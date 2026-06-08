@@ -13,6 +13,7 @@ Supported snapshot types:
 
 - `account-before-verdict`: account summary, current holdings, pending orders, reserved orders, and same-day fills.
 - `account-before-order`: every field above plus buy-available checks for buy candidates and sell-available checks for sell candidates.
+- `post-order-state`: narrow post-submission verification. For reservation orders, check reservation-order state only; for intraday orders, check same-day order/fill and pending-order state only.
 
 ## Permissions
 
@@ -29,6 +30,7 @@ Allowed read-only KIS account APIs:
 Rules:
 
 - Use only read-only inquiry APIs. Inspect current parameters with `find_api_detail` before the first use of each API type.
+- Reuse validated parameter templates within the same run. Do not probe known-invalid values for verification. For `inquire_account_balance`, use `inqr_dvsn_1="1"` and omit `env_dv` unless the current API detail explicitly supports it.
 - Call KIS directly. For retryable rate-limit, gateway, transport, and timeout failures, use bounded backoff before marking a lookup failed.
 - Do not provide account number, account product code, or HTS ID; the MCP wrapper supplies them.
 - Do not call order submission, reservation submission, correction, cancellation, or order-revision APIs.
@@ -56,8 +58,8 @@ Do not hide partial data. Preserve successful read-only results, non-sensitive A
   "run_id": "<run_id>",
   "started_at": "<Asia/Seoul ISO-8601>",
   "generated_at": "",
-  "stage": "account-before-verdict | account-before-order",
-  "snapshot_type": "account-before-verdict | account-before-order",
+  "stage": "account-before-verdict | account-before-order | post-order-state",
+  "snapshot_type": "account-before-verdict | account-before-order | post-order-state",
   "status": "success | partial | failed",
   "skipped": false,
   "skip_reason": "",
@@ -125,3 +127,5 @@ Do not hide partial data. Preserve successful read-only results, non-sensitive A
 ```
 
 For `account-before-verdict`, `order_availability` may be an empty list. For `account-before-order`, include availability rows for every candidate that could become an order.
+
+For `post-order-state`, return the same JSON shape with `snapshot_type="post-order-state"` and `stage="post-order-state"`. Keep unrelated arrays empty unless they were required for the narrow verification. Do not repeat account summary, full balance, buy-available, or sell-available lookups after accepted reservation submissions when a reservation lookup confirms the submitted reservations.

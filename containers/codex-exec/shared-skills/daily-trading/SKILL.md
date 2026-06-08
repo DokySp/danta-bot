@@ -139,10 +139,12 @@ These rules apply to direct and indirect use, including `daily-*`, `pre-open`, `
 2. Give each agent the same complete symbol list, `run_id`, `started_at`, environment, required schema, and permission boundary. The launcher spec must include the same complete list in `symbol_ids` so wrapper validation can reject missing-symbol outputs before the Main agent writes canonical artifacts.
 3. Always run all three domain paths for the complete universe. `closed` market status is not a reason to skip `financial` or `news`, and it is not a reason to mark symbols `price_only`.
 4. The financial path is cache-first:
-   - cache location: `reports/cache/financial/<YYYY-MM-DD>.json`
+   - cache location: `~/.cache/codex/collect-financial-information/<YYYY-MM-DD>.json`
    - validity: one Korea trading day
-   - cache hit: generate `financial.json` from cache without external financial calls
-   - cache miss or explicit force refresh: collect from KIS/official sources and let the Main agent update the cache
+   - cache helper: `collect-financial-information/scripts/financial_cache.py`
+   - cache hit: generate `financial.json` from helper-validated cache without external financial calls
+   - cache miss or explicit force refresh: collect from KIS/official sources and let the Main agent update the cache through the helper
+   - invalid, failed, empty, wrong-date, wrong-stage, wrong-domain, or missing-requested-symbol cache payloads are misses and must not overwrite an existing valid cache
 5. The news path is KIS news/disclosure only. Web search and web news sources are not allowed.
 6. Write each returned payload immediately and exactly once:
    - `market.json`
@@ -160,11 +162,13 @@ The market collector gathers KIS price, chart, order-book/trade, flow, rank, ind
 2. Record source provenance and per-symbol errors.
 3. A symbol receives `eligible_for_verdict=false` only when symbol identity is unresolved/ambiguous, usable price or observation time is missing, or market data is too broken to support even a price-only verdict.
 4. Missing financial data, missing news/disclosure data, or completed no-data searches are not exclusion reasons by themselves. If identifier, name, current-or-last price, and observation time exist, keep the symbol eligible with `evidence_mode="price_only"` and explicit warnings. Use `price_only` only after the relevant financial/news domain path actually returned missing, failed, or no-data evidence for that symbol; never use it merely because the market is `closed` or because the Main agent skipped a required collector.
-5. An ineligible symbol is excluded from every verdict stage, target-quantity calculation, and trading. Keep it in artifacts and the report with explicit exclusion reasons.
-6. Build `decision-brief.json` from `merged.json`, account exposure, domain summaries, and market status.
-7. `decision-brief.json` includes symbol id/name, eligibility, evidence mode, price and observation time, core market signals, core financial summary when available, core KIS news summary when available, account exposure summary, and missing/error reasons.
-8. `decision-brief.json` excludes long raw API payloads, full article text, repeated source detail, and sensitive information.
-9. Domain or run status uses only `success`, `partial`, or `failed` as defined in `run-artifacts.md`.
+5. `price_only` is not a trading exclusion or execution-blocking evidence mode. If the symbol remains eligible and has a valid price observation, missing, partial, failed, or no-data financial/news evidence may lower confidence and remain in warnings, but it must not by itself block `order_cash`, `order_resv`, demo submission, or real submission.
+6. An ineligible symbol is excluded from every verdict stage, target-quantity calculation, and trading. Keep it in artifacts and the report with explicit exclusion reasons.
+7. Build `decision-brief.json` from `merged.json`, account exposure, domain summaries, and market status.
+8. `decision-brief.json` includes symbol id/name, eligibility, evidence mode, price and observation time, core market signals, core financial summary when available, core KIS news summary when available, account exposure summary, and missing/error reasons.
+9. `decision-brief.json` excludes long raw API payloads, full article text, repeated source detail, and sensitive information.
+10. Keep `decision-brief.json` compact for verdict fan-out: at most five market signals, three financial summary bullets, three KIS news/disclosure items, and five warnings/errors per symbol. Summarize repeated domain-wide missing reasons once and reference the domain status from symbols.
+11. Domain or run status uses only `success`, `partial`, or `failed` as defined in `run-artifacts.md`.
 
 ### 4. `first-verdict`: Independent Symbol Scores
 
@@ -210,7 +214,8 @@ The market collector gathers KIS price, chart, order-book/trade, flow, rank, ind
    ```
 
 7. Same-day filled quantity is used to prevent repeated trading. It is not subtracted from current live holdings again.
-8. Create the order candidate list from the additional required quantities and the latest account constraints.
+8. `expected_holding_quantity` is the pre-candidate expected holding quantity after already-active pending and reserved quantities are considered. It is valid for `expected_holding_quantity` to differ from `target_holding_quantity`; consistency is checked with `target_holding_quantity = expected_holding_quantity + additional_required_quantity`.
+9. Create the order candidate list from the additional required quantities and the latest account constraints.
 
 ### 7. `final-risk-verdict` And Execution
 
@@ -219,8 +224,10 @@ The market collector gathers KIS price, chart, order-book/trade, flow, rank, ind
 3. The `final-risk-verdict` sub-agent may approve or block risk, but cannot recalculate target quantities, replace judge results, alter order candidates, or call order APIs.
 4. Write its result to `final-order-verdict.json`.
 5. If `final-order-verdict.json` is missing, invalid, `failed`, `blocked`, or `needs_review`, the Main agent must block order submission.
-6. Submit orders only when explicitly authorized, `final-order-verdict.json` is `approved`, market status permits the requested submission type, and all execution gates pass.
-7. Write `execution.json` even when all orders are skipped, blocked, or fail.
+6. `final-risk-verdict` must apply the same `price_only` and `expected_holding_quantity` rules from `trade-execution.md` to `order_cash`, `order_resv`, demo submission, and real submission.
+7. Submit orders only when explicitly authorized, `final-order-verdict.json` is `approved`, market status permits the requested submission type, and all execution gates pass.
+8. After accepted submissions, perform only narrow post-order verification. For `order_resv`, verify reservation visibility through reservation-order lookup; do not repeat account summary, full balance, buy-available, or sell-available checks unless a submission result is uncertain or reservation lookup fails.
+9. Write `execution.json` even when all orders are skipped, blocked, or fail.
 
 ### 8. Report And Finalize
 

@@ -12,6 +12,8 @@ The brief contains compact per-symbol market, financial, KIS news/disclosure, ac
 
 `evidence_mode="price_only"` symbols are still eligible when they have a resolved identifier, name, current-or-last price, and observation time. Agents must score them with lower confidence and explicit missing-data notes instead of excluding them solely because financial or news data is absent.
 
+For `final-risk-verdict`, `price_only` remains order-eligible evidence when the symbol is eligible and the order candidate satisfies account, market-status, order-type, user-limit, and same-day-fill constraints. Missing, partial, failed, or no-data financial/news evidence may be recorded as warning or lower confidence, but it is not by itself a reason to return `blocked` or `needs_review` for `order_cash`, `order_resv`, demo submission, or real submission.
+
 ## `first-verdict`
 
 The seven analyst and ten juror personas independently score every eligible symbol.
@@ -182,6 +184,8 @@ Rules:
 - `needs_review` means the evidence is insufficient or ambiguous and no order may be submitted.
 - Missing, invalid, or `failed` `final-risk-verdict` output blocks order submission.
 - The Main agent writes `final-order-verdict.json` and enforces the block/approval result.
+- `price_only` evidence mode, missing financial evidence, or missing news evidence is not insufficient or ambiguous evidence by itself when the candidate otherwise satisfies the execution gates.
+- `expected_holding_quantity` is the pre-candidate expected holding quantity after already-active pending and reserved quantities are considered. It is valid for this field to differ from `target_holding_quantity`; consistency must be checked through `additional_required_quantity` and `validated_order_quantity`.
 
 ## Allowed Terms
 

@@ -36,6 +36,7 @@ Forbidden sources:
 - For retryable KIS/MCP API error codes or messages, including rate-limit, temporary gateway/routing, transport, and timeout failures, retry the same API with the same parameters using exponential backoff up to 10 retries after the initial call.
 - Recommended delay sequence is 1, 2, 4, 8, 16, then 30 seconds capped for remaining retries. Add small jitter when the runtime supports it.
 - Preserve every attempt in `attempts`, including API name, non-sensitive parameters, error code/message, delay, and final outcome.
+- Record only APIs actually called in `attempts`. Do not add placeholder attempts for APIs that were considered but skipped.
 - Authentication, token, credential, and permission errors are not local backoff targets. Return those errors to the daily-trading Main agent; do not call `auth_token`.
 
 ## Workflow
@@ -47,6 +48,8 @@ Forbidden sources:
 5. Deduplicate substantially identical KIS items while preserving distinct KIS identifiers when available.
 6. Summarize each item factually and briefly. Do not include full article text.
 7. Return the JSON envelope below. A completed KIS search with no relevant stories is valid and uses an empty `items` list. A failed KIS search is an error, but final daily-trading eligibility is decided by the Main agent after merge and may remain `price_only` when identifier and price snapshot are available.
+8. Keep the output compact for downstream verdict fan-out. Return at most three relevant items per symbol and at most ten market-wide items. Prefer the most recent, most directly symbol-linked KIS items.
+9. Before final output, validate that the response is a single valid JSON object. Do not emit Markdown, code fences, explanatory text, trailing comments, or partial JSON.
 
 ## Required Output
 
