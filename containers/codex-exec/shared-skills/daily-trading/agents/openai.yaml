@@ -1,4 +1,4 @@
 interface:
   display_name: "Daily Trading"
-  short_description: "One-pass portfolio collection, account snapshots, verdicts, risk approval, and trading"
-  default_prompt: "Use $daily-trading with $check-holiday preflight, preserve price-only eligible symbols, enforce the mandatory stage model matrix in stage-metrics.json including actual_model/actual_effort, run first-verdict, second-verdict, and final-risk-verdict, and only let Main agent submit explicitly authorized orders."
+  short_description: "One-pass portfolio collection, account snapshots, verdicts, and trading"
+  default_prompt: "Use $daily-trading with $check-holiday preflight, preserve price-only eligible symbols, run collection and verdict sub-agents through the daily-trading launcher, run first-verdict and second-verdict, and keep account refresh, order preparation, and any authorized submission inside the Main agent order-execution stage."

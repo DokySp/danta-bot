@@ -1,4 +1,0 @@
-interface:
-  display_name: "Collect Account State"
-  short_description: "Collect read-only account snapshots for daily-trading"
-  default_prompt: "Use $collect-account-state to return a sanitized read-only account snapshot for daily-trading; never submit, correct, cancel, reserve, or write files."

@@ -13,26 +13,35 @@ from typing import Any
 
 
 ALLOWED_STATUS = {"success", "partial", "failed"}
+ALLOWED_STAGE_METRIC_STAGES = {
+    "initialize",
+    "account-before-verdict",
+    "market-collection",
+    "financial-collection",
+    "news-collection",
+    "merge-and-brief",
+    "first-verdict",
+    "second-verdict",
+    "order-execution",
+    "report",
+}
 DOMAIN_BRIEF_ARTIFACTS = [
     "market.json",
+    "decision-brief.json",
+]
+OPTIONAL_ARTIFACTS = [
     "financial.json",
     "news.json",
-    "merged.json",
-    "decision-brief.json",
 ]
 EXPECTED_ARTIFACTS = [
     "run.json",
     "stage-metrics.json",
     "market.json",
-    "financial.json",
-    "news.json",
     "account-before-verdict.json",
-    "merged.json",
     "decision-brief.json",
     "verdict-first.json",
     "verdict-second.json",
     "account-before-order.json",
-    "final-order-verdict.json",
     "execution.json",
 ]
 
@@ -208,41 +217,9 @@ def validate_stage_metrics(data: Any, errors: list[dict[str, Any]]) -> None:
         if not isinstance(metric, dict):
             add_issue(errors, "invalid_metric", "metric entry must be an object", name, f"$.metrics[{index}]")
             continue
-        expected = mandatory_model_effort(metric)
-        if expected is None:
-            continue
-        expected_model, expected_effort = expected
-        path = f"$.metrics[{index}]"
-        for key in ("recommended_model", "recommended_effort", "actual_model", "actual_effort"):
-            if not str(metric.get(key, "")).strip():
-                add_issue(errors, "missing_stage_model_field", f"{key} is required", name, path)
-        if metric.get("recommended_model") != expected_model:
-            add_issue(errors, "recommended_model_mismatch", f"expected {expected_model}, got {metric.get('recommended_model')}", name, path)
-        if metric.get("recommended_effort") != expected_effort:
-            add_issue(errors, "recommended_effort_mismatch", f"expected {expected_effort}, got {metric.get('recommended_effort')}", name, path)
-        if metric.get("actual_model") != expected_model:
-            add_issue(errors, "actual_model_mismatch", f"expected {expected_model}, got {metric.get('actual_model')}", name, path)
-        if metric.get("actual_effort") != expected_effort:
-            add_issue(errors, "actual_effort_mismatch", f"expected {expected_effort}, got {metric.get('actual_effort')}", name, path)
-
-
-def mandatory_model_effort(metric: dict[str, Any]) -> tuple[str, str] | None:
-    stage = str(metric.get("stage", "")).strip().lower()
-    role = str(metric.get("agent_role", "")).strip().lower()
-
-    if role == "account" or stage in {"account-before-verdict", "account-before-order"}:
-        return "gpt-5.3-codex-spark", "low"
-    if role in {"market", "financial", "news"} or stage in {"market-collection", "financial-collection", "news-collection"}:
-        return "gpt-5.3-codex-spark", "low"
-    if role in {"analyst", "juror"} or stage == "first-verdict":
-        return "gpt-5.5", "low"
-    if role == "judge" or stage == "second-verdict":
-        return "gpt-5.5", "high"
-    if role == "final-risk" or stage == "final-risk-verdict":
-        return "gpt-5.5", "high"
-    if role == "main" or stage in {"initialize", "merge-and-brief", "execution", "report"}:
-        return "gpt-5.5", "medium"
-    return None
+        stage_name = str(metric.get("stage", "")).strip().lower()
+        if stage_name not in ALLOWED_STAGE_METRIC_STAGES:
+            add_issue(errors, "invalid_stage_metric", f"unexpected stage metric: {metric.get('stage')}", name, f"$.metrics[{index}].stage")
 
 
 def validate_symbol_preservation(
@@ -325,17 +302,6 @@ def validate_decision_brief(data: Any, errors: list[dict[str, Any]], warnings: l
                 add_issue(errors, "eligible_missing_symbol_name", "eligible symbol requires symbol_name", name, path)
             if not price_available(item):
                 add_issue(errors, "eligible_missing_price", "eligible symbol requires price.current_or_last and price.observed_at", name, path)
-            financial_missing = not bool(item.get("financial_summary"))
-            news_missing = not bool(item.get("news_summary"))
-            if financial_missing or news_missing:
-                if item.get("evidence_mode") != "price_only":
-                    add_issue(
-                        warnings,
-                        "price_only_missing_evidence_mode",
-                        "price-only eligible symbol should set evidence_mode='price_only'",
-                        name,
-                        path,
-                    )
         elif item.get("eligible_for_verdict") is False and price_available(item):
             reasons = list(item.get("exclusion_reasons") or []) + list(item.get("required_missing") or [])
             if is_fin_news_only(reasons):
@@ -387,7 +353,7 @@ def validate_run(run_dir: Path, mark_run: bool = False) -> dict[str, Any]:
             if not (run_dir / name).exists():
                 add_issue(errors, "missing_artifact", f"{name} is required for {run_json.get('status')} runs", name)
 
-    for name in EXPECTED_ARTIFACTS:
+    for name in EXPECTED_ARTIFACTS + OPTIONAL_ARTIFACTS:
         if name == "run.json":
             continue
         data = read_artifact(run_dir, name, errors)
@@ -493,32 +459,25 @@ def common_artifact(run_id: str, stage: str, symbols: list[dict[str, Any]]) -> d
     }
 
 
-def stage_metrics(run_id: str, bad_model: bool = False) -> dict[str, Any]:
+def stage_metrics(run_id: str) -> dict[str, Any]:
     metrics = [
-        ("initialize", "main", "gpt-5.5", "medium"),
-        ("account-before-verdict", "account", "gpt-5.3-codex-spark", "low"),
-        ("market-collection", "market", "gpt-5.3-codex-spark", "low"),
-        ("financial-collection", "financial", "gpt-5.3-codex-spark", "low"),
-        ("news-collection", "news", "gpt-5.3-codex-spark", "low"),
-        ("first-verdict", "analyst", "gpt-5.5", "low"),
-        ("first-verdict", "juror", "gpt-5.5", "low"),
-        ("second-verdict", "judge", "gpt-5.5", "high"),
-        ("final-risk-verdict", "final-risk", "gpt-5.5", "high"),
-        ("execution", "main", "gpt-5.5", "medium"),
-        ("report", "main", "gpt-5.5", "medium"),
+        ("initialize", "main"),
+        ("account-before-verdict", "main"),
+        ("market-collection", "market"),
+        ("financial-collection", "financial"),
+        ("news-collection", "news"),
+        ("first-verdict", "analyst"),
+        ("first-verdict", "juror"),
+        ("second-verdict", "judge"),
+        ("order-execution", "main"),
+        ("report", "main"),
     ]
     entries = []
-    for stage, role, model, effort in metrics:
-        actual_model = "gpt-5.5" if bad_model and stage == "market-collection" else model
-        actual_effort = "medium" if bad_model and stage == "market-collection" else effort
+    for stage, role in metrics:
         entries.append(
             {
                 "stage": stage,
                 "agent_role": role,
-                "recommended_model": model,
-                "recommended_effort": effort,
-                "actual_model": actual_model,
-                "actual_effort": actual_effort,
                 "started_at": "2026-06-07T09:00:00+09:00",
                 "ended_at": "2026-06-07T09:00:01+09:00",
                 "duration_ms": 1000,
@@ -536,7 +495,7 @@ def write_fixture(
     *,
     count: int = 29,
     comma_joined: bool = False,
-    bad_model: bool = False,
+    omit_fin_news: bool = False,
     secret: bool = False,
 ) -> None:
     run_id = "self-test"
@@ -551,7 +510,7 @@ def write_fixture(
         }
     )
     write_json(run_dir / "run.json", run_json)
-    write_json(run_dir / "stage-metrics.json", stage_metrics(run_id, bad_model=bad_model))
+    write_json(run_dir / "stage-metrics.json", stage_metrics(run_id))
 
     artifact_symbols = list(symbols)
     if comma_joined:
@@ -562,19 +521,20 @@ def write_fixture(
             }
         ]
 
-    for name, stage in (
+    fixture_artifacts = [
         ("market.json", "market-collection"),
         ("financial.json", "financial-collection"),
         ("news.json", "news-collection"),
-        ("merged.json", "merge-and-brief"),
         ("decision-brief.json", "decision-brief"),
         ("account-before-verdict.json", "account-before-verdict"),
         ("verdict-first.json", "first-verdict"),
         ("verdict-second.json", "second-verdict"),
-        ("account-before-order.json", "account-before-order"),
-        ("final-order-verdict.json", "final-risk-verdict"),
-        ("execution.json", "execution"),
-    ):
+        ("account-before-order.json", "order-execution"),
+        ("execution.json", "order-execution"),
+    ]
+    if omit_fin_news:
+        fixture_artifacts = [(name, stage) for name, stage in fixture_artifacts if name not in OPTIONAL_ARTIFACTS]
+    for name, stage in fixture_artifacts:
         payload = common_artifact(run_id, stage, artifact_symbols if name in DOMAIN_BRIEF_ARTIFACTS else [])
         if name == "decision-brief.json":
             payload["market_holiday"] = {"status": "closed", "target_date": "20260607"}
@@ -592,8 +552,8 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
 def run_self_test() -> int:
     cases = [
         ("price-only 29 symbol run passes", {}, True),
+        ("missing financial/news artifacts pass", {"omit_fin_news": True}, True),
         ("comma-joined symbol_id fails", {"comma_joined": True}, False),
-        ("wrong collector model fails", {"bad_model": True}, False),
         ("raw access token/JWT fails", {"secret": True}, False),
     ]
     failures = []

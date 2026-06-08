@@ -3,17 +3,17 @@
 ## One-Pass Rule
 
 - The complete portfolio universe is collected in detail once per `run_id`.
-- `market`, `financial`, and `news` collection sub-agents run in parallel and each receives the same complete symbol list.
-- Each domain returns one JSON object containing all symbols.
-- The launcher spec for each collection agent must include the complete universe in `symbol_ids` so the wrapper can fail fast when a domain silently drops a symbol.
+- `market`, `financial`, and `news` collection sub-agents may run in parallel and each receives the same complete symbol list.
+- `market` returns one JSON object containing all symbols. `financial` and `news` are optional best-effort artifacts.
+- The launcher spec for the market collector must include the complete universe in `symbol_ids` so the wrapper can fail fast when market silently drops a symbol.
 - `first-verdict` and `second-verdict` agents reuse the saved snapshots. They never recollect or call external tools.
 - Retries are allowed only to recover failed KIS calls before that domain snapshot is finalized. Preserve all attempts in the domain JSON.
-- If a domain agent fails without valid JSON, the Main agent creates a `failed` envelope and adds the same required agent-level error to every symbol so no symbol silently disappears.
+- If the market agent fails without valid JSON, the Main agent creates a `failed` envelope and adds the same required agent-level error to every symbol so no symbol silently disappears. If financial/news collection fails, record a non-blocking warning and continue with market/account evidence.
 
 ## KIS Call Backoff
 
 - KIS calls made by collection agents are direct calls. Do not use a shared KIS call gate.
-- Inspect current parameters with the relevant tool's `find_api_detail` before the first call to each API type.
+- Use validated parameter templates for known KIS APIs. Call `find_api_detail` only when introducing a new API type, when no validated template exists, or after an API rejects the template for parameter/schema reasons.
 - Do not group multiple KIS calls from the same agent with `multi_tool_use.parallel`.
 - For retryable KIS/MCP API error codes or messages, including rate-limit, temporary gateway/routing, transport, and timeout failures, retry the same API with the same parameters using exponential backoff up to 10 retries after the initial call.
 - Recommended delay sequence is 1, 2, 4, 8, 16, then 30 seconds capped for remaining retries. Add small jitter when the runtime supports it.
@@ -27,7 +27,7 @@
 Before account snapshots, collection, verdicts, or order preparation, the Main agent runs `$check-holiday` for the Asia/Seoul target date. Record the normalized `status` as `open`, `closed`, or `unknown` in `run.json`, `decision-brief.json`, and the report.
 
 - `open`: collect normal live market snapshots.
-- `closed`: collect or reuse the most recent valid trading-day price snapshot and label `price.snapshot_mode="previous_trading_day"`. This only changes the market snapshot mode and execution path; it does not skip financial collection, news/disclosure collection, or any collection sub-agent.
+- `closed`: collect or reuse the most recent valid trading-day price snapshot and label `price.snapshot_mode="previous_trading_day"`. This only changes the market snapshot mode and execution path.
 - `unknown`: collection and analysis may continue, but real order and reservation submission are blocked.
 
 ### Market Collector
@@ -73,7 +73,7 @@ Forbidden:
 
 Must use `$collect-financial-information`. KIS and official sources only.
 
-Market status `closed` is not a financial-data condition. Unless a valid cache hit is used, the financial collector must still attempt the portfolio-wide financial collection and return per-symbol results or per-symbol errors.
+Financial collection is best-effort. Missing, failed, partial, no-data, or skipped financial collection must not stop merge, verdicts, target calculation, or order execution when market/account gates pass.
 
 Financial collection is cache-first:
 
@@ -109,9 +109,9 @@ Store the cache only if the helper exits successfully. Do not write cache files 
 
 ### News Collector
 
-Must use `$collect-news-information`. KIS news and disclosure-related APIs only.
+When news collection is attempted, use `$collect-news-information`. KIS news and disclosure-related APIs only.
 
-Market status `closed` is not a news-data condition. The news collector must still attempt KIS news/disclosure collection and return per-symbol summaries, empty successful searches, or per-symbol errors.
+News collection is best-effort. Missing, failed, partial, no-data, or skipped news collection must not stop merge, verdicts, target calculation, or order execution when market/account gates pass.
 
 Forbidden:
 
@@ -124,9 +124,9 @@ News output is compressed to KIS identifiers, title, publication time, publisher
 
 ## Account Collection
 
-The Main agent delegates read-only account lookup to `$collect-account-state`, then sanitizes and writes the returned JSON.
+The Main agent performs read-only account lookup directly, then sanitizes and writes the account JSON artifacts.
 
-The account sub-agent may query:
+The Main agent may query:
 
 - account asset summary
 - current live holdings
@@ -136,7 +136,7 @@ The account sub-agent may query:
 - buy-available amount or quantity for buy candidates
 - sell-available quantity for sell candidates
 
-The account sub-agent must not submit, reserve, correct, cancel, write files, return sensitive values, or make trading decisions.
+Account lookup code must not submit, reserve, correct, cancel, or persist sensitive values.
 
 Initial snapshot for `account-before-verdict.json`:
 
@@ -160,7 +160,7 @@ If either account snapshot is missing, invalid, or `failed`, the Main agent must
 
 ## Symbol Eligibility
 
-The Main agent decides eligibility after merging all three domain snapshots.
+The Main agent decides eligibility after merging required market/account evidence and any available financial/news snapshots.
 
 Set `eligible_for_verdict=false` only when one of the following prevents even a price-based verdict:
 
@@ -169,9 +169,9 @@ Set `eligible_for_verdict=false` only when one of the following prevents even a 
 - market collection failure that prevents price, trend, and risk assessment
 - domain errors explicitly marked as required and unresolved for symbol identity or price
 
-Financial collection failure, missing financial fields, news lookup failure, and no-news results are not exclusion reasons by themselves. If a symbol has a resolved identifier, name, current-or-last price, and observation time, keep `eligible_for_verdict=true`, set `evidence_mode="price_only"`, and record financial/news gaps in `required_missing`, `warnings`, or non-sensitive `errors`.
+Financial collection failure, missing financial fields, absent financial artifact, news lookup failure, absent news artifact, and no-news results are not exclusion reasons by themselves. If a symbol has a resolved identifier, name, current-or-last price, and observation time, keep `eligible_for_verdict=true`.
 
-Use `evidence_mode="price_only"` only after the relevant financial/news collector or cache path actually returned missing, failed, or no-data evidence for that symbol. Do not mark a symbol `price_only` merely because the market is `closed`, because the run uses previous-trading-day prices, or because the Main agent skipped a required collector.
+Do not require `evidence_mode="price_only"` solely because financial/news data is missing. If `price_only` is used, it is descriptive only and must not lower eligibility, target quantities, or order permission by itself.
 
 An empty but successfully completed news search is not a failure. Product-specific non-applicable fields are not missing data.
 
@@ -179,7 +179,7 @@ Ineligible symbols remain in every applicable artifact and the final report, but
 
 ## decision-brief.json
 
-After `merged.json` is complete, the Main agent creates `decision-brief.json` for verdict agents.
+The Main agent creates `decision-brief.json` directly from required market/account evidence and any available financial/news summaries.
 
 Include:
 
@@ -191,7 +191,7 @@ Include:
 - core financial summary when available
 - core KIS news/disclosure summary when available
 - account exposure summary
-- missing fields and non-sensitive errors
+- optional missing fields and non-sensitive errors
 
 Exclude:
 
@@ -200,7 +200,7 @@ Exclude:
 - repeated source details
 - account numbers, account product codes, tokens, app keys, app secrets, HTS IDs, auth headers, and credential-like values
 
-`first-verdict`, `second-verdict`, and `final-risk-verdict` agents use `decision-brief.json` as their default input instead of raw `merged.json`.
+`first-verdict` and `second-verdict` agents use `decision-brief.json` as their input.
 
 Keep `decision-brief.json` compact enough for fan-out verdict stages:
 
@@ -208,7 +208,7 @@ Keep `decision-brief.json` compact enough for fan-out verdict stages:
 - include at most three financial summary bullets per symbol
 - include at most three KIS news/disclosure summary items per symbol
 - include at most five warnings/errors per symbol
-- summarize repeated missing-domain reasons once at the run or domain level and reference the domain status from each symbol
+- summarize repeated optional missing-domain reasons once at the run or domain level when useful
 - never include raw API payloads, raw account lookup attempts, full article text, or repeated source metadata
 
 ## Market JSON Shape

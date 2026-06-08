@@ -18,15 +18,13 @@ reports/
         ├── run.json
         ├── stage-metrics.json
         ├── market.json
-        ├── financial.json
-        ├── news.json
+        ├── financial.json  # optional best-effort
+        ├── news.json       # optional best-effort
         ├── account-before-verdict.json
-        ├── merged.json
         ├── decision-brief.json
         ├── verdict-first.json
         ├── verdict-second.json
         ├── account-before-order.json
-        ├── final-order-verdict.json
         └── execution.json
 ```
 
@@ -50,7 +48,7 @@ Final `run.json` status:
 
 - `success`: every required analysis stage succeeded and every explicitly requested execution stage completed without failure.
 - `partial`: a usable report exists, but at least one symbol or non-fatal stage is partial, excluded, blocked, or failed.
-- `failed`: no usable merged verdict/report exists, or a required explicitly requested account/order stage failed so the requested result could not be produced.
+- `failed`: no usable verdict/report exists, or a required explicitly requested account/order stage failed so the requested result could not be produced.
 
 If runtime artifact validation fails, set `validation_status="failed"`, keep the validation summary in `run.json`, and mark final `status="failed"` with `status_reason="validation_failed"`.
 
@@ -102,12 +100,8 @@ Omit `symbol_id` only for run-wide errors. Do not include sensitive values in er
   "status": "success | partial | failed",
   "metrics": [
     {
-      "stage": "initialize | account-before-verdict | market-collection | financial-collection | news-collection | merge-and-brief | first-verdict | second-verdict | account-before-order | final-risk-verdict | execution | post-order-state | report",
-      "agent_role": "main | account | market | financial | news | analyst | juror | judge | final-risk",
-      "recommended_model": "",
-      "recommended_effort": "low | medium | high",
-      "actual_model": "",
-      "actual_effort": "low | medium | high",
+      "stage": "initialize | account-before-verdict | market-collection | financial-collection | news-collection | merge-and-brief | first-verdict | second-verdict | order-execution | report",
+      "agent_role": "main | market | financial | news | analyst | juror | judge",
       "started_at": "",
       "ended_at": "",
       "duration_ms": null,
@@ -127,21 +121,20 @@ Omit `symbol_id` only for run-wide errors. Do not include sensitive values in er
 
 If exact token usage is available, record actual integer values and `token_source="actual"`. If exact token usage is not available, keep all token fields `null`, set `token_source="unavailable"`, and record a non-sensitive reason such as `runtime did not expose per-stage token usage`.
 
-Launcher wrappers must be treated as failed stage evidence when the wrapper is missing, has `status="failed"`, has a non-zero `returncode`, or has `parsed_json=null`. Failed wrappers must be reflected in `stage-metrics.json` with the launcher's `actual_model` and `actual_effort`; the Main agent must write a failed canonical envelope for the affected stage and block order candidate calculation or order submission when the failed stage is required.
+Launcher wrappers must be treated as failed stage evidence when the wrapper is missing, has `status="failed"`, has a non-zero `returncode`, or has `parsed_json=null`. Failed wrappers must be reflected in `stage-metrics.json`; the Main agent must write a failed canonical envelope for the affected stage and block order candidate calculation or order submission when the failed stage is required.
 
 ## File Responsibilities
 
 - `run.json`: input scope, environment, timestamps, stage statuses, final status, artifact paths, `market_holiday.status` (`open`, `closed`, or `unknown`), and validation status.
-- `stage-metrics.json`: stage timing, recommended and actual model/effort, status, and token usage availability.
-- `market.json`, `financial.json`, `news.json`: one domain file each containing the complete symbol universe and per-symbol errors.
+- `stage-metrics.json`: stage timing, status, and token usage availability.
+- `market.json`: required market file containing the complete symbol universe and per-symbol errors.
+- `financial.json`, `news.json`: optional best-effort domain files. Missing, failed, partial, or no-data financial/news artifacts must not fail validation or block verdict/order flow by themselves.
 - `account-before-verdict.json`: sanitized initial account, current holdings, pending/reserved orders, and same-day fills.
-- `merged.json`: immutable verdict input, source provenance, eligibility, and exclusion reasons.
-- `decision-brief.json`: compact verdict input derived from `merged.json`, account exposure, and domain summaries; excludes raw payloads, full article text, repeated source detail, and sensitive fields.
+- `decision-brief.json`: compact canonical verdict input derived from market/account evidence and optional financial/news summaries; contains source provenance, eligibility, exclusion reasons, account exposure, and domain summaries; excludes raw payloads, full article text, repeated source detail, and sensitive fields.
 - `verdict-first.json`: raw `first-verdict` responses and aggregated `+2..-2` score per eligible symbol.
 - `verdict-second.json`: `second-verdict` set, raw judge responses, reconciled target quantities, target cash, and rationale.
-- `account-before-order.json`: sanitized latest account snapshot or a skipped envelope.
-- `final-order-verdict.json`: `final-risk-verdict` approval result for order candidates; result is `approved`, `blocked`, or `needs_review`.
-- `execution.json`: quantity calculations, final order list, submissions, failures, and narrow post-order state, or a skipped envelope. Post-order state should contain only the minimum read-only verification needed for submitted orders or reservations.
+- `account-before-order.json`: sanitized latest account snapshot or a skipped envelope from the `order-execution` stage.
+- `execution.json`: quantity calculations, final order list, submissions, failures, blocked candidates, or a skipped envelope from the `order-execution` stage.
 
 ## `decision-brief.json` Shape
 
@@ -150,7 +143,7 @@ Launcher wrappers must be treated as failed stage evidence when the wrapper is m
 ```json
 {
   "brief_type": "verdict-input",
-  "source_artifacts": ["market.json", "financial.json", "news.json", "account-before-verdict.json", "merged.json"],
+      "source_artifacts": ["market.json", "account-before-verdict.json"],
   "account_exposure_summary": {},
   "symbols": [
     {
@@ -177,27 +170,9 @@ Launcher wrappers must be treated as failed stage evidence when the wrapper is m
 }
 ```
 
-Financial or news absence alone does not make a symbol ineligible. If `symbol_id`, `symbol_name`, `price.current_or_last`, and `price.observed_at` exist, keep `eligible_for_verdict=true`, set `evidence_mode="price_only"`, and record the missing domains in `required_missing` or `warnings`.
+Financial or news absence alone does not make a symbol ineligible. If `symbol_id`, `symbol_name`, `price.current_or_last`, and `price.observed_at` exist, keep `eligible_for_verdict=true`. Missing, failed, partial, no-data, or absent financial/news artifacts must not fail validation, lower eligibility, or block order execution by themselves.
 
-`price_only` is a fallback for actual financial/news missing, failed, or no-data results after those domain paths ran or a valid financial cache path was checked. It is not a shortcut for `closed` market status, previous-trading-day snapshot mode, or Main-agent-only price lookup.
-
-## `final-order-verdict.json` Shape
-
-`final-order-verdict.json` uses the common envelope and contains:
-
-```json
-{
-  "stage": "final-risk-verdict",
-  "result": "approved | blocked | needs_review",
-  "order_candidate_count": 0,
-  "approved_order_count": 0,
-  "risk_checks": [],
-  "blocking_reasons": [],
-  "review_reasons": []
-}
-```
-
-If this file is missing, invalid, `failed`, `blocked`, or `needs_review`, the Main agent must block order submission.
+Use financial/news summaries when present. When absent, leave those summaries empty or add non-blocking notes; do not create required evidence gates from financial/news absence.
 
 ## Sanitization
 

@@ -51,39 +51,31 @@ Write one Korean report at `reports/YYYY-MM-DD_포트폴리오.md`.
 - 예약 매수/매도:
 - 당일 체결:
 
-## 7. 주문 전 `final-risk-verdict`
-- `final-order-verdict.json` 결과: approved / blocked / needs_review / skipped / failed
-- 승인 주문 수:
-- 차단 사유:
-- 추가 검토 사유:
-
-## 8. 최종 주문 목록
+## 7. 최종 주문 목록
 | 종목식별자 | 종목명 | 방향 | 현재 실시간 보유수량 | 미체결·예약 매수 | 미체결·예약 매도 | 예상 보유수량 | 목표 보유수량 | 추가 필요수량 | 결과 |
 |---|---|---|---:|---:|---:|---:|---:|---:|---|
 
-## 9. 실행 결과
+## 8. 실행 결과
 - 주문 요청 유형: 분석만 / 준비 / 모의 제출 / 실전 제출
 - 실제 제출 여부:
 - 제출된 주문번호 또는 예약번호:
 - 실패 또는 보류 사유:
 
-## 10. Stage Metrics
+## 9. Stage Metrics
 | Stage | Agent role | 권장 모델 | 권장 effort | 실제 모델 | 실제 effort | 상태 | 소요시간(ms) | Token source |
 |---|---|---|---|---|---|---|---:|---|
 
-## 11. 아티팩트
+## 10. 아티팩트
 - 실행 디렉터리: reports/runs/<run_id>/
 - 보존된 partial / failed 아티팩트:
 - `decision-brief.json`:
-- `final-order-verdict.json`:
 - `stage-metrics.json`:
 - validation status:
 
-## 12. 메모
+## 11. 메모
 - 당일 체결수량은 반복매매 방지에 사용했으며 현재 보유수량에서 다시 차감하지 않음
 - `closed` 상태에서는 직전 거래일 snapshot 기반 예약주문 후보만 가능하며 일반 `order_cash`는 제출하지 않음
 - `unknown` 상태에서는 실전 주문과 예약주문을 제출하지 않음
-- `final-risk-verdict`가 blocked, needs_review, missing, failed이면 주문을 제출하지 않음
 - 투자 권유가 아니라 의사결정 보조 분석임
 ```
 

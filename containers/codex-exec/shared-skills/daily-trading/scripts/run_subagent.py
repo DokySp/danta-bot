@@ -61,15 +61,10 @@ def safe_name(value: str) -> str:
     return cleaned.strip(".-") or "subagent"
 
 
-def mandatory_model_effort(stage: str, agent_role: str) -> tuple[str, str]:
+def launcher_model_effort(stage: str, agent_role: str) -> tuple[str, str]:
     stage_key = stage.strip().lower()
     role_key = agent_role.strip().lower()
 
-    if role_key in {"account", "collect-account-state"} or stage_key in {
-        "account-before-verdict",
-        "account-before-order",
-    }:
-        return COLLECTOR_MODEL, "low"
     if role_key in {"market", "financial", "news"} or stage_key in {
         "market-collection",
         "financial-collection",
@@ -79,8 +74,6 @@ def mandatory_model_effort(stage: str, agent_role: str) -> tuple[str, str]:
     if role_key in {"analyst", "juror"} or role_key.startswith(("analyst-", "juror-")) or stage_key == "first-verdict":
         return VERDICT_MODEL, "low"
     if role_key == "judge" or role_key.startswith("judge-") or stage_key == "second-verdict":
-        return VERDICT_MODEL, "high"
-    if role_key in {"final-risk", "final-risk-verdict"} or stage_key == "final-risk-verdict":
         return VERDICT_MODEL, "high"
     raise ValueError(f"unsupported daily-trading sub-agent stage/role: stage={stage!r}, agent_role={agent_role!r}")
 
@@ -272,7 +265,7 @@ def wrapper_paths(spec: dict[str, Any]) -> tuple[Path, Path]:
 
 def run_one(spec: dict[str, Any]) -> dict[str, Any]:
     validate_spec(spec)
-    actual_model, actual_effort = mandatory_model_effort(str(spec["stage"]), str(spec["agent_role"]))
+    model, effort = launcher_model_effort(str(spec["stage"]), str(spec["agent_role"]))
     wrapper_path, raw_output_path = wrapper_paths(spec)
     raw_output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -282,9 +275,9 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
         os.getenv("CODEX_BIN", "codex"),
         "exec",
         "-m",
-        actual_model,
+        model,
         "-c",
-        f'model_reasoning_effort="{actual_effort}"',
+        f'model_reasoning_effort="{effort}"',
         "--skip-git-repo-check",
         "-o",
         str(raw_output_path),
@@ -350,8 +343,6 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
         "agent_role": str(spec["agent_role"]),
         "task_name": str(spec["task_name"]),
         "status": status,
-        "actual_model": actual_model,
-        "actual_effort": actual_effort,
         "started_at": started_at,
         "ended_at": ended_at,
         "duration_ms": duration_ms,
@@ -362,10 +353,6 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
         "metric": {
             "stage": str(spec["stage"]),
             "agent_role": str(spec["agent_role"]),
-            "recommended_model": actual_model,
-            "recommended_effort": actual_effort,
-            "actual_model": actual_model,
-            "actual_effort": actual_effort,
             "started_at": started_at,
             "ended_at": ended_at,
             "duration_ms": duration_ms,
@@ -570,7 +557,6 @@ def run_self_test() -> int:
                 (spec(tmp, stage="market-collection", agent_role="market", task_name="market"), COLLECTOR_MODEL, "low"),
                 (spec(tmp, stage="first-verdict", agent_role="analyst", task_name="first"), VERDICT_MODEL, "low"),
                 (spec(tmp, stage="second-verdict", agent_role="judge", task_name="second"), VERDICT_MODEL, "high"),
-                (spec(tmp, stage="final-risk-verdict", agent_role="final-risk", task_name="risk"), VERDICT_MODEL, "high"),
             ]
             for test_spec, model, effort in cases:
                 wrapper = run_one(test_spec)

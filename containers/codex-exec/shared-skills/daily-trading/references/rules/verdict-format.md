@@ -2,21 +2,19 @@
 
 ## External-Call Ban
 
-`first-verdict`, `second-verdict`, and `final-risk-verdict` agents use only the immutable snapshots supplied by the Main agent. KIS, MCP, web, network, shell, file reads outside supplied persona text, file writes, and recollection are forbidden.
+`first-verdict` and `second-verdict` agents use only the immutable snapshots supplied by the Main agent. KIS, MCP, web, network, shell, file reads outside supplied persona text, file writes, and recollection are forbidden.
 
 ## `decision-brief.json` Input
 
-`decision-brief.json` is the default input for all verdict agents. Do not give verdict agents raw `merged.json` unless the user explicitly changes this contract.
+`decision-brief.json` is the input for `first-verdict` and `second-verdict` agents.
 
-The brief contains compact per-symbol market, financial, KIS news/disclosure, account exposure, eligibility, evidence mode, and error summaries. It must not contain long raw API payloads, full article text, repeated source detail, or sensitive account/authentication values.
+The brief contains compact per-symbol market, optional financial, optional KIS news/disclosure, account exposure, eligibility, evidence mode, and error summaries. It must not contain long raw API payloads, full article text, repeated source detail, or sensitive account/authentication values.
 
-`evidence_mode="price_only"` symbols are still eligible when they have a resolved identifier, name, current-or-last price, and observation time. Agents must score them with lower confidence and explicit missing-data notes instead of excluding them solely because financial or news data is absent.
-
-For `final-risk-verdict`, `price_only` remains order-eligible evidence when the symbol is eligible and the order candidate satisfies account, market-status, order-type, user-limit, and same-day-fill constraints. Missing, partial, failed, or no-data financial/news evidence may be recorded as warning or lower confidence, but it is not by itself a reason to return `blocked` or `needs_review` for `order_cash`, `order_resv`, demo submission, or real submission.
+Financial/news absence is not a negative signal by itself. If a symbol has a resolved identifier, name, current-or-last price, and observation time, agents must score it from the available market/account evidence and must not lower score, lower confidence, exclude it, or remove its target solely because financial or news data is absent.
 
 ## `first-verdict`
 
-The seven analyst and ten juror personas independently score every eligible symbol.
+The selected seven `first-verdict` personas independently score every eligible symbol.
 
 Score meanings:
 
@@ -55,7 +53,7 @@ Rules:
 - `score` is one of `-2`, `-1`, `0`, `1`, `2`.
 - `confidence` is an integer from `1` to `10`.
 - Evidence cites fields and observation dates from `decision-brief.json`.
-- For `price_only` symbols, evidence must cite the price snapshot and observation date, and `missing_data` must mention absent financial/news evidence when absent.
+- If financial/news data is absent, `missing_data` may mention it as context, but the absence must not lower score or confidence by itself.
 - One symbol's data cannot support another symbol.
 - An agent cannot see other verdict outputs.
 
@@ -133,60 +131,6 @@ The Main agent reconciles valid judge results:
 - Apply explicit user limits and latest account constraints after reconciliation.
 - Record every judge input, valid value, excluded value, and final result in `verdict-second.json`.
 
-## `final-risk-verdict`
-
-The `final-risk-verdict` sub-agent reviews the Main agent's order candidates after `account-before-order.json` is refreshed and before any order submission.
-
-Inputs:
-
-- `decision-brief.json`
-- `verdict-second.json`
-- sanitized `account-before-order.json`
-- the Main agent's order candidate list
-
-Forbidden:
-
-- recalculating target quantities
-- replacing or overriding judge results
-- adding new order candidates
-- changing direction or quantity
-- calling KIS, MCP, web, network, shell, or any external source
-- submitting, reserving, correcting, or cancelling orders
-- writing files
-
-The `final-risk-verdict` returns:
-
-```json
-{
-  "agent_id": "",
-  "persona": "final-risk",
-  "stage": "final-risk-verdict",
-  "result": "approved | blocked | needs_review",
-  "approved_order_ids": [],
-  "risk_checks": [
-    {
-      "check": "",
-      "status": "pass | fail | review",
-      "evidence": "",
-      "affected_orders": []
-    }
-  ],
-  "blocking_reasons": [],
-  "review_reasons": [],
-  "errors": []
-}
-```
-
-Rules:
-
-- `approved` means every order candidate passed `final-risk-verdict` review as provided.
-- `blocked` means at least one required risk gate failed and no order may be submitted.
-- `needs_review` means the evidence is insufficient or ambiguous and no order may be submitted.
-- Missing, invalid, or `failed` `final-risk-verdict` output blocks order submission.
-- The Main agent writes `final-order-verdict.json` and enforces the block/approval result.
-- `price_only` evidence mode, missing financial evidence, or missing news evidence is not insufficient or ambiguous evidence by itself when the candidate otherwise satisfies the execution gates.
-- `expected_holding_quantity` is the pre-candidate expected holding quantity after already-active pending and reserved quantities are considered. It is valid for this field to differ from `target_holding_quantity`; consistency must be checked through `additional_required_quantity` and `validated_order_quantity`.
-
 ## Allowed Terms
 
 | Field | Allowed values |
@@ -194,6 +138,5 @@ Rules:
 | artifact status | `success`, `partial`, `failed` |
 | first score | `+2`, `+1`, `0`, `-1`, `-2` |
 | eligibility | `eligible_for_verdict=true/false` |
-| `final-risk-verdict` result | `approved`, `blocked`, `needs_review` |
 | order direction | `buy`, `sell`, `none` |
 | execution result | `submitted`, `skipped`, `blocked`, `failed` |

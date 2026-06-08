@@ -34,23 +34,18 @@ MCP_TRADING_ENV_VALUES = {"paper", "acct"}
 KST = ZoneInfo("Asia/Seoul")
 DAILY_TRADING_STAGE_MODEL_CONTRACT = (
     "\n\n[daily-trading stage model contract]\n"
-    "- daily-trading을 실제 사용하면 아래 stage별 model/effort는 권장값이 아니라 필수값이다.\n"
-    "- collection/verdict/final-risk sub-agent는 multi_agent_v1.spawn_agent가 아니라 "
+    "- collection/verdict sub-agent는 multi_agent_v1.spawn_agent가 아니라 "
     "`/app/skills/daily-trading/scripts/run_subagent.py`로 실행한다.\n"
     "- launcher spec에는 run_id, started_at, stage, agent_role, task_name, prompt, "
-    "workspace_dir, output_dir를 넣고, 모델/effort는 launcher 내부 matrix가 고정한다.\n"
+    "workspace_dir, output_dir를 넣는다.\n"
     "- launcher는 `codex exec -m <model> -c model_reasoning_effort=\"<effort>\"`를 사용하며 "
     "parent와 같은 CODEX_HOME, CODEX_MCP_TRADING_ENV, workspace cwd, sandbox bypass 설정을 상속한다.\n"
     "- launcher는 `reports/runs/<run_id>/subagents/<task_name>.wrapper.json`와 raw text만 남긴다. "
     "Main agent만 wrapper의 parsed_json을 sanitize한 뒤 canonical artifact를 작성한다.\n"
-    "- collect-account-state, market, financial, news: model=gpt-5.3-codex-spark, effort=low.\n"
-    "- first-verdict analyst/juror: model=gpt-5.5, effort=low.\n"
+    "- market, financial, news: model=gpt-5.3-codex-spark, effort=low.\n"
+    "- selected first-verdict personas: model=gpt-5.5, effort=low.\n"
     "- second-verdict judge: model=gpt-5.5, effort=high.\n"
-    "- final-risk-verdict: model=gpt-5.5, effort=high.\n"
-    "- Main agent initialize, merge-and-brief, execution, report: model=gpt-5.5, effort=medium.\n"
-    "- stage-metrics.json의 모든 metrics 항목에는 recommended_model, recommended_effort, "
-    "actual_model, actual_effort를 기록한다.\n"
-    "- actual_model 또는 actual_effort가 필수값과 다르면 run validation failed로 처리된다.\n"
+    "- Main agent initialize, account snapshots, merge-and-brief, order-execution, report: model=gpt-5.5, effort=medium.\n"
 )
 VALIDATION_SUMMARY_LIMIT = 8
 

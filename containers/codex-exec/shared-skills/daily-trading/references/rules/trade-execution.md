@@ -2,7 +2,7 @@
 
 ## Scope
 
-`second-verdict` decides portfolio target quantities. Only the Main agent converts those targets into order candidates and calls actual order submission APIs. Read-only account state is collected through `$collect-account-state`.
+`second-verdict` decides portfolio target quantities. Only the Main agent converts those targets into order candidates, collects read-only account state, and calls actual order submission APIs inside the single `order-execution` stage.
 
 - Analysis-only request: calculate and report targets, but do not call order APIs. Write skipped `account-before-order.json` and `execution.json`.
 - Preparation or review request: refresh account state and create order tickets, but do not submit.
@@ -18,14 +18,14 @@ The execution rules in this file apply uniformly to `order_cash` and `order_resv
 The Main agent must read the `$check-holiday` result recorded in `run.json` and `decision-brief.json` before order candidate calculation and before any submission.
 
 - `open`: explicitly authorized demo or real submission may continue after all other gates.
-- `closed`: use previous-trading-day snapshot prices for verdicts. If the user or schedule explicitly requested 실전(acct) 예약거래, create reservation-order candidates and use only `order_resv` after every gate passes. Do not use `order_cash`. This status does not affect whether financial or news collection should run.
+- `closed`: use previous-trading-day snapshot prices for verdicts. If the user or schedule explicitly requested 실전(acct) 예약거래, create reservation-order candidates and use only `order_resv` after every gate passes. Do not use `order_cash`.
 - `unknown`: block every real `order_cash` and `order_resv` submission. Analysis, target calculation, and non-submitting preparation may continue.
 
 ## Account Snapshot Boundary
 
-Collection, `first-verdict`, `second-verdict`, and `final-risk-verdict` sub-agents cannot call any account or order API.
+Collection, `first-verdict`, and `second-verdict` sub-agents cannot call any account or order API.
 
-Before order calculation, the Main agent requests `$collect-account-state` with `snapshot_type="account-before-order"` to refresh only the fields required to validate current candidates:
+Before order calculation, the Main agent refreshes only the read-only account fields required to validate current candidates:
 
 - `inquire_account_balance`
 - `inquire_balance`
@@ -35,11 +35,11 @@ Before order calculation, the Main agent requests `$collect-account-state` with 
 - `inquire_psbl_order` for buy candidates
 - `inquire_psbl_sell` for sell candidates
 
-The account sub-agent must inspect current parameters with `find_api_detail`, must not provide account number, account product code, or HTS ID because the MCP wrapper supplies them, and must not run ledger APIs in parallel. It returns JSON only through the daily-trading sub-agent launcher wrapper. The Main agent sanitizes wrapper `parsed_json` and writes `account-before-order.json`.
+The Main agent must use validated parameter templates for known read-only account APIs, must not provide account number, account product code, or HTS ID because the MCP wrapper supplies them, and must not run ledger APIs in parallel. It sanitizes the result and writes `account-before-order.json`.
 
-Use the validated KIS parameter templates for account lookups instead of probing invalid values. In particular, `inquire_account_balance` uses `inqr_dvsn_1="1"` and does not include `env_dv` when the inspected API detail does not support it. If a parameter template was already validated earlier in the same run, reuse it and record `template_reused=true` in the attempt entry rather than repeating trial calls.
+Call `find_api_detail` only when no validated template exists, when introducing a new API type, or after the API rejects a template for parameter/schema reasons. In particular, `inquire_account_balance` uses `inqr_dvsn_1="1"` and does not include `env_dv` unless the currently inspected API detail supports it. If a parameter template was already validated earlier in the same run, reuse it and record `template_reused=true` in the attempt entry rather than repeating trial calls.
 
-If `account-before-order.json` is missing, invalid, or `failed`, the Main agent must block order candidate calculation, `final-risk-verdict`, and submission.
+If `account-before-order.json` is missing, invalid, or `failed`, the Main agent must block order candidate calculation and submission.
 
 ## Main-Agent Order API Boundary
 
@@ -131,36 +131,13 @@ Every order must satisfy all applicable constraints:
 - same-day fill guard passed
 - user maximum amount, maximum quantity, prohibited symbols, and price limits passed
 - market status permits the requested submission type
-- order price and order type were validated using current API details
-- `price_only` evidence mode is allowed when the symbol remains eligible and has a valid price observation
-- `final-risk-verdict` result is `approved`
+- order price and order type were validated using known templates or current API details when templates were unavailable/rejected
+- missing financial/news evidence is allowed when the symbol remains eligible and has a valid price observation
 - demo or real submission was explicitly requested
 
 If any gate fails, do not submit that order. Record `blocked` and the exact non-sensitive reason.
 
-Missing, partial, failed, or no-data financial/news evidence is not an execution gate by itself. When `decision-brief.json` marks a symbol `eligible_for_verdict=true` with `evidence_mode="price_only"`, `final-risk-verdict` and the Main agent may lower confidence, record warnings, or preserve missing-data notes, but they must not block, fail, or send the order to review solely because the order is based on `price_only` evidence. This applies equally to `order_cash`, `order_resv`, demo submission, and real submission.
-
-## `final-risk-verdict` Gate
-
-After order candidates are created and before any submission, the Main agent runs the `final-risk-verdict` sub-agent through the daily-trading sub-agent launcher.
-
-Inputs:
-
-- `decision-brief.json`
-- `verdict-second.json`
-- sanitized `account-before-order.json`
-- order candidates
-
-The `final-risk-verdict` sub-agent can return only `approved`, `blocked`, or `needs_review`.
-
-- `approved`: the Main agent may continue to explicit-authorization and order API gates.
-- `blocked`: the Main agent records blocked execution and submits nothing.
-- `needs_review`: the Main agent records review-needed execution and submits nothing.
-- missing, invalid, or `failed`: the Main agent records blocked execution and submits nothing.
-
-The `final-risk-verdict` sub-agent must not recalculate target quantities, change order candidates, replace judge output, call APIs, or write files. It must evaluate the candidate quantities using the pre-candidate `expected_holding_quantity` definition in this file and must not require `expected_holding_quantity` to equal `target_holding_quantity`.
-
-`final-risk-verdict` must not create a required-evidence gate from `price_only` alone. If a symbol is eligible, has a valid reconciled target, has a valid price observation, and satisfies account, market-status, order-type, user-limit, and same-day-fill constraints, absent financial/news evidence is only a warning and cannot be the sole reason for `blocked` or `needs_review`.
+Missing, partial, failed, skipped, or no-data financial/news evidence is not an execution gate by itself. The Main agent must not block, fail, reduce, or send an order to review solely because financial/news evidence is absent. This applies equally to `order_cash`, `order_resv`, demo submission, and real submission.
 
 ## Price And Order Type
 
@@ -174,21 +151,11 @@ The `final-risk-verdict` sub-agent must not recalculate target quantities, chang
 ## Submission Order
 
 1. Validate all candidates against the same latest account snapshot.
-2. Obtain an `approved` result in `final-order-verdict.json`.
-3. Process sells before buys.
-4. Do not count unfilled sell proceeds as buy cash.
-5. Submit orders sequentially and apply the order API backoff rules at each call site.
-6. A failed or blocked order does not transfer its quantity or budget to another symbol in the same run.
-7. After submissions, run a narrow post-order verification and record it in `execution.json`.
-
-## Post-Order Verification
-
-Post-order verification is not a second full `account-before-order` snapshot. Its purpose is only to determine whether submitted orders or reservations are visible after the Main agent's order API calls.
-
-- For `order_resv`, call only reservation-order lookup such as `order_resv_ccnl` unless an order submission returned an uncertain timeout or the reservation lookup itself fails.
-- For intraday `order_cash`, call only same-day order/fill and pending-order lookups unless the submission result is uncertain.
-- Do not repeat `inquire_account_balance`, `inquire_balance`, `inquire_psbl_order`, or `inquire_psbl_sell` during post-order verification when all submissions returned accepted order or reservation identifiers.
-- If a submission result is uncertain, use the minimum read-only lookup needed to prove whether that specific order was accepted before retrying or marking it failed.
+2. Process sells before buys.
+3. Do not count unfilled sell proceeds as buy cash.
+4. Submit orders sequentially and apply the order API backoff rules at each call site.
+5. A failed or blocked order does not transfer its quantity or budget to another symbol in the same run.
+6. Do not run routine verification lookups after accepted submissions. If a submission result is uncertain because of timeout or transport ambiguity, use the minimum read-only lookup needed to prove whether that specific order was accepted before retrying or marking it failed.
 
 ## Execution JSON Fields
 
@@ -197,7 +164,6 @@ Post-order verification is not a second full `account-before-order` snapshot. It
 ```json
 {
   "request_type": "analysis | prepare | demo-submit | real-submit",
-  "final_order_verdict_result": "approved | blocked | needs_review | skipped",
   "target_cash_amount": 0,
   "latest_available_cash": 0,
   "orders": [
@@ -220,8 +186,7 @@ Post-order verification is not a second full `account-before-order` snapshot. It
       "reason": "",
       "order_or_reservation_id": ""
     }
-  ],
-  "post_order_state": {}
+  ]
 }
 ```
 
