@@ -190,8 +190,8 @@ def holding_history_csv_path(workspace_dir: Path) -> Path:
         return Path(configured)
     memory_root = os.getenv("DAILY_TRADING_MEMORY_DIR", "").strip()
     if memory_root:
-        return Path(memory_root) / "holding-history" / "holding-changes.csv"
-    return workspace_dir / "memory" / "holding-history" / "holding-changes.csv"
+        return Path(memory_root) / "show-holding-history" / "holding-changes.csv"
+    return workspace_dir / "memory" / "show-holding-history" / "holding-changes.csv"
 
 
 def append_holding_history_from_run(workspace_dir: Path, context: CodexRunContext) -> int:

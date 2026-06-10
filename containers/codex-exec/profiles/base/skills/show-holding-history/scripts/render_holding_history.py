@@ -51,11 +51,11 @@ def default_csv_path() -> Path:
         return Path(configured)
     memory_root = os.getenv("DAILY_TRADING_MEMORY_DIR", "").strip()
     if memory_root:
-        return Path(memory_root) / "holding-history" / "holding-changes.csv"
+        return Path(memory_root) / "show-holding-history" / "holding-changes.csv"
     root = repo_root()
     if root:
-        return root / "memory" / "holding-history" / "holding-changes.csv"
-    return Path.cwd() / "memory" / "holding-history" / "holding-changes.csv"
+        return root / "memory" / "show-holding-history" / "holding-changes.csv"
+    return Path.cwd() / "memory" / "show-holding-history" / "holding-changes.csv"
 
 
 def parse_date(value: str) -> date | None:
@@ -402,7 +402,7 @@ def write_chart(
 
 def write_png(path: Path, rows: list[dict[str, str]], days: int, today: date) -> list[Path]:
     if Image is None or ImageDraw is None:
-        raise RuntimeError("Pillow is required to render holding-history charts with Korean labels")
+        raise RuntimeError("Pillow is required to render show-holding-history output with Korean labels")
 
     series, names = build_series(rows)
     symbols = sorted(series, key=lambda symbol: (-symbol_max_quantity(series, symbol), symbol))
@@ -428,7 +428,7 @@ def main() -> int:
         raise SystemExit("--days must be positive")
     today = date.fromisoformat(args.today) if args.today else datetime.now(KST).date()
     csv_path = Path(args.csv_path) if args.csv_path else default_csv_path()
-    output_path = Path(args.out) if args.out else csv_path.parent / f"holding-history-{args.days}d.png"
+    output_path = Path(args.out) if args.out else csv_path.parent / f"show-holding-history-{args.days}d.png"
     rows = load_rows(csv_path, args.days, today)
     image_paths = write_png(output_path, rows, args.days, today)
     print(

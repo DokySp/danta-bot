@@ -1,6 +1,6 @@
 ---
 name: show-holding-history
-description: "Render recent holding quantity changes from memory/holding-history/holding-changes.csv as Telegram-ready time/quantity chart images. Use when the user asks for $show-holding-history or $show-holding-history N."
+description: "Render recent holding quantity changes from memory/show-holding-history/holding-changes.csv as Telegram-ready time/quantity chart images. Use when the user asks for $show-holding-history or $show-holding-history N."
 ---
 
 # Show Holding History
@@ -14,9 +14,9 @@ Render submitted cash-order holding quantity changes recorded by `codex-exec` af
 Use the first configured CSV path in this order:
 
 1. `HOLDING_HISTORY_CSV` when set.
-2. `DAILY_TRADING_MEMORY_DIR/holding-history/holding-changes.csv` when `DAILY_TRADING_MEMORY_DIR` is set.
-3. `<repo>/memory/holding-history/holding-changes.csv` from a local repository checkout.
-4. `./memory/holding-history/holding-changes.csv` from the current working directory.
+2. `DAILY_TRADING_MEMORY_DIR/show-holding-history/holding-changes.csv` when `DAILY_TRADING_MEMORY_DIR` is set.
+3. `<repo>/memory/show-holding-history/holding-changes.csv` from a local repository checkout.
+4. `./memory/show-holding-history/holding-changes.csv` from the current working directory.
 
 The CSV is append-only and contains submitted non-reservation order quantity changes. Reservation orders are ignored.
 
