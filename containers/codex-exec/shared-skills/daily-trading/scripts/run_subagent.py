@@ -26,8 +26,8 @@ REQUIRED_SPEC_FIELDS = {
     "workspace_dir",
     "output_dir",
 }
-COLLECTOR_MODEL = "gpt-5.3-codex-spark"
-VERDICT_MODEL = "gpt-5.5"
+SUBAGENT_MODEL = "gpt-5.5"
+SUBAGENT_REASONING_EFFORT = "low"
 COLLECTION_STAGES = {"market-collection", "financial-collection", "news-collection"}
 TEXT_OUTPUT_STAGES = {"financial-collection", "news-collection"}
 OPTIONAL_GROUP_FAILURE_STAGES = TEXT_OUTPUT_STAGES
@@ -67,18 +67,48 @@ def launcher_model_effort(stage: str, agent_role: str) -> tuple[str, str]:
     stage_key = stage.strip().lower()
     role_key = agent_role.strip().lower()
 
-    if role_key in {"market", "financial", "news"} or stage_key in {
-        "market-collection",
-        "financial-collection",
-        "news-collection",
-    }:
-        return COLLECTOR_MODEL, "low"
-    if role_key in {"analyst", "juror"} or role_key.startswith(("analyst-", "juror-")) or stage_key == "first-verdict":
-        return VERDICT_MODEL, "low"
-    if role_key == "judge" or role_key.startswith("judge-") or stage_key == "second-verdict":
-        return VERDICT_MODEL, "high"
+    if (
+        role_key in {"market", "financial", "news", "analyst", "juror", "judge"}
+        or role_key.startswith(("analyst-", "juror-", "judge-"))
+        or stage_key in {
+            "market-collection",
+            "financial-collection",
+            "news-collection",
+            "first-verdict",
+            "second-verdict",
+        }
+    ):
+        return SUBAGENT_MODEL, SUBAGENT_REASONING_EFFORT
     raise ValueError(f"unsupported daily-trading sub-agent stage/role: stage={stage!r}, agent_role={agent_role!r}")
 
+
+def assert_unsupported_stage_rejected() -> None:
+    try:
+        launcher_model_effort("unsupported-stage", "unsupported-role")
+    except ValueError:
+        return
+    raise AssertionError("unsupported daily-trading sub-agent stage/role was accepted")
+
+
+def assert_model_effort(stage: str, agent_role: str, *, model: str, effort: str) -> None:
+    actual_model, actual_effort = launcher_model_effort(stage, agent_role)
+    if (actual_model, actual_effort) != (model, effort):
+        raise AssertionError(
+            f"expected {model}/{effort} for {stage}/{agent_role}, got {actual_model}/{actual_effort}"
+        )
+
+
+def assert_all_supported_stages_use_subagent_defaults() -> None:
+    cases = [
+        ("market-collection", "market"),
+        ("financial-collection", "financial"),
+        ("news-collection", "news"),
+        ("first-verdict", "analyst"),
+        ("first-verdict", "juror-05"),
+        ("second-verdict", "judge"),
+    ]
+    for stage, role in cases:
+        assert_model_effort(stage, role, model=SUBAGENT_MODEL, effort=SUBAGENT_REASONING_EFFORT)
 
 def validate_spec(spec: dict[str, Any]) -> None:
     missing = sorted(field for field in REQUIRED_SPEC_FIELDS if not str(spec.get(field, "")).strip())
@@ -577,10 +607,28 @@ def run_self_test() -> int:
         os.environ["FAKE_CODEX_ARGV_LOG"] = str(argv_log)
         os.environ["CODEX_BYPASS_APPROVALS_AND_SANDBOX"] = "1"
         try:
+            try:
+                assert_all_supported_stages_use_subagent_defaults()
+                assert_unsupported_stage_rejected()
+            except AssertionError as exc:
+                failures.append(str(exc))
+
             cases = [
-                (spec(tmp, stage="market-collection", agent_role="market", task_name="market"), COLLECTOR_MODEL, "low"),
-                (spec(tmp, stage="first-verdict", agent_role="analyst", task_name="first"), VERDICT_MODEL, "low"),
-                (spec(tmp, stage="second-verdict", agent_role="judge", task_name="second"), VERDICT_MODEL, "high"),
+                (
+                    spec(tmp, stage="market-collection", agent_role="market", task_name="market"),
+                    SUBAGENT_MODEL,
+                    SUBAGENT_REASONING_EFFORT,
+                ),
+                (
+                    spec(tmp, stage="first-verdict", agent_role="analyst", task_name="first"),
+                    SUBAGENT_MODEL,
+                    SUBAGENT_REASONING_EFFORT,
+                ),
+                (
+                    spec(tmp, stage="second-verdict", agent_role="judge", task_name="second"),
+                    SUBAGENT_MODEL,
+                    SUBAGENT_REASONING_EFFORT,
+                ),
             ]
             for test_spec, model, effort in cases:
                 wrapper = run_one(test_spec)

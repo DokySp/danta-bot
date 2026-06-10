@@ -29,10 +29,10 @@ ENV CODEX_EXEC_PORT=8080
 WORKDIR /app
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl git nodejs npm ripgrep \
+  && apt-get install -y --no-install-recommends ca-certificates curl fonts-noto-cjk git nodejs npm ripgrep \
   && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir PyYAML==6.0.2
+RUN pip install --no-cache-dir Pillow==12.1.1 PyYAML==6.0.2
 
 RUN set -eux; \
   case "${TARGETARCH:-amd64}" in \

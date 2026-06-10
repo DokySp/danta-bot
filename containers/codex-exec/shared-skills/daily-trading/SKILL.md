@@ -17,7 +17,7 @@ Read only the files needed for the current stage.
 - Portfolio report: `references/rules/report-template.md`
 - Target quantity and execution: `references/rules/trade-execution.md`
 - `first-verdict` personas: selected files under `references/personas/analyst-*.md` plus `references/personas/juror-05-역발상.md`
-- `second-verdict` personas: `references/personas/judge-*.md`
+- `second-verdict` personas: `references/personas/judge-midterm.md` and `references/personas/judge-longterm.md`
 
 ## Canonical Terms
 
@@ -35,11 +35,11 @@ Read only the files needed for the current stage.
 | Stage | Agent | Mandatory model | Mandatory effort |
 |---|---|---|---|
 | Main orchestration and account snapshots | `Main agent` | `gpt-5.5` | `medium` |
-| Market collection | `market` sub-agent | `gpt-5.3-codex-spark` | `low` |
-| News collection | `news` sub-agent | `gpt-5.3-codex-spark` | `low` |
-| Financial summary collection | `financial` sub-agent | `gpt-5.3-codex-spark` | `low` |
+| Market collection | `market` sub-agent | `gpt-5.5` | `low` |
+| News collection | `news` sub-agent | `gpt-5.5` | `low` |
+| Financial summary collection | `financial` sub-agent | `gpt-5.5` | `low` |
 | `first-verdict` | selected 7 personas | `gpt-5.5` | `low` |
-| `second-verdict` | 3 judge | `gpt-5.5` | `high` |
+| `second-verdict` | 2 judges | `gpt-5.5` | `low` |
 | Account refresh, order preparation, and execution | `Main agent` | `gpt-5.5` | `medium` |
 
 ## Run Identity
@@ -92,7 +92,8 @@ These rules apply to direct and indirect use, including `daily-*`, `pre-open`, `
 
 - Run every verdict role through the daily-trading sub-agent launcher. Do not use `multi_agent_v1.spawn_agent` for daily-trading stage delegation because the launcher is the model/effort enforcement boundary.
 - `first-verdict` and `second-verdict` agents cannot call KIS, web, MCP, network, shell, or any external data source.
-- They cannot write files or submit orders.
+- They cannot submit orders.
+- They may write only their own human-review Markdown companion file under `reports/runs/<run_id>/verdicts/` using the fixed filename rules in `verdict-format.md`. They must not write or modify canonical JSON artifacts.
 - Their input is `decision-brief.json`.
 - They may use only the exact snapshots, personas, and verdict artifacts supplied by the Main agent.
 - Missing data stays missing. Recollection, substitution from another symbol, target-quantity invention outside the assigned stage, and guessing are forbidden.
@@ -143,24 +144,26 @@ The market collector gathers KIS price, chart, order-book/trade, flow, rank, ind
 
 1. Run the daily-trading sub-agent launcher for the selected seven `first-verdict` personas in parallel.
 2. Give every first-verdict agent the same immutable `decision-brief.json` and only eligible symbols, including `evidence_mode="price_only"` symbols.
-3. Each agent independently returns one `+2`, `+1`, `0`, `-1`, or `-2` score per symbol using `verdict-format.md`.
-4. Agents cannot see other verdict-agent results.
-5. The Main agent aggregates each symbol's valid scores using the thresholds in `verdict-format.md`.
-6. Preserve raw responses, aggregation inputs, excluded symbols, and final first scores in `verdict-first.json`.
-7. If no usable `first-verdict` result exists, still write `verdict-first.json` with `status="failed"` and stop before `second-verdict`.
+3. Tell each agent its required human-review Markdown companion path from `verdict-format.md`.
+4. Each agent independently returns one `+2`, `+1`, `0`, `-1`, or `-2` score per symbol using `verdict-format.md`.
+5. Agents cannot see other verdict-agent results.
+6. The Main agent aggregates each symbol's valid scores using the thresholds in `verdict-format.md`.
+7. Preserve raw responses, aggregation inputs, excluded symbols, final first scores, and any companion Markdown paths in `verdict-first.json`.
+8. If no usable `first-verdict` result exists, still write `verdict-first.json` with `status="failed"` and stop before `second-verdict`.
 
 ### 5. `second-verdict`: Portfolio Targets
 
 1. Build the `second-verdict` set from:
    - eligible symbols with first score `+2` or `+1`
    - every eligible current holding, regardless of first score
-2. Run the daily-trading sub-agent launcher for the short-, mid-, and long-term judge personas in parallel.
+2. Run the daily-trading sub-agent launcher for the mid- and long-term judge personas in parallel.
 3. Give each judge the same immutable `decision-brief.json` and `verdict-first.json`.
-4. Judges perform portfolio-level comparison without external calls and return target quantities for every `second-verdict` symbol.
-5. They must consider relative attractiveness, duplicate exposure, current weight, market conditions, and same-day fills from the brief.
-6. Fixed minimum or maximum cash ratios are forbidden. Target cash is decided from the market and portfolio evidence.
-7. The Main agent reconciles judge outputs using `verdict-format.md` and writes `verdict-second.json`.
-8. If no usable `second-verdict` target exists, still write `verdict-second.json` with `status="failed"` and do not calculate orders.
+4. Tell each judge its required human-review Markdown companion path from `verdict-format.md`.
+5. Judges perform portfolio-level comparison without external calls and return target quantities for every `second-verdict` symbol.
+6. They must consider relative attractiveness, duplicate exposure, current weight, market conditions, and same-day fills from the brief.
+7. Fixed minimum or maximum cash ratios are forbidden. Target cash is decided from the market and portfolio evidence.
+8. The Main agent reconciles judge outputs using `verdict-format.md`, preserves any companion Markdown paths, and writes `verdict-second.json`.
+9. If no usable `second-verdict` target exists, still write `verdict-second.json` with `status="failed"` and do not calculate orders.
 
 ### 6. Account Refresh, Order Preparation, And Execution
 
@@ -205,6 +208,7 @@ The market collector gathers KIS price, chart, order-book/trade, flow, rank, ind
 - The launcher writes `reports/runs/<run_id>/subagents/<task_name>.wrapper.json` and raw text only. The Main agent owns every canonical artifact under `reports/runs/<run_id>/`.
 - Main agent may use only sanitized wrapper `parsed_json` for JSON artifacts and sanitized wrapper `parsed_text` for `financial.md` and `news.md`. Failed wrappers, invalid JSON for JSON-required stages, missing wrappers, or empty financial/news text must remain visible in wrapper files and the affected canonical artifact status.
 - Preserve every raw verdict result inside the corresponding verdict JSON.
+- Preserve any verdict-agent human-review Markdown companion file paths inside the corresponding verdict JSON, but do not use Markdown content as machine-validated input for aggregation, reconciliation, target calculation, or order gates.
 - If a verdict response is structurally incomplete, request one correction without adding new data.
 - After one failed correction, record the response error and continue with remaining valid responses.
 - Never let a failed collector or verdict agent silently disappear from artifacts.

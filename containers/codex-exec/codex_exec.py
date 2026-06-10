@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import base64
+import csv
 import html
 import json
 import logging
@@ -42,9 +44,7 @@ DAILY_TRADING_STAGE_MODEL_CONTRACT = (
     "parent와 같은 CODEX_HOME, CODEX_MCP_TRADING_ENV, workspace cwd, sandbox bypass 설정을 상속한다.\n"
     "- launcher는 `reports/runs/<run_id>/subagents/<task_name>.wrapper.json`와 raw text만 남긴다. "
     "Main agent만 JSON 단계의 parsed_json 또는 financial/news 단계의 parsed_text를 sanitize한 뒤 canonical artifact를 작성한다.\n"
-    "- market, financial, news: model=gpt-5.3-codex-spark, effort=low.\n"
-    "- selected first-verdict personas: model=gpt-5.5, effort=low.\n"
-    "- second-verdict judge: model=gpt-5.5, effort=high.\n"
+    "- 모든 collection/verdict sub-agent: model=gpt-5.5, effort=low.\n"
     "- Main agent initialize, account snapshots, merge-and-brief, order-execution, report: model=gpt-5.5, effort=medium.\n"
 )
 
@@ -165,6 +165,141 @@ def error_message_with_run_context(exc: Exception, fallback: str) -> str:
     if isinstance(context, CodexRunContext):
         return append_daily_trading_started_at(message, context)
     return message
+
+
+HOLDING_HISTORY_HEADER = [
+    "timestamp_kst",
+    "date",
+    "run_id",
+    "symbol_id",
+    "symbol_name",
+    "direction",
+    "old_quantity",
+    "new_quantity",
+    "delta_quantity",
+    "submitted_quantity",
+    "order_or_reservation_id",
+    "row_id",
+    "source_artifact",
+]
+
+
+def holding_history_csv_path(workspace_dir: Path) -> Path:
+    configured = os.getenv("HOLDING_HISTORY_CSV", "").strip()
+    if configured:
+        return Path(configured)
+    memory_root = os.getenv("DAILY_TRADING_MEMORY_DIR", "").strip()
+    if memory_root:
+        return Path(memory_root) / "holding-history" / "holding-changes.csv"
+    return workspace_dir / "memory" / "holding-history" / "holding-changes.csv"
+
+
+def append_holding_history_from_run(workspace_dir: Path, context: CodexRunContext) -> int:
+    run_dir = workspace_dir / "reports" / "runs" / context.run_id
+    execution_path = run_dir / "execution.json"
+    if not execution_path.is_file():
+        return 0
+    try:
+        payload = json.loads(execution_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        logging.exception("failed to read execution artifact path=%s", execution_path)
+        return 0
+
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict):
+        data = payload if isinstance(payload, dict) else {}
+    request_type = str(data.get("request_type", "")).lower()
+    if "resv" in request_type or "reservation" in request_type or "예약" in request_type:
+        return 0
+    orders = data.get("orders", [])
+    if not isinstance(orders, list):
+        return 0
+
+    rows: list[dict[str, str]] = []
+    for index, order in enumerate(orders):
+        if not isinstance(order, dict):
+            continue
+        if str(order.get("result", "")).lower() != "submitted":
+            continue
+        direction = str(order.get("direction", "")).lower()
+        if direction not in {"buy", "sell"}:
+            continue
+        order_type = str(order.get("order_type", "")).lower()
+        if "resv" in order_type or "reservation" in order_type or "예약" in order_type:
+            continue
+        quantity = int_value(order.get("validated_order_quantity"))
+        if quantity <= 0:
+            continue
+        current_quantity = int_value(order.get("current_live_holding_quantity"))
+        delta = quantity if direction == "buy" else -quantity
+        rows.append(
+            {
+                "timestamp_kst": context.started_at,
+                "date": context.started_at[:10],
+                "run_id": context.run_id,
+                "symbol_id": str(order.get("symbol_id", "")).strip(),
+                "symbol_name": str(order.get("symbol_name", "")).strip(),
+                "direction": direction,
+                "old_quantity": str(current_quantity),
+                "new_quantity": str(current_quantity + delta),
+                "delta_quantity": str(delta),
+                "submitted_quantity": str(quantity),
+                "order_or_reservation_id": str(order.get("order_or_reservation_id", "")).strip(),
+                "row_id": str(index),
+                "source_artifact": str(execution_path.relative_to(workspace_dir)),
+            }
+        )
+    if not rows:
+        return 0
+
+    csv_path = holding_history_csv_path(workspace_dir)
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    existing_keys: set[tuple[str, str, str, str, str]] = set()
+    if csv_path.exists():
+        try:
+            with csv_path.open(newline="") as file:
+                for row in csv.DictReader(file):
+                    existing_keys.add(
+                        (
+                            row.get("run_id", ""),
+                            row.get("symbol_id", ""),
+                            row.get("direction", ""),
+                            row.get("order_or_reservation_id", ""),
+                            row.get("row_id", ""),
+                        )
+                    )
+        except OSError:
+            logging.exception("failed to read holding history path=%s", csv_path)
+
+    write_header = not csv_path.exists() or csv_path.stat().st_size == 0
+    written = 0
+    with csv_path.open("a", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=HOLDING_HISTORY_HEADER)
+        if write_header:
+            writer.writeheader()
+        for row in rows:
+            key = (
+                row["run_id"],
+                row["symbol_id"],
+                row["direction"],
+                row["order_or_reservation_id"],
+                row["row_id"],
+            )
+            if key in existing_keys:
+                continue
+            writer.writerow(row)
+            existing_keys.add(key)
+            written += 1
+    if written:
+        logging.info("appended holding history rows=%s path=%s", written, csv_path)
+    return written
+
+
+def int_value(value: Any) -> int:
+    try:
+        return int(str(value or "0").replace(",", ""))
+    except ValueError:
+        return 0
 
 
 ERROR_LOG_LIMIT = 2000
@@ -371,6 +506,60 @@ class TelegramGateway:
         except URLError as exc:
             raise RuntimeError(f"telegram-gateway failed: {exc}") from exc
 
+    def send_photo(
+        self,
+        path: Path,
+        caption: str | None = None,
+        chat_id: str | None = None,
+        route: str | None = None,
+    ) -> None:
+        self._send_binary_file("/sendPhoto", path, caption, chat_id, route)
+
+    def send_document(
+        self,
+        path: Path,
+        caption: str | None = None,
+        chat_id: str | None = None,
+        route: str | None = None,
+    ) -> None:
+        self._send_binary_file("/sendDocument", path, caption, chat_id, route)
+
+    def _send_binary_file(
+        self,
+        endpoint: str,
+        path: Path,
+        caption: str | None,
+        chat_id: str | None,
+        route: str | None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "filename": path.name,
+            "content_base64": base64.b64encode(path.read_bytes()).decode("ascii"),
+            "parse_mode": "HTML",
+        }
+        if caption:
+            payload["caption"] = caption
+        if chat_id:
+            payload["chat_id"] = chat_id
+        outbound_route = route or self.config.telegram_route
+        if outbound_route:
+            payload["route"] = outbound_route
+        body = json.dumps(payload).encode("utf-8")
+        request = Request(
+            self._gateway_url(endpoint),
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=30) as response:
+                response.read()
+        except HTTPError as exc:
+            raw = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"telegram-gateway file send failed: HTTP {exc.code}: {raw}") from exc
+        except URLError as exc:
+            raise RuntimeError(f"telegram-gateway file send failed: {exc}") from exc
+
     def send_chat_action(
         self,
         chat_id: str | None,
@@ -556,12 +745,14 @@ class CodexRunner:
             )
         except Exception as exc:
             if daily_trading_hint or self._daily_trading_artifact_exists(context):
+                self._append_holding_history_if_available(context)
                 attach_daily_trading_context(exc, context)
             raise
 
         if result.returncode != 0:
             exc = classify_codex_error(result.returncode, result.stdout, result.stderr)
             if daily_trading_hint or self._daily_trading_artifact_exists(context):
+                self._append_holding_history_if_available(context)
                 attach_daily_trading_context(exc, context)
             raise exc
 
@@ -571,11 +762,18 @@ class CodexRunner:
             output = result.stdout.strip()
         output = output.strip() or "<i>Codex completed without output.</i>"
         if daily_trading_hint or self._daily_trading_artifact_exists(context):
+            self._append_holding_history_if_available(context)
             output = append_daily_trading_started_at(output, context)
         return output
 
     def _daily_trading_artifact_exists(self, context: CodexRunContext) -> bool:
         return (self.config.workspace_dir / "reports" / "runs" / context.run_id / "run.json").is_file()
+
+    def _append_holding_history_if_available(self, context: CodexRunContext) -> None:
+        try:
+            append_holding_history_from_run(self.config.workspace_dir, context)
+        except Exception:
+            logging.exception("failed to append holding history run_id=%s", context.run_id)
 
     def _session_ids(self) -> list[str]:
         ids: list[str] = []
@@ -707,6 +905,62 @@ class CodexRunner:
         marker.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+def parse_show_holding_history_command(text: str) -> int | None:
+    parts = text.strip().split()
+    if not parts or parts[0] != "$show-holding-history":
+        return None
+    if len(parts) == 1:
+        return 7
+    if len(parts) != 2:
+        raise UserFacingError(
+            "invalid show-holding-history arguments",
+            "사용법: <code>$show-holding-history</code> 또는 <code>$show-holding-history 7</code>",
+        )
+    try:
+        days = int(parts[1])
+    except ValueError as exc:
+        raise UserFacingError(
+            "invalid show-holding-history days",
+            "일수는 숫자로 입력해주세요. 예: <code>$show-holding-history 7</code>",
+        ) from exc
+    if days <= 0:
+        raise UserFacingError(
+            "invalid show-holding-history days",
+            "일수는 1 이상의 숫자로 입력해주세요.",
+        )
+    return days
+
+
+def render_holding_history(config: Config, days: int) -> dict[str, Any]:
+    script = (
+        config.workspace_dir
+        / "containers"
+        / "codex-exec"
+        / "profiles"
+        / "base"
+        / "skills"
+        / "show-holding-history"
+        / "scripts"
+        / "render_holding_history.py"
+    )
+    if not script.exists():
+        script = config.codex_home / "skills" / "show-holding-history" / "scripts" / "render_holding_history.py"
+    if not script.exists():
+        raise RuntimeError(f"show-holding-history renderer not found: {script}")
+    result = subprocess.run(
+        ["python3", str(script), "--days", str(days)],
+        cwd=config.workspace_dir,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"show-holding-history failed: {result.stderr.strip() or result.stdout.strip()}")
+    return json.loads(result.stdout)
+
+
 @dataclass(frozen=True)
 class TelegramTask:
     chat_id: str | None
@@ -747,6 +1001,27 @@ class TelegramWorker:
     def _handle(self, task: TelegramTask) -> None:
         text = task.text.strip()
         logging.info("handling telegram task message_id=%s text=%r", task.message_id, text)
+
+        holding_history_days = parse_show_holding_history_command(text)
+        if holding_history_days is not None:
+            summary = render_holding_history(self.config, holding_history_days)
+            row_count = int(summary.get("row_count", 0))
+            caption = (
+                f"<b>보유수량 변경 이력</b>\n"
+                f"<code>{holding_history_days}일</code> / <code>{row_count}건</code>"
+            )
+            image_paths = [Path(str(path)) for path in summary.get("image_paths", [])]
+            if not image_paths:
+                image_paths = [Path(str(summary["image_path"]))]
+            csv_path = Path(str(summary["csv_path"]))
+            for index, image_path in enumerate(image_paths, start=1):
+                photo_caption = caption
+                if len(image_paths) > 1:
+                    photo_caption = f"{caption}\n<code>{index}/{len(image_paths)}</code>"
+                self.gateway.send_photo(image_path, photo_caption, task.chat_id, task.route)
+            if csv_path.exists():
+                self.gateway.send_document(csv_path, "원본 CSV", task.chat_id, task.route)
+            return
 
         if text.startswith("/new "):
             self.gateway.send_message(

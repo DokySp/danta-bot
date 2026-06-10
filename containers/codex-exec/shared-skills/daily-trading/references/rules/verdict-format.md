@@ -2,7 +2,35 @@
 
 ## External-Call Ban
 
-`first-verdict` and `second-verdict` agents use only the immutable snapshots supplied by the Main agent. KIS, MCP, web, network, shell, file reads outside supplied persona text, file writes, and recollection are forbidden.
+`first-verdict` and `second-verdict` agents use only the immutable snapshots supplied by the Main agent. KIS, MCP, web, network, shell, file reads outside supplied persona text, canonical artifact writes, and recollection are forbidden.
+
+Verdict agents may write only their own human-review Markdown companion file described below. They must not write, update, or repair `run.json`, `decision-brief.json`, `verdict-first.json`, `verdict-second.json`, account artifacts, execution artifacts, wrapper files, or another agent's Markdown file.
+
+## Human-Review Markdown Companion
+
+Each verdict agent writes one companion Markdown file for human inspection:
+
+```text
+reports/runs/<run_id>/verdicts/<stage>--<agent_role>--<task_name>.md
+```
+
+Filename rules:
+
+- `<stage>` is exactly `first-verdict` or `second-verdict`.
+- `<agent_role>` is the launcher `agent_role` after replacing every character except ASCII letters, digits, `_`, `-`, and `.` with `-`.
+- `<task_name>` is the launcher `task_name` with the same safe-name replacement.
+- Do not include spaces, slashes, timestamps, persona display names, symbol names, or free-form suffixes in the filename.
+
+Content rules:
+
+- Write Korean prose for human review.
+- Cover every supplied eligible asset for that agent.
+- Keep each asset judgement short: decision, key evidence, key risk or missing context.
+- Do not add evidence that is absent from `decision-brief.json` or `verdict-first.json`.
+- Do not include account numbers, account product codes, tokens, app keys, app secrets, HTS IDs, authorization headers, cookies, or raw credentials.
+- The exact Markdown structure is not machine validated. Tables, bullets, or short sections are all allowed.
+
+The companion Markdown file is never the source of truth for scoring, target quantities, reconciliation, order calculation, or order gates. The JSON response captured in the launcher wrapper remains the only machine-validated verdict output. If the Markdown file is missing, malformed, incomplete, or inconsistent with JSON, record a warning and continue from the JSON verdict data.
 
 ## `decision-brief.json` Input
 
@@ -33,6 +61,7 @@ Each agent returns:
   "agent_id": "",
   "persona": "",
   "stage": "first-verdict",
+  "human_markdown_path": "reports/runs/<run_id>/verdicts/first-verdict--<agent_role>--<task_name>.md",
   "symbols": [
     {
       "symbol_id": "",
@@ -56,6 +85,7 @@ Rules:
 - If financial/news data is absent, `missing_data` may mention it as context, but the absence must not lower score or confidence by itself.
 - One symbol's data cannot support another symbol.
 - An agent cannot see other verdict outputs.
+- `human_markdown_path` is informational. Missing or invalid path metadata must not invalidate otherwise valid symbol scores.
 
 ### First-Score Aggregation
 
@@ -79,15 +109,16 @@ If no valid score exists, exclude the symbol from `second-verdict` and trading.
 
 ## `second-verdict`
 
-The `second-verdict` set contains eligible `+2` and `+1` symbols plus every eligible current holding. Short-, mid-, and long-term judges independently compare the set at portfolio level.
+The `second-verdict` set contains eligible `+2` and `+1` symbols plus every eligible current holding. Mid- and long-term judges independently compare the set at portfolio level.
 
 Each judge returns:
 
 ```json
 {
   "agent_id": "",
-  "persona": "short-term | mid-term | long-term",
+  "persona": "mid-term | long-term",
   "stage": "second-verdict",
+  "human_markdown_path": "reports/runs/<run_id>/verdicts/second-verdict--<agent_role>--<task_name>.md",
   "portfolio": {
     "target_cash_amount": 0,
     "cash_rationale": [],
@@ -117,14 +148,15 @@ Rules:
 - Same-day fills are a repeated-trade guard; do not subtract them from current live holdings.
 - No fixed minimum cash ratio, maximum cash ratio, or fixed investment ratio is allowed.
 - Judges cannot add a symbol that is absent from the `second-verdict` set.
+- `human_markdown_path` is informational. Missing or invalid path metadata must not invalidate otherwise valid target quantities.
 
 ### Reconciliation
 
 The Main agent reconciles valid judge results:
 
-- Final target holding quantity: median of valid judge target quantities for that symbol, rounded down only if a non-integer can occur.
-- Final target cash amount: median of valid judge target cash amounts.
-- If fewer than two valid judge results exist for a symbol, set no final target and exclude it from orders.
+- Final target holding quantity: with exactly two valid judge results, use the average of the two target quantities and round down if fractional.
+- Final target cash amount: with exactly two valid judge results, use the average of the two target cash amounts.
+- If either judge result is invalid or missing for a symbol, set no final target and exclude it from orders.
 - Validate the reconciled quantities and cash against `account-before-verdict.json` total assets using the immutable market-snapshot valuation prices.
 - If reconciled holdings plus target cash exceed total assets, reduce only buy-side target quantities in reverse relative-attractiveness order until the targets fit. Do not increase any sell target.
 - If reconciled holdings plus target cash are below total assets, add the unexplained remainder to final target cash. Do not increase target quantities merely to consume cash.

@@ -12,6 +12,8 @@ reports/
         ├── subagents/
         │   ├── <task_name>.wrapper.json
         │   └── <task_name>.raw.txt
+        ├── verdicts/
+        │   └── <stage>--<agent_role>--<task_name>.md
         ├── run.json
         ├── market.json
         ├── financial.md    # optional best-effort plain text
@@ -26,7 +28,9 @@ reports/
 
 Create `run.json` immediately when daily-trading begins. Write every other file when its stage completes or fails. Domain snapshots are write-once; retries and partial results are retained in an `attempts` array rather than replacing earlier evidence.
 
-The daily-trading sub-agent launcher writes only `subagents/<task_name>.wrapper.json` and `subagents/<task_name>.raw.txt`. It does not write canonical artifacts such as `market.json`, `financial.md`, `news.md`, or verdict files. The Main agent reads each wrapper, sanitizes `parsed_json` for JSON stages or `parsed_text` for financial/news text stages, and writes the canonical artifact.
+The daily-trading sub-agent launcher writes only `subagents/<task_name>.wrapper.json` and `subagents/<task_name>.raw.txt`. It does not write canonical artifacts such as `market.json`, `financial.md`, `news.md`, or verdict JSON files. The Main agent reads each wrapper, sanitizes `parsed_json` for JSON stages or `parsed_text` for financial/news text stages, and writes the canonical artifact.
+
+Verdict sub-agents may write only their own human-review companion Markdown file under `verdicts/` using the fixed filename rules in `verdict-format.md`. These Markdown files are for human inspection only. Missing, malformed, or incomplete companion Markdown must be recorded as a non-blocking warning, but must not fail wrapper parsing, JSON artifact validation, score aggregation, target reconciliation, target calculation, or order gates.
 
 ## Status Values
 
@@ -87,8 +91,9 @@ Launcher wrappers must be treated as failed stage evidence when the wrapper is m
 - `financial.md`, `news.md`: optional best-effort plain-text context files. Missing, failed, partial, no-data, malformed Markdown, or absent financial/news text must not fail validation or block verdict/order flow by themselves.
 - `account-before-verdict.json`: sanitized initial account, current holdings, pending/reserved orders, and same-day fills.
 - `decision-brief.json`: compact canonical verdict input derived from market/account evidence and optional financial/news summaries; contains source provenance, eligibility, exclusion reasons, account exposure, and domain summaries; excludes raw payloads, full article text, repeated source detail, and sensitive fields.
-- `verdict-first.json`: raw `first-verdict` responses and aggregated `+2..-2` score per eligible symbol.
-- `verdict-second.json`: `second-verdict` set, raw judge responses, reconciled target quantities, target cash, and rationale.
+- `verdict-first.json`: raw `first-verdict` responses, companion Markdown paths when present, and aggregated `+2..-2` score per eligible symbol.
+- `verdict-second.json`: `second-verdict` set, raw judge responses, companion Markdown paths when present, reconciled target quantities, target cash, and rationale.
+- `verdicts/<stage>--<agent_role>--<task_name>.md`: optional human-review companion Markdown written by the corresponding verdict sub-agent only. It is not canonical machine input.
 - `account-before-order.json`: sanitized latest account snapshot or a skipped envelope from the `order-execution` stage.
 - `execution.json`: quantity calculations, final order list, submissions, failures, blocked candidates, or a skipped envelope from the `order-execution` stage.
 

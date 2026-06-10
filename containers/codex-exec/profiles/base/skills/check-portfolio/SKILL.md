@@ -28,9 +28,11 @@ Use the first existing user-managed portfolio path in this order:
 Use the first existing assistant-managed recommendation cache path in this order:
 
 1. `ASSISTANT_PORTFOLIO_CACHE_FILE` environment variable when set.
-2. `~/.cache/codex/check-portfolio/assistant-recommendations.txt`.
+2. `DAILY_TRADING_MEMORY_DIR/check-portfolio/assistant-recommendations.txt` when `DAILY_TRADING_MEMORY_DIR` is set.
+3. `<repo>/memory/check-portfolio/assistant-recommendations.txt` from a local repository checkout.
+4. `./memory/check-portfolio/assistant-recommendations.txt` from the current working directory.
 
-The assistant cache follows the same `~/.cache/codex/<skill-name>` convention used by other cached skills. It remains separate from the user-managed `/app/config/portfolio.txt` so Codex recommendations do not rewrite the user's portfolio file.
+The assistant cache is stored under the repository-level `memory/` directory by default. It remains separate from the user-managed `/app/config/portfolio.txt` so Codex recommendations do not rewrite the user's portfolio file.
 
 ## Workflow
 
@@ -50,4 +52,4 @@ When the user asks Codex to add recommended symbols to the assistant cache, run:
 sh scripts/update_assistant_portfolio_cache.sh 123456 234567
 ```
 
-This creates or updates `ASSISTANT_PORTFOLIO_CACHE_FILE` when set, otherwise `~/.cache/codex/check-portfolio/assistant-recommendations.txt`, and stores one deduplicated six-digit symbol per line.
+This creates or updates `ASSISTANT_PORTFOLIO_CACHE_FILE` when set, otherwise `memory/check-portfolio/assistant-recommendations.txt`, and stores one deduplicated six-digit symbol per line.

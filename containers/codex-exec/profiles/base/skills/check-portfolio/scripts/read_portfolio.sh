@@ -21,11 +21,14 @@ if [ -n "${ASSISTANT_PORTFOLIO_CACHE_FILE:-}" ]; then
   assistant_candidates="${assistant_candidates}${ASSISTANT_PORTFOLIO_CACHE_FILE}
 "
 fi
-home_dir="${HOME:-}"
-if [ -z "$home_dir" ]; then
-  home_dir="$(cd ~ && pwd)"
+if [ -n "${DAILY_TRADING_MEMORY_DIR:-}" ]; then
+  memory_root="$DAILY_TRADING_MEMORY_DIR"
+elif [ -n "$repo_root" ]; then
+  memory_root="$repo_root/memory"
+else
+  memory_root="$(pwd)/memory"
 fi
-assistant_candidates="${assistant_candidates}${home_dir}/.cache/codex/check-portfolio/assistant-recommendations.txt"
+assistant_candidates="${assistant_candidates}${memory_root}/check-portfolio/assistant-recommendations.txt"
 
 input_files=""
 

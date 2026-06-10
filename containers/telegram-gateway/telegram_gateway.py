@@ -2,6 +2,8 @@
 import html
 import json
 import logging
+import base64
+import mimetypes
 import os
 import re
 import signal
@@ -688,6 +690,59 @@ class TelegramClient:
             raise RuntimeError(f"Telegram {method} failed: {body}")
         return parsed
 
+    def post_multipart(
+        self,
+        method: str,
+        payload: dict[str, Any],
+        files: dict[str, tuple[str, bytes, str]],
+        timeout: int | None = None,
+    ) -> dict[str, Any]:
+        boundary = f"telegram-gateway-{time.time_ns()}"
+        parts: list[bytes] = []
+        for key, value in payload.items():
+            parts.extend(
+                [
+                    f"--{boundary}\r\n".encode("utf-8"),
+                    f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode("utf-8"),
+                    str(value).encode("utf-8"),
+                    b"\r\n",
+                ]
+            )
+        for key, (filename, content, content_type) in files.items():
+            safe_filename = filename.replace('"', "")
+            parts.extend(
+                [
+                    f"--{boundary}\r\n".encode("utf-8"),
+                    (
+                        f'Content-Disposition: form-data; name="{key}"; '
+                        f'filename="{safe_filename}"\r\n'
+                    ).encode("utf-8"),
+                    f"Content-Type: {content_type}\r\n\r\n".encode("utf-8"),
+                    content,
+                    b"\r\n",
+                ]
+            )
+        parts.append(f"--{boundary}--\r\n".encode("utf-8"))
+        request = Request(
+            f"{self.base_url}/{method}",
+            data=b"".join(parts),
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=timeout or self.route.http_timeout) as response:
+                body = response.read().decode("utf-8")
+        except HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Telegram {method} failed: HTTP {exc.code}: {body}") from exc
+        except URLError as exc:
+            raise RuntimeError(f"Telegram {method} failed: {exc}") from exc
+
+        parsed = json.loads(body)
+        if not parsed.get("ok"):
+            raise RuntimeError(f"Telegram {method} failed: {body}")
+        return parsed
+
     def get_updates(self, offset: int | None) -> list[dict[str, Any]]:
         payload: dict[str, Any] = {
             "timeout": self.route.poll_timeout,
@@ -730,6 +785,24 @@ class TelegramClient:
 
     def send_chat_action(self, chat_id: str, action: str = "typing") -> None:
         self.post_form("sendChatAction", {"chat_id": chat_id, "action": action})
+
+    def send_binary_file(
+        self,
+        method: str,
+        field_name: str,
+        chat_id: str,
+        filename: str,
+        content: bytes,
+        caption: str | None = None,
+        parse_mode: str | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {"chat_id": chat_id}
+        if caption:
+            payload["caption"] = sanitize_telegram_html(caption) if parse_mode == "HTML" else caption
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        self.post_multipart(method, payload, {field_name: (filename, content, content_type)})
 
 
 class CodexExecClient:
@@ -814,7 +887,7 @@ class GatewayApp:
                 )
 
             def do_POST(self) -> None:
-                if self.path not in {"/sendMessage", "/notify", "/sendChatAction"}:
+                if self.path not in {"/sendMessage", "/notify", "/sendChatAction", "/sendPhoto", "/sendDocument"}:
                     self._write_json(404, {"ok": False, "error": "not found"})
                     return
 
@@ -831,6 +904,39 @@ class GatewayApp:
                             self._write_json(400, {"ok": False, "error": "action is required"})
                             return
                         TelegramClient(route).send_chat_action(chat_id, action)
+                        self._write_json(200, {"ok": True})
+                        return
+
+                    if self.path in {"/sendPhoto", "/sendDocument"}:
+                        route = app.resolve_send_route(payload)
+                        chat_id = str(payload.get("chat_id") or route.default_chat_id or "")
+                        if not chat_id:
+                            self._write_json(400, {"ok": False, "error": "chat_id is required"})
+                            return
+                        filename = str(payload.get("filename") or "").strip()
+                        if not filename:
+                            self._write_json(400, {"ok": False, "error": "filename is required"})
+                            return
+                        encoded = str(payload.get("content_base64") or "")
+                        if not encoded:
+                            self._write_json(400, {"ok": False, "error": "content_base64 is required"})
+                            return
+                        content = base64.b64decode(encoded)
+                        caption = str(payload.get("caption") or "").strip() or None
+                        parse_mode = payload.get("parse_mode")
+                        if parse_mode is not None:
+                            parse_mode = str(parse_mode)
+                        method = "sendPhoto" if self.path == "/sendPhoto" else "sendDocument"
+                        field_name = "photo" if self.path == "/sendPhoto" else "document"
+                        TelegramClient(route).send_binary_file(
+                            method,
+                            field_name,
+                            chat_id,
+                            filename,
+                            content,
+                            caption=caption,
+                            parse_mode=parse_mode,
+                        )
                         self._write_json(200, {"ok": True})
                         return
 

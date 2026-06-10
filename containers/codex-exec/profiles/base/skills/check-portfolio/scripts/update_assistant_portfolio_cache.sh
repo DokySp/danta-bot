@@ -6,11 +6,16 @@ if [ "$#" -eq 0 ]; then
   exit 2
 fi
 
-home_dir="${HOME:-}"
-if [ -z "$home_dir" ]; then
-  home_dir="$(cd ~ && pwd)"
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -n "${DAILY_TRADING_MEMORY_DIR:-}" ]; then
+  memory_root="$DAILY_TRADING_MEMORY_DIR"
+elif [ -n "$repo_root" ]; then
+  memory_root="$repo_root/memory"
+else
+  memory_root="$(pwd)/memory"
 fi
-cache_file="${ASSISTANT_PORTFOLIO_CACHE_FILE:-$home_dir/.cache/codex/check-portfolio/assistant-recommendations.txt}"
+
+cache_file="${ASSISTANT_PORTFOLIO_CACHE_FILE:-$memory_root/check-portfolio/assistant-recommendations.txt}"
 cache_dir="$(dirname "$cache_file")"
 mkdir -p "$cache_dir"
 
