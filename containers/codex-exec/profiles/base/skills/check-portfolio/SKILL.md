@@ -1,22 +1,36 @@
 ---
 name: check-portfolio
-description: "Read the codex-exec base portfolio configuration file verbatim. Use when the user asks to check, show, load, or reference the configured portfolio, portfolio tickers, holding list, or portfolio file."
+description: "Read the merged codex-exec configured portfolio symbols from the user-managed portfolio file and the assistant-managed recommendation cache. Use when the user asks to check, show, load, or reference the configured portfolio, configured tickers, or portfolio file."
 ---
 
 # Check Portfolio
 
 ## Purpose
 
-Read the portfolio configuration file exactly as stored. Do not parse, rank, expand, normalize, or edit the portfolio unless the user explicitly asks for a separate follow-up action.
+Read the configured portfolio symbols from two sources and output the merged symbol list only.
 
-## File Location
+- The user-managed portfolio file is for symbols the user adds directly.
+- The assistant-managed recommendation cache is for symbols added by Codex recommendations.
+- Merge both sources as a union of six-digit Korean stock codes.
+- Remove duplicates. Ordering has no meaning.
+- Do not rank, expand, or add symbols unless the user explicitly asks for a separate follow-up action.
+- This skill does not read live account holdings. `$daily-trading` adds current holdings separately from its initial read-only account snapshot.
 
-Use the first existing path in this order:
+## File Locations
+
+Use the first existing user-managed portfolio path in this order:
 
 1. `PORTFOLIO_FILE` environment variable when set.
 2. `/app/config/portfolio.txt`.
 3. `/workspace/containers/codex-exec/profiles/base/config/portfolio.txt`.
 4. `containers/codex-exec/profiles/base/config/portfolio.txt` when running from a local repository checkout.
+
+Use the first existing assistant-managed recommendation cache path in this order:
+
+1. `ASSISTANT_PORTFOLIO_CACHE_FILE` environment variable when set.
+2. `~/.cache/codex/check-portfolio/assistant-recommendations.txt`.
+
+The assistant cache follows the same `~/.cache/codex/<skill-name>` convention used by other cached skills. It remains separate from the user-managed `/app/config/portfolio.txt` so Codex recommendations do not rewrite the user's portfolio file.
 
 ## Workflow
 
@@ -26,4 +40,14 @@ Run the bundled reader:
 sh scripts/read_portfolio.sh
 ```
 
-Report the file path and the raw file contents. If the file does not exist or cannot be read, say that directly and do not guess the portfolio.
+Return the stdout exactly as the merged symbol list. Do not add path labels or source sections. If neither file exists or no readable symbols are present, say that directly and do not guess the portfolio.
+
+## Assistant Recommendation Cache
+
+When the user asks Codex to add recommended symbols to the assistant cache, run:
+
+```bash
+sh scripts/update_assistant_portfolio_cache.sh 123456 234567
+```
+
+This creates or updates `ASSISTANT_PORTFOLIO_CACHE_FILE` when set, otherwise `~/.cache/codex/check-portfolio/assistant-recommendations.txt`, and stores one deduplicated six-digit symbol per line.

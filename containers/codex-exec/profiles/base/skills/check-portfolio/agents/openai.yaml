@@ -1,4 +1,4 @@
 interface:
   display_name: "Check Portfolio"
-  short_description: "Read configured portfolio text"
-  default_prompt: "Use $check-portfolio to read the configured portfolio file."
+  short_description: "Read configured portfolio symbols"
+  default_prompt: "Use $check-portfolio to read the merged configured portfolio symbols only; live account holdings are added later by $daily-trading."

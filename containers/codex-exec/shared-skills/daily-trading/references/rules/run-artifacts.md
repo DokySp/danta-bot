@@ -6,9 +6,6 @@ Every daily-trading run uses the injected or generated `run_id`.
 
 ```text
 reports/
-├── cache/
-│   └── financial/
-│       └── <YYYY-MM-DD>.json
 ├── YYYY-MM-DD_포트폴리오.md
 └── runs/
     └── <run_id>/
@@ -16,10 +13,9 @@ reports/
         │   ├── <task_name>.wrapper.json
         │   └── <task_name>.raw.txt
         ├── run.json
-        ├── stage-metrics.json
         ├── market.json
-        ├── financial.json  # optional best-effort
-        ├── news.json       # optional best-effort
+        ├── financial.md    # optional best-effort plain text
+        ├── news.md         # optional best-effort plain text
         ├── account-before-verdict.json
         ├── decision-brief.json
         ├── verdict-first.json
@@ -28,11 +24,9 @@ reports/
         └── execution.json
 ```
 
-Create `run.json` and initialize `stage-metrics.json` immediately when daily-trading begins. Write every other file when its stage completes or fails. Domain snapshots are write-once; retries and partial results are retained in an `attempts` array rather than replacing earlier evidence.
+Create `run.json` immediately when daily-trading begins. Write every other file when its stage completes or fails. Domain snapshots are write-once; retries and partial results are retained in an `attempts` array rather than replacing earlier evidence.
 
-Financial cache files live outside `reports/runs/<run_id>/` because they are reused by date. By default they live in `~/.cache/codex/collect-financial-information/<YYYY-MM-DD>.json`; `FINANCIAL_CACHE_DIR` overrides the directory. The cache key is the Korea trading date, and the validity period is one Korea trading day. Read and write financial cache files only through `collect-financial-information/scripts/financial_cache.py`; this helper validates date, schema, stage, domain, status, non-empty symbols, and requested-symbol presence before a cache hit or cache write is allowed. Additional cached symbols are allowed.
-
-The daily-trading sub-agent launcher writes only `subagents/<task_name>.wrapper.json` and `subagents/<task_name>.raw.txt`. It does not write canonical artifacts such as `market.json`, `financial.json`, `news.json`, or verdict files. The Main agent reads each wrapper, sanitizes `parsed_json`, writes the canonical artifact, and copies the wrapper metric into `stage-metrics.json`.
+The daily-trading sub-agent launcher writes only `subagents/<task_name>.wrapper.json` and `subagents/<task_name>.raw.txt`. It does not write canonical artifacts such as `market.json`, `financial.md`, `news.md`, or verdict files. The Main agent reads each wrapper, sanitizes `parsed_json` for JSON stages or `parsed_text` for financial/news text stages, and writes the canonical artifact.
 
 ## Status Values
 
@@ -50,11 +44,9 @@ Final `run.json` status:
 - `partial`: a usable report exists, but at least one symbol or non-fatal stage is partial, excluded, blocked, or failed.
 - `failed`: no usable verdict/report exists, or a required explicitly requested account/order stage failed so the requested result could not be produced.
 
-If runtime artifact validation fails, set `validation_status="failed"`, keep the validation summary in `run.json`, and mark final `status="failed"` with `status_reason="validation_failed"`.
-
 ## Common Envelope
 
-Every artifact JSON file except `stage-metrics.json` contains:
+Every artifact JSON file contains:
 
 ```json
 {
@@ -86,49 +78,13 @@ Each error contains:
 
 Omit `symbol_id` only for run-wide errors. Do not include sensitive values in error messages.
 
-## Stage Metrics
-
-`stage-metrics.json` records the operational envelope for every major stage:
-
-```json
-{
-  "schema_version": "1",
-  "run_id": "",
-  "started_at": "",
-  "generated_at": "",
-  "stage": "stage-metrics",
-  "status": "success | partial | failed",
-  "metrics": [
-    {
-      "stage": "initialize | account-before-verdict | market-collection | financial-collection | news-collection | merge-and-brief | first-verdict | second-verdict | order-execution | report",
-      "agent_role": "main | market | financial | news | analyst | juror | judge",
-      "started_at": "",
-      "ended_at": "",
-      "duration_ms": null,
-      "status": "success | partial | failed",
-      "token_usage": {
-        "input_tokens": null,
-        "output_tokens": null,
-        "total_tokens": null
-      },
-      "token_source": "actual | unavailable",
-      "token_unavailable_reason": ""
-    }
-  ],
-  "errors": []
-}
-```
-
-If exact token usage is available, record actual integer values and `token_source="actual"`. If exact token usage is not available, keep all token fields `null`, set `token_source="unavailable"`, and record a non-sensitive reason such as `runtime did not expose per-stage token usage`.
-
-Launcher wrappers must be treated as failed stage evidence when the wrapper is missing, has `status="failed"`, has a non-zero `returncode`, or has `parsed_json=null`. Failed wrappers must be reflected in `stage-metrics.json`; the Main agent must write a failed canonical envelope for the affected stage and block order candidate calculation or order submission when the failed stage is required.
+Launcher wrappers must be treated as failed stage evidence when the wrapper is missing, has `status="failed"`, or has a non-zero `returncode`. JSON-required stages also fail when `parsed_json=null`. Financial/news text stages fail only when `parsed_text` is empty or unusable. A `run-group` result is `failed` only when a required stage fails; if only financial/news text stages fail, the group result is `partial`. Failed wrappers must remain in `subagents/`; the Main agent must write a failed canonical envelope for a failed required stage and block order candidate calculation or order submission only when the failed stage is required.
 
 ## File Responsibilities
 
-- `run.json`: input scope, environment, timestamps, stage statuses, final status, artifact paths, `market_holiday.status` (`open`, `closed`, or `unknown`), and validation status.
-- `stage-metrics.json`: stage timing, status, and token usage availability.
+- `run.json`: input scope, environment, timestamps, stage statuses, final status, and artifact paths.
 - `market.json`: required market file containing the complete symbol universe and per-symbol errors.
-- `financial.json`, `news.json`: optional best-effort domain files. Missing, failed, partial, or no-data financial/news artifacts must not fail validation or block verdict/order flow by themselves.
+- `financial.md`, `news.md`: optional best-effort plain-text context files. Missing, failed, partial, no-data, malformed Markdown, or absent financial/news text must not fail validation or block verdict/order flow by themselves.
 - `account-before-verdict.json`: sanitized initial account, current holdings, pending/reserved orders, and same-day fills.
 - `decision-brief.json`: compact canonical verdict input derived from market/account evidence and optional financial/news summaries; contains source provenance, eligibility, exclusion reasons, account exposure, and domain summaries; excludes raw payloads, full article text, repeated source detail, and sensitive fields.
 - `verdict-first.json`: raw `first-verdict` responses and aggregated `+2..-2` score per eligible symbol.

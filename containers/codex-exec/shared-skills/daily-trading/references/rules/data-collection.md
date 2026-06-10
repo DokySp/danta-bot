@@ -3,6 +3,7 @@
 ## One-Pass Rule
 
 - The complete portfolio universe is collected in detail once per `run_id`.
+- The complete portfolio universe is the union of configured/requested symbols from `$check-portfolio` and current live holdings from the initial read-only account snapshot.
 - `market`, `financial`, and `news` collection sub-agents may run in parallel and each receives the same complete symbol list.
 - `market` returns one JSON object containing all symbols. `financial` and `news` are optional best-effort artifacts.
 - The launcher spec for the market collector must include the complete universe in `symbol_ids` so the wrapper can fail fast when market silently drops a symbol.
@@ -21,14 +22,6 @@
 - Authentication, token, credential, and permission errors are not local backoff targets. Return them to the Main agent so `auth-token.md` can handle token reissue centrally.
 
 ## Domain Responsibilities
-
-### Market Status Preflight
-
-Before account snapshots, collection, verdicts, or order preparation, the Main agent runs `$check-holiday` for the Asia/Seoul target date. Record the normalized `status` as `open`, `closed`, or `unknown` in `run.json`, `decision-brief.json`, and the report.
-
-- `open`: collect normal live market snapshots.
-- `closed`: collect or reuse the most recent valid trading-day price snapshot and label `price.snapshot_mode="previous_trading_day"`. This only changes the market snapshot mode and execution path.
-- `unknown`: collection and analysis may continue, but real order and reservation submission are blocked.
 
 ### Market Collector
 
@@ -75,43 +68,25 @@ Must use `$collect-financial-information`. KIS and official sources only.
 
 Financial collection is best-effort. Missing, failed, partial, no-data, or skipped financial collection must not stop merge, verdicts, target calculation, or order execution when market/account gates pass.
 
-Financial collection is cache-first:
+Financial collection returns compact Markdown text, not JSON. The Main agent writes the sanitized text to `financial.md` when available and may copy only short bullets into `decision-brief.json`.
 
-- Cache path: `~/.cache/codex/collect-financial-information/<YYYY-MM-DD>.json`
-- `FINANCIAL_CACHE_DIR` overrides the cache directory
-- Validity: one Korea trading day
-- Cache validation helper: `collect-financial-information/scripts/financial_cache.py`
-- Cache hit: the Main agent creates `financial.json` from the helper-validated payload without external financial calls
-- Cache miss or explicit force refresh: the financial collector uses KIS and official sources, returns the fresh envelope, and the Main agent updates the cache only through the helper
-- The financial collector may return a cache update candidate, but it must not write files directly while running as a `daily-trading` sub-agent
-- Failed, malformed, empty, wrong-date, wrong-stage, wrong-domain, or missing-requested-symbol cache payloads are cache misses and must not overwrite an existing cache
+Required text constraints:
 
-Before launching `financial-collection`, the Main agent runs:
-
-```bash
-python3 <collect-financial-information-skill-dir>/scripts/financial_cache.py get \
-  --date <YYYY-MM-DD> \
-  --symbols "<comma-separated complete universe>"
-```
-
-If the helper exits successfully, use its `payload` as the complete `financial.json` source and skip the financial sub-agent. The helper may read a larger date-level cache, but it returns only the requested symbols when `--symbols` is supplied. If it exits non-zero, preserve the non-sensitive reason in `stage-metrics.json` or `run.json` and launch the financial sub-agent.
-
-After a cache-miss financial sub-agent returns `parsed_json`, the Main agent runs:
-
-```bash
-python3 <collect-financial-information-skill-dir>/scripts/financial_cache.py put \
-  --date <YYYY-MM-DD> \
-  --symbols "<comma-separated complete universe>" \
-  < financial.json
-```
-
-Store the cache only if the helper exits successfully. Do not write cache files by hand, do not store `failed` financial envelopes, and do not replace an existing valid cache with an invalid or missing-requested-symbol payload.
+- no JSON envelope
+- no code fences
+- no raw API payloads
+- no account, token, app key, app secret, HTS ID, or other sensitive values
+- no long source dumps
+- one compact section per relevant symbol when data exists
+- a short "no usable financial context" note is acceptable when the collector finds nothing
 
 ### News Collector
 
 When news collection is attempted, use `$collect-news-information`. KIS news and disclosure-related APIs only.
 
 News collection is best-effort. Missing, failed, partial, no-data, or skipped news collection must not stop merge, verdicts, target calculation, or order execution when market/account gates pass.
+
+News collection returns compact Markdown text, not JSON. The Main agent writes the sanitized text to `news.md` when available and may copy only short bullets into `decision-brief.json`.
 
 Forbidden:
 
@@ -147,6 +122,8 @@ Initial snapshot for `account-before-verdict.json`:
 - same-day fills
 
 If this snapshot fails, continue collection and verdicts only for requested/configured symbols, mark current holdings unknown, and block target-to-order conversion and every order operation.
+
+When this snapshot succeeds, add every current live holding to the complete portfolio universe even if that symbol is absent from `$check-portfolio`. Do not drop a live holding solely because it was not configured.
 
 Latest snapshot for `account-before-order.json`:
 
@@ -186,7 +163,7 @@ Include:
 - symbol id and name
 - eligibility, evidence mode, warnings, and exclusion reasons
 - current or most recent valid price and observation timestamp
-- market status and live/previous-trading-day snapshot mode
+- price snapshot mode
 - core market signals
 - core financial summary when available
 - core KIS news/disclosure summary when available

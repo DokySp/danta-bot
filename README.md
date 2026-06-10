@@ -154,6 +154,8 @@ containers/
         config/
           codex-exec.env     # 기본 Codex 실행 및 MCP 연결 환경변수 설정
           schedules.yaml     # 기본 스케줄링 설정
+          portfolio.txt      # 기본 포트폴리오 설정
+          default-trade-prompt # 기본 거래 프롬프트
         skills/
       experimental/
         compose.yaml
@@ -162,6 +164,13 @@ containers/
           schedules.yaml     # 실험 스케줄링 설정
         skills/
 ```
+
+`codex-exec` 프로필 Compose는 `config/`를 `/app/config`로 writable bind mount합니다.
+`schedules.yaml`, `portfolio.txt`, `default-trade-prompt` 파일 변경은 컨테이너 재시작 없이 다음
+스케줄러 tick 또는 다음 Codex 실행부터 반영됩니다. `$trading-schedule-toggle` 스킬도 이 mount를 통해
+`daily-{number}` 스케줄의 `enabled` 값을 on/off로 직접 바꿀 수 있습니다. 단, `codex-exec.env`처럼
+환경변수로 주입되는 설정은 컨테이너 재생성 후 적용됩니다. 스킬이 config를 수정하려면 호스트
+config 파일과 디렉터리가 컨테이너 실행 UID 1000에 쓰기 가능해야 합니다.
 
 ## Codex CLI
 

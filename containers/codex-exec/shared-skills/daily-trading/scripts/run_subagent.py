@@ -29,6 +29,8 @@ REQUIRED_SPEC_FIELDS = {
 COLLECTOR_MODEL = "gpt-5.3-codex-spark"
 VERDICT_MODEL = "gpt-5.5"
 COLLECTION_STAGES = {"market-collection", "financial-collection", "news-collection"}
+TEXT_OUTPUT_STAGES = {"financial-collection", "news-collection"}
+OPTIONAL_GROUP_FAILURE_STAGES = TEXT_OUTPUT_STAGES
 
 
 def now_iso() -> str:
@@ -319,10 +321,21 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
         raw_output = stdout.strip()
         raw_output_path.write_text(raw_output, encoding="utf-8")
 
-    parsed_json, parse_errors = parse_json_output(raw_output)
-    if parsed_json is not None:
-        parsed_json = normalize_parsed_json(spec, parsed_json)
-    errors.extend(parse_errors)
+    stage = str(spec["stage"])
+    parsed_json = None
+    parsed_text = None
+    parse_errors: list[dict[str, Any]] = []
+    text_errors: list[dict[str, Any]] = []
+    if stage in TEXT_OUTPUT_STAGES:
+        parsed_text = raw_output.strip()
+        if not parsed_text:
+            text_errors.append({"code": "empty_output", "message": "codex exec returned no text output"})
+        errors.extend(text_errors)
+    else:
+        parsed_json, parse_errors = parse_json_output(raw_output)
+        if parsed_json is not None:
+            parsed_json = normalize_parsed_json(spec, parsed_json)
+        errors.extend(parse_errors)
     schema_errors: list[dict[str, Any]] = []
     if parsed_json is not None and not parse_errors:
         schema_errors = structural_errors(spec, parsed_json)
@@ -334,7 +347,10 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
 
     ended_at = now_iso()
     duration_ms = int((time.monotonic() - started) * 1000)
-    status = "success" if returncode == 0 and parsed_json is not None and not parse_errors and not schema_errors else "failed"
+    if stage in TEXT_OUTPUT_STAGES:
+        status = "success" if returncode == 0 and parsed_text and not text_errors else "failed"
+    else:
+        status = "success" if returncode == 0 and parsed_json is not None and not parse_errors and not schema_errors else "failed"
     wrapper = {
         "schema_version": "1",
         "run_id": str(spec["run_id"]),
@@ -349,18 +365,8 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
         "returncode": returncode,
         "raw_output_path": str(raw_output_path),
         "parsed_json": parsed_json,
+        "parsed_text": parsed_text,
         "errors": errors,
-        "metric": {
-            "stage": str(spec["stage"]),
-            "agent_role": str(spec["agent_role"]),
-            "started_at": started_at,
-            "ended_at": ended_at,
-            "duration_ms": duration_ms,
-            "status": status,
-            "token_usage": {"input_tokens": None, "output_tokens": None, "total_tokens": None},
-            "token_source": "unavailable",
-            "token_unavailable_reason": "sub-agent launcher did not expose token usage",
-        },
         "command": [part for part in cmd[:-1]],
     }
     write_json(wrapper_path, wrapper)
@@ -388,11 +394,25 @@ def run_group(specs: list[dict[str, Any]], max_workers: int | None = None) -> di
             wrappers.append(future.result())
     wrappers.sort(key=lambda item: str(item.get("task_name", "")))
     failed = [item for item in wrappers if item.get("status") != "success"]
+    required_failed = [
+        item
+        for item in failed
+        if str(item.get("stage", "")).strip() not in OPTIONAL_GROUP_FAILURE_STAGES
+    ]
+    optional_failed = [item for item in failed if item not in required_failed]
+    if required_failed:
+        status = "failed"
+    elif optional_failed:
+        status = "partial"
+    else:
+        status = "success"
     return {
         "schema_version": "1",
-        "status": "failed" if failed else "success",
+        "status": status,
         "count": len(wrappers),
         "failed_count": len(failed),
+        "required_failed_count": len(required_failed),
+        "optional_failed_count": len(optional_failed),
         "wrappers": wrappers,
     }
 
@@ -457,10 +477,14 @@ if output_path is None:
     print("missing -o", file=sys.stderr)
     sys.exit(2)
 output_path.parent.mkdir(parents=True, exist_ok=True)
+task_name = output_path.name.removesuffix(".raw.txt")
+empty_tasks = {item.strip() for item in os.environ.get("FAKE_CODEX_EMPTY_TASKS", "").split(",") if item.strip()}
+if task_name in empty_tasks:
+    output_path.write_text("", encoding="utf-8")
+    sys.exit(int(os.environ.get("FAKE_CODEX_EXIT", "0")))
 if os.environ.get("FAKE_CODEX_INVALID_JSON") == "1":
     output_path.write_text("not json", encoding="utf-8")
 else:
-    task_name = output_path.name.removesuffix(".raw.txt")
     if "market" in task_name:
         payload = {
             "schema_version": "1",
@@ -568,12 +592,17 @@ def run_self_test() -> int:
                     failures.append(str(exc))
 
             os.environ["FAKE_CODEX_INVALID_JSON"] = "1"
-            invalid = spec(tmp, stage="news-collection", agent_role="news", task_name="invalid-json")
+            invalid = spec(tmp, stage="market-collection", agent_role="market", task_name="invalid-json")
             wrapper = run_one(invalid)
             if wrapper["status"] != "failed" or wrapper["parsed_json"] is not None:
                 failures.append("invalid JSON did not produce failed wrapper with parsed_json=null")
-            if (Path(invalid["output_dir"]) / "news.json").exists():
-                failures.append("launcher wrote canonical news.json")
+            if (Path(invalid["output_dir"]) / "market.json").exists():
+                failures.append("launcher wrote canonical market.json")
+
+            text_spec = spec(tmp, stage="news-collection", agent_role="news", task_name="text-news")
+            wrapper = run_one(text_spec)
+            if wrapper["status"] != "success" or wrapper["parsed_json"] is not None or wrapper.get("parsed_text") != "not json":
+                failures.append("text collection output was not accepted without JSON parsing")
             os.environ.pop("FAKE_CODEX_INVALID_JSON", None)
 
             market_spec = spec(tmp, stage="market-collection", agent_role="market", task_name="market-alias")
@@ -615,6 +644,39 @@ def run_self_test() -> int:
             wrapper_count = len(list((Path(group["wrappers"][0]["raw_output_path"]).parent).glob("g-*.wrapper.json")))
             if wrapper_count != 3:
                 failures.append(f"expected 3 group wrapper files, got {wrapper_count}")
+
+            os.environ["FAKE_CODEX_EMPTY_TASKS"] = "optional-news"
+            optional_group = run_group(
+                [
+                    spec(tmp, stage="market-collection", agent_role="market", task_name="optional-market"),
+                    spec(tmp, stage="news-collection", agent_role="news", task_name="optional-news"),
+                ],
+                max_workers=2,
+            )
+            if (
+                optional_group["status"] != "partial"
+                or optional_group["failed_count"] != 1
+                or optional_group["required_failed_count"] != 0
+                or optional_group["optional_failed_count"] != 1
+            ):
+                failures.append(f"optional text failure did not produce partial group: {optional_group}")
+
+            os.environ["FAKE_CODEX_EMPTY_TASKS"] = "required-market"
+            required_group = run_group(
+                [
+                    spec(tmp, stage="market-collection", agent_role="market", task_name="required-market"),
+                    spec(tmp, stage="news-collection", agent_role="news", task_name="required-news"),
+                ],
+                max_workers=2,
+            )
+            if (
+                required_group["status"] != "failed"
+                or required_group["failed_count"] != 1
+                or required_group["required_failed_count"] != 1
+                or required_group["optional_failed_count"] != 0
+            ):
+                failures.append(f"required failure did not produce failed group: {required_group}")
+            os.environ.pop("FAKE_CODEX_EMPTY_TASKS", None)
         finally:
             os.environ.clear()
             os.environ.update(old_env)

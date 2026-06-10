@@ -72,6 +72,13 @@ env_file:
 KIS app key, secret, 계좌번호는 공용 `containers/kis-trade-mcp/config/kis-trade-mcp.env`에 둡니다.
 실제 `codex-exec.env` 파일은 git에서 무시하고, `codex-exec.env.example`만 추적합니다.
 
+프로필 Compose는 `./config`를 `/app/config`로 writable bind mount합니다. 따라서 호스트의
+`containers/codex-exec/profiles/<name>/config/schedules.yaml`, `portfolio.txt`,
+`default-trade-prompt`를 수정하면 컨테이너 안의 `/app/config`에도 즉시 보이고, 다음 Codex 실행이나
+스케줄러 tick부터 새 내용이 사용됩니다. `codex-exec.env`처럼 프로세스 환경변수로 주입되는 값은
+컨테이너 시작 시점에만 읽히므로 변경 후 Compose 재생성이 필요합니다. 컨테이너 안의 Codex 스킬이
+config를 수정하려면 호스트 config 파일과 디렉터리가 컨테이너 실행 UID 1000에 쓰기 가능해야 합니다.
+
 ## Codex MCP Config
 
 인스턴스별 Codex MCP 설정은 `containers/codex-exec/profiles/<name>/config/codex-exec.env`로 주입합니다.
@@ -130,3 +137,6 @@ schedules:
 ```
 
 스케줄 작업은 채팅 기본 세션과 독립된 one-off Codex 실행으로 처리됩니다.
+스케줄러는 매 tick마다 `SCHEDULE_FILE`을 다시 읽습니다. `$trading-schedule-toggle` 스킬은
+`/app/config/schedules.yaml`의 `daily-{number}` 항목만 on/off로 수정하며, 수정 결과는 컨테이너
+재시작 없이 다음 scheduler tick부터 반영됩니다.

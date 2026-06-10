@@ -14,7 +14,7 @@ services:
     volumes:
       - codex-home-experimental:/codex-home
       - codex-state-experimental:/state
-      - ./config:/app/config:ro
+      - ./config:/app/config:rw
       - ../../:/workspace
 
 volumes:

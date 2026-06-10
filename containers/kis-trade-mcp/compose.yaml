@@ -1,6 +1,6 @@
 services:
   kis-trade-mcp:
-    image: dokysp/kis-trade-mcp:1.0.0
+    image: dokysp/kis-trade-mcp:latest
     container_name: kis-trade-mcp
     restart: unless-stopped
     env_file:

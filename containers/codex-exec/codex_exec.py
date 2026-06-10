@@ -41,13 +41,12 @@ DAILY_TRADING_STAGE_MODEL_CONTRACT = (
     "- launcher는 `codex exec -m <model> -c model_reasoning_effort=\"<effort>\"`를 사용하며 "
     "parent와 같은 CODEX_HOME, CODEX_MCP_TRADING_ENV, workspace cwd, sandbox bypass 설정을 상속한다.\n"
     "- launcher는 `reports/runs/<run_id>/subagents/<task_name>.wrapper.json`와 raw text만 남긴다. "
-    "Main agent만 wrapper의 parsed_json을 sanitize한 뒤 canonical artifact를 작성한다.\n"
+    "Main agent만 JSON 단계의 parsed_json 또는 financial/news 단계의 parsed_text를 sanitize한 뒤 canonical artifact를 작성한다.\n"
     "- market, financial, news: model=gpt-5.3-codex-spark, effort=low.\n"
     "- selected first-verdict personas: model=gpt-5.5, effort=low.\n"
     "- second-verdict judge: model=gpt-5.5, effort=high.\n"
     "- Main agent initialize, account snapshots, merge-and-brief, order-execution, report: model=gpt-5.5, effort=medium.\n"
 )
-VALIDATION_SUMMARY_LIMIT = 8
 
 
 def env_bool(name: str, default: bool) -> bool:
@@ -117,13 +116,6 @@ class CodexRunContext:
     started_at_display: str
 
 
-@dataclass(frozen=True)
-class DailyTradingValidation:
-    passed: bool
-    summary_lines: list[str]
-    raw: dict[str, Any]
-
-
 def new_codex_run_context() -> CodexRunContext:
     started_at = datetime.now(KST)
     return CodexRunContext(
@@ -163,30 +155,12 @@ def append_daily_trading_started_at(text: str, context: CodexRunContext) -> str:
     return f"{text.rstrip()}\n\n{line}"
 
 
-def append_daily_trading_validation_summary(text: str, validation: DailyTradingValidation) -> str:
-    if validation.passed:
-        return text
-    lines = validation.summary_lines[:VALIDATION_SUMMARY_LIMIT]
-    if not lines:
-        lines = ["validator failed without a summary"]
-    summary = "\n".join(lines)
-    return f"{text.rstrip()}\n\n<b>daily-trading validation failed</b>\n<pre>{html.escape(summary)}</pre>"
-
-
 def attach_daily_trading_context(exc: Exception, context: CodexRunContext) -> None:
     setattr(exc, "daily_trading_run_context", context)
 
 
-def attach_daily_trading_validation(exc: Exception, validation: DailyTradingValidation | None) -> None:
-    if validation:
-        setattr(exc, "daily_trading_validation", validation)
-
-
 def error_message_with_run_context(exc: Exception, fallback: str) -> str:
     message = exc.html_message if isinstance(exc, UserFacingError) else fallback
-    validation = getattr(exc, "daily_trading_validation", None)
-    if isinstance(validation, DailyTradingValidation):
-        message = append_daily_trading_validation_summary(message, validation)
     context = getattr(exc, "daily_trading_run_context", None)
     if isinstance(context, CodexRunContext):
         return append_daily_trading_started_at(message, context)
@@ -295,7 +269,6 @@ class Config:
     usage_timeout_seconds: int
     bundled_skills_dir: Path
     sync_skills_overwrite: bool
-    daily_trading_validator: Path
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -328,12 +301,6 @@ class Config:
             usage_timeout_seconds=env_int("CODEX_USAGE_TIMEOUT_SECONDS", 20),
             bundled_skills_dir=Path(os.getenv("BUNDLED_SKILLS_DIR", "/app/skills")),
             sync_skills_overwrite=required_env_bool("CODEX_SYNC_SKILLS_OVERWRITE"),
-            daily_trading_validator=Path(
-                os.getenv(
-                    "DAILY_TRADING_VALIDATOR",
-                    "/app/skills/daily-trading/scripts/validate_run.py",
-                )
-            ),
         )
 
 
@@ -589,14 +556,12 @@ class CodexRunner:
             )
         except Exception as exc:
             if daily_trading_hint or self._daily_trading_artifact_exists(context):
-                attach_daily_trading_validation(exc, self._validate_daily_trading_artifacts(context))
                 attach_daily_trading_context(exc, context)
             raise
 
         if result.returncode != 0:
             exc = classify_codex_error(result.returncode, result.stdout, result.stderr)
             if daily_trading_hint or self._daily_trading_artifact_exists(context):
-                attach_daily_trading_validation(exc, self._validate_daily_trading_artifacts(context))
                 attach_daily_trading_context(exc, context)
             raise exc
 
@@ -606,90 +571,11 @@ class CodexRunner:
             output = result.stdout.strip()
         output = output.strip() or "<i>Codex completed without output.</i>"
         if daily_trading_hint or self._daily_trading_artifact_exists(context):
-            validation = self._validate_daily_trading_artifacts(context)
-            if validation:
-                output = append_daily_trading_validation_summary(output, validation)
             output = append_daily_trading_started_at(output, context)
         return output
 
     def _daily_trading_artifact_exists(self, context: CodexRunContext) -> bool:
         return (self.config.workspace_dir / "reports" / "runs" / context.run_id / "run.json").is_file()
-
-    def _daily_trading_run_dir(self, context: CodexRunContext) -> Path:
-        return self.config.workspace_dir / "reports" / "runs" / context.run_id
-
-    def _validate_daily_trading_artifacts(self, context: CodexRunContext) -> DailyTradingValidation | None:
-        run_dir = self._daily_trading_run_dir(context)
-        if not run_dir.exists():
-            return None
-
-        validator = self.config.daily_trading_validator
-        if not validator.exists():
-            return DailyTradingValidation(
-                passed=False,
-                summary_lines=[f"daily-trading validator not found: {validator}"],
-                raw={"status": "failed", "errors": [{"message": f"validator not found: {validator}"}]},
-            )
-
-        cmd = [
-            "python3",
-            str(validator),
-            "--run-dir",
-            str(run_dir),
-            "--json",
-            "--mark-run",
-        ]
-        logging.info("running daily-trading validator command=%s", " ".join(shlex.quote(part) for part in cmd))
-        try:
-            result = subprocess.run(
-                cmd,
-                cwd=self.config.workspace_dir,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=30,
-                check=False,
-            )
-        except Exception as exc:  # noqa: BLE001 - report validator failures to Telegram
-            logging.exception("daily-trading validator crashed run_id=%s", context.run_id)
-            return DailyTradingValidation(
-                passed=False,
-                summary_lines=[f"validator crashed: {exc}"],
-                raw={"status": "failed", "errors": [{"message": str(exc)}]},
-            )
-
-        raw: dict[str, Any]
-        try:
-            parsed = json.loads(result.stdout or "{}")
-            raw = parsed if isinstance(parsed, dict) else {"status": "failed", "errors": []}
-        except json.JSONDecodeError:
-            raw = {
-                "status": "failed",
-                "errors": [
-                    {
-                        "code": "validator_output_not_json",
-                        "message": (result.stderr or result.stdout or "validator returned no output").strip(),
-                    }
-                ],
-            }
-
-        errors = raw.get("errors") if isinstance(raw.get("errors"), list) else []
-        summary_lines = []
-        for item in errors[:VALIDATION_SUMMARY_LIMIT]:
-            if isinstance(item, dict):
-                code = str(item.get("code", "validation_error"))
-                message = str(item.get("message", ""))
-                artifact = str(item.get("artifact", "")).strip()
-                prefix = f"{artifact}: " if artifact else ""
-                summary_lines.append(f"{prefix}{code}: {message}")
-            else:
-                summary_lines.append(str(item))
-
-        if result.returncode != 0 and not summary_lines:
-            summary_lines.append((result.stderr or "validator failed without details").strip())
-
-        passed = result.returncode == 0 and str(raw.get("status", "")).lower() == "passed"
-        return DailyTradingValidation(passed=passed, summary_lines=summary_lines, raw=raw)
 
     def _session_ids(self) -> list[str]:
         ids: list[str] = []

@@ -9,8 +9,6 @@ Write one Korean report at `reports/YYYY-MM-DD_포트폴리오.md`.
 - run_id:
 - 작업 시작:
 - 환경: demo / real / 분석 전용
-- 한국장 상태: open / closed / unknown
-- 가격 snapshot 모드: live / previous_trading_day
 - 최종 상태: success / partial / failed
 
 ## 1. 수집 상태
@@ -61,21 +59,13 @@ Write one Korean report at `reports/YYYY-MM-DD_포트폴리오.md`.
 - 제출된 주문번호 또는 예약번호:
 - 실패 또는 보류 사유:
 
-## 9. Stage Metrics
-| Stage | Agent role | 권장 모델 | 권장 effort | 실제 모델 | 실제 effort | 상태 | 소요시간(ms) | Token source |
-|---|---|---|---|---|---|---|---:|---|
-
-## 10. 아티팩트
+## 9. 아티팩트
 - 실행 디렉터리: reports/runs/<run_id>/
 - 보존된 partial / failed 아티팩트:
 - `decision-brief.json`:
-- `stage-metrics.json`:
-- validation status:
 
-## 11. 메모
+## 10. 메모
 - 당일 체결수량은 반복매매 방지에 사용했으며 현재 보유수량에서 다시 차감하지 않음
-- `closed` 상태에서는 직전 거래일 snapshot 기반 예약주문 후보만 가능하며 일반 `order_cash`는 제출하지 않음
-- `unknown` 상태에서는 실전 주문과 예약주문을 제출하지 않음
 - 투자 권유가 아니라 의사결정 보조 분석임
 ```
 

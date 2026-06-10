@@ -1,4 +1,4 @@
 interface:
   display_name: "Collect Financial Information"
-  short_description: "Collect cache-first official financial data for Korean securities"
-  default_prompt: "Use $collect-financial-information cache-first for the supplied Korean securities; return cache hit/miss metadata and write only through the financial cache helper when standalone."
+  short_description: "Collect compact official financial context for Korean securities"
+  default_prompt: "Use $collect-financial-information for the supplied Korean securities; return compact Markdown text only, with no JSON envelope and no file writes."
