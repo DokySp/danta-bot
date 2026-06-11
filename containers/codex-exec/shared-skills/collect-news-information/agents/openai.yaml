@@ -1,4 +1,4 @@
 interface:
   display_name: "Collect News Information"
-  short_description: "Collect KIS-only news and disclosures for Korean securities"
-  default_prompt: "Use $collect-news-information to collect compressed KIS news/disclosure summaries for the supplied Korean portfolio; return compact Markdown text only and do not use web search or web news."
+  short_description: "Collect and retrieve date-based Korean stock news YAML caches"
+  default_prompt: "Use $collect-news-information to collect or retrieve the date-based Korean stock news YAML cache path. Prefer get mode when a cache should already exist; use collect mode only when news must be fetched."

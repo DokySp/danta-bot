@@ -30,7 +30,7 @@ Write one Korean report at `reports/YYYY-MM-DD_포트폴리오.md`.
 - 핵심 누락 또는 오류:
 
 ## 4. `first-verdict` 독립 평결
-| 종목식별자 | 종목명 | 평균 점수 | 최종 `first-verdict` 점수 | 유효 응답 수 | 핵심 근거 | 핵심 리스크 |
+| 종목식별자 | 종목명 | 평균 점수(0-10) | 최종 `first-verdict` 점수(0-10) | 유효 응답 수 | 핵심 근거 | 핵심 리스크 |
 |---|---|---:|---:|---:|---|---|
 
 ## 5. `second-verdict` 포트폴리오 평결

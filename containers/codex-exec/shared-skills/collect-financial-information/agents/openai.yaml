@@ -1,4 +1,4 @@
 interface:
   display_name: "Collect Financial Information"
-  short_description: "Collect compact official financial context for Korean securities"
-  default_prompt: "Use $collect-financial-information for the supplied Korean securities; return compact Markdown text only, with no JSON envelope and no file writes."
+  short_description: "Collect KIS-only financial YAML cache for Korean securities"
+  default_prompt: "Use $collect-financial-information for the supplied Korean securities using only KIS market, financial, and estimate APIs; return the financial YAML cache path only, with no JSON envelope."

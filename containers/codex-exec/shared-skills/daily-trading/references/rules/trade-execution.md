@@ -123,12 +123,12 @@ Every order must satisfy all applicable constraints:
 - same-day fill guard passed
 - user maximum amount, maximum quantity, prohibited symbols, and price limits passed
 - order price and order type were validated using known templates or current API details when templates were unavailable/rejected
-- missing financial/news evidence is allowed when the symbol remains eligible and has a valid price observation
+- missing financial/news/market-status evidence is allowed when the symbol remains eligible and has a valid price observation
 - demo or real submission was explicitly requested
 
 If any gate fails, do not submit that order. Record `blocked` and the exact non-sensitive reason.
 
-Missing, partial, failed, skipped, or no-data financial/news evidence is not an execution gate by itself. The Main agent must not block, fail, reduce, or send an order to review solely because financial/news evidence is absent. This applies equally to `order_cash`, `order_resv`, demo submission, and real submission.
+Missing, partial, failed, skipped, or no-data financial/news/market-status evidence is not an execution gate by itself. The Main agent must not block, fail, reduce, or send an order to review solely because financial/news/market-status evidence is absent. This applies equally to `order_cash`, `order_resv`, demo submission, and real submission.
 
 ## Price And Order Type
 

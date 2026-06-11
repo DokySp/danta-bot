@@ -28,8 +28,11 @@ REQUIRED_SPEC_FIELDS = {
 }
 SUBAGENT_MODEL = "gpt-5.5"
 SUBAGENT_REASONING_EFFORT = "low"
-COLLECTION_STAGES = {"market-collection", "financial-collection", "news-collection"}
-TEXT_OUTPUT_STAGES = {"financial-collection", "news-collection"}
+COLLECTION_STAGES = {"financial-collection", "news-collection", "market-status-collection"}
+FINANCIAL_PATH_OUTPUT_STAGES = {"financial-collection"}
+NEWS_PATH_OUTPUT_STAGES = {"news-collection"}
+MARKET_STATUS_TEXT_OUTPUT_STAGES = {"market-status-collection"}
+TEXT_OUTPUT_STAGES = FINANCIAL_PATH_OUTPUT_STAGES | NEWS_PATH_OUTPUT_STAGES | MARKET_STATUS_TEXT_OUTPUT_STAGES
 OPTIONAL_GROUP_FAILURE_STAGES = TEXT_OUTPUT_STAGES
 
 
@@ -68,11 +71,11 @@ def launcher_model_effort(stage: str, agent_role: str) -> tuple[str, str]:
     role_key = agent_role.strip().lower()
 
     if (
-        role_key in {"market", "financial", "news", "analyst", "juror", "judge"}
+        role_key in {"financial", "news", "market-status", "analyst", "juror", "judge"}
         or role_key.startswith(("analyst-", "juror-", "judge-"))
         or stage_key in {
-            "market-collection",
             "financial-collection",
+            "market-status-collection",
             "news-collection",
             "first-verdict",
             "second-verdict",
@@ -100,11 +103,11 @@ def assert_model_effort(stage: str, agent_role: str, *, model: str, effort: str)
 
 def assert_all_supported_stages_use_subagent_defaults() -> None:
     cases = [
-        ("market-collection", "market"),
         ("financial-collection", "financial"),
+        ("market-status-collection", "market-status"),
         ("news-collection", "news"),
         ("first-verdict", "analyst"),
-        ("first-verdict", "juror-05"),
+        ("first-verdict", "analyst-jpmorgan"),
         ("second-verdict", "judge"),
     ]
     for stage, role in cases:
@@ -128,164 +131,6 @@ def parse_json_output(raw: str) -> tuple[Any | None, list[dict[str, Any]]]:
                 "message": f"{exc.msg} at line {exc.lineno} column {exc.colno}",
             }
         ]
-
-
-def symbol_id_from(value: Any) -> str:
-    if isinstance(value, dict):
-        for key in ("symbol_id", "pdno", "stock_code", "code", "symbol"):
-            raw = value.get(key)
-            if raw is not None and str(raw).strip():
-                return str(raw).strip()
-    elif value is not None and str(value).strip():
-        return str(value).strip()
-    return ""
-
-
-def expected_symbol_ids(spec: dict[str, Any]) -> list[str]:
-    for key in ("symbol_ids", "symbols", "portfolio_symbols", "complete_symbol_list"):
-        raw = spec.get(key)
-        if not isinstance(raw, list):
-            continue
-        result: list[str] = []
-        seen: set[str] = set()
-        for item in raw:
-            sid = symbol_id_from(item)
-            if not sid or sid in seen:
-                continue
-            seen.add(sid)
-            result.append(sid)
-        if result:
-            return result
-    return []
-
-
-def first_non_empty(*values: Any) -> Any:
-    for value in values:
-        if value not in (None, ""):
-            return value
-    return None
-
-
-def normalize_market_payload(payload: Any) -> Any:
-    """Accept common market-agent aliases but expose the canonical artifact keys."""
-    if not isinstance(payload, dict):
-        return payload
-    if str(payload.get("stage", "")).strip() != "market-collection":
-        return payload
-
-    if str(payload.get("schema_version", "")).strip() in {"1.0", "1"}:
-        payload["schema_version"] = "1"
-
-    symbols = payload.get("symbols")
-    if not isinstance(symbols, list):
-        return payload
-
-    for item in symbols:
-        if not isinstance(item, dict):
-            continue
-
-        identity = item.get("market_identity") if isinstance(item.get("market_identity"), dict) else {}
-        price_alias = (
-            item.get("current_or_latest_price")
-            if isinstance(item.get("current_or_latest_price"), dict)
-            else {}
-        )
-
-        sid = first_non_empty(item.get("symbol_id"), item.get("symbol"), item.get("pdno"), item.get("stock_code"))
-        if sid is not None:
-            item["symbol_id"] = str(sid)
-
-        name = first_non_empty(item.get("symbol_name"), identity.get("name"), item.get("name"), item.get("stock_name"))
-        if name is not None:
-            item["symbol_name"] = str(name)
-
-        product_type = first_non_empty(item.get("product_type"), identity.get("product_type"), "unresolved")
-        item["product_type"] = str(product_type)
-
-        price = item.get("price") if isinstance(item.get("price"), dict) else {}
-        current_or_last = first_non_empty(price.get("current_or_last"), price_alias.get("current_or_last"), price_alias.get("price"))
-        observed_at = first_non_empty(price.get("observed_at"), price_alias.get("observed_at"))
-        snapshot_mode = first_non_empty(price.get("snapshot_mode"), price_alias.get("snapshot_mode"))
-        item["price"] = {
-            **price,
-            "current_or_last": current_or_last,
-            "observed_at": observed_at or "",
-            "snapshot_mode": snapshot_mode or "",
-        }
-
-        if "market_context" not in item:
-            item["market_context"] = identity
-        if "order_book" not in item and isinstance(item.get("order_book_trade_context"), dict):
-            item["order_book"] = item.get("order_book_trade_context")
-        if "local_signals" not in item and isinstance(item.get("market_signals"), dict):
-            item["local_signals"] = [item.get("market_signals")]
-        item.setdefault("charts", {"daily": [], "weekly": [], "monthly": []})
-        item.setdefault("trades", [])
-        item.setdefault("investor_flow", {})
-        item.setdefault("rank_and_industry", {})
-        item.setdefault("etf_etn", {})
-        item.setdefault("sources", [])
-        item.setdefault("errors", [])
-        item.setdefault("required_missing", [])
-        item.setdefault("eligible_for_verdict", bool(current_or_last and observed_at))
-
-    return payload
-
-
-def normalize_parsed_json(spec: dict[str, Any], parsed_json: Any) -> Any:
-    if str(spec.get("stage", "")).strip() == "market-collection":
-        return normalize_market_payload(parsed_json)
-    return parsed_json
-
-
-def structural_errors(spec: dict[str, Any], parsed_json: Any) -> list[dict[str, Any]]:
-    stage = str(spec.get("stage", "")).strip()
-    if stage not in COLLECTION_STAGES:
-        return []
-    if not isinstance(parsed_json, dict):
-        return [{"code": "schema_type", "message": "collection output must be a JSON object"}]
-
-    errors: list[dict[str, Any]] = []
-    if parsed_json.get("schema_version") != "1":
-        errors.append({"code": "schema_version", "message": "schema_version must be '1'"})
-    if str(parsed_json.get("run_id", "")) != str(spec.get("run_id", "")):
-        errors.append({"code": "run_id_mismatch", "message": "collection output run_id must match the stage spec"})
-
-    symbols = parsed_json.get("symbols")
-    if not isinstance(symbols, list):
-        errors.append({"code": "missing_symbols", "message": "top-level symbols list is required"})
-        return errors
-
-    ids: list[str] = []
-    for index, item in enumerate(symbols):
-        sid = symbol_id_from(item)
-        if not sid:
-            errors.append({"code": "missing_symbol_id", "message": f"symbol_id is required for symbols[{index}]"})
-            continue
-        if "," in sid:
-            errors.append({"code": "comma_joined_symbol_id", "message": f"symbol_id must represent one symbol at symbols[{index}]"})
-        ids.append(sid)
-
-        if stage == "market-collection" and isinstance(item, dict):
-            price = item.get("price") if isinstance(item.get("price"), dict) else {}
-            if not str(item.get("symbol_name", "")).strip():
-                errors.append({"code": "missing_symbol_name", "message": f"symbol_name is required for {sid}"})
-            if price.get("current_or_last") in (None, "") or not str(price.get("observed_at", "")).strip():
-                errors.append({"code": "missing_market_price", "message": f"price.current_or_last and price.observed_at are required for {sid}"})
-
-    expected = expected_symbol_ids(spec)
-    if expected:
-        unique_ids = set(ids)
-        missing = [sid for sid in expected if sid not in unique_ids]
-        extra = sorted(unique_ids - set(expected))
-        if len(ids) != len(expected):
-            errors.append({"code": "symbol_count_mismatch", "message": f"expected {len(expected)} symbols, got {len(ids)}"})
-        if missing:
-            errors.append({"code": "missing_universe_symbols", "message": "missing symbols: " + ", ".join(missing[:20])})
-        if extra:
-            errors.append({"code": "extra_symbols", "message": "unexpected symbols: " + ", ".join(extra[:20])})
-
-    return errors
 
 
 def wrapper_paths(spec: dict[str, Any]) -> tuple[Path, Path]:
@@ -357,19 +202,16 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
     parse_errors: list[dict[str, Any]] = []
     text_errors: list[dict[str, Any]] = []
     if stage in TEXT_OUTPUT_STAGES:
+        # Collection text stages return cache paths, fixed missing-cache messages,
+        # or concise Markdown summaries. The launcher records that text and
+        # intentionally does not validate path existence.
         parsed_text = raw_output.strip()
         if not parsed_text:
-            text_errors.append({"code": "empty_output", "message": "codex exec returned no text output"})
+            text_errors.append({"code": "empty_output", "message": "codex exec returned no text/path output"})
         errors.extend(text_errors)
     else:
         parsed_json, parse_errors = parse_json_output(raw_output)
-        if parsed_json is not None:
-            parsed_json = normalize_parsed_json(spec, parsed_json)
         errors.extend(parse_errors)
-    schema_errors: list[dict[str, Any]] = []
-    if parsed_json is not None and not parse_errors:
-        schema_errors = structural_errors(spec, parsed_json)
-        errors.extend(schema_errors)
     if returncode not in (0, None):
         errors.append({"code": "nonzero_returncode", "message": f"codex exec exited with {returncode}"})
     if stderr.strip():
@@ -380,7 +222,7 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
     if stage in TEXT_OUTPUT_STAGES:
         status = "success" if returncode == 0 and parsed_text and not text_errors else "failed"
     else:
-        status = "success" if returncode == 0 and parsed_json is not None and not parse_errors and not schema_errors else "failed"
+        status = "success" if returncode == 0 and parsed_json is not None and not parse_errors else "failed"
     wrapper = {
         "schema_version": "1",
         "run_id": str(spec["run_id"]),
@@ -515,37 +357,10 @@ if task_name in empty_tasks:
 if os.environ.get("FAKE_CODEX_INVALID_JSON") == "1":
     output_path.write_text("not json", encoding="utf-8")
 else:
-    if "market" in task_name:
-        payload = {
-            "schema_version": "1",
-            "run_id": "self-test",
-            "started_at": "2026-06-08T09:00:00+09:00",
-            "generated_at": "2026-06-08T09:00:01+09:00",
-            "stage": "market-collection",
-            "domain": "market",
-            "status": "success",
-            "skipped": False,
-            "skip_reason": "",
-            "attempts": [],
-            "errors": [],
-            "symbols": [
-                {
-                    "symbol_id": "005930",
-                    "symbol_name": "삼성전자",
-                    "product_type": "stock",
-                    "eligible_for_verdict": True,
-                    "required_missing": [],
-                    "price": {
-                        "current_or_last": 100,
-                        "observed_at": "2026-06-08T09:00:00+09:00",
-                        "snapshot_mode": "live",
-                    },
-                    "errors": [],
-                }
-            ],
-        }
-    elif "financial" in task_name or "news" in task_name:
+    if "financial" in task_name or "news" in task_name or "market-status" in task_name:
         domain = "financial" if "financial" in task_name else "news"
+        if "market-status" in task_name:
+            domain = "market-status"
         payload = {
             "schema_version": "1",
             "run_id": "self-test",
@@ -615,11 +430,6 @@ def run_self_test() -> int:
 
             cases = [
                 (
-                    spec(tmp, stage="market-collection", agent_role="market", task_name="market"),
-                    SUBAGENT_MODEL,
-                    SUBAGENT_REASONING_EFFORT,
-                ),
-                (
                     spec(tmp, stage="first-verdict", agent_role="analyst", task_name="first"),
                     SUBAGENT_MODEL,
                     SUBAGENT_REASONING_EFFORT,
@@ -639,50 +449,22 @@ def run_self_test() -> int:
                 except AssertionError as exc:
                     failures.append(str(exc))
 
-            os.environ["FAKE_CODEX_INVALID_JSON"] = "1"
-            invalid = spec(tmp, stage="market-collection", agent_role="market", task_name="invalid-json")
-            wrapper = run_one(invalid)
-            if wrapper["status"] != "failed" or wrapper["parsed_json"] is not None:
-                failures.append("invalid JSON did not produce failed wrapper with parsed_json=null")
-            if (Path(invalid["output_dir"]) / "market.json").exists():
-                failures.append("launcher wrote canonical market.json")
-
             text_spec = spec(tmp, stage="news-collection", agent_role="news", task_name="text-news")
+            os.environ["FAKE_CODEX_INVALID_JSON"] = "1"
             wrapper = run_one(text_spec)
             if wrapper["status"] != "success" or wrapper["parsed_json"] is not None or wrapper.get("parsed_text") != "not json":
                 failures.append("text collection output was not accepted without JSON parsing")
             os.environ.pop("FAKE_CODEX_INVALID_JSON", None)
 
-            market_spec = spec(tmp, stage="market-collection", agent_role="market", task_name="market-alias")
-            market_spec["symbol_ids"] = ["005930", "000660"]
-            market_payload = {
-                "schema_version": "1.0",
-                "run_id": "self-test",
-                "stage": "market-collection",
-                "status": "partial",
-                "symbols": [
-                    {
-                        "symbol": "005930",
-                        "market_identity": {"name": "삼성전자", "product_type": "stock"},
-                        "current_or_latest_price": {
-                            "price": 100,
-                            "observed_at": "2026-06-08T09:00:00+09:00",
-                            "snapshot_mode": "live",
-                        },
-                    }
-                ],
-            }
-            normalized = normalize_parsed_json(market_spec, market_payload)
-            if normalized["schema_version"] != "1" or normalized["symbols"][0].get("symbol_id") != "005930":
-                failures.append("market alias payload was not normalized to canonical fields")
-            market_errors = structural_errors(market_spec, normalized)
-            if not any(error["code"] == "missing_universe_symbols" for error in market_errors):
-                failures.append("market structural validation did not reject missing symbol coverage")
-
             group = run_group(
                 [
-                    spec(tmp, stage="market-collection", agent_role="market", task_name="g-market"),
                     spec(tmp, stage="financial-collection", agent_role="financial", task_name="g-financial"),
+                    spec(
+                        tmp,
+                        stage="market-status-collection",
+                        agent_role="market-status",
+                        task_name="g-market-status",
+                    ),
                     spec(tmp, stage="news-collection", agent_role="news", task_name="g-news"),
                 ],
                 max_workers=3,
@@ -696,7 +478,6 @@ def run_self_test() -> int:
             os.environ["FAKE_CODEX_EMPTY_TASKS"] = "optional-news"
             optional_group = run_group(
                 [
-                    spec(tmp, stage="market-collection", agent_role="market", task_name="optional-market"),
                     spec(tmp, stage="news-collection", agent_role="news", task_name="optional-news"),
                 ],
                 max_workers=2,
@@ -709,10 +490,10 @@ def run_self_test() -> int:
             ):
                 failures.append(f"optional text failure did not produce partial group: {optional_group}")
 
-            os.environ["FAKE_CODEX_EMPTY_TASKS"] = "required-market"
+            os.environ["FAKE_CODEX_EMPTY_TASKS"] = "required-first"
             required_group = run_group(
                 [
-                    spec(tmp, stage="market-collection", agent_role="market", task_name="required-market"),
+                    spec(tmp, stage="first-verdict", agent_role="analyst", task_name="required-first"),
                     spec(tmp, stage="news-collection", agent_role="news", task_name="required-news"),
                 ],
                 max_workers=2,

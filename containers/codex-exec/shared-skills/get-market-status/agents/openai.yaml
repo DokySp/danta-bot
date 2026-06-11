@@ -1,0 +1,4 @@
+interface:
+  display_name: "Get Market Status"
+  short_description: "Report index direction and percent change for US and Korean markets"
+  default_prompt: "Use $get-market-status to report live or latest-available status, percent change, and a concise Korean opinion for S&P 500, Nasdaq, Dow, KOSPI, and KOSDAQ. Use Google Finance as the authoritative source for S&P 500, Nasdaq, and Dow."

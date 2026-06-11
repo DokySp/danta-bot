@@ -1,71 +1,78 @@
 ---
 name: collect-news-information
-description: "Collect compact Korean stock and ETF news context from KIS news and disclosure-related APIs only. Use for the news collection agent in daily-trading, or when a user explicitly requests KIS-sourced news without account, balance, or order operations."
+description: "Collect or retrieve Korean stock news YAML caches using direct KIS Open API calls. Use for daily-trading news collection, date-based news cache lookup, or when another agent needs the path to a cached news file."
 ---
 
 # Collect News Information
 
 ## Scope
 
-Collect current KIS news and disclosure context for the complete supplied symbol list in one pass. Return compact Markdown text only. Do not return a JSON envelope, and do not write files; the caller owns artifact persistence.
+Use this skill to collect Korean stock news into a date-based YAML cache or to return the path to an existing cache.
 
-Allowed sources:
-
-- KIS news APIs such as `domestic_stock(api_type="news_title")`
-- KIS disclosure-related APIs or KIS-returned disclosure records
-
-Forbidden sources:
-
-- web search
-- current web news search
-- direct publisher websites
-- blogs, social media, forums, community posts, unofficial aggregators, or unsourced summaries
-- full article text or long raw news payloads
-
-## Permissions
-
-- External calls: allowed only through KIS MCP news/disclosure-related APIs.
-- KIS calls: direct calls only, with bounded backoff for retryable KIS failures.
-- Account, balance, order-available, fill-history, pending-order, reservation-order, and order APIs: forbidden.
-- File writes and order submission: forbidden.
-- Secrets such as account numbers, tokens, app keys, app secrets, and HTS IDs: never request or return.
-
-## KIS Backoff
-
-- Use existing validated parameter templates for known KIS API calls.
-- Call `find_api_detail` only when no validated template exists, a new API type is introduced, or KIS rejects the template.
-- For retryable KIS/MCP API error codes or messages, including rate-limit, temporary gateway/routing, transport, and timeout failures, retry the same API with the same parameters using exponential backoff up to 10 retries after the initial call.
-- Recommended delay sequence is 1, 2, 4, 8, 16, then 30 seconds capped for remaining retries. Add small jitter when the runtime supports it.
-- Preserve attempt summaries in the Markdown only when they materially change confidence. Do not include sensitive parameters.
-- Authentication, token, credential, and permission errors are not local backoff targets. Return a concise note to the daily-trading Main agent; do not call `auth_token`.
-
-## Workflow
-
-1. Accept `run_id`, `started_at`, trading environment, and the complete symbol list.
-2. Search each symbol by identifier and unambiguous name using only KIS news/disclosure-related APIs.
-3. Record market-wide KIS news separately from symbol-specific KIS news when useful.
-4. Deduplicate substantially identical KIS items while preserving distinct KIS identifiers when available.
-5. Summarize each item factually and briefly. Do not include full article text.
-6. A completed KIS search with no relevant stories is valid; write a short no-data note.
-7. Return Markdown text only. Do not emit JSON, code fences, trailing comments, or long raw payloads.
-
-## Required Output
-
-Use this compact shape:
+Default cache path:
 
 ```text
-# News Context
-
-- status: success | partial | no-data | failed
-- generated_at: <Asia/Seoul ISO-8601 if known>
-
-## Market-Wide
-- <up to 5 short KIS news/disclosure bullets, or "no relevant KIS items">
-
-## <symbol_id> <symbol_name>
-- <title or KIS id> | <published_at if known> | <publisher/source>: <short factual summary>
-- risk/opportunity tags: <short comma-separated tags, if useful>
-- missing/errors: <concise non-sensitive note, if any>
+memory/collect-news-information/news-YYYY-MM-DD.yaml
 ```
 
-If the complete news context risks becoming too large, prefer the most recent and directly symbol-linked KIS items. A compact partial summary is more useful than a malformed JSON response.
+## Modes
+
+- `get`: Return the cache file path for the requested date. If no date is supplied, use today's Asia/Seoul date. If the file does not exist, return exactly:
+
+  ```text
+  해당 날짜 뉴스 캐시가 아직 생성되지 않았습니다.
+  ```
+
+- `collect`: Use direct KIS Open API REST calls to collect news for the supplied symbol list, write the date cache, and return the cache file path.
+
+## Direct KIS API
+
+Use the bundled helper:
+
+```bash
+python3 containers/codex-exec/shared-skills/collect-news-information/scripts/news_cache.py get --date YYYY-MM-DD
+python3 containers/codex-exec/shared-skills/collect-news-information/scripts/news_cache.py collect --date YYYY-MM-DD --symbols 005930,000660
+```
+
+Required environment variables inside `codex-exec`:
+
+```text
+KIS_APP_KEY
+KIS_APP_SECRET
+```
+
+The helper uses the fixed real KIS Open API base URL `https://openapi.koreainvestment.com:9443`. It does not use paper keys.
+
+News API details:
+
+- OAuth token endpoint: `/oauth2/tokenP`
+- News endpoint: `/uapi/domestic-stock/v1/quotations/news-title`
+- News `tr_id`: `FHKST01011800`
+
+## Output Format
+
+The YAML file is keyed by quoted 6-digit symbol strings. Repeated `collect` calls update only the requested symbols and preserve other existing symbols in the same date file.
+
+```yaml
+date: "2026-06-10"
+source: kis_open_api
+symbols:
+  "000000":
+    symbol_name: 종목이름
+    articles:
+      - article_date: "2026-06-10T09:30:00+09:00"
+        sentiment: positive
+        content: KIS API 반환 제목 또는 문구
+```
+
+Allowed sentiment values are `positive`, `neutral`, `negative`, and `mixed`.
+
+Top-level fields are always ordered as `date`, `source`, and `symbols`. Symbol fields are ordered as `symbol_name` then `articles` when `symbol_name` is present; otherwise only `articles` is written. Article fields are always strings: `article_date`, `sentiment`, and `content`. Use an empty string for `article_date` when the API does not provide a date. Do not write `title`, `symbol_id`, `updated_at`, or `errors` fields. Write `symbol_name` only when the KIS API response includes a matching Korean symbol name for the requested symbol code.
+
+## Boundaries
+
+- Account, balance, order-available, fill-history, pending-order, reservation-order, correction, cancellation, and order APIs are forbidden.
+- Do not return app keys, app secrets, access tokens, authorization headers, or token cache contents.
+- Store OAuth token cache outside the repo memory tree.
+- Prefer returning the cache path to other agents. Return full file contents only when explicitly requested.
+- Store the KIS API returned news title or short text in `content` without a separate summarization step.

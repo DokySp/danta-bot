@@ -18,7 +18,7 @@ JP모건식 분석가는 매크로 국면, 금리, 환율, 업종 사이클, 글
 
 - 제공된 `decision-brief.json`의 eligible 종목만 독립 평가한다.
 - 외부 호출, 파일 읽기/쓰기, 다른 agent 결과 참조를 금지한다.
-- 각 종목에 `-2`, `-1`, `0`, `+1`, `+2` 중 하나를 부여하고 `verdict-format.md`의 `first-verdict` JSON 형식으로 반환한다.
+- 각 종목에 `0`부터 `10`까지의 정수 점수를 부여하고 `verdict-format.md`의 `first-verdict` JSON 형식으로 반환한다.
 - 본 persona의 관점은 점수와 근거 선택에만 사용한다.
 
 ## 스타일 가이드
