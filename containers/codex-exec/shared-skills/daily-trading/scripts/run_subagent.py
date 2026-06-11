@@ -26,14 +26,21 @@ REQUIRED_SPEC_FIELDS = {
     "workspace_dir",
     "output_dir",
 }
-SUBAGENT_MODEL = "gpt-5.5"
-SUBAGENT_REASONING_EFFORT = "low"
+COLLECTION_SUBAGENT_MODEL = "gpt-5.4-mini"
+COLLECTION_SUBAGENT_REASONING_EFFORT = "low"
+FIRST_VERDICT_SUBAGENT_MODEL = "gpt-5.4-mini"
+FIRST_VERDICT_SUBAGENT_REASONING_EFFORT = "medium"
+SECOND_VERDICT_SUBAGENT_MODEL = "gpt-5.5"
+SECOND_VERDICT_SUBAGENT_REASONING_EFFORT = "low"
 COLLECTION_STAGES = {"financial-collection", "news-collection", "market-status-collection"}
 FINANCIAL_PATH_OUTPUT_STAGES = {"financial-collection"}
 NEWS_PATH_OUTPUT_STAGES = {"news-collection"}
 MARKET_STATUS_TEXT_OUTPUT_STAGES = {"market-status-collection"}
 TEXT_OUTPUT_STAGES = FINANCIAL_PATH_OUTPUT_STAGES | NEWS_PATH_OUTPUT_STAGES | MARKET_STATUS_TEXT_OUTPUT_STAGES
 OPTIONAL_GROUP_FAILURE_STAGES = TEXT_OUTPUT_STAGES
+VERDICT_STAGES = {"first-verdict", "second-verdict"}
+MAX_BLANK_LINES = 1
+RAW_RETENTION_VALUES = {"always", "failed", "never"}
 
 
 def now_iso() -> str:
@@ -61,27 +68,229 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
+def read_json_if_exists(path: Path) -> Any | None:
+    if not path.exists():
+        return None
+    return load_json(path)
+
+
 def safe_name(value: str) -> str:
     cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "-" for ch in value.strip())
     return cleaned.strip(".-") or "subagent"
+
+
+def compact_prompt(prompt: str) -> str:
+    """Remove prompt whitespace that does not carry trading instructions."""
+    compacted: list[str] = []
+    blank_count = 0
+    for raw_line in prompt.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = raw_line.rstrip()
+        if line:
+            compacted.append(line)
+            blank_count = 0
+            continue
+        blank_count += 1
+        if blank_count <= MAX_BLANK_LINES:
+            compacted.append("")
+    return "\n".join(compacted).strip("\n")
+
+
+def normalize_artifact_paths(raw: Any) -> dict[str, str]:
+    if not isinstance(raw, dict):
+        return {}
+    paths: dict[str, str] = {}
+    for key, value in raw.items():
+        key_text = str(key).strip()
+        value_text = str(value).strip()
+        if key_text and value_text:
+            paths[key_text] = value_text
+    return paths
+
+
+def normalize_symbol_ids(raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        items: list[Any] = raw.replace("\n", ",").split(",")
+    elif isinstance(raw, list):
+        items = raw
+    else:
+        items = [raw]
+
+    symbols: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        if isinstance(item, dict):
+            value = item.get("symbol_id") or item.get("symbol") or item.get("code")
+        else:
+            value = item
+        symbol_id = str(value or "").strip()
+        if symbol_id and symbol_id not in seen:
+            symbols.append(symbol_id)
+            seen.add(symbol_id)
+    return symbols
+
+
+def raw_retention_mode() -> str:
+    mode = os.getenv("CODEX_SUBAGENT_RAW_RETENTION", "always").strip().lower()
+    if mode not in RAW_RETENTION_VALUES:
+        return "always"
+    return mode
+
+
+def resolve_artifact_path(path_text: str, workspace_dir: str) -> Path:
+    path = Path(path_text)
+    if path.is_absolute():
+        return path
+    return Path(workspace_dir) / path
+
+
+def filter_symbols(payload: Any, symbol_ids: list[str]) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+    wanted = set(symbol_ids)
+    filtered = dict(payload)
+    symbols = payload.get("symbols")
+    if isinstance(symbols, list):
+        filtered["symbols"] = [
+            item
+            for item in symbols
+            if isinstance(item, dict) and str(item.get("symbol_id") or item.get("symbol") or item.get("code") or "") in wanted
+        ]
+    elif isinstance(symbols, dict):
+        filtered["symbols"] = {key: value for key, value in symbols.items() if str(key) in wanted}
+    return filtered
+
+
+def write_verdict_input_slices(spec: dict[str, Any]) -> dict[str, str]:
+    if not is_compact_verdict_spec(spec):
+        return {}
+    stage = str(spec.get("stage", "")).strip()
+    artifacts = normalize_artifact_paths(spec.get("artifact_paths"))
+    symbols = normalize_symbol_ids(spec.get("symbol_ids") or spec.get("symbols"))
+    decision_brief = artifacts.get("decision_brief") or artifacts.get("decision-brief") or artifacts.get("brief")
+    if not decision_brief or not symbols:
+        return {}
+
+    workspace_dir = str(spec.get("workspace_dir", ""))
+    output_dir = Path(str(spec["output_dir"]))
+    slice_dir = output_dir / "verdict-inputs"
+    task_name = safe_name(str(spec["task_name"]))
+    slice_paths: dict[str, str] = {}
+
+    for artifact_key, source_path_text in (
+        ("decision_brief", decision_brief),
+        ("verdict_first", artifacts.get("verdict_first") or artifacts.get("verdict-first") or ""),
+    ):
+        if not source_path_text:
+            continue
+        source_path = resolve_artifact_path(source_path_text, workspace_dir)
+        payload = read_json_if_exists(source_path)
+        if payload is None:
+            continue
+        sliced = filter_symbols(payload, symbols)
+        relative_name = "decision-brief" if artifact_key == "decision_brief" else "verdict-first"
+        slice_path = slice_dir / f"{task_name}.{relative_name}.json"
+        write_json(slice_path, sliced)
+        slice_paths[artifact_key] = str(slice_path)
+    return slice_paths
+
+
+def spec_with_verdict_slices(spec: dict[str, Any], slice_paths: dict[str, str]) -> dict[str, Any]:
+    if not slice_paths:
+        return spec
+    copied = dict(spec)
+    artifacts = dict(normalize_artifact_paths(copied.get("artifact_paths")))
+    if "decision_brief" in slice_paths:
+        artifacts["decision_brief"] = slice_paths["decision_brief"]
+    if "verdict_first" in slice_paths:
+        artifacts["verdict_first"] = slice_paths["verdict_first"]
+    copied["artifact_paths"] = artifacts
+    return copied
+
+
+def is_compact_verdict_spec(spec: dict[str, Any]) -> bool:
+    if str(spec.get("stage", "")).strip() not in VERDICT_STAGES:
+        return False
+    if str(spec.get("prompt", "")).strip():
+        return False
+    artifacts = normalize_artifact_paths(spec.get("artifact_paths"))
+    decision_brief = artifacts.get("decision_brief") or artifacts.get("decision-brief") or artifacts.get("brief")
+    symbols = normalize_symbol_ids(spec.get("symbol_ids") or spec.get("symbols"))
+    return bool(decision_brief and symbols)
+
+
+def is_compact_verdict_candidate(spec: dict[str, Any]) -> bool:
+    return (
+        str(spec.get("stage", "")).strip() in VERDICT_STAGES
+        and not str(spec.get("prompt", "")).strip()
+        and (spec.get("artifact_paths") is not None or spec.get("symbol_ids") is not None or spec.get("symbols") is not None)
+    )
+
+
+def compact_verdict_prompt(spec: dict[str, Any]) -> str | None:
+    if not is_compact_verdict_spec(spec):
+        return None
+    stage = str(spec.get("stage", "")).strip()
+    artifacts = normalize_artifact_paths(spec.get("artifact_paths"))
+    symbols = normalize_symbol_ids(spec.get("symbol_ids") or spec.get("symbols"))
+    decision_brief = artifacts.get("decision_brief") or artifacts.get("decision-brief") or artifacts.get("brief")
+    verdict_first = artifacts.get("verdict_first") or artifacts.get("verdict-first")
+    persona = artifacts.get("persona") or artifacts.get("persona_path")
+    verdict_format = artifacts.get("verdict_format") or artifacts.get("verdict-format")
+    output_dir = str(spec.get("output_dir", "")).strip()
+    task_name = safe_name(str(spec.get("task_name", "")))
+    agent_role = safe_name(str(spec.get("agent_role", "")))
+    sidecar_path = f"{output_dir}/verdicts/{stage}--{agent_role}--{task_name}.md"
+
+    lines = [
+        "Daily-trading verdict sub-agent.",
+        f"stage: {stage}",
+        f"agent_role: {spec.get('agent_role', '')}",
+        f"task_name: {spec.get('task_name', '')}",
+        f"run_id: {spec.get('run_id', '')}",
+        f"started_at: {spec.get('started_at', '')}",
+        f"workspace_dir: {spec.get('workspace_dir', '')}",
+        f"human_markdown_path: {sidecar_path}",
+        "",
+        "Use only the supplied local artifacts and persona. Do not call KIS, MCP, web, network, or external data sources.",
+        "Read only the listed symbol_ids from artifact files; do not load unrelated symbols or raw cache files.",
+    ]
+    if decision_brief:
+        lines.append(f"decision_brief: {decision_brief}")
+    if verdict_first:
+        lines.append(f"verdict_first: {verdict_first}")
+    if persona:
+        lines.append(f"persona: {persona}")
+    if verdict_format:
+        lines.append(f"verdict_format: {verdict_format}")
+    if symbols:
+        lines.append("symbol_ids: " + ",".join(symbols))
+
+    lines.extend(
+        [
+            "",
+            "Return JSON only in the required verdict format. Also write the human-review Markdown sidecar path above.",
+            "Optional financial/news/market-status absence is context only and must not lower score, target, or eligibility by itself.",
+        ]
+    )
+    return compact_prompt("\n".join(lines))
+
+
+def build_prompt(spec: dict[str, Any]) -> str:
+    return compact_verdict_prompt(spec) or compact_prompt(str(spec.get("prompt", "")))
 
 
 def launcher_model_effort(stage: str, agent_role: str) -> tuple[str, str]:
     stage_key = stage.strip().lower()
     role_key = agent_role.strip().lower()
 
-    if (
-        role_key in {"financial", "news", "market-status", "analyst", "juror", "judge"}
-        or role_key.startswith(("analyst-", "juror-", "judge-"))
-        or stage_key in {
-            "financial-collection",
-            "market-status-collection",
-            "news-collection",
-            "first-verdict",
-            "second-verdict",
-        }
-    ):
-        return SUBAGENT_MODEL, SUBAGENT_REASONING_EFFORT
+    if role_key in {"financial", "news", "market-status"} or stage_key in COLLECTION_STAGES:
+        return COLLECTION_SUBAGENT_MODEL, COLLECTION_SUBAGENT_REASONING_EFFORT
+    if role_key in {"analyst", "juror"} or role_key.startswith(("analyst-", "juror-")) or stage_key == "first-verdict":
+        return FIRST_VERDICT_SUBAGENT_MODEL, FIRST_VERDICT_SUBAGENT_REASONING_EFFORT
+    if role_key == "judge" or role_key.startswith("judge-") or stage_key == "second-verdict":
+        return SECOND_VERDICT_SUBAGENT_MODEL, SECOND_VERDICT_SUBAGENT_REASONING_EFFORT
     raise ValueError(f"unsupported daily-trading sub-agent stage/role: stage={stage!r}, agent_role={agent_role!r}")
 
 
@@ -101,22 +310,64 @@ def assert_model_effort(stage: str, agent_role: str, *, model: str, effort: str)
         )
 
 
-def assert_all_supported_stages_use_subagent_defaults() -> None:
+def assert_all_supported_stages_use_expected_models() -> None:
     cases = [
-        ("financial-collection", "financial"),
-        ("market-status-collection", "market-status"),
-        ("news-collection", "news"),
-        ("first-verdict", "analyst"),
-        ("first-verdict", "analyst-jpmorgan"),
-        ("second-verdict", "judge"),
+        (
+            "financial-collection",
+            "financial",
+            COLLECTION_SUBAGENT_MODEL,
+            COLLECTION_SUBAGENT_REASONING_EFFORT,
+        ),
+        (
+            "market-status-collection",
+            "market-status",
+            COLLECTION_SUBAGENT_MODEL,
+            COLLECTION_SUBAGENT_REASONING_EFFORT,
+        ),
+        (
+            "news-collection",
+            "news",
+            COLLECTION_SUBAGENT_MODEL,
+            COLLECTION_SUBAGENT_REASONING_EFFORT,
+        ),
+        (
+            "first-verdict",
+            "analyst",
+            FIRST_VERDICT_SUBAGENT_MODEL,
+            FIRST_VERDICT_SUBAGENT_REASONING_EFFORT,
+        ),
+        (
+            "first-verdict",
+            "analyst-jpmorgan",
+            FIRST_VERDICT_SUBAGENT_MODEL,
+            FIRST_VERDICT_SUBAGENT_REASONING_EFFORT,
+        ),
+        (
+            "second-verdict",
+            "judge",
+            SECOND_VERDICT_SUBAGENT_MODEL,
+            SECOND_VERDICT_SUBAGENT_REASONING_EFFORT,
+        ),
     ]
-    for stage, role in cases:
-        assert_model_effort(stage, role, model=SUBAGENT_MODEL, effort=SUBAGENT_REASONING_EFFORT)
+    for stage, role, model, effort in cases:
+        assert_model_effort(stage, role, model=model, effort=effort)
 
 def validate_spec(spec: dict[str, Any]) -> None:
-    missing = sorted(field for field in REQUIRED_SPEC_FIELDS if not str(spec.get(field, "")).strip())
+    required = REQUIRED_SPEC_FIELDS
+    compact_verdict_requested = is_compact_verdict_candidate(spec)
+    if compact_verdict_requested:
+        required = REQUIRED_SPEC_FIELDS - {"prompt"}
+    missing = sorted(field for field in required if not str(spec.get(field, "")).strip())
     if missing:
         raise ValueError("missing required spec fields: " + ", ".join(missing))
+    if compact_verdict_requested:
+        artifacts = normalize_artifact_paths(spec.get("artifact_paths"))
+        decision_brief = artifacts.get("decision_brief") or artifacts.get("decision-brief") or artifacts.get("brief")
+        symbols = normalize_symbol_ids(spec.get("symbol_ids") or spec.get("symbols"))
+        if not decision_brief:
+            raise ValueError("compact verdict spec requires artifact_paths.decision_brief")
+        if not symbols:
+            raise ValueError("compact verdict spec requires symbol_ids")
 
 
 def parse_json_output(raw: str) -> tuple[Any | None, list[dict[str, Any]]]:
@@ -145,6 +396,8 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
     model, effort = launcher_model_effort(str(spec["stage"]), str(spec["agent_role"]))
     wrapper_path, raw_output_path = wrapper_paths(spec)
     raw_output_path.parent.mkdir(parents=True, exist_ok=True)
+    slice_paths = write_verdict_input_slices(spec)
+    prompt_spec = spec_with_verdict_slices(spec, slice_paths)
 
     started_at = now_iso()
     started = time.monotonic()
@@ -161,7 +414,7 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
     ]
     if env_bool("CODEX_BYPASS_APPROVALS_AND_SANDBOX", True):
         cmd.append("--dangerously-bypass-approvals-and-sandbox")
-    cmd.append(str(spec["prompt"]))
+    cmd.append(build_prompt(prompt_spec))
 
     env = os.environ.copy()
     if env.get("CODEX_HOME"):
@@ -223,6 +476,11 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
         status = "success" if returncode == 0 and parsed_text and not text_errors else "failed"
     else:
         status = "success" if returncode == 0 and parsed_json is not None and not parse_errors else "failed"
+    retention = raw_retention_mode()
+    raw_output_retained = True
+    if raw_output_path.exists() and (retention == "never" or (retention == "failed" and status == "success")):
+        raw_output_path.unlink()
+        raw_output_retained = False
     wrapper = {
         "schema_version": "1",
         "run_id": str(spec["run_id"]),
@@ -236,10 +494,14 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
         "duration_ms": duration_ms,
         "returncode": returncode,
         "raw_output_path": str(raw_output_path),
+        "raw_output_retained": raw_output_retained,
+        "raw_retention": retention,
         "parsed_json": parsed_json,
         "parsed_text": parsed_text,
         "errors": errors,
         "command": [part for part in cmd[:-1]],
+        "prompt_mode": "compact_verdict" if compact_verdict_prompt(prompt_spec) else "raw",
+        "verdict_input_paths": slice_paths,
     }
     write_json(wrapper_path, wrapper)
     return wrapper
@@ -398,6 +660,92 @@ def spec(tmp: Path, *, stage: str, agent_role: str, task_name: str) -> dict[str,
     }
 
 
+def compact_spec(tmp: Path, *, stage: str, agent_role: str, task_name: str) -> dict[str, Any]:
+    payload = spec(tmp, stage=stage, agent_role=agent_role, task_name=task_name)
+    payload.pop("prompt")
+    payload["artifact_paths"] = {
+        "decision_brief": str(tmp / "reports" / "runs" / "self-test" / "decision-brief.json"),
+        "verdict_first": str(tmp / "reports" / "runs" / "self-test" / "verdict-first.json"),
+        "persona": "references/personas/analyst-jpmorgan.md",
+        "verdict_format": "references/rules/verdict-format.md",
+    }
+    payload["symbol_ids"] = ["005930", {"symbol_id": "000660"}, "005930"]
+    return payload
+
+
+def write_sample_verdict_inputs(tmp: Path) -> None:
+    run_dir = tmp / "reports" / "runs" / "self-test"
+    write_json(
+        run_dir / "decision-brief.json",
+        {
+            "schema_version": "1",
+            "symbols": [
+                {"symbol_id": "005930", "symbol_name": "삼성전자"},
+                {"symbol_id": "000660", "symbol_name": "SK하이닉스"},
+                {"symbol_id": "035420", "symbol_name": "NAVER"},
+            ],
+        },
+    )
+    write_json(
+        run_dir / "verdict-first.json",
+        {
+            "schema_version": "1",
+            "symbols": [
+                {"symbol_id": "005930", "score": 7},
+                {"symbol_id": "000660", "score": 8},
+                {"symbol_id": "035420", "score": 5},
+            ],
+        },
+    )
+
+
+def assert_prompt_compaction() -> None:
+    raw = "  keep leading instruction  \n\n\nnext line   \r\n\r\nfinal"
+    expected = "  keep leading instruction\n\nnext line\n\nfinal"
+    actual = compact_prompt(raw)
+    if actual != expected:
+        raise AssertionError(f"unexpected compact prompt: {actual!r}")
+
+
+def assert_compact_verdict_prompt(tmp: Path) -> None:
+    prompt = build_prompt(compact_spec(tmp, stage="first-verdict", agent_role="analyst-jpmorgan", task_name="first"))
+    required_parts = [
+        "stage: first-verdict",
+        "agent_role: analyst-jpmorgan",
+        "decision_brief:",
+        "persona: references/personas/analyst-jpmorgan.md",
+        "symbol_ids: 005930,000660",
+        "Return JSON only",
+    ]
+    missing = [part for part in required_parts if part not in prompt]
+    if missing:
+        raise AssertionError(f"compact verdict prompt missing {missing}: {prompt}")
+
+
+def assert_verdict_input_slices(tmp: Path) -> None:
+    write_sample_verdict_inputs(tmp)
+    payload = compact_spec(tmp, stage="second-verdict", agent_role="judge", task_name="slice-test")
+    slices = write_verdict_input_slices(payload)
+    expected_keys = {"decision_brief", "verdict_first"}
+    if set(slices) != expected_keys:
+        raise AssertionError(f"unexpected slice keys: {slices}")
+    for slice_path_text in slices.values():
+        slice_payload = load_json(Path(slice_path_text))
+        symbols = [item.get("symbol_id") for item in slice_payload.get("symbols", [])]
+        if symbols != ["005930", "000660"]:
+            raise AssertionError(f"unexpected sliced symbols for {slice_path_text}: {symbols}")
+
+
+def assert_invalid_spec(spec_payload: dict[str, Any], expected: str) -> None:
+    try:
+        validate_spec(spec_payload)
+    except ValueError as exc:
+        if expected not in str(exc):
+            raise AssertionError(f"expected {expected!r}, got {exc}") from exc
+        return
+    raise AssertionError(f"invalid spec was accepted; expected {expected!r}")
+
+
 def assert_argv(argv_log: Path, *, model: str, effort: str) -> None:
     lines = [json.loads(line) for line in argv_log.read_text(encoding="utf-8").splitlines() if line.strip()]
     if not lines:
@@ -423,21 +771,48 @@ def run_self_test() -> int:
         os.environ["CODEX_BYPASS_APPROVALS_AND_SANDBOX"] = "1"
         try:
             try:
-                assert_all_supported_stages_use_subagent_defaults()
+                assert_all_supported_stages_use_expected_models()
                 assert_unsupported_stage_rejected()
+                assert_prompt_compaction()
+                assert_compact_verdict_prompt(tmp)
+                assert_verdict_input_slices(tmp)
+                missing_brief = compact_spec(
+                    tmp, stage="first-verdict", agent_role="analyst-jpmorgan", task_name="missing-brief"
+                )
+                missing_brief["artifact_paths"].pop("decision_brief")
+                assert_invalid_spec(missing_brief, "artifact_paths.decision_brief")
+                missing_symbols = compact_spec(
+                    tmp, stage="first-verdict", agent_role="analyst-jpmorgan", task_name="missing-symbols"
+                )
+                missing_symbols["symbol_ids"] = []
+                assert_invalid_spec(missing_symbols, "symbol_ids")
+                raw_with_artifacts = compact_spec(
+                    tmp, stage="first-verdict", agent_role="analyst-jpmorgan", task_name="raw-with-artifacts"
+                )
+                raw_with_artifacts["prompt"] = '{"return":"json only"}'
+                validate_spec(raw_with_artifacts)
+                if build_prompt(raw_with_artifacts) != '{"return":"json only"}':
+                    raise AssertionError("prompt-based spec with artifact metadata did not remain raw")
+                if write_verdict_input_slices(raw_with_artifacts):
+                    raise AssertionError("prompt-based spec with artifact metadata created verdict slices")
             except AssertionError as exc:
                 failures.append(str(exc))
 
             cases = [
                 (
+                    spec(tmp, stage="financial-collection", agent_role="financial", task_name="financial"),
+                    COLLECTION_SUBAGENT_MODEL,
+                    COLLECTION_SUBAGENT_REASONING_EFFORT,
+                ),
+                (
                     spec(tmp, stage="first-verdict", agent_role="analyst", task_name="first"),
-                    SUBAGENT_MODEL,
-                    SUBAGENT_REASONING_EFFORT,
+                    FIRST_VERDICT_SUBAGENT_MODEL,
+                    FIRST_VERDICT_SUBAGENT_REASONING_EFFORT,
                 ),
                 (
                     spec(tmp, stage="second-verdict", agent_role="judge", task_name="second"),
-                    SUBAGENT_MODEL,
-                    SUBAGENT_REASONING_EFFORT,
+                    SECOND_VERDICT_SUBAGENT_MODEL,
+                    SECOND_VERDICT_SUBAGENT_REASONING_EFFORT,
                 ),
             ]
             for test_spec, model, effort in cases:
@@ -448,6 +823,28 @@ def run_self_test() -> int:
                     assert_argv(argv_log, model=model, effort=effort)
                 except AssertionError as exc:
                     failures.append(str(exc))
+
+            compact_wrapper = run_one(
+                compact_spec(tmp, stage="first-verdict", agent_role="analyst-jpmorgan", task_name="compact-first")
+            )
+            if compact_wrapper["status"] != "success" or compact_wrapper.get("prompt_mode") != "compact_verdict":
+                failures.append(f"compact verdict spec returned unexpected wrapper: {compact_wrapper}")
+            if not compact_wrapper.get("verdict_input_paths", {}).get("decision_brief"):
+                failures.append(f"compact verdict spec did not create decision brief slice: {compact_wrapper}")
+
+            old_raw_retention = os.environ.get("CODEX_SUBAGENT_RAW_RETENTION")
+            os.environ["CODEX_SUBAGENT_RAW_RETENTION"] = "failed"
+            retained_wrapper = run_one(
+                compact_spec(tmp, stage="first-verdict", agent_role="analyst-jpmorgan", task_name="raw-retention")
+            )
+            if retained_wrapper.get("raw_output_retained") is not False:
+                failures.append(f"successful raw output was not pruned with failed retention: {retained_wrapper}")
+            if Path(retained_wrapper["raw_output_path"]).exists():
+                failures.append("raw output path still exists after successful failed-retention run")
+            if old_raw_retention is None:
+                os.environ.pop("CODEX_SUBAGENT_RAW_RETENTION", None)
+            else:
+                os.environ["CODEX_SUBAGENT_RAW_RETENTION"] = old_raw_retention
 
             text_spec = spec(tmp, stage="news-collection", agent_role="news", task_name="text-news")
             os.environ["FAKE_CODEX_INVALID_JSON"] = "1"

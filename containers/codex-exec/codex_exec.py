@@ -44,7 +44,9 @@ DAILY_TRADING_STAGE_MODEL_CONTRACT = (
     "parent와 같은 CODEX_HOME, CODEX_MCP_TRADING_ENV, workspace cwd, sandbox bypass 설정을 상속한다.\n"
     "- launcher는 `reports/runs/<run_id>/subagents/<task_name>.wrapper.json`와 raw text만 남긴다. "
     "Main agent만 JSON 단계의 parsed_json 또는 financial/news/market-status 단계의 parsed_text를 sanitize한 뒤 canonical artifact를 작성한다.\n"
-    "- 모든 collection/verdict sub-agent: model=gpt-5.5, effort=low.\n"
+    "- collection sub-agent: model=gpt-5.4-mini, effort=low.\n"
+    "- first-verdict sub-agent: model=gpt-5.4-mini, effort=medium.\n"
+    "- second-verdict sub-agent: model=gpt-5.5, effort=low.\n"
     "- Main agent initialize, account snapshots, merge-and-brief, order-execution, report: model=gpt-5.5, effort=medium.\n"
 )
 

@@ -1,54 +1,53 @@
 # Run Artifact Rules
 
-## Directory And Files
-
-Every daily-trading run uses the injected or generated `run_id`.
+## Directory
 
 ```text
 reports/
 ├── YYYY-MM-DD_포트폴리오.md
-└── runs/
-    └── <run_id>/
-        ├── subagents/
-        │   ├── <task_name>.wrapper.json
-        │   └── <task_name>.raw.txt
-        ├── verdicts/
-        │   └── <stage>--<agent_role>--<task_name>.md
-        ├── run.json
-        ├── price-chart.json
-        ├── account-before-verdict.json
-        ├── decision-brief.json
-        ├── verdict-first.json
-        ├── verdict-second.json
-        ├── account-before-order.json
-        └── execution.json
+└── runs/<run_id>/
+    ├── subagents/<task_name>.wrapper.json
+    ├── subagents/<task_name>.raw.txt
+    ├── verdict-inputs/<task_name>.decision-brief.json
+    ├── verdict-inputs/<task_name>.verdict-first.json
+    ├── verdicts/<stage>--<agent_role>--<task_name>.md
+    ├── run.json
+    ├── price-chart.json
+    ├── account-before-verdict.json
+    ├── decision-brief.json
+    ├── verdict-first.json
+    ├── verdict-second.json
+    ├── account-before-order.json
+    └── execution.json
 ```
 
-Create `run.json` immediately when daily-trading begins. Write every other file when its stage completes or fails. Domain snapshots are write-once; retries and partial results are retained in an `attempts` array rather than replacing earlier evidence.
+Create `run.json` when work starts. Write every other artifact when its stage completes, skips, or fails. Domain snapshots are write-once for the stage; retain retries and partial results in `attempts` instead of replacing evidence.
 
-The daily-trading sub-agent launcher writes only `subagents/<task_name>.wrapper.json` and `subagents/<task_name>.raw.txt`. It does not write canonical artifacts such as verdict JSON files. Financial and news collection return `parsed_text`, but that text is a cache path or the fixed missing-cache message rather than body text. Market-status collection also returns `parsed_text`, but that text is the concise `$get-market-status` Markdown summary rather than a file path. The Main agent calls `kis-trade-mcp` directly for price/chart data and writes `price-chart.json`. Financial context is stored as a reusable YAML memory cache at `memory/collect-financial-information/financial-YYYY-MM-DD.yaml`; news context is stored as a reusable YAML memory cache at `memory/collect-news-information/news-YYYY-MM-DD.yaml`. The Main agent must not create `reports/runs/<run_id>/financial.md`, `reports/runs/<run_id>/news.md`, or `reports/runs/<run_id>/market-status.md`.
+The sub-agent launcher writes wrapper files, raw files, and optional verdict input slices. Main agent owns canonical JSON artifacts and must not create `financial.md`, `news.md`, or `market-status.md`. Financial/news context lives in reusable memory caches; market-status is launcher text.
 
-Verdict sub-agents may write only their own human-review companion Markdown file under `verdicts/` using the fixed filename rules in `verdict-format.md`. These Markdown files are for human inspection only. Missing, malformed, or incomplete companion Markdown must be recorded as a non-blocking warning, but must not fail wrapper parsing, JSON artifact validation, score aggregation, target reconciliation, target calculation, or order gates.
+`subagents/*.raw.txt` keeps the raw model output for debugging. It is retained by default. `CODEX_SUBAGENT_RAW_RETENTION=failed` may delete successful raw outputs after parsing; `never` may delete all raw outputs after parsing. Wrappers still keep status, errors, parsed output, raw path metadata, and whether the raw file was retained.
+
+Verdict Markdown sidecars are human-review only. Missing, malformed, or inconsistent sidecars are warnings and must not fail JSON parsing, aggregation, target reconciliation, or order gates.
+
+`verdict-inputs/` files are non-canonical slices derived from canonical artifacts for one verdict task and its `symbol_ids`. They reduce verdict fan-out context. If a slice is missing, the canonical artifact remains the source of truth.
 
 ## Status Values
 
-Only these values are allowed:
+- `success`: required usable output exists.
+- `partial`: usable output exists with non-fatal symbol or stage errors.
+- `failed`: no usable output, or a required main-agent gate failed.
 
-- `success`: the stage produced all required usable output.
-- `partial`: the stage produced usable output but has one or more symbol or non-fatal stage errors.
-- `failed`: the stage produced no usable output or a required main-agent gate failed.
+For intentionally unneeded stages, use `status="success"`, `skipped=true`, and a non-empty `skip_reason`.
 
-For a deliberately unneeded stage, use `status="success"`, `skipped=true`, and a non-empty `skip_reason`.
+Final `run.json`:
 
-Final `run.json` status:
-
-- `success`: every required analysis stage succeeded and every explicitly requested execution stage completed without failure.
-- `partial`: a usable report exists, but at least one symbol or non-fatal stage is partial, excluded, blocked, or failed.
-- `failed`: no usable verdict/report exists, or a required explicitly requested account/order stage failed so the requested result could not be produced.
+- `success`: required analysis succeeded and requested execution completed.
+- `partial`: a usable report exists, but some symbol/stage is partial, excluded, blocked, or failed.
+- `failed`: no usable verdict/report exists, or a required requested account/order stage failed.
 
 ## Common Envelope
 
-Every artifact JSON file contains:
+Every canonical JSON artifact contains:
 
 ```json
 {
@@ -65,41 +64,71 @@ Every artifact JSON file contains:
 }
 ```
 
-Each error contains:
+Error objects use:
+
+```json
+{"stage":"","symbol_id":"","source":"","code":"","message":"","required":true}
+```
+
+Omit `symbol_id` only for run-wide errors. Messages must not contain sensitive values.
+
+## Wrapper Handling
+
+Treat a wrapper as failed evidence when it is missing, has `status="failed"`, or has non-zero `returncode`.
+
+Financial/news/market-status text stages fail in the launcher only when `parsed_text` is empty. Do not validate returned cache-path existence in the launcher. A `run-group` result is `failed` only when a required stage fails; if only optional text stages fail, group status is `partial`.
+
+Failed wrappers remain in `subagents/`. Main agent writes failed canonical envelopes and blocks only dependent required stages.
+
+## Artifact Responsibilities
+
+| Artifact | Owner | Purpose |
+|---|---|---|
+| `run.json` | Main | input scope, environment, timestamps, stage statuses, artifact paths, final status |
+| `price-chart.json` | Main | required complete symbol universe, sanitized price/chart evidence, per-symbol errors |
+| financial memory path | optional collector/Main | reusable `memory/collect-financial-information/financial-YYYY-MM-DD.yaml` reference |
+| news memory path | optional collector/Main | reusable `memory/collect-news-information/news-YYYY-MM-DD.yaml` reference |
+| market-status text | optional collector/Main | compact `$get-market-status` summary |
+| `account-before-verdict.json` | Main | sanitized initial holdings, pending/reserved orders, same-day fills |
+| `decision-brief.json` | Main | compact verdict input from price/chart, account, and optional summaries |
+| `verdict-inputs/*.json` | Launcher | non-canonical per-task slices of `decision-brief.json` and `verdict-first.json` |
+| `verdict-first.json` | Main | raw first verdict responses, sidecar paths, aggregated scores |
+| `verdict-second.json` | Main | judge responses, sidecar paths, reconciled target quantities, target cash, and rationale |
+| `account-before-order.json` | Main | sanitized latest account snapshot, active pending/reserved orders, or skipped envelope |
+| `execution.json` | Main | active-order adjustment decisions, quantity math, blocked/submitted/skipped/failed order results |
+
+Financial/news/market-status absence alone must not fail validation, lower eligibility, or block verdict/order flow.
+
+## Account Order Evidence Shape
+
+`account-before-order.json` must include the active pending/reserved order fields needed for safe adjustment:
 
 ```json
 {
-  "stage": "",
-  "symbol_id": "",
-  "source": "",
-  "code": "",
-  "message": "",
-  "required": true
+  "active_orders": [
+    {
+      "symbol_id": "",
+      "symbol_name": "",
+      "order_id": "",
+      "order_kind": "pending | reservation",
+      "direction": "buy | sell",
+      "remaining_quantity": 0,
+      "order_price": 0,
+      "order_type": "",
+      "execution_environment": "demo | real",
+      "order_path": "immediate | reservation",
+      "active_status": "active | cancelled | filled | expired | unknown",
+      "observed_at": ""
+    }
+  ]
 }
 ```
 
-Omit `symbol_id` only for run-wide errors. Do not include sensitive values in error messages.
-
-Launcher wrappers must be treated as failed stage evidence when the wrapper is missing, has `status="failed"`, or has a non-zero `returncode`. Financial, news, and market-status text stages fail in the launcher only when `parsed_text` is empty; the launcher must not add a separate file-existence validation for returned cache paths or market-status text. A `run-group` result is `failed` only when a required stage fails; if only financial/news/market-status stages fail, the group result is `partial`. Failed wrappers must remain in `subagents/`; the Main agent must write a failed canonical envelope for a failed required stage and block order candidate calculation or order submission only when the failed stage is required.
-
-## File Responsibilities
-
-- `run.json`: input scope, environment, timestamps, stage statuses, final status, and artifact paths.
-- `price-chart.json`: required sanitized canonical price/chart file from direct `kis-trade-mcp` calls, containing the complete symbol universe and per-symbol errors.
-- Financial memory path: optional best-effort cache reference to `memory/collect-financial-information/financial-YYYY-MM-DD.yaml`. Missing, failed, partial, no-data, malformed YAML, or absent financial cache must not fail validation or block verdict/order flow by itself.
-- News memory path: optional best-effort cache reference to `memory/collect-news-information/news-YYYY-MM-DD.yaml`. Missing, failed, partial, no-data, malformed YAML, or absent news cache must not fail validation or block verdict/order flow by itself.
-- Market-status launcher text: optional best-effort compact summary returned by `$get-market-status`. Missing, failed, partial, no-data, malformed, or absent market-status text must not fail validation or block verdict/order flow by itself.
-- `account-before-verdict.json`: sanitized initial account, current holdings, pending/reserved orders, and same-day fills.
-- `decision-brief.json`: compact canonical verdict input derived from price/chart, account evidence, and optional financial/news/market-status summaries; contains source provenance, eligibility, exclusion reasons, account exposure, and domain summaries; excludes raw payloads, full article text, repeated source detail, and sensitive fields.
-- `verdict-first.json`: raw `first-verdict` responses, companion Markdown paths when present, and aggregated integer `0` to `10` score per eligible symbol.
-- `verdict-second.json`: `second-verdict` set, raw judge responses, companion Markdown paths when present, reconciled target quantities, target cash, and rationale.
-- `verdicts/<stage>--<agent_role>--<task_name>.md`: optional human-review companion Markdown written by the corresponding verdict sub-agent only. It is not canonical machine input.
-- `account-before-order.json`: sanitized latest account snapshot or a skipped envelope from the `order-execution` stage.
-- `execution.json`: quantity calculations, final order list, submissions, failures, blocked candidates, or a skipped envelope from the `order-execution` stage.
+Only `active_status="active"` rows may contribute to pending/reserved quantity math or active-order adjustment. If any required field for an active order is missing or ambiguous, block cancellation, correction, replacement, and conflicting new submission for that symbol with a non-sensitive reason.
 
 ## `decision-brief.json` Shape
 
-`decision-brief.json` uses the common envelope and includes:
+Use the common envelope plus:
 
 ```json
 {
@@ -115,11 +144,7 @@ Launcher wrappers must be treated as failed stage evidence when the wrapper is m
       "eligible_for_verdict": true,
       "evidence_mode": "full | price_only",
       "exclusion_reasons": [],
-      "price": {
-        "current_or_last": null,
-        "observed_at": "",
-        "snapshot_mode": "live | previous_trading_day"
-      },
+      "price": {"current_or_last": null, "observed_at": "", "snapshot_mode": "live | previous_trading_day"},
       "price_chart_signals": [],
       "financial_summary": {},
       "news_summary": [],
@@ -132,18 +157,8 @@ Launcher wrappers must be treated as failed stage evidence when the wrapper is m
 }
 ```
 
-Financial, news, or market-status absence alone does not make a symbol ineligible. If `symbol_id`, `symbol_name`, `price.current_or_last`, and `price.observed_at` exist, keep `eligible_for_verdict=true`. Missing, failed, partial, no-data, or absent financial/news/market-status artifacts must not fail validation, lower eligibility, or block order execution by themselves.
-
-Use financial/news/market-status summaries when present. When absent, leave those summaries empty or add non-blocking notes; do not create required evidence gates from financial/news/market-status absence.
+If `symbol_id`, `symbol_name`, `price.current_or_last`, and `price.observed_at` exist, financial/news/market-status absence must not make a symbol ineligible. Keep optional summaries empty or add non-blocking notes.
 
 ## Sanitization
 
-Before writing any artifact or sending data to a sub-agent, remove:
-
-- account number and account product code
-- access token, refresh token, app key, and app secret
-- HTS ID
-- authorization headers and cookies
-- any field whose value is a credential
-
-Record that sanitization occurred without recording the removed value.
+Before artifacts, prompts, reports, or user responses, remove account numbers, account product codes, tokens, app keys, app secrets, HTS IDs, auth headers, cookies, and credential-like values. Record sanitization without recording removed values.
