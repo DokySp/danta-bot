@@ -6,14 +6,22 @@ routes:
     bot_commands:
       - command: new
         description: 새 Codex 세션 생성
+        instruction: /new
       - command: usage
         description: Codex 사용량 확인
+        instruction: /usage
+      - command: add_portfolio_ticker
+        description: 포트폴리오 종목 추가
+        instruction: /add_portfolio_ticker
+      - command: remove_portfolio_ticker
+        description: 포트폴리오 종목 삭제
+        instruction: /remove_portfolio_ticker
       - command: schedule_on
         description: 일일 거래 스케줄 활성화
-        text: 일일 거래 스케줄 활성화해줘.
+        instruction: 일일 거래 스케줄 활성화해줘.
       - command: schedule_off
         description: 일일 거래 스케줄 비활성화
-        text: 일일 거래 스케줄 비활성화해줘.
+        instruction: 일일 거래 스케줄 비활성화해줘.
 
   # experimental worker through bot v2
   v2:
@@ -22,11 +30,19 @@ routes:
     bot_commands:
       - command: new
         description: 새 Codex 세션 생성
+        instruction: /new
       - command: usage
         description: Codex 사용량 확인
+        instruction: /usage
+      - command: add_portfolio_ticker
+        description: 포트폴리오 종목 추가
+        instruction: /add_portfolio_ticker
+      - command: remove_portfolio_ticker
+        description: 포트폴리오 종목 삭제
+        instruction: /remove_portfolio_ticker
       - command: schedule_on
         description: 일일 거래 스케줄 활성화
-        text: 일일 거래 스케줄 활성화해줘.
+        instruction: 일일 거래 스케줄 활성화해줘.
       - command: schedule_off
         description: 일일 거래 스케줄 비활성화
-        text: 일일 거래 스케줄 비활성화해줘.
+        instruction: 일일 거래 스케줄 비활성화해줘.

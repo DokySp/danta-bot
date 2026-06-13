@@ -23,6 +23,10 @@ KST = ZoneInfo("Asia/Seoul")
 SYMBOLS_PER_IMAGE = 10
 WIDTH = 2940
 HEIGHT = 1640
+POINT_RADIUS = 10
+POINT_PADDING = POINT_RADIUS + 2
+X_OVERLAP_OFFSET_STEP = 6
+Y_OVERLAP_OFFSET_STEP = 4.5
 PALETTE = [
     (37, 99, 235),
     (220, 38, 38),
@@ -354,12 +358,12 @@ def write_chart(
     used_boxes: list[tuple[int, int, int, int]] = []
     page_offset = (page_index - 1) * SYMBOLS_PER_IMAGE
     offset_center = (len(symbols) - 1) / 2
-    x_pad = max(0, round(offset_center * 4) + 7)
-    y_pad = max(0, round(offset_center * 3) + 5)
+    x_pad = max(0, round(offset_center * X_OVERLAP_OFFSET_STEP) + POINT_PADDING)
+    y_pad = max(0, round(offset_center * Y_OVERLAP_OFFSET_STEP) + POINT_RADIUS)
     for index, symbol in enumerate(symbols):
         color = PALETTE[(page_offset + index) % len(PALETTE)]
-        x_offset = round((index - offset_center) * 4)
-        y_offset = round((index - offset_center) * 3)
+        x_offset = round((index - offset_center) * X_OVERLAP_OFFSET_STEP)
+        y_offset = round((index - offset_center) * Y_OVERLAP_OFFSET_STEP)
         point_values = [
             (
                 point_for(
@@ -391,7 +395,7 @@ def write_chart(
                 elbow = (x, previous_y)
                 draw.line((previous_point, elbow), fill=color, width=5)
                 draw.line((elbow, point), fill=color, width=5)
-            draw.rectangle((x - 5, y - 5, x + 5, y + 5), fill=color)
+            draw.rectangle((x - POINT_RADIUS, y - POINT_RADIUS, x + POINT_RADIUS, y + POINT_RADIUS), fill=color)
         if points:
             place_inline_label(draw, symbol_label(symbol, names), points, color, left, top, right, plot_bottom, label_font, used_boxes)
 

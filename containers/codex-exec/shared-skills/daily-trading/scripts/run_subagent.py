@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import subprocess
 import tempfile
@@ -41,6 +42,14 @@ OPTIONAL_GROUP_FAILURE_STAGES = TEXT_OUTPUT_STAGES
 VERDICT_STAGES = {"first-verdict", "second-verdict"}
 MAX_BLANK_LINES = 1
 RAW_RETENTION_VALUES = {"always", "failed", "never"}
+DISALLOWED_COMPACT_VERDICT_KEYS = {
+    "cash_rationale",
+    "duplicate_exposure_limits",
+    "evidence",
+    "price_chart_view",
+    "rationale",
+    "risks",
+}
 
 
 def now_iso() -> str:
@@ -253,8 +262,11 @@ def compact_verdict_prompt(spec: dict[str, Any]) -> str | None:
         f"workspace_dir: {spec.get('workspace_dir', '')}",
         f"human_markdown_path: {sidecar_path}",
         "",
-        "Use only the supplied local artifacts and persona. Do not call KIS, MCP, web, network, or external data sources.",
-        "Read only the listed symbol_ids from artifact files; do not load unrelated symbols or raw cache files.",
+        "Use only the supplied local artifact, persona, and rule files.",
+        "You may use read-only local shell commands such as cat and jq only for the explicitly listed files.",
+        "Do not call KIS, MCP, web, network, account/order APIs, or external data sources.",
+        "Do not write files, create Markdown, emit diffs, or wrap output in code fences.",
+        "Read only the listed symbol_ids from artifact files; do not load unrelated symbols, raw cache files, secrets, or unlisted paths.",
     ]
     if decision_brief:
         lines.append(f"decision_brief: {decision_brief}")
@@ -266,11 +278,22 @@ def compact_verdict_prompt(spec: dict[str, Any]) -> str | None:
         lines.append(f"verdict_format: {verdict_format}")
     if symbols:
         lines.append("symbol_ids: " + ",".join(symbols))
+    if stage == "second-verdict":
+        lines.extend(
+            [
+                "",
+                "For second-verdict, use per-symbol scores from verdict_first when available.",
+                "Interpret final_first_score as the confidence-adjusted first-verdict score: 5 is neutral, below 5 is a sell/reduce opinion, and above 5 is a buy/increase opinion.",
+                "If a symbol's first-verdict score is missing, unavailable, or unusable, treat it as neutral 5 and continue.",
+                "First-verdict scores are judgment inputs, not hard buy/sell gates.",
+            ]
+        )
 
     lines.extend(
         [
             "",
-            "Return JSON only in the required verdict format. Also write the human-review Markdown sidecar path above.",
+            "Return JSON only in the required compact verdict format. human_markdown_path is informational; the Main agent creates that sidecar from JSON.",
+            "Use short reason_code and one_line_reason fields instead of long rationale, risk, evidence, or prose arrays.",
             "Optional financial/news/market-status absence is context only and must not lower score, target, or eligibility by itself.",
         ]
     )
@@ -368,6 +391,20 @@ def validate_spec(spec: dict[str, Any]) -> None:
             raise ValueError("compact verdict spec requires artifact_paths.decision_brief")
         if not symbols:
             raise ValueError("compact verdict spec requires symbol_ids")
+    stage = str(spec.get("stage", "")).strip()
+    agent_role = safe_name(str(spec.get("agent_role", ""))).lower()
+    task_name = safe_name(str(spec.get("task_name", ""))).lower()
+    if stage == "first-verdict" and ("analyst-statestreet" in agent_role or "analyst-statestreet" in task_name):
+        raise ValueError("analyst-statestreet is no longer a selected first-verdict persona")
+    if stage == "second-verdict" and ("judge-longterm" in agent_role or "judge-longterm" in task_name):
+        raise ValueError("judge-longterm is no longer a selected second-verdict judge")
+    if stage == "second-verdict" and agent_role == "judge-midterm":
+        retry_numbers = [
+            int(match.group(1))
+            for match in re.finditer(r"(?:retry|attempt)-?(\d+)", task_name)
+        ]
+        if retry_numbers and max(retry_numbers) > 2:
+            raise ValueError("judge-midterm retry is limited to at most 2 retries")
 
 
 def parse_json_output(raw: str) -> tuple[Any | None, list[dict[str, Any]]]:
@@ -384,6 +421,102 @@ def parse_json_output(raw: str) -> tuple[Any | None, list[dict[str, Any]]]:
         ]
 
 
+def compact_verdict_payload_errors(payload: Any, stage: str) -> list[dict[str, Any]]:
+    errors: list[dict[str, Any]] = []
+
+    def walk(value: Any, path: str) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                key_text = str(key)
+                next_path = f"{path}.{key_text}" if path else key_text
+                if key_text in DISALLOWED_COMPACT_VERDICT_KEYS:
+                    errors.append(
+                        {
+                            "code": "disallowed_compact_verdict_key",
+                            "message": f"compact verdict JSON must not include {next_path}",
+                        }
+                    )
+                walk(item, next_path)
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                walk(item, f"{path}[{index}]")
+
+    walk(payload, "")
+    if not isinstance(payload, dict):
+        errors.append({"code": "invalid_compact_verdict_schema", "message": "compact verdict JSON must be an object"})
+        return errors
+    if payload.get("stage") != stage:
+        errors.append(
+            {
+                "code": "invalid_compact_verdict_schema",
+                "message": f"compact verdict JSON stage must be {stage}",
+            }
+        )
+    symbols = payload.get("symbols")
+    if not isinstance(symbols, list) or not symbols:
+        errors.append(
+            {
+                "code": "invalid_compact_verdict_schema",
+                "message": "compact verdict JSON must include a non-empty symbols array",
+            }
+        )
+        return errors
+    for index, symbol in enumerate(symbols):
+        if not isinstance(symbol, dict):
+            errors.append(
+                {
+                    "code": "invalid_compact_verdict_schema",
+                    "message": f"symbols[{index}] must be an object",
+                }
+            )
+            continue
+        for field in ("symbol_id", "symbol_name", "reason_code", "one_line_reason"):
+            if field not in symbol:
+                errors.append(
+                    {
+                        "code": "invalid_compact_verdict_schema",
+                        "message": f"symbols[{index}] missing {field}",
+                    }
+                )
+        if stage == "first-verdict":
+            for field in ("score", "confidence"):
+                if field not in symbol:
+                    errors.append(
+                        {
+                            "code": "invalid_compact_verdict_schema",
+                            "message": f"symbols[{index}] missing {field}",
+                        }
+                    )
+        if stage == "second-verdict":
+            for field in ("target_holding_quantity", "relative_attractiveness_rank"):
+                if field not in symbol:
+                    errors.append(
+                        {
+                            "code": "invalid_compact_verdict_schema",
+                            "message": f"symbols[{index}] missing {field}",
+                        }
+                    )
+    if stage == "second-verdict":
+        portfolio = payload.get("portfolio")
+        if not isinstance(portfolio, dict):
+            errors.append(
+                {
+                    "code": "invalid_compact_verdict_schema",
+                    "message": "second-verdict must include portfolio object",
+                }
+            )
+        else:
+            for field in ("target_cash_amount", "cash_reason_code", "one_line_portfolio_reason"):
+                if field not in portfolio:
+                    errors.append(
+                        {
+                            "code": "invalid_compact_verdict_schema",
+                            "message": f"portfolio missing {field}",
+                        }
+                    )
+    return errors
+
+
 def wrapper_paths(spec: dict[str, Any]) -> tuple[Path, Path]:
     output_dir = Path(str(spec["output_dir"]))
     task_name = safe_name(str(spec["task_name"]))
@@ -398,6 +531,7 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
     raw_output_path.parent.mkdir(parents=True, exist_ok=True)
     slice_paths = write_verdict_input_slices(spec)
     prompt_spec = spec_with_verdict_slices(spec, slice_paths)
+    prompt_mode = "compact_verdict" if compact_verdict_prompt(prompt_spec) else "raw"
 
     started_at = now_iso()
     started = time.monotonic()
@@ -454,6 +588,7 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
     parsed_text = None
     parse_errors: list[dict[str, Any]] = []
     text_errors: list[dict[str, Any]] = []
+    compact_verdict_errors: list[dict[str, Any]] = []
     if stage in TEXT_OUTPUT_STAGES:
         # Collection text stages return cache paths, fixed missing-cache messages,
         # or concise Markdown summaries. The launcher records that text and
@@ -465,6 +600,9 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
     else:
         parsed_json, parse_errors = parse_json_output(raw_output)
         errors.extend(parse_errors)
+        if stage in VERDICT_STAGES and prompt_mode == "compact_verdict" and parsed_json is not None:
+            compact_verdict_errors = compact_verdict_payload_errors(parsed_json, stage)
+            errors.extend(compact_verdict_errors)
     if returncode not in (0, None):
         errors.append({"code": "nonzero_returncode", "message": f"codex exec exited with {returncode}"})
     if stderr.strip():
@@ -475,7 +613,7 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
     if stage in TEXT_OUTPUT_STAGES:
         status = "success" if returncode == 0 and parsed_text and not text_errors else "failed"
     else:
-        status = "success" if returncode == 0 and parsed_json is not None and not parse_errors else "failed"
+        status = "success" if returncode == 0 and parsed_json is not None and not parse_errors and not compact_verdict_errors else "failed"
     retention = raw_retention_mode()
     raw_output_retained = True
     if raw_output_path.exists() and (retention == "never" or (retention == "failed" and status == "success")):
@@ -500,7 +638,7 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
         "parsed_text": parsed_text,
         "errors": errors,
         "command": [part for part in cmd[:-1]],
-        "prompt_mode": "compact_verdict" if compact_verdict_prompt(prompt_spec) else "raw",
+        "prompt_mode": prompt_mode,
         "verdict_input_paths": slice_paths,
     }
     write_json(wrapper_path, wrapper)
@@ -638,7 +776,37 @@ else:
             "symbols": [{"symbol_id": "005930", "symbol_name": "삼성전자", "errors": []}],
         }
     else:
-        payload = {"ok": True, "argv": sys.argv[1:]}
+        prompt = sys.argv[-1] if sys.argv else ""
+        if "stage: first-verdict" in prompt or "stage: second-verdict" in prompt:
+            stage = "second-verdict" if "stage: second-verdict" in prompt else "first-verdict"
+            payload = {
+                "agent_id": "fake",
+                "persona": "fake",
+                "stage": stage,
+                "human_markdown_path": "",
+                "symbols": [
+                    {
+                        "symbol_id": "005930",
+                        "symbol_name": "삼성전자",
+                        "reason_code": "hold_neutral",
+                        "one_line_reason": "self-test",
+                        **(
+                            {"target_holding_quantity": 0, "relative_attractiveness_rank": 1}
+                            if stage == "second-verdict"
+                            else {"score": 5, "confidence": 5, "missing_data": []}
+                        ),
+                    }
+                ],
+                "errors": [],
+            }
+            if stage == "second-verdict":
+                payload["portfolio"] = {
+                    "target_cash_amount": 0,
+                    "cash_reason_code": "cash_buffer",
+                    "one_line_portfolio_reason": "self-test",
+                }
+        else:
+            payload = {"ok": True, "argv": sys.argv[1:]}
     output_path.write_text(json.dumps(payload), encoding="utf-8")
 sys.exit(int(os.environ.get("FAKE_CODEX_EXIT", "0")))
 """,
@@ -712,14 +880,34 @@ def assert_compact_verdict_prompt(tmp: Path) -> None:
     required_parts = [
         "stage: first-verdict",
         "agent_role: analyst-jpmorgan",
+        "You may use read-only local shell commands such as cat and jq only for the explicitly listed files.",
+        "Do not call KIS, MCP, web, network, account/order APIs, or external data sources.",
+        "Do not write files, create Markdown, emit diffs, or wrap output in code fences.",
+        "Read only the listed symbol_ids from artifact files; do not load unrelated symbols, raw cache files, secrets, or unlisted paths.",
         "decision_brief:",
         "persona: references/personas/analyst-jpmorgan.md",
+        "verdict_format: references/rules/verdict-format.md",
         "symbol_ids: 005930,000660",
         "Return JSON only",
     ]
     missing = [part for part in required_parts if part not in prompt]
     if missing:
         raise AssertionError(f"compact verdict prompt missing {missing}: {prompt}")
+
+    second_prompt = build_prompt(
+        compact_spec(tmp, stage="second-verdict", agent_role="judge-midterm", task_name="second")
+    )
+    second_required_parts = [
+        "stage: second-verdict",
+        "verdict_first:",
+        "For second-verdict, use per-symbol scores from verdict_first when available.",
+        "Interpret final_first_score as the confidence-adjusted first-verdict score: 5 is neutral, below 5 is a sell/reduce opinion, and above 5 is a buy/increase opinion.",
+        "If a symbol's first-verdict score is missing, unavailable, or unusable, treat it as neutral 5 and continue.",
+        "First-verdict scores are judgment inputs, not hard buy/sell gates.",
+    ]
+    missing = [part for part in second_required_parts if part not in second_prompt]
+    if missing:
+        raise AssertionError(f"compact second-verdict prompt missing {missing}: {second_prompt}")
 
 
 def assert_verdict_input_slices(tmp: Path) -> None:
@@ -786,6 +974,108 @@ def run_self_test() -> int:
                 )
                 missing_symbols["symbol_ids"] = []
                 assert_invalid_spec(missing_symbols, "symbol_ids")
+                assert_invalid_spec(
+                    compact_spec(
+                        tmp,
+                        stage="first-verdict",
+                        agent_role="analyst-statestreet",
+                        task_name="analyst-statestreet",
+                    ),
+                    "analyst-statestreet",
+                )
+                assert_invalid_spec(
+                    compact_spec(
+                        tmp,
+                        stage="first-verdict",
+                        agent_role="analyst",
+                        task_name="analyst-statestreet-retry1",
+                    ),
+                    "analyst-statestreet",
+                )
+                assert_invalid_spec(
+                    compact_spec(
+                        tmp,
+                        stage="second-verdict",
+                        agent_role="judge-longterm",
+                        task_name="judge-longterm",
+                    ),
+                    "judge-longterm",
+                )
+                assert_invalid_spec(
+                    compact_spec(
+                        tmp,
+                        stage="second-verdict",
+                        agent_role="judge",
+                        task_name="judge-longterm-retry1",
+                    ),
+                    "judge-longterm",
+                )
+                assert_invalid_spec(
+                    compact_spec(
+                        tmp,
+                        stage="second-verdict",
+                        agent_role="judge-midterm",
+                        task_name="judge-midterm-retry3",
+                    ),
+                    "at most 2 retries",
+                )
+                assert_invalid_spec(
+                    compact_spec(
+                        tmp,
+                        stage="second-verdict",
+                        agent_role="judge-midterm",
+                        task_name="judge-midterm-attempt3",
+                    ),
+                    "at most 2 retries",
+                )
+                assert_invalid_spec(
+                    compact_spec(
+                        tmp,
+                        stage="second-verdict",
+                        agent_role="judge-midterm",
+                        task_name="judge-midterm-retry-3",
+                    ),
+                    "at most 2 retries",
+                )
+                assert_invalid_spec(
+                    compact_spec(
+                        tmp,
+                        stage="second-verdict",
+                        agent_role="judge-midterm",
+                        task_name="judge-midterm-attempt-3",
+                    ),
+                    "at most 2 retries",
+                )
+                assert_invalid_spec(
+                    compact_spec(
+                        tmp,
+                        stage="second-verdict",
+                        agent_role="judge-midterm",
+                        task_name="judge-midterm-retry1-attempt3",
+                    ),
+                    "at most 2 retries",
+                )
+                compact_errors = compact_verdict_payload_errors(
+                    {
+                        "stage": "first-verdict",
+                        "symbols": [
+                            {
+                                "symbol_id": "005930",
+                                "score": 5,
+                                "evidence": ["too long for compact verdict"],
+                            }
+                        ],
+                    },
+                    "first-verdict",
+                )
+                if not compact_errors or compact_errors[0].get("code") != "disallowed_compact_verdict_key":
+                    raise AssertionError(f"compact verdict disallowed keys were not rejected: {compact_errors}")
+                invalid_second_errors = compact_verdict_payload_errors(
+                    {"stage": "second-verdict", "portfolio": {}, "symbols": [{}]},
+                    "second-verdict",
+                )
+                if not any(error.get("code") == "invalid_compact_verdict_schema" for error in invalid_second_errors):
+                    raise AssertionError(f"invalid compact second-verdict schema was accepted: {invalid_second_errors}")
                 raw_with_artifacts = compact_spec(
                     tmp, stage="first-verdict", agent_role="analyst-jpmorgan", task_name="raw-with-artifacts"
                 )

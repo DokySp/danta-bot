@@ -1,4 +1,4 @@
 interface:
   display_name: "Daily Trading"
   short_description: "One-pass portfolio collection, account snapshots, verdicts, and trading"
-  default_prompt: "Use $daily-trading, preserve price-only eligible symbols, run collection and verdict sub-agents through the daily-trading launcher, run first-verdict and second-verdict, and keep account refresh, order preparation, and any authorized submission inside the Main agent order-execution stage."
+  default_prompt: "Use $daily-trading, preserve price-only eligible symbols, reuse valid optional caches when available, run selected 4 first-verdict analysts and single judge-midterm second-verdict through the daily-trading launcher, keep verdict sub-agents JSON-only, and keep account refresh, order preparation, and any authorized submission inside the Main agent order-execution stage."

@@ -3,7 +3,7 @@ schedules:
     enabled: true
     cron: "0 6 * * 1-5"
     message: |
-      $check-portfolio로 설정 종목을 확인하고, 초기 계좌 스냅샷에서 현재 보유 종목을 읽어 둘을 합친 전체 종목 universe를 대상으로
+      $check-portfolio로 recommanded, specified, holding, universe JSON을 확인하고, check-portfolio의 universe 전체 종목을 대상으로
       $collect-financial-information 수행하고 그 결과를 출력해줘.
 
   - id: trading-toggle
@@ -12,16 +12,30 @@ schedules:
     message: |
       $check-holiday 스킬을 통해서 휴장일인지 확인하고, $trading-schedule-toggle 을 통해 휴장일이 아닌 경우 daily 스케줄을 활성화, 휴장일인 경우 daily 스케줄을 비활성화해줘.
 
+  - id: daily-00
+    enabled: true
+    cron: "0 7 * * 1-5"
+    message: |
+      $check-portfolio로 recommanded, specified, holding, universe JSON을 확인하고, check-portfolio의 universe를 $daily-trading 대상으로 사용해줘. 
+      $daily-trading 스킬로 실전(acct) 거래를 지정가 예약 거래로 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
+
+  - id: daily-10
+    enabled: true
+    cron: "5 9 * * 1-5"
+    message: |
+      $check-portfolio로 recommanded, specified, holding, universe JSON을 확인하고, check-portfolio의 universe를 $daily-trading 대상으로 사용해줘. 
+      예약 거래 내역을 확인하고 $daily-trading 스킬로 실전(acct) 거래를 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
+
   - id: daily-20
     enabled: true
-    cron: "0 9,10,13 * * 1-5"
+    cron: "0 10,11,13 * * 1-5"
     message: |
-      $check-portfolio로 설정 종목을 확인하고, 초기 계좌 스냅샷에서 현재 보유 종목을 읽어 둘을 합친 전체 종목 universe를 $daily-trading 대상으로 사용해줘.
-      $daily-trading 스킬을 사용하여 현재 상황을 판단한 뒤, 실전(acct) 거래를 실제로 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
+      $check-portfolio로 recommanded, specified, holding, universe JSON을 확인하고, check-portfolio의 universe를 $daily-trading 대상으로 사용해줘. 
+      $daily-trading 스킬로 실전(acct) 거래를 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
 
   - id: daily-30
     enabled: true
-    cron: "0 15 * * 1-5"
+    cron: "5 15 * * 1-5"
     message: |
-      $check-portfolio로 설정 종목을 확인하고, 초기 계좌 스냅샷에서 현재 보유 종목을 읽어 둘을 합친 전체 종목 universe를 $daily-trading 대상으로 사용해줘.
-      $daily-trading 스킬을 사용하여 리밸런싱을 고려한 뒤, open일 때만 실전(acct) 거래를 실제로 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
+      $check-portfolio로 recommanded, specified, holding, universe JSON을 확인하고, check-portfolio의 universe를 $daily-trading 대상으로 사용해줘. 
+      이번 거래가 오늘의 마지막 거래임을 참고하여 $daily-trading 스킬로 실전(acct) 거래를 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.

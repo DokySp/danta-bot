@@ -1,4 +1,4 @@
 interface:
   display_name: "Check Portfolio"
-  short_description: "Read configured portfolio symbols"
-  default_prompt: "Use $check-portfolio to read the merged configured portfolio symbols only; live account holdings are added later by $daily-trading."
+  short_description: "Read portfolio universe JSON"
+  default_prompt: "Use $check-portfolio to read portfolio JSON with recommanded, specified, holding, and universe fields. Use direct KIS holdings from the skill output; do not ask $daily-trading to re-read holdings only to expand the universe."

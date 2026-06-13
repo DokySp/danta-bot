@@ -3,9 +3,9 @@
 ## Core Contract
 
 - Collect the complete portfolio universe once per `run_id`.
-- Universe = requested/configured symbols from `$check-portfolio` plus current live holdings from the initial read-only account snapshot.
+- Universe = `$check-portfolio` JSON `universe`, which already combines `recommanded`, `specified`, and direct KIS `holding` symbols.
 - Main agent directly collects required price/chart evidence through `kis-trade-mcp` and writes `price-chart.json`.
-- `financial`, `news`, and `market-status` run through `scripts/run_subagent.py`; they are optional best-effort context.
+- `financial` and `news` reuse valid same-date memory caches when those caches cover the complete symbol universe. Only missing or incomplete optional domains run through `scripts/run_subagent.py`; `market-status` remains an optional best-effort launcher stage.
 - Verdict agents reuse saved artifacts. They never recollect and never call external tools.
 - Preserve partial successes and errors. Do not drop a symbol silently.
 
@@ -39,21 +39,23 @@ Price/chart collection may use quote, ETF/ETN, and daily/weekly/monthly chart AP
 
 ## Optional Domain Collectors
 
-All optional collectors receive the full symbol universe, `run_id`, paths, and permission boundary. Missing, failed, partial, skipped, or no-data optional output must not block merge, verdicts, target calculation, demo order, real order, or reservation order when required price/chart and account gates pass.
+All optional collectors receive the full symbol universe, `run_id`, paths, and permission boundary when they are needed. Missing, failed, partial, skipped, cache-hit, or no-data optional output must not block merge, verdicts, target calculation, demo order, real order, or reservation order when required price/chart and account gates pass.
 
 | Stage | Required skill/source | Launcher output | Main-agent use |
 |---|---|---|---|
-| `financial-collection` | `$collect-financial-information`; KIS financial/estimate APIs only | `memory/collect-financial-information/financial-YYYY-MM-DD.yaml` path or fixed missing-cache message | cache path plus at most three short per-symbol bullets |
-| `news-collection` | `$collect-news-information`; KIS news/disclosure only | `memory/collect-news-information/news-YYYY-MM-DD.yaml` path or fixed missing-cache message | cache path plus at most three short per-symbol items |
+| `financial-collection` | Existing same-date full-universe cache, otherwise `$collect-financial-information`; KIS financial/estimate APIs only | `memory/collect-financial-information/financial-YYYY-MM-DD.yaml` path or fixed missing-cache message | cache path plus at most three short per-symbol bullets |
+| `news-collection` | Existing same-date full-universe cache, otherwise `$collect-news-information`; KIS news/disclosure only | `memory/collect-news-information/news-YYYY-MM-DD.yaml` path or fixed missing-cache message | cache path plus at most three short per-symbol items |
 | `market-status-collection` | `$get-market-status` | concise Markdown for S&P 500, Nasdaq, Dow, KOSPI, KOSDAQ | at most five run-level bullets |
 
-Optional launcher text must contain no JSON envelope, code fences, raw API payloads, raw quote/news dumps, long source dumps, account data, tokens, app keys, app secrets, HTS IDs, or credential-like values. Main agent must not create `financial.md`, `news.md`, or `market-status.md` run artifacts.
+Optional launcher text must be only a cache path, fixed missing-cache message, or short market-status summary. It must contain no JSON envelope, code fences, raw API payloads, raw quote/news dumps, long source dumps, account data, tokens, app keys, app secrets, HTS IDs, or credential-like values. Main agent must not create `financial.md`, `news.md`, or `market-status.md` run artifacts.
 
 News cache entries are keyed by symbol code. Article fields are `article_date`, `sentiment`, and `content`; `sentiment` is `positive`, `neutral`, `negative`, or `mixed`. Do not store `title`, `symbol_id`, `updated_at`, or `errors` in the cache.
 
 ## Account Evidence
 
-Main agent performs read-only account lookup, sanitizes it, and writes account artifacts. It may query:
+For universe construction, the Main agent uses `$check-portfolio` JSON and must not separately re-read current live holdings only to expand the universe.
+
+Before order calculation or execution, Main agent performs read-only account lookup, sanitizes it, and writes account artifacts. It may query:
 
 - account asset summary
 - current live holdings
@@ -63,7 +65,7 @@ Main agent performs read-only account lookup, sanitizes it, and writes account a
 - buy-available amount/quantity for buy candidates
 - sell-available quantity for sell candidates
 
-Initial `account-before-verdict.json` failure does not stop analysis for requested/configured symbols, but current holdings become unknown and all order preparation/submission is blocked.
+If `$check-portfolio` holdings lookup fails, current holdings are unknown; do not guess holdings or silently drop that source.
 
 Latest `account-before-order.json` is required before order calculation. If missing, invalid, or `failed`, block order preparation and execution.
 

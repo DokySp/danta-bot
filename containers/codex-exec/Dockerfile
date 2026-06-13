@@ -61,9 +61,10 @@ RUN groupadd --gid 1000 app \
 ENV npm_config_cache=/tmp/npm-cache
 
 COPY --chown=app:app codex-exec/codex_exec.py /app/codex_exec.py
+COPY --chown=app:app codex-exec/service /app/service
 COPY --chown=app:app codex-exec/profiles/${CODEX_EXEC_PROFILE}/config /app/config
 COPY --chown=app:app codex-exec/scripts/merge-codex-config.sh /app/merge-codex-config.sh
-COPY --chown=app:app codex-exec/scripts/codex_usage /app/codex_usage
+COPY --chown=app:app codex-exec/scripts/codex_usage.py /app/codex_usage.py
 COPY --chown=app:app codex-exec/shared-skills /app/skills
 COPY --chown=app:app codex-exec/profiles/${CODEX_EXEC_PROFILE}/skills /app/version-skills
 
@@ -79,7 +80,7 @@ RUN set -eux; \
   done; \
   rm -rf /app/version-skills
 
-RUN chmod +x /app/merge-codex-config.sh /app/codex_usage
+RUN chmod +x /app/merge-codex-config.sh /app/codex_usage.py
 
 USER app
 

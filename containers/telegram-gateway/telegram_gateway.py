@@ -188,7 +188,7 @@ TELEGRAM_CONTEXT_CONTENT_FIELDS = (
 
 
 def build_codex_input_text(text: str, message: dict[str, Any]) -> str:
-    if is_gateway_command(text):
+    if text.strip().startswith("/"):
         return text
 
     context = telegram_reply_context(message)
@@ -206,12 +206,6 @@ def build_codex_input_text(text: str, message: dict[str, Any]) -> str:
         f"{text}\n"
         "</user_message>"
     )
-
-
-def is_gateway_command(text: str) -> bool:
-    stripped = text.strip()
-    return stripped == "/new" or stripped.startswith("/new ") or stripped == "/usage"
-
 
 def telegram_reply_context(message: dict[str, Any]) -> dict[str, Any]:
     context: dict[str, Any] = {}
@@ -439,7 +433,7 @@ def parse_env_file(path: Path) -> dict[str, str]:
 class BotCommand:
     command: str
     description: str
-    text: str | None = None
+    instruction: str | None = None
 
     def telegram_payload(self) -> dict[str, str]:
         return {"command": self.command, "description": self.description}
@@ -458,10 +452,10 @@ def parse_bot_commands(raw_commands: Any, *, source: str) -> tuple[BotCommand, .
 
         command = str(item.get("command", "")).strip()
         description = str(item.get("description", "")).strip()
-        text_value = item.get("text")
-        text = str(text_value).strip() if text_value is not None else None
-        if text == "":
-            text = None
+        instruction_value = item.get("instruction")
+        instruction = str(instruction_value).strip() if instruction_value is not None else None
+        if instruction == "":
+            instruction = None
 
         if not command:
             raise ValueError(f"{item_source}.command is required")
@@ -477,7 +471,7 @@ def parse_bot_commands(raw_commands: Any, *, source: str) -> tuple[BotCommand, .
             raise ValueError(f"{item_source}.description must be 256 chars or fewer")
 
         seen.add(command)
-        commands.append(BotCommand(command=command, description=description, text=text))
+        commands.append(BotCommand(command=command, description=description, instruction=instruction))
 
     return tuple(commands)
 
@@ -494,14 +488,14 @@ def apply_bot_command_alias(route: "RouteConfig", text: str) -> str:
         return text
 
     for command in route.bot_commands:
-        if not command.text:
+        if not command.instruction:
             continue
 
         source = f"/{command.command}"
         if stripped == source:
-            return command.text
+            return command.instruction
         if stripped.startswith(f"{source} "):
-            return f"{command.text}{stripped[len(source):]}"
+            return f"{command.instruction}{stripped[len(source):]}"
 
     return text
 

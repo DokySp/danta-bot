@@ -2,9 +2,9 @@
 
 ## Shared Rules
 
-Verdict agents use only supplied immutable artifacts, persona text, and this format. They must not call KIS, MCP, web, network, shell, or external data sources; read unrelated files; recollect; or write canonical artifacts.
+Verdict agents use only supplied immutable artifacts, persona text, and this format. They may use read-only local shell commands such as `cat` and `jq` only for explicitly listed artifact/persona/rule files. They must not call KIS, MCP, web, network, account/order APIs, or external data sources; read unrelated files; recollect; write files; or write canonical artifacts.
 
-They may write one human-review Markdown sidecar:
+Verdict agents return compact JSON only. They must not emit Markdown, diffs, code fences, long prose, raw artifact excerpts, or raw source payloads. `human_markdown_path` is informational only; the Main agent creates one human-review Markdown sidecar from parsed JSON:
 
 ```text
 reports/runs/<run_id>/verdicts/<stage>--<agent_role>--<task_name>.md
@@ -12,7 +12,7 @@ reports/runs/<run_id>/verdicts/<stage>--<agent_role>--<task_name>.md
 
 `<stage>` is `first-verdict` or `second-verdict`. Sanitize `agent_role` and `task_name` by replacing every character except ASCII letters, digits, `_`, `-`, and `.` with `-`. Do not add timestamps, symbol names, persona names, spaces, slashes, or suffixes.
 
-Sidecar content:
+Main-generated `first-verdict` sidecar content:
 
 - Korean prose.
 - Exactly one per-symbol Markdown table.
@@ -29,15 +29,34 @@ Sidecar content:
 - `의견(판단)` is concise and cites only supplied evidence.
 - No extra per-symbol sections or sensitive values.
 
+Main-generated `second-verdict` sidecar content:
+
+- Korean prose.
+- Exactly one per-symbol Markdown table.
+- Header exactly:
+
+  ```markdown
+  | 종목 | 목표수량 | 상대매력도 | 판단코드 | 의견(판단) |
+  |---|---:|---:|---|---|
+  ```
+
+- One row for every supplied second-verdict asset.
+- `종목` includes symbol id and name.
+- `목표수량` is the non-negative integer target.
+- `상대매력도` is the integer rank from `relative_attractiveness_rank`.
+- `판단코드` is `reason_code`.
+- `의견(판단)` is `one_line_reason`.
+- No extra per-symbol sections or sensitive values.
+
 The sidecar is never machine input. JSON captured by the launcher is authoritative. Missing, malformed, or inconsistent sidecars are warnings only.
 
 `decision-brief.json` is the verdict input. It should contain compact price/chart, optional financial/news/market-status summaries, account exposure, eligibility, evidence mode, and errors. Absence of optional financial/news/market-status data is context only; it must not lower score, lower confidence, exclude a symbol, remove a target, or block orders by itself.
 
-When the launcher supplies compact verdict specs, it may replace canonical artifact paths with `verdict-inputs/` slices containing only the listed `symbol_ids`. Read only those supplied paths. Do not load unrelated symbols, raw memory caches, or optional source files.
+When the launcher supplies compact verdict specs, it may replace canonical artifact paths with `verdict-inputs/` slices containing only the listed `symbol_ids`. Verdict sub-agents may use read-only local shell commands such as `cat` and `jq` only for explicitly listed artifact/persona/rule files. Do not load unrelated symbols, raw memory caches, optional source files, secrets, or unlisted paths.
 
 ## `first-verdict`
 
-Selected first-verdict personas independently score every eligible symbol.
+Selected four first-verdict personas independently score every eligible symbol: `analyst-blackrock`, `analyst-fidelity`, `analyst-jpmorgan`, and `analyst-morganstanley`. `analyst-fidelity` includes quality, value, momentum, and low-volatility factor checks formerly covered by `analyst-statestreet`.
 
 Score scale:
 
@@ -63,8 +82,8 @@ Return JSON:
       "symbol_name": "",
       "score": 5,
       "confidence": 5,
-      "evidence": [],
-      "risks": [],
+      "reason_code": "hold_neutral",
+      "one_line_reason": "",
       "missing_data": []
     }
   ],
@@ -75,7 +94,8 @@ Return JSON:
 Rules:
 
 - `score` and `confidence` are integers from `0` to `10`.
-- Evidence cites fields and observation dates from `decision-brief.json`.
+- `reason_code` is a short snake_case label. `one_line_reason` is one concise Korean sentence citing only supplied evidence when useful.
+- Do not return long `evidence`, `risks`, `rationale`, or prose arrays.
 - One symbol's data cannot support another symbol.
 - Agents cannot see other verdict outputs.
 - `human_markdown_path` is informational.
@@ -83,29 +103,32 @@ Rules:
 Aggregation by Main agent:
 
 ```text
+confidence_weight = confidence / 10
+confidence_adjusted_score = 5 + ((score - 5) * confidence_weight)
 mean_score = sum(valid scores) / count(valid scores)
-final_first_score = round_half_up(mean_score)
+mean_confidence_adjusted_score = sum(valid confidence_adjusted_scores) / count(valid confidence_adjusted_scores)
+final_first_score = round_half_up(mean_confidence_adjusted_score)
 ```
 
+`confidence_adjusted_score` pulls low-confidence scores toward neutral `5`; `confidence=0` becomes `5`, and `confidence=10` preserves the original `score`.
 If no valid score exists, exclude that symbol from `second-verdict` and trading.
 
 ## `second-verdict`
 
-Input set = eligible symbols with `final_first_score >= 7` plus every eligible current holding. Mid- and long-term judges compare that set at portfolio level.
+Input set = eligible symbols with `final_first_score >= 7` plus every eligible `holding` symbol from `$check-portfolio`. Only `judge-midterm` compares that set at portfolio level. If its required output is missing or unusable, retry `judge-midterm` at most two times.
 
 Return JSON:
 
 ```json
 {
   "agent_id": "",
-  "persona": "mid-term | long-term",
+  "persona": "mid-term",
   "stage": "second-verdict",
   "human_markdown_path": "reports/runs/<run_id>/verdicts/second-verdict--<agent_role>--<task_name>.md",
   "portfolio": {
     "target_cash_amount": 0,
-    "cash_rationale": [],
-    "price_chart_view": "",
-    "duplicate_exposure_limits": []
+    "cash_reason_code": "cash_buffer",
+    "one_line_portfolio_reason": ""
   },
   "symbols": [
     {
@@ -113,8 +136,8 @@ Return JSON:
       "symbol_name": "",
       "target_holding_quantity": 0,
       "relative_attractiveness_rank": 1,
-      "rationale": [],
-      "risks": []
+      "reason_code": "hold_target",
+      "one_line_reason": ""
     }
   ],
   "errors": []
@@ -125,19 +148,23 @@ Rules:
 
 - `target_holding_quantity` is a non-negative integer.
 - Every second-verdict symbol receives a target quantity, including reduce-to-zero holdings.
-- Consider relative attractiveness, duplicate exposure, current weight, and price/chart conditions.
+- Consider relative attractiveness, duplicate exposure, current weight, price/chart conditions, and the supplied `verdict-first.json` scores.
+- Treat `final_first_score` as the confidence-adjusted first-verdict score: `5` is neutral, below `5` is a sell/reduce opinion, and above `5` is a buy/increase opinion.
+- If a symbol's first-verdict score is missing, unavailable, or unusable, treat its score as neutral `5` instead of failing the judgment.
+- First-verdict scores are judgment inputs, not hard buy/sell gates.
 - No fixed cash ratio or fixed investment ratio.
-- Judges cannot add symbols outside the supplied set.
+- The judge cannot add symbols outside the supplied set.
+- Do not return long `cash_rationale`, `duplicate_exposure_limits`, `price_chart_view`, `rationale`, `risks`, or prose arrays.
 
-Reconciliation by Main agent:
+Validation by Main agent:
 
-- With two valid judges, average target quantities and round down when fractional.
-- With two valid judges, average target cash.
-- If either judge result is invalid or missing for a symbol, set no final target and exclude it from orders.
-- Validate reconciled holdings plus target cash against `account-before-verdict.json` total assets using immutable price snapshot valuations.
+- Use the single valid `judge-midterm` target quantities and target cash as the canonical `verdict-second.json` target.
+- If the valid judge result is missing for a symbol, set no final target and exclude it from orders.
+- Validate target holdings plus target cash against the latest available account/order gate using immutable price snapshot valuations.
 - If targets exceed assets, reduce only buy-side quantities in reverse relative-attractiveness order. Do not increase sell targets.
 - If targets are below assets, add the unexplained remainder to final target cash. Do not increase quantities merely to spend cash.
-- Apply latest account constraints after reconciliation.
+- Preserve total-asset/cash, duplicate exposure, high-price concentration, active order, same-day repeat, and market open gates.
+- Apply latest account constraints after target validation.
 
 ## Allowed Values
 

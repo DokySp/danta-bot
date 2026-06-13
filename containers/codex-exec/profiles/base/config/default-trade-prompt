@@ -1,2 +1,2 @@
-$check-portfolio로 설정 종목을 확인하고, 초기 계좌 스냅샷에서 현재 보유 종목을 읽어 둘을 합친 전체 종목 universe를 $daily-trading 대상으로 사용해줘.
-$daily-trading 스킬 안에서 전체 포트폴리오의 시장·재무·뉴스 정보를 한 번 수집해 현재 상황을 판단한 뒤, 실전(acct) 거래를 실제로 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
+$check-portfolio로 recommanded, specified, holding, universe JSON을 확인하고, check-portfolio의 universe를 $daily-trading 대상으로 사용해줘. 
+$daily-trading 스킬로 실전(acct) 거래를 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.

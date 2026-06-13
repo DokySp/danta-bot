@@ -68,8 +68,7 @@ env_file:
   - ./config/codex-exec.env
 ```
 
-`codex-exec.env`에는 Codex 실행 값과 해당 인스턴스의 MCP 연결 값을 함께 둡니다.
-KIS app key, secret, 계좌번호는 공용 `containers/kis-trade-mcp/config/kis-trade-mcp.env`에 둡니다.
+`codex-exec.env`에는 Codex 실행 값, 해당 인스턴스의 MCP 연결 값, 그리고 `$check-portfolio` 같은 codex-exec 내부 direct API helper가 쓰는 KIS app key/secret/계좌번호를 함께 둡니다.
 실제 `codex-exec.env` 파일은 git에서 무시하고, `codex-exec.env.example`만 추적합니다.
 
 프로필 Compose는 `./config`를 `/app/config`로 writable bind mount합니다. 따라서 호스트의

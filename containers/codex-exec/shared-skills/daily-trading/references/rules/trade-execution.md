@@ -53,7 +53,7 @@ Forbidden to every sub-agent:
 
 ## Active Order Reconciliation
 
-Before submitting any new order, the Main agent must compare active, non-cancelled pending and reserved orders from `account-before-order.json` with the reconciled `target_holding_quantity`. Use the `active_orders` fields defined in `run-artifacts.md`; if any required active-order field is missing or ambiguous, block cancellation, correction, replacement, and conflicting new submission for that symbol.
+Before submitting any new order, the Main agent must compare active, non-cancelled pending and reserved orders from `account-before-order.json` with the validated `target_holding_quantity` from the single `judge-midterm` result. Use the `active_orders` fields defined in `run-artifacts.md`; if any required active-order field is missing or ambiguous, block cancellation, correction, replacement, and conflicting new submission for that symbol.
 
 For each symbol:
 
@@ -118,9 +118,9 @@ Same-day fills are account evidence only; they do not change the quantity formul
 
 ## Cash Decision
 
-- `verdict-second.json` supplies the reconciled target cash amount.
+- `verdict-second.json` supplies the validated target cash amount from the single `judge-midterm` result.
 - There is no fixed minimum cash ratio, maximum cash ratio, or fixed investment ratio.
-- Reconciled target quantities plus target cash must not exceed the initial account total assets. Any unexplained remainder is target cash, not an automatic buy budget.
+- Validated target quantities plus target cash must not exceed the initial account total assets. Any unexplained remainder is target cash, not an automatic buy budget.
 - Buy orders cannot exceed the latest order-available amount after active pending/reserved buys.
 - Expected proceeds from unfilled sells are not available buy cash.
 - If latest account cash is lower than the target or constraints require more cash, reduce or block buys; do not silently increase sells beyond target quantities.
@@ -129,7 +129,7 @@ Same-day fills are account evidence only; they do not change the quantity formul
 
 Every order must satisfy all applicable constraints:
 
-- symbol remains eligible and has a valid reconciled target
+- symbol remains eligible and has a valid target
 - latest account snapshot succeeded
 - direction and quantity match the target delta
 - buy quantity does not exceed `inquire_psbl_order`
