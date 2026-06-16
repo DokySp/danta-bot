@@ -11,6 +11,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -24,6 +25,7 @@ import yaml
 
 MARKDOWN_V2_SPECIALS = r"_*[]()~`>#+-=|{}.!"
 BOT_COMMAND_RE = re.compile(r"^[a-z0-9_]{1,32}$")
+KST = timezone(timedelta(hours=9), "KST")
 
 
 def env_int(name: str, default: int) -> int:
@@ -41,6 +43,15 @@ def env_bool_value(raw: str | None, default: bool) -> bool:
 
 def csv_value(raw: str | None) -> set[str]:
     return {item.strip() for item in (raw or "").split(",") if item.strip()}
+
+
+def env_path(name: str, default: str | None = None) -> Path | None:
+    raw = os.getenv(name)
+    if raw is None:
+        raw = default
+    if raw is None or raw.strip() == "":
+        return None
+    return Path(raw).expanduser()
 
 
 def escape_markdown_v2(text: str) -> str:
@@ -409,6 +420,21 @@ def trim_telegram_text(text: str) -> str:
     return text[:TELEGRAM_CONTEXT_TEXT_LIMIT].rstrip() + "... [truncated]"
 
 
+def telegram_datetime(value: Any) -> datetime | None:
+    if isinstance(value, bool):
+        return None
+    if not isinstance(value, (int, float)):
+        return None
+    try:
+        return datetime.fromtimestamp(value, tz=timezone.utc).astimezone(KST)
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
+def conversation_log_path(log_dir: Path, event_datetime: datetime) -> Path:
+    return log_dir / f"{event_datetime.astimezone(KST).date().isoformat()}.jsonl"
+
+
 def parse_env_file(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     for line in path.read_text().splitlines():
@@ -507,6 +533,7 @@ class Config:
     gateway_host: str
     gateway_port: int
     gateway_routes_file: Path
+    conversation_log_dir: Path | None
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -516,6 +543,10 @@ class Config:
             gateway_host=os.getenv("GATEWAY_HOST", "0.0.0.0"),
             gateway_port=env_int("GATEWAY_PORT", 8080),
             gateway_routes_file=Path(os.getenv("GATEWAY_ROUTES_FILE", "/app/config/routes.yaml")),
+            conversation_log_dir=env_path(
+                "GATEWAY_CONVERSATION_LOG_DIR",
+                "/workspace/memory/telegram-conversations",
+            ),
         )
 
 
@@ -859,6 +890,7 @@ class GatewayApp:
         self.offsets_lock = threading.Lock()
         self.bot_commands_generation = 0
         self.bot_command_routes: dict[str, RouteConfig] = {}
+        self.conversation_log_lock = threading.Lock()
 
     def serve_http(self) -> ThreadingHTTPServer:
         app = self
@@ -931,6 +963,14 @@ class GatewayApp:
                             caption=caption,
                             parse_mode=parse_mode,
                         )
+                        app.append_outbound_conversation_event(
+                            route,
+                            chat_id,
+                            method,
+                            caption,
+                            source_path=self.path,
+                            extra={"filename": filename},
+                        )
                         self._write_json(200, {"ok": True})
                         return
 
@@ -950,6 +990,7 @@ class GatewayApp:
                         parse_mode = str(parse_mode)
                     escape = bool(payload.get("escape", True))
                     TelegramClient(route).send_message(chat_id, text, parse_mode=parse_mode, escape=escape)
+                    app.append_outbound_conversation_event(route, chat_id, "sendMessage", text, source_path=self.path)
                 except Exception as exc:  # noqa: BLE001 - convert all endpoint errors to JSON
                     logging.exception("send endpoint failed")
                     self._write_json(500, {"ok": False, "error": str(exc)})
@@ -1099,10 +1140,15 @@ class GatewayApp:
         chat_id = str(chat.get("id", ""))
         text = message.get("text")
 
-        if not chat_id or not isinstance(text, str):
+        if not chat_id:
             return
         if chat_id not in route.allowed_chat_ids:
             logging.warning("ignored unauthorized chat_id=%s route=%s", chat_id, route.route_id)
+            return
+
+        if not isinstance(text, str):
+            self.append_inbound_conversation_event(route, update, message, None, None)
+            logging.info("stored non-text telegram message route=%s chat_id=%s", route.route_id, chat_id)
             return
 
         routed_text = apply_bot_command_alias(route, text)
@@ -1125,11 +1171,13 @@ class GatewayApp:
                 text,
                 routed_text,
             )
+        self.append_inbound_conversation_event(route, update, message, text, routed_text)
 
         client = TelegramClient(route)
         if route.echo_mode:
             logging.info("echoing telegram message route=%s chat_id=%s message_id=%s", route.route_id, chat_id, message_id)
             client.send_message(chat_id, text)
+            self.append_outbound_conversation_event(route, chat_id, "sendMessage", text, source_path="echo")
             return
 
         resolved = self.router.resolve(route.route_id, routed_text)
@@ -1160,8 +1208,81 @@ class GatewayApp:
             reply_text = response.get("reply_text") or response.get("text")
         if reply_text:
             client.send_message(chat_id, str(reply_text))
+            self.append_outbound_conversation_event(route, chat_id, "sendMessage", str(reply_text), source_path="codex_reply")
         elif route.ack_text:
             client.send_message(chat_id, route.ack_text)
+            self.append_outbound_conversation_event(route, chat_id, "sendMessage", route.ack_text, source_path="ack")
+
+    def append_inbound_conversation_event(
+        self,
+        route: RouteConfig,
+        update: dict[str, Any],
+        message: dict[str, Any],
+        text: str | None,
+        routed_text: str | None,
+    ) -> None:
+        event_datetime = telegram_datetime(message.get("date")) or datetime.now(KST)
+        event = {
+            "recorded_at": datetime.now(KST).isoformat(),
+            "occurred_at": event_datetime.isoformat(),
+            "direction": "inbound",
+            "type": "telegram_message",
+            "route": route.route_id,
+            "update_id": update.get("update_id"),
+            "message_id": message.get("message_id"),
+            "message_date": message.get("date"),
+            "chat": summarize_telegram_chat(message.get("chat")),
+            "from": summarize_telegram_user(message.get("from")),
+            "text": text,
+            "caption": message.get("caption") if isinstance(message.get("caption"), str) else None,
+            "routed_text": routed_text,
+            "content_types": [field for field in TELEGRAM_CONTEXT_CONTENT_FIELDS if field in message],
+            "reply_context": telegram_reply_context(message),
+            "raw_message": message,
+        }
+        self.append_conversation_event(event, event_datetime)
+
+    def append_outbound_conversation_event(
+        self,
+        route: RouteConfig,
+        chat_id: str,
+        method: str,
+        text: str | None,
+        *,
+        source_path: str,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        event_datetime = datetime.now(KST)
+        event = {
+            "recorded_at": event_datetime.isoformat(),
+            "occurred_at": event_datetime.isoformat(),
+            "direction": "outbound",
+            "type": "telegram_send",
+            "route": route.route_id,
+            "chat": {"id": chat_id},
+            "method": method,
+            "source_path": source_path,
+            "text": text,
+        }
+        if extra:
+            event.update(extra)
+        self.append_conversation_event(event, event_datetime)
+
+    def append_conversation_event(self, event: dict[str, Any], event_datetime: datetime) -> None:
+        log_dir = self.config.conversation_log_dir
+        if log_dir is None:
+            return
+
+        path = conversation_log_path(log_dir, event_datetime)
+
+        try:
+            line = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+            with self.conversation_log_lock:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("a", encoding="utf-8") as file:
+                    file.write(line + "\n")
+        except Exception:
+            logging.exception("failed to append Telegram conversation log path=%s route=%s", path, event.get("route"))
 
 
 def main() -> None:
