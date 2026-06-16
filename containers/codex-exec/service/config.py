@@ -57,6 +57,7 @@ class Config:
     state_dir: Path
     workspace_dir: Path
     schedule_file: Path
+    price_trigger_file: Path
     telegram_gateway_url: str
     telegram_route: str | None
     mcp_trading_env: str
@@ -83,6 +84,9 @@ class Config:
             state_dir=Path(os.getenv("STATE_DIR", "/state")),
             workspace_dir=Path(os.getenv("WORKSPACE_DIR", "/workspace")),
             schedule_file=Path(os.getenv("SCHEDULE_FILE", "/app/config/schedules.yaml")),
+            price_trigger_file=Path(
+                os.getenv("PRICE_TRIGGER_FILE", "/app/config/price-triggers.yaml")
+            ),
             telegram_gateway_url=os.getenv(
                 "TELEGRAM_GATEWAY_URL",
                 "http://telegram-gateway:8080/sendMessage",

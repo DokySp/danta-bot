@@ -7,6 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from .config import Config
+from .price_trigger import PriceTriggerWatcher
 from .runner import CodexRunner
 from .scheduler import Scheduler
 from .state import StateStore
@@ -22,13 +23,16 @@ class App:
         self.gateway = TelegramGateway(config)
         self.telegram_worker = TelegramWorker(config, self.state, self.runner, self.gateway)
         self.scheduler = Scheduler(config, self.runner, self.gateway)
+        self.price_trigger_watcher = PriceTriggerWatcher(config, self.gateway)
 
     def start(self) -> ThreadingHTTPServer:
         self.telegram_worker.start()
         self.scheduler.start()
+        self.price_trigger_watcher.start()
         return self._serve_http()
 
     def stop(self) -> None:
+        self.price_trigger_watcher.stop()
         self.scheduler.stop()
 
     def _serve_http(self) -> ThreadingHTTPServer:

@@ -1,0 +1,12 @@
+enabled: true
+poll_seconds: 60
+cache_file: /state/price-triggers/kospi.json
+
+triggers:
+  - id: kospi
+    enabled: true
+    name: KOSPI
+    symbol: KOSPI
+    source: kis_domestic_index
+    up_percent: 1.0
+    down_percent: -1.0

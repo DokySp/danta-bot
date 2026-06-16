@@ -73,7 +73,7 @@ env_file:
 
 프로필 Compose는 `./config`를 `/app/config`로 writable bind mount합니다. 따라서 호스트의
 `containers/codex-exec/profiles/<name>/config/schedules.yaml`, `portfolio.txt`,
-`default-trade-prompt`를 수정하면 컨테이너 안의 `/app/config`에도 즉시 보이고, 다음 Codex 실행이나
+`price-triggers.yaml`, `default-trade-prompt`를 수정하면 컨테이너 안의 `/app/config`에도 즉시 보이고, 다음 Codex 실행이나
 스케줄러 tick부터 새 내용이 사용됩니다. `codex-exec.env`처럼 프로세스 환경변수로 주입되는 값은
 컨테이너 시작 시점에만 읽히므로 변경 후 Compose 재생성이 필요합니다. 컨테이너 안의 Codex 스킬이
 config를 수정하려면 호스트 config 파일과 디렉터리가 컨테이너 실행 UID 1000에 쓰기 가능해야 합니다.
@@ -139,3 +139,29 @@ schedules:
 스케줄러는 매 tick마다 `SCHEDULE_FILE`을 다시 읽습니다. `$trading-schedule-toggle` 스킬은
 `/app/config/schedules.yaml`의 `daily-{number}` 항목만 on/off로 수정하며, 수정 결과는 컨테이너
 재시작 없이 다음 scheduler tick부터 반영됩니다.
+
+## Price Triggers
+
+`PRICE_TRIGGER_FILE`은 기본적으로 `/app/config/price-triggers.yaml`입니다. base 프로필은 KIS
+국내업종 현재지수 API(`/uapi/domestic-stock/v1/quotations/inquire-index-price`,
+`tr_id=FHPUP02100000`)의 KOSPI(`FID_COND_MRKT_DIV_CODE=U`, `FID_INPUT_ISCD=0001`)만 감시하며,
+기준값 대비 `+1.0%` 또는 `-1.0%`에 닿으면 Telegram 알림만 보냅니다. 이 알림은 Codex 실행을
+호출하지 않습니다.
+
+```yaml
+enabled: true
+poll_seconds: 60
+cache_file: /state/price-triggers/kospi.json
+
+triggers:
+  - id: kospi
+    enabled: true
+    name: KOSPI
+    symbol: KOSPI
+    source: kis_domestic_index
+    up_percent: 1.0
+    down_percent: -1.0
+```
+
+처음 관측한 값은 알림 없이 캐시 기준값으로 저장됩니다. 이후 관측값이 기준값 대비 임계치에 닿으면
+`가격 조건 터치` Telegram 메시지를 보내고, 그 터치값을 새 기준값으로 캐시합니다.
