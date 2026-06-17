@@ -3,10 +3,56 @@ poll_seconds: 60
 cache_file: /state/price-triggers/kospi.json
 
 triggers:
-  - id: kospi
+  - id: kospi-case-1
     enabled: true
+    case_title: "case 1 - 기본 민감도"
     name: KOSPI
     symbol: KOSPI
     source: kis_domestic_index
     up_percent: 1.0
     down_percent: -1.0
+
+  - id: kospi-case-2
+    enabled: true
+    case_title: "case 2 - 하락 민감형"
+    name: KOSPI
+    symbol: KOSPI
+    source: kis_domestic_index
+    up_percent: 1.5
+    down_percent: -0.8
+
+  - id: kospi-case-3
+    enabled: true
+    case_title: "case 3 - 상승 추세 확인형"
+    name: KOSPI
+    symbol: KOSPI
+    source: kis_domestic_index
+    up_percent: 1.2
+    down_percent: -1.8
+
+  - id: kospi-case-4
+    enabled: true
+    case_title: "case 4 - 저소음형"
+    name: KOSPI
+    symbol: KOSPI
+    source: kis_domestic_index
+    up_percent: 2.0
+    down_percent: -2.0
+
+  - id: kospi-case-5
+    enabled: true
+    case_title: "case 5 - 급락 감지형"
+    name: KOSPI
+    symbol: KOSPI
+    source: kis_domestic_index
+    up_percent: 2.0
+    down_percent: -1.2
+
+  - id: kospi-case-6
+    enabled: true
+    case_title: "case 6 - 강한 리스크 경보"
+    name: KOSPI
+    symbol: KOSPI
+    source: kis_domestic_index
+    up_percent: 3.0
+    down_percent: -2.0

@@ -145,8 +145,9 @@ schedules:
 `PRICE_TRIGGER_FILE`은 기본적으로 `/app/config/price-triggers.yaml`입니다. base 프로필은 KIS
 국내업종 현재지수 API(`/uapi/domestic-stock/v1/quotations/inquire-index-price`,
 `tr_id=FHPUP02100000`)의 KOSPI(`FID_COND_MRKT_DIV_CODE=U`, `FID_INPUT_ISCD=0001`)만 감시하며,
-기준값 대비 `+1.0%` 또는 `-1.0%`에 닿으면 Telegram 알림만 보냅니다. 이 알림은 Codex 실행을
-호출하지 않습니다.
+각 case의 기준값 대비 설정된 임계치에 닿으면 Telegram 알림만 보냅니다. 이 알림은 Codex 실행을
+호출하지 않습니다. 각 case는 서로 다른 `id`를 사용하므로 같은 cache file 안에서도 기준값이
+case별로 따로 저장됩니다.
 
 ```yaml
 enabled: true
@@ -154,8 +155,9 @@ poll_seconds: 60
 cache_file: /state/price-triggers/kospi.json
 
 triggers:
-  - id: kospi
+  - id: kospi-case-1
     enabled: true
+    case_title: "case 1 - 기본 민감도"
     name: KOSPI
     symbol: KOSPI
     source: kis_domestic_index
@@ -163,5 +165,11 @@ triggers:
     down_percent: -1.0
 ```
 
+기본 case는 `case 1 - 기본 민감도`(`+1.0%`, `-1.0%`), `case 2 - 하락 민감형`(`+1.5%`,
+`-0.8%`), `case 3 - 상승 추세 확인형`(`+1.2%`, `-1.8%`), `case 4 - 저소음형`(`+2.0%`,
+`-2.0%`), `case 5 - 급락 감지형`(`+2.0%`, `-1.2%`), `case 6 - 강한 리스크 경보`(`+3.0%`,
+`-2.0%`)입니다.
+
 처음 관측한 값은 알림 없이 캐시 기준값으로 저장됩니다. 이후 관측값이 기준값 대비 임계치에 닿으면
-`가격 조건 터치` Telegram 메시지를 보내고, 그 터치값을 새 기준값으로 캐시합니다.
+`case N - 제목`이 최상단에 포함된 `가격 조건 터치` Telegram 메시지를 보내고, 그 터치값을 해당
+case의 새 기준값으로 캐시합니다.

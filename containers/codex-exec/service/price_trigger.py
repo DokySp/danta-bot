@@ -34,6 +34,7 @@ KIS_INDEX_CODES = {
 @dataclass(frozen=True)
 class PriceTrigger:
     trigger_id: str
+    case_title: str
     name: str
     symbol: str
     source: str
@@ -99,6 +100,7 @@ def parse_price_trigger_config(path: Path, state_dir: Path) -> TriggerConfig:
         triggers.append(
             PriceTrigger(
                 trigger_id=trigger_id,
+                case_title=str(item.get("case_title") or trigger_id),
                 name=str(item.get("name") or symbol),
                 symbol=symbol,
                 source=str(item.get("source") or "naver_domestic_index"),
@@ -154,10 +156,15 @@ class PriceTriggerWatcher:
             states = {}
             cache["triggers"] = states
 
+        quotes: dict[tuple[str, str], Quote] = {}
         for trigger in trigger_config.triggers:
             if not trigger.enabled:
                 continue
-            quote = fetch_quote(trigger, self.config)
+            quote_key = (trigger.source, trigger.symbol.upper())
+            quote = quotes.get(quote_key)
+            if quote is None:
+                quote = fetch_quote(trigger, self.config)
+                quotes[quote_key] = quote
             state = states.setdefault(trigger.trigger_id, {})
             if not isinstance(state, dict):
                 state = {}
@@ -215,6 +222,7 @@ class PriceTriggerWatcher:
         route = trigger.route
         chat_id = trigger.chat_id
         text = (
+            f"<b>{html.escape(trigger.case_title)}</b>\n"
             "<b>가격 조건 터치</b>\n"
             f"대상: <code>{html.escape(trigger.name)}</code>\n"
             f"방향: {html.escape(direction_label)}\n"
