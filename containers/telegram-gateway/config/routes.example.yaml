@@ -21,10 +21,10 @@ routes:
         instruction: /remove_portfolio_ticker
       - command: schedule_on
         description: 일일 거래 스케줄 활성화
-        instruction: 일일 거래 스케줄 활성화해줘.
+        instruction: /schedule_on
       - command: schedule_off
         description: 일일 거래 스케줄 비활성화
-        instruction: 일일 거래 스케줄 비활성화해줘.
+        instruction: /schedule_off
 
   # experimental worker through bot v2
   v2:
@@ -48,7 +48,7 @@ routes:
         instruction: /remove_portfolio_ticker
       - command: schedule_on
         description: 일일 거래 스케줄 활성화
-        instruction: 일일 거래 스케줄 활성화해줘.
+        instruction: /schedule_on
       - command: schedule_off
         description: 일일 거래 스케줄 비활성화
-        instruction: 일일 거래 스케줄 비활성화해줘.
+        instruction: /schedule_off

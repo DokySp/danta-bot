@@ -5,6 +5,7 @@ from typing import Any
 from .new_usage import handle_new, handle_usage
 from .kospi_touch_status import handle_kospi_touch_status
 from .portfolio import handle_add_portfolio_ticker, handle_remove_portfolio_ticker
+from .schedule import handle_schedule_off, handle_schedule_on
 
 TelegramCommandHandler = Callable[[Any, Any, str], None]
 
@@ -16,6 +17,8 @@ def handle_telegram_command(worker: Any, task: Any, command: str, args: str) -> 
         "kospi_touch_status": handle_kospi_touch_status,
         "add_portfolio_ticker": handle_add_portfolio_ticker,
         "remove_portfolio_ticker": handle_remove_portfolio_ticker,
+        "schedule_on": handle_schedule_on,
+        "schedule_off": handle_schedule_off,
     }
     handler = handlers.get(command)
     if handler is None:
