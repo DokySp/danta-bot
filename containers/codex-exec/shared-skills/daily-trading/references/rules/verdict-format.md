@@ -50,9 +50,9 @@ Main-generated `second-verdict` sidecar content:
 
 The sidecar is never machine input. JSON captured by the launcher is authoritative. Missing, malformed, or inconsistent sidecars are warnings only.
 
-`decision-brief.json` is the verdict input. It should contain compact price/chart, optional financial/news/market-status summaries, account exposure, eligibility, evidence mode, and errors. Absence of optional financial/news/market-status data is context only; it must not lower score, lower confidence, exclude a symbol, remove a target, or block orders by itself.
+`decision-brief.json` is the canonical verdict input. It should contain compact price/chart, optional financial/news/market-status summaries, account exposure, eligibility, evidence mode, and errors. Absence of optional financial/news/market-status data is context only; it must not lower score, lower confidence, exclude a symbol, remove a target, or block orders by itself.
 
-When the launcher supplies compact verdict specs, it may replace canonical artifact paths with `verdict-inputs/` slices containing only the listed `symbol_ids`. Verdict sub-agents may use read-only local shell commands such as `cat` and `jq` only for explicitly listed artifact/persona/rule files. Do not load unrelated symbols, raw memory caches, optional source files, secrets, or unlisted paths.
+Verdict sub-agents receive launcher-created lossless `verdict-inputs/` slices containing only the listed `symbol_ids`. `first-verdict` reads a `verdict-core` slice derived from `decision-brief.json`; `second-verdict` reads `verdict-core` plus a selected-symbol slice derived from `verdict-first.json`. Raw prompt fallback is forbidden for verdict stages. Verdict sub-agents may use read-only local shell commands such as `cat` and `jq` only for explicitly listed artifact/persona/rule files. Do not load unrelated symbols, raw memory caches, optional source files, secrets, or unlisted paths.
 
 ## `first-verdict`
 
@@ -115,7 +115,7 @@ If no valid score exists, exclude that symbol from `second-verdict` and trading.
 
 ## `second-verdict`
 
-Input set = eligible symbols with `final_first_score >= 7` plus every eligible `holding` symbol from `$check-portfolio`. Only `judge-midterm` compares that set at portfolio level. If its required output is missing or unusable, retry `judge-midterm` at most two times.
+Input set = eligible symbols with `final_first_score >= 7` plus every eligible `holding` symbol from `$check-portfolio`. Only `judge-midterm` compares that set at portfolio level. If its required output is missing or unusable, retry only the failed `judge-midterm` task at most two times.
 
 Return JSON:
 
@@ -148,7 +148,7 @@ Rules:
 
 - `target_holding_quantity` is a non-negative integer.
 - Every second-verdict symbol receives a target quantity, including reduce-to-zero holdings.
-- Consider relative attractiveness, duplicate exposure, current weight, price/chart conditions, and the supplied `verdict-first.json` scores.
+- Consider relative attractiveness, duplicate exposure, current weight, price/chart conditions, and the supplied selected-symbol first-verdict results.
 - Treat `final_first_score` as the confidence-adjusted first-verdict score: `5` is neutral, below `5` is a sell/reduce opinion, and above `5` is a buy/increase opinion.
 - If a symbol's first-verdict score is missing, unavailable, or unusable, treat its score as neutral `5` instead of failing the judgment.
 - First-verdict scores are judgment inputs, not hard buy/sell gates.

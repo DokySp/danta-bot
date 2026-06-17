@@ -24,13 +24,14 @@ Token budget rule: load only the reference needed for the current stage. Do not 
 | Main execution owner | `Main agent` |
 | Independent symbol score stage | `first-verdict` |
 | Portfolio target stage | `second-verdict` |
-| Compact verdict input | `decision-brief.json` |
+| Canonical verdict input | `decision-brief.json` |
+| Sub-agent verdict input | launcher-created lossless selected-symbol slices |
 
 ## Launcher Contract
 
-Use `scripts/run_subagent.py` for every collection and verdict sub-agent. The launcher enforces collection sub-agents with `gpt-5.4-mini` and `model_reasoning_effort=low`, `first-verdict` sub-agents with `gpt-5.4-mini` and `model_reasoning_effort=medium`, and `second-verdict` sub-agents with `gpt-5.5` and `model_reasoning_effort=low`. It writes `subagents/<task_name>.wrapper.json`, raw output when retained, and verdict input slices when compact verdict specs are used. It treats financial/news/market-status text stages as optional group failures. Do not use `multi_agent_v1.spawn_agent` for daily-trading stage delegation.
+Use `scripts/run_subagent.py` for every collection and verdict sub-agent. The launcher enforces collection sub-agents with `gpt-5.4-mini` and `model_reasoning_effort=low`, `first-verdict` sub-agents with `gpt-5.4-mini` and `model_reasoning_effort=medium`, and `second-verdict` sub-agents with `gpt-5.5` and `model_reasoning_effort=low`. It writes `subagents/<task_name>.wrapper.json`, raw output when retained, token usage metadata, and verdict input slices when compact verdict specs are used. It treats financial/news/market-status text stages as optional group failures. Do not use `multi_agent_v1.spawn_agent` for daily-trading stage delegation.
 
-For verdict stages, prefer compact specs with `artifact_paths` and `symbol_ids` instead of long handwritten prompts. The launcher builds the standard prompt from those fields and writes per-task `verdict-inputs/` slices containing only the listed symbols.
+For verdict stages, use compact specs with `artifact_paths` and `symbol_ids`; do not include `prompt`. The launcher builds the standard prompt from those fields and writes per-task lossless `verdict-inputs/` slices containing only the listed symbols. It derives `verdict-core` from `decision-brief.json` and derives a selected-symbol first-verdict slice from `verdict-first.json` for `second-verdict`.
 
 Supported sub-agent stages:
 
@@ -38,7 +39,7 @@ Supported sub-agent stages:
 - `news-collection`: `$collect-news-information`; text output is a cache path or fixed missing-cache message. Skip this sub-agent when a valid same-date cache for the full symbol universe is already available.
 - `market-status-collection`: `$get-market-status`; text output is concise Markdown for S&P 500, Nasdaq, Dow, KOSPI, and KOSDAQ.
 - `first-verdict`: selected four personas: `analyst-blackrock`, `analyst-fidelity`, `analyst-jpmorgan`, `analyst-morganstanley`. `analyst-fidelity` also carries the former quality/value/momentum/low-volatility factor checks from `analyst-statestreet`.
-- `second-verdict`: `judge-midterm` only. Retry the `judge-midterm` task at most two times when the required output is missing or unusable.
+- `second-verdict`: `judge-midterm` only. Retry the failed `judge-midterm` task at most two times when the required output is missing or unusable.
 
 ## Run Identity
 
@@ -63,7 +64,7 @@ Collection sub-agents:
 
 Verdict sub-agents:
 
-- Use only supplied snapshots, `decision-brief.json`, `verdict-first.json` when applicable, and their persona.
+- Use only supplied snapshots, launcher-created verdict slices, and their persona.
 - May use read-only local shell commands such as `cat` and `jq` only for explicitly listed artifact/persona/rule files.
 - Do not call KIS, MCP, web, network, account/order APIs, or external data sources.
 - Return compact JSON only. They must not write files, create Markdown sidecars, emit diffs, or include code fences.
@@ -74,10 +75,10 @@ Verdict sub-agents:
 1. Initialize run identity and auth handling.
 2. Build the complete portfolio universe from `$check-portfolio` JSON `universe`, which already includes `recommanded`, `specified`, and direct KIS `holding` symbols.
 3. Main agent collects required price/chart evidence once and writes `price-chart.json`.
-4. Reuse valid same-date financial/news caches when they cover the full symbol universe; otherwise run missing optional `financial`, `news`, and `market-status` collection in parallel through the launcher.
+4. Reuse valid same-date financial/news caches when they cover the full symbol universe; otherwise run missing optional `financial`, `news`, and `market-status` collection in parallel through the launcher and record the cache miss or universe mismatch reason.
 5. Merge required price/chart and account evidence plus short optional summaries into compact `decision-brief.json`.
-6. Run the selected four `first-verdict` personas in parallel with the same immutable brief, then have the Main agent create human-review sidecars from parsed JSON.
-7. Build `second-verdict` set from eligible symbols with `final_first_score >= 7` plus eligible `holding` symbols from `$check-portfolio`, then run only `judge-midterm` with at most two retries. Use the single valid judge target as the canonical target after deterministic validation.
+6. Run the selected four `first-verdict` personas in parallel with launcher-created `verdict-core` inputs. Main agent may reduce `symbol_ids` and merge prior valid verdict rows only when it can prove price, holdings, news, and active-order status are stable; otherwise rerun the symbol. Always re-evaluate sell/stop-loss candidates, same-day fills, price shocks, new news, active orders, and score-boundary cases. Launcher automatic wrapper reuse is limited to the same spec fingerprint. The Main agent creates human-review sidecars from parsed JSON.
+7. Build `second-verdict` set from eligible symbols with `final_first_score >= 7` plus eligible `holding` symbols from `$check-portfolio`, then run only `judge-midterm` with a selected-symbol first-verdict slice and at most two retries for the failed task only. Use the single valid judge target as the canonical target after deterministic validation.
 8. Refresh account state before orders, validate the single target set, reconcile active pending/reserved orders, apply `trade-execution.md` gates, and submit only explicitly authorized adjustments or orders.
 9. Write `execution.json`, final report, and final `run.json` status.
 
@@ -85,10 +86,10 @@ Verdict sub-agents:
 
 - Sub-agent prompts should name the stage, role, run paths, required output, one relevant persona/rule reference, and the compact artifact paths.
 - Verdict sub-agents may use read-only local shell commands such as `cat` and `jq` only for explicitly listed artifact/persona/rule files. KIS, MCP, web, network, account/order APIs, file writes, raw caches, secrets, and unlisted paths remain forbidden.
-- Verdict compact specs must pass `artifact_paths.decision_brief` and `symbol_ids`; they may pass `artifact_paths.verdict_first`, `artifact_paths.persona`, and `artifact_paths.verdict_format`.
-- Verdict compact specs must omit `prompt`; if `prompt` is non-empty, the launcher treats the spec as a backward-compatible raw prompt spec even when artifact metadata is present.
+- Verdict compact specs must pass `artifact_paths.decision_brief` and `symbol_ids`; `second-verdict` must also pass `artifact_paths.verdict_first`. They may pass `artifact_paths.persona` and `artifact_paths.verdict_format`.
+- Verdict compact specs must omit `prompt`; raw prompt fallback is forbidden for verdict stages.
 - Pass artifact paths and short excerpts, not full JSON, unless the sub-agent must score that exact compact JSON.
-- `decision-brief.json` is the only verdict input; keep it compact as defined in `data-collection.md`.
+- Keep canonical `decision-brief.json` for the run record, but pass launcher-created verdict slices to sub-agents.
 - Do not repeat auth, order, sanitization, optional-stage, or schema rules in every prompt. Cite the relevant rule file instead.
 - Verdict output must be compact JSON with short `reason_code` and `one_line_reason` fields instead of long rationale, risk, or evidence arrays.
 - Missing financial/news/market-status data stays optional and must not become a verdict or order blocker by prompt wording.
@@ -99,4 +100,5 @@ Verdict sub-agents:
 - If `market_status` from `$check-holiday` or scheduler context is supplied, order execution requires `open`; `closed` or `unknown` blocks order submission.
 - Financial/news/market-status failures are visible but non-blocking when price/chart and account gates pass.
 - A failed required wrapper remains evidence; write the failed canonical envelope and stop only the dependent stages.
+- When retrying, submit only failed sub-agent specs. Successful wrappers with the same `spec_fingerprint` are reusable evidence.
 - Sensitive values must be removed before artifacts, prompts, reports, or user responses.

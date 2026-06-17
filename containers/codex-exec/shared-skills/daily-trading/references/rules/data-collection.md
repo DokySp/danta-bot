@@ -5,7 +5,7 @@
 - Collect the complete portfolio universe once per `run_id`.
 - Universe = `$check-portfolio` JSON `universe`, which already combines `recommanded`, `specified`, and direct KIS `holding` symbols.
 - Main agent directly collects required price/chart evidence through `kis-trade-mcp` and writes `price-chart.json`.
-- `financial` and `news` reuse valid same-date memory caches when those caches cover the complete symbol universe. Only missing or incomplete optional domains run through `scripts/run_subagent.py`; `market-status` remains an optional best-effort launcher stage.
+- `financial` and `news` reuse valid same-date memory caches when those caches cover the complete symbol universe. Only missing or incomplete optional domains run through `scripts/run_subagent.py`; record cache miss or universe mismatch reasons. `market-status` remains an optional best-effort launcher stage.
 - Verdict agents reuse saved artifacts. They never recollect and never call external tools.
 - Preserve partial successes and errors. Do not drop a symbol silently.
 
@@ -86,7 +86,7 @@ Ineligible symbols remain in artifacts and report, but are excluded from verdict
 
 ## `decision-brief.json`
 
-`decision-brief.json` is the compact canonical input for `first-verdict` and `second-verdict`.
+`decision-brief.json` is the compact canonical verdict input for the run record. Verdict sub-agents receive launcher-created lossless `verdict-core` slices derived from it; `second-verdict` also receives a selected-symbol first-verdict slice instead of full `verdict-first.json`.
 
 Include only:
 

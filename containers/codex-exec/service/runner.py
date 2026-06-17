@@ -5,6 +5,7 @@ import os
 import shlex
 import subprocess
 from pathlib import Path
+from typing import Any
 
 from .config import Config
 from .daily_trading import (
@@ -26,6 +27,130 @@ HTML_PROMPT_SUFFIX = (
     "<b>, <i>, <u>, <s>, <code>, <pre>, <a> 태그 위주로 사용하고 "
     "전체 메시지는 가능한 4096자 안쪽으로 요약해줘."
 )
+
+TOKEN_USAGE_FIELDS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+    "total_tokens",
+)
+
+
+def zero_token_usage() -> dict[str, int]:
+    return {field: 0 for field in TOKEN_USAGE_FIELDS}
+
+
+def token_usage_from(raw: Any) -> dict[str, int]:
+    usage = zero_token_usage()
+    if not isinstance(raw, dict):
+        return usage
+    for field in TOKEN_USAGE_FIELDS:
+        value = raw.get(field)
+        if isinstance(value, bool):
+            continue
+        try:
+            usage[field] = int(value)
+        except (TypeError, ValueError):
+            usage[field] = 0
+    return usage
+
+
+def add_token_usage(total: dict[str, int], usage: dict[str, int]) -> None:
+    for field in TOKEN_USAGE_FIELDS:
+        total[field] = int(total.get(field, 0)) + int(usage.get(field, 0))
+
+
+def token_count_payload(item: Any) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
+        return None
+    if item.get("type") == "token_count":
+        return item
+    if item.get("type") != "event_msg":
+        return None
+    payload = item.get("payload")
+    if isinstance(payload, dict) and payload.get("type") == "token_count":
+        return payload
+    return None
+
+
+def parse_codex_json_events(stdout: str) -> dict[str, Any]:
+    usage = zero_token_usage()
+    event_count = 0
+    last_rate_limits: Any | None = None
+    last_message = ""
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        payload = token_count_payload(item)
+        if payload is not None:
+            info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+            add_token_usage(usage, token_usage_from(info.get("last_token_usage")))
+            event_count += 1
+            last_rate_limits = item.get("rate_limits") or payload.get("rate_limits") or last_rate_limits
+            continue
+        if isinstance(item, dict) and item.get("type") == "event_msg":
+            event_payload = item.get("payload")
+            if isinstance(event_payload, dict) and event_payload.get("type") == "task_complete":
+                message = event_payload.get("last_agent_message")
+                if isinstance(message, str):
+                    last_message = message
+    return {
+        "token_usage": usage,
+        "token_usage_event_count": event_count,
+        "rate_limits": last_rate_limits,
+        "last_agent_message": last_message,
+    }
+
+
+def parse_percent(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = value.strip().removesuffix("%").strip()
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def usage_window(snapshot: Any, key: str) -> dict[str, Any] | None:
+    if not isinstance(snapshot, dict):
+        return None
+    limits = snapshot.get("rateLimits")
+    if not isinstance(limits, dict):
+        return None
+    window = limits.get(key)
+    return window if isinstance(window, dict) else None
+
+
+def used_percent(snapshot: Any, key: str) -> float | None:
+    window = usage_window(snapshot, key)
+    if not window:
+        return None
+    return parse_percent(window.get("usedPercent"))
+
+
+def format_percent_delta(before: Any, after: Any, key: str) -> str:
+    before_used = used_percent(before, key)
+    after_used = used_percent(after, key)
+    if before_used is None or after_used is None or after_used < before_used:
+        return "n/a"
+    delta = max(0.0, after_used - before_used)
+    if delta.is_integer():
+        return f"{int(delta)}%"
+    return f"{delta:.1f}".rstrip("0").rstrip(".") + "%"
+
+
+def format_token_count(total_tokens: int, has_usage: bool) -> str:
+    if not has_usage:
+        return "n/a"
+    return f"{total_tokens:,}"
 
 
 class CodexRunner:
@@ -104,10 +229,13 @@ class CodexRunner:
         output_file = self.tmp_dir / f"{context.run_id}.txt"
         daily_trading_hint = daily_trading_hint or is_explicit_daily_trading_request(prompt)
         full_prompt = self._build_prompt(prompt, context, daily_trading_hint)
+        usage_before = self._read_usage_snapshot()
 
         cmd = [
             self.config.codex_bin,
-            *subcommand,
+            "exec",
+            "--json",
+            *subcommand[1:],
             "-m",
             self.config.model,
             "-c",
@@ -149,15 +277,109 @@ class CodexRunner:
                 attach_daily_trading_context(exc, context)
             raise exc
 
+        event_summary = parse_codex_json_events(result.stdout or "")
         if output_file.exists():
             output = output_file.read_text()
         else:
-            output = result.stdout.strip()
+            output = str(event_summary.get("last_agent_message") or "").strip() or result.stdout.strip()
         output = output.strip() or "<i>Codex completed without output.</i>"
         if daily_trading_hint or self._daily_trading_artifact_exists(context):
             self._append_holding_history_if_available(context)
             output = append_daily_trading_started_at(output, context)
+        usage_after = self._read_usage_snapshot()
+        output = self._append_token_usage_summary(
+            output,
+            context,
+            event_summary,
+            usage_before,
+            usage_after,
+        )
         return output
+
+    def _read_usage_snapshot(self) -> dict[str, Any] | None:
+        if not self.config.usage_script.exists():
+            logging.warning("codex usage script not found path=%s", self.config.usage_script)
+            return None
+
+        cmd = [
+            str(self.config.usage_script),
+            "--json",
+            "--timeout",
+            str(self.config.usage_timeout_seconds),
+        ]
+        env = os.environ.copy()
+        env["CODEX_HOME"] = str(self.config.codex_home)
+        env["CODEX_BIN"] = self.config.codex_bin
+
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=self.config.workspace_dir,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=self.config.usage_timeout_seconds + 5,
+                check=False,
+            )
+        except Exception:
+            logging.exception("failed to query codex usage snapshot")
+            return None
+        if result.returncode != 0:
+            logging.warning("codex usage snapshot failed stderr=%s", (result.stderr or "").strip()[-1000:])
+            return None
+        try:
+            return json.loads(result.stdout)
+        except json.JSONDecodeError:
+            logging.warning("codex usage snapshot returned invalid JSON")
+            return None
+
+    def _append_token_usage_summary(
+        self,
+        output: str,
+        context,
+        event_summary: dict[str, Any],
+        usage_before: dict[str, Any] | None,
+        usage_after: dict[str, Any] | None,
+    ) -> str:
+        if "총 사용 토큰:" in output:
+            return output
+
+        main_usage = token_usage_from(event_summary.get("token_usage"))
+        subagent_usage, subagent_has_usage = self._subagent_token_usage(context)
+        total_usage = zero_token_usage()
+        add_token_usage(total_usage, main_usage)
+        add_token_usage(total_usage, subagent_usage)
+        has_usage = bool(event_summary.get("token_usage_event_count")) or subagent_has_usage
+
+        summary = "\n".join(
+            [
+                f"<b>총 사용 토큰: {format_token_count(total_usage['total_tokens'], has_usage)}</b>",
+                f"<b>5h: {format_percent_delta(usage_before, usage_after, 'primary')}</b>",
+                f"<b>weekly: {format_percent_delta(usage_before, usage_after, 'secondary')}</b>",
+            ]
+        )
+        return f"{output.rstrip()}\n\n{summary}"
+
+    def _subagent_token_usage(self, context) -> tuple[dict[str, int], bool]:
+        total = zero_token_usage()
+        has_usage = False
+        subagent_dir = self.config.workspace_dir / "reports" / "runs" / context.run_id / "subagents"
+        if not subagent_dir.is_dir():
+            return total, False
+        for path in sorted(subagent_dir.glob("*.wrapper.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+            except (OSError, json.JSONDecodeError):
+                logging.warning("failed to read subagent token wrapper path=%s", path)
+                continue
+            if not isinstance(payload, dict):
+                continue
+            usage = token_usage_from(payload.get("token_usage"))
+            if int(usage.get("total_tokens", 0)) > 0 or payload.get("token_usage_event_count"):
+                has_usage = True
+            add_token_usage(total, usage)
+        return total, has_usage
 
     def _daily_trading_artifact_exists(self, context) -> bool:
         return (self.config.workspace_dir / "reports" / "runs" / context.run_id / "run.json").is_file()

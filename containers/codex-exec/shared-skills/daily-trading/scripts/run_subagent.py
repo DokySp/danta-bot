@@ -11,6 +11,7 @@ import shlex
 import subprocess
 import tempfile
 import time
+import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,6 +43,13 @@ OPTIONAL_GROUP_FAILURE_STAGES = TEXT_OUTPUT_STAGES
 VERDICT_STAGES = {"first-verdict", "second-verdict"}
 MAX_BLANK_LINES = 1
 RAW_RETENTION_VALUES = {"always", "failed", "never"}
+TOKEN_USAGE_FIELDS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+    "total_tokens",
+)
 DISALLOWED_COMPACT_VERDICT_KEYS = {
     "cash_rationale",
     "duplicate_exposure_limits",
@@ -75,6 +83,77 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
         json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
         handle.write("\n")
     tmp.replace(path)
+
+
+def zero_token_usage() -> dict[str, int]:
+    return {field: 0 for field in TOKEN_USAGE_FIELDS}
+
+
+def token_usage_from(raw: Any) -> dict[str, int]:
+    usage = zero_token_usage()
+    if not isinstance(raw, dict):
+        return usage
+    for field in TOKEN_USAGE_FIELDS:
+        value = raw.get(field)
+        if isinstance(value, bool):
+            continue
+        try:
+            usage[field] = int(value)
+        except (TypeError, ValueError):
+            usage[field] = 0
+    return usage
+
+
+def add_token_usage(total: dict[str, int], usage: dict[str, int]) -> None:
+    for field in TOKEN_USAGE_FIELDS:
+        total[field] = int(total.get(field, 0)) + int(usage.get(field, 0))
+
+
+def token_count_payload(item: Any) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
+        return None
+    if item.get("type") == "token_count":
+        return item
+    if item.get("type") != "event_msg":
+        return None
+    payload = item.get("payload")
+    if isinstance(payload, dict) and payload.get("type") == "token_count":
+        return payload
+    return None
+
+
+def parse_codex_json_events(stdout: str) -> dict[str, Any]:
+    usage = zero_token_usage()
+    event_count = 0
+    last_rate_limits: Any | None = None
+    last_message = ""
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        payload = token_count_payload(item)
+        if payload is not None:
+            info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+            add_token_usage(usage, token_usage_from(info.get("last_token_usage")))
+            event_count += 1
+            last_rate_limits = item.get("rate_limits") or payload.get("rate_limits") or last_rate_limits
+            continue
+        if isinstance(item, dict) and item.get("type") == "event_msg":
+            event_payload = item.get("payload")
+            if isinstance(event_payload, dict) and event_payload.get("type") == "task_complete":
+                message = event_payload.get("last_agent_message")
+                if isinstance(message, str):
+                    last_message = message
+    return {
+        "token_usage": usage,
+        "token_usage_event_count": event_count,
+        "rate_limits": last_rate_limits,
+        "last_agent_message": last_message,
+    }
 
 
 def read_json_if_exists(path: Path) -> Any | None:
@@ -154,6 +233,20 @@ def resolve_artifact_path(path_text: str, workspace_dir: str) -> Path:
     return Path(workspace_dir) / path
 
 
+def filter_symbol_scoped_errors(errors: Any, wanted: set[str]) -> Any:
+    if not isinstance(errors, list):
+        return errors
+    filtered: list[Any] = []
+    for item in errors:
+        if not isinstance(item, dict):
+            filtered.append(item)
+            continue
+        symbol_id = item.get("symbol_id")
+        if symbol_id is None or str(symbol_id) in wanted:
+            filtered.append(item)
+    return filtered
+
+
 def filter_symbols(payload: Any, symbol_ids: list[str]) -> Any:
     if not isinstance(payload, dict):
         return payload
@@ -168,7 +261,29 @@ def filter_symbols(payload: Any, symbol_ids: list[str]) -> Any:
         ]
     elif isinstance(symbols, dict):
         filtered["symbols"] = {key: value for key, value in symbols.items() if str(key) in wanted}
+    if "errors" in filtered:
+        filtered["errors"] = filter_symbol_scoped_errors(filtered.get("errors"), wanted)
     return filtered
+
+
+def build_verdict_core_payload(payload: Any, symbol_ids: list[str]) -> Any:
+    filtered = filter_symbols(payload, symbol_ids)
+    if not isinstance(filtered, dict):
+        return filtered
+    core = dict(filtered)
+    core["slice_type"] = "verdict-core"
+    core["source_brief_type"] = filtered.get("brief_type") or "decision-brief"
+    return core
+
+
+def build_verdict_first_slice_payload(payload: Any, symbol_ids: list[str]) -> Any:
+    filtered = filter_symbols(payload, symbol_ids)
+    if not isinstance(filtered, dict):
+        return filtered
+    sliced = dict(filtered)
+    sliced["slice_type"] = "verdict-first-slice"
+    sliced["source_stage"] = filtered.get("stage") or "verdict-first"
+    return sliced
 
 
 def write_verdict_input_slices(spec: dict[str, Any]) -> dict[str, str]:
@@ -187,18 +302,24 @@ def write_verdict_input_slices(spec: dict[str, Any]) -> dict[str, str]:
     task_name = safe_name(str(spec["task_name"]))
     slice_paths: dict[str, str] = {}
 
-    for artifact_key, source_path_text in (
-        ("decision_brief", decision_brief),
-        ("verdict_first", artifacts.get("verdict_first") or artifacts.get("verdict-first") or ""),
-    ):
+    sources = [("decision_brief", decision_brief)]
+    if stage == "second-verdict":
+        sources.append(("verdict_first", artifacts.get("verdict_first") or artifacts.get("verdict-first") or ""))
+
+    for artifact_key, source_path_text in sources:
         if not source_path_text:
             continue
         source_path = resolve_artifact_path(source_path_text, workspace_dir)
         payload = read_json_if_exists(source_path)
         if payload is None:
             continue
-        sliced = filter_symbols(payload, symbols)
-        relative_name = "decision-brief" if artifact_key == "decision_brief" else "verdict-first"
+        if artifact_key == "decision_brief":
+            sliced = build_verdict_core_payload(payload, symbols)
+            relative_name = "verdict-core"
+            slice_paths["verdict_core"] = str(slice_dir / f"{task_name}.{relative_name}.json")
+        else:
+            sliced = build_verdict_first_slice_payload(payload, symbols)
+            relative_name = "verdict-first-slice"
         slice_path = slice_dir / f"{task_name}.{relative_name}.json"
         write_json(slice_path, sliced)
         slice_paths[artifact_key] = str(slice_path)
@@ -282,7 +403,7 @@ def compact_verdict_prompt(spec: dict[str, Any]) -> str | None:
         lines.extend(
             [
                 "",
-                "For second-verdict, use per-symbol scores from verdict_first when available.",
+                "For second-verdict, use the lossless selected-symbol first-verdict slice from verdict_first.",
                 "Interpret final_first_score as the confidence-adjusted first-verdict score: 5 is neutral, below 5 is a sell/reduce opinion, and above 5 is a buy/increase opinion.",
                 "If a symbol's first-verdict score is missing, unavailable, or unusable, treat it as neutral 5 and continue.",
                 "First-verdict scores are judgment inputs, not hard buy/sell gates.",
@@ -383,15 +504,20 @@ def validate_spec(spec: dict[str, Any]) -> None:
     missing = sorted(field for field in required if not str(spec.get(field, "")).strip())
     if missing:
         raise ValueError("missing required spec fields: " + ", ".join(missing))
+    stage = str(spec.get("stage", "")).strip()
+    if stage in VERDICT_STAGES and str(spec.get("prompt", "")).strip():
+        raise ValueError("verdict raw prompt fallback is forbidden; use compact artifact_paths and symbol_ids")
     if compact_verdict_requested:
         artifacts = normalize_artifact_paths(spec.get("artifact_paths"))
         decision_brief = artifacts.get("decision_brief") or artifacts.get("decision-brief") or artifacts.get("brief")
+        verdict_first = artifacts.get("verdict_first") or artifacts.get("verdict-first")
         symbols = normalize_symbol_ids(spec.get("symbol_ids") or spec.get("symbols"))
         if not decision_brief:
             raise ValueError("compact verdict spec requires artifact_paths.decision_brief")
+        if stage == "second-verdict" and not verdict_first:
+            raise ValueError("second-verdict compact spec requires artifact_paths.verdict_first")
         if not symbols:
             raise ValueError("compact verdict spec requires symbol_ids")
-    stage = str(spec.get("stage", "")).strip()
     agent_role = safe_name(str(spec.get("agent_role", ""))).lower()
     task_name = safe_name(str(spec.get("task_name", ""))).lower()
     if stage == "first-verdict" and ("analyst-statestreet" in agent_role or "analyst-statestreet" in task_name):
@@ -524,8 +650,81 @@ def wrapper_paths(spec: dict[str, Any]) -> tuple[Path, Path]:
     return subagent_dir / f"{task_name}.wrapper.json", subagent_dir / f"{task_name}.raw.txt"
 
 
+def file_sha256(path: Path) -> str | None:
+    try:
+        with path.open("rb") as handle:
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
+def artifact_content_fingerprints(spec: dict[str, Any]) -> dict[str, str | None]:
+    artifacts = normalize_artifact_paths(spec.get("artifact_paths"))
+    workspace_dir = str(spec.get("workspace_dir", ""))
+    fingerprints: dict[str, str | None] = {}
+    for key, path_text in sorted(artifacts.items()):
+        if key in {"persona", "persona_path", "verdict_format", "verdict-format"}:
+            continue
+        fingerprints[key] = file_sha256(resolve_artifact_path(path_text, workspace_dir))
+    return fingerprints
+
+
+def spec_fingerprint(spec: dict[str, Any]) -> str:
+    relevant = {
+        key: spec.get(key)
+        for key in (
+            "run_id",
+            "started_at",
+            "stage",
+            "agent_role",
+            "task_name",
+            "prompt",
+            "workspace_dir",
+            "output_dir",
+            "artifact_paths",
+            "symbol_ids",
+            "symbols",
+        )
+    }
+    relevant["artifact_content_sha256"] = artifact_content_fingerprints(spec)
+    encoded = json.dumps(relevant, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def existing_success_wrapper(spec: dict[str, Any], fingerprint: str) -> dict[str, Any] | None:
+    if env_bool("CODEX_SUBAGENT_REUSE_SUCCESS", True) is False:
+        return None
+    wrapper_path, _raw_output_path = wrapper_paths(spec)
+    if not wrapper_path.exists():
+        return None
+    try:
+        wrapper = load_json(wrapper_path)
+    except Exception:
+        return None
+    if not isinstance(wrapper, dict):
+        return None
+    if wrapper.get("status") != "success":
+        return None
+    if wrapper.get("spec_fingerprint") != fingerprint:
+        return None
+    wrapper["reused_existing_wrapper"] = True
+    return wrapper
+
+
+def reusable_success_wrapper(spec: dict[str, Any]) -> dict[str, Any] | None:
+    validate_spec(spec)
+    return existing_success_wrapper(spec, spec_fingerprint(spec))
+
+
 def run_one(spec: dict[str, Any]) -> dict[str, Any]:
     validate_spec(spec)
+    fingerprint = spec_fingerprint(spec)
+    reused = existing_success_wrapper(spec, fingerprint)
+    if reused is not None:
+        return reused
     model, effort = launcher_model_effort(str(spec["stage"]), str(spec["agent_role"]))
     wrapper_path, raw_output_path = wrapper_paths(spec)
     raw_output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -538,6 +737,7 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
     cmd = [
         os.getenv("CODEX_BIN", "codex"),
         "exec",
+        "--json",
         "-m",
         model,
         "-c",
@@ -577,10 +777,11 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 - wrapper records sub-agent failures
         errors.append({"code": "exec_failed", "message": str(exc)})
 
+    event_summary = parse_codex_json_events(stdout)
     if raw_output_path.exists():
         raw_output = raw_output_path.read_text(encoding="utf-8", errors="replace")
     else:
-        raw_output = stdout.strip()
+        raw_output = event_summary.get("last_agent_message") or stdout.strip()
         raw_output_path.write_text(raw_output, encoding="utf-8")
 
     stage = str(spec["stage"])
@@ -640,6 +841,11 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
         "command": [part for part in cmd[:-1]],
         "prompt_mode": prompt_mode,
         "verdict_input_paths": slice_paths,
+        "spec_fingerprint": fingerprint,
+        "reused_existing_wrapper": False,
+        "token_usage": event_summary["token_usage"],
+        "token_usage_event_count": event_summary["token_usage_event_count"],
+        "rate_limits": event_summary["rate_limits"],
     }
     write_json(wrapper_path, wrapper)
     return wrapper
@@ -658,12 +864,20 @@ def group_specs(payload: Any) -> list[dict[str, Any]]:
 
 
 def run_group(specs: list[dict[str, Any]], max_workers: int | None = None) -> dict[str, Any]:
-    workers = max_workers or min(8, max(1, len(specs)))
     wrappers: list[dict[str, Any]] = []
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        future_map = {executor.submit(run_one, spec): spec for spec in specs}
-        for future in as_completed(future_map):
-            wrappers.append(future.result())
+    pending_specs: list[dict[str, Any]] = []
+    for spec in specs:
+        reused = reusable_success_wrapper(spec)
+        if reused is None:
+            pending_specs.append(spec)
+        else:
+            wrappers.append(reused)
+    if pending_specs:
+        workers = max_workers or min(8, max(1, len(pending_specs)))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_map = {executor.submit(run_one, spec): spec for spec in pending_specs}
+            for future in as_completed(future_map):
+                wrappers.append(future.result())
     wrappers.sort(key=lambda item: str(item.get("task_name", "")))
     failed = [item for item in wrappers if item.get("status") != "success"]
     required_failed = [
@@ -808,6 +1022,26 @@ else:
         else:
             payload = {"ok": True, "argv": sys.argv[1:]}
     output_path.write_text(json.dumps(payload), encoding="utf-8")
+if "--json" in sys.argv:
+    print(json.dumps({
+        "type": "event_msg",
+        "payload": {
+            "type": "token_count",
+            "info": {
+                "last_token_usage": {
+                    "input_tokens": 100,
+                    "cached_input_tokens": 40,
+                    "output_tokens": 20,
+                    "reasoning_output_tokens": 5,
+                    "total_tokens": 120
+                }
+            }
+        },
+        "rate_limits": {
+            "primary": {"used_percent": 1.0},
+            "secondary": {"used_percent": 2.0}
+        }
+    }))
 sys.exit(int(os.environ.get("FAKE_CODEX_EXIT", "0")))
 """,
         encoding="utf-8",
@@ -847,10 +1081,41 @@ def write_sample_verdict_inputs(tmp: Path) -> None:
         run_dir / "decision-brief.json",
         {
             "schema_version": "1",
+            "brief_type": "decision-brief",
+            "market_status_summary": ["m1", "m2", "m3", "m4", "m5", "m6"],
+            "errors": [
+                {"symbol_id": "005930", "code": "keep_symbol_error"},
+                {"symbol_id": "035420", "code": "drop_symbol_error"},
+                {"code": "keep_run_error"},
+            ],
             "symbols": [
-                {"symbol_id": "005930", "symbol_name": "삼성전자"},
+                {
+                    "symbol_id": "005930",
+                    "symbol_name": "삼성전자",
+                    "price": {
+                        "current_or_last": 70000,
+                        "observed_at": "2026-06-08T09:00:00+09:00",
+                        "snapshot_mode": "live",
+                        "open": 69000,
+                        "high": 71000,
+                    },
+                    "price_chart_signals": [
+                        {"signal": "s1", "strength": 1, "timeframe": "D"},
+                        {"signal": "s2", "strength": 2, "timeframe": "W"},
+                        {"signal": "s3", "strength": 3, "timeframe": "M"},
+                        {"signal": "s4", "strength": 4, "timeframe": "Y"},
+                    ],
+                    "news_summary": [
+                        {"content": "n1", "url": "u1"},
+                        {"content": "n2", "url": "u2"},
+                        {"content": "n3", "url": "u3"},
+                        {"content": "n4", "url": "u4"},
+                    ],
+                    "warnings": ["w1", "w2", "w3", "w4"],
+                    "custom_detail": {"keep": True},
+                },
                 {"symbol_id": "000660", "symbol_name": "SK하이닉스"},
-                {"symbol_id": "035420", "symbol_name": "NAVER"},
+                {"symbol_id": "035420", "symbol_name": "NAVER", "custom_detail": {"drop": True}},
             ],
         },
     )
@@ -858,8 +1123,21 @@ def write_sample_verdict_inputs(tmp: Path) -> None:
         run_dir / "verdict-first.json",
         {
             "schema_version": "1",
+            "stage": "verdict-first",
             "symbols": [
-                {"symbol_id": "005930", "score": 7},
+                {
+                    "symbol_id": "005930",
+                    "score": 7,
+                    "agent_scores": [
+                        {
+                            "agent_role": "analyst-blackrock",
+                            "score": 7,
+                            "confidence": 6,
+                            "one_line_reason": "full reason should remain",
+                        }
+                    ],
+                    "custom_verdict_detail": {"keep": True},
+                },
                 {"symbol_id": "000660", "score": 8},
                 {"symbol_id": "035420", "score": 5},
             ],
@@ -900,7 +1178,7 @@ def assert_compact_verdict_prompt(tmp: Path) -> None:
     second_required_parts = [
         "stage: second-verdict",
         "verdict_first:",
-        "For second-verdict, use per-symbol scores from verdict_first when available.",
+        "For second-verdict, use the lossless selected-symbol first-verdict slice from verdict_first.",
         "Interpret final_first_score as the confidence-adjusted first-verdict score: 5 is neutral, below 5 is a sell/reduce opinion, and above 5 is a buy/increase opinion.",
         "If a symbol's first-verdict score is missing, unavailable, or unusable, treat it as neutral 5 and continue.",
         "First-verdict scores are judgment inputs, not hard buy/sell gates.",
@@ -914,14 +1192,40 @@ def assert_verdict_input_slices(tmp: Path) -> None:
     write_sample_verdict_inputs(tmp)
     payload = compact_spec(tmp, stage="second-verdict", agent_role="judge", task_name="slice-test")
     slices = write_verdict_input_slices(payload)
-    expected_keys = {"decision_brief", "verdict_first"}
+    expected_keys = {"decision_brief", "verdict_core", "verdict_first"}
     if set(slices) != expected_keys:
         raise AssertionError(f"unexpected slice keys: {slices}")
-    for slice_path_text in slices.values():
+    for key, slice_path_text in slices.items():
         slice_payload = load_json(Path(slice_path_text))
         symbols = [item.get("symbol_id") for item in slice_payload.get("symbols", [])]
         if symbols != ["005930", "000660"]:
             raise AssertionError(f"unexpected sliced symbols for {slice_path_text}: {symbols}")
+        if key == "verdict_core" and slice_payload.get("slice_type") != "verdict-core":
+            raise AssertionError(f"verdict-core slice missing slice_type: {slice_payload}")
+        if key == "verdict_core":
+            error_codes = [item.get("code") for item in slice_payload.get("errors", []) if isinstance(item, dict)]
+            if error_codes != ["keep_symbol_error", "keep_run_error"]:
+                raise AssertionError(f"verdict-core did not filter symbol-scoped errors: {slice_payload}")
+            first_symbol = slice_payload["symbols"][0]
+            if first_symbol.get("price", {}).get("open") != 69000:
+                raise AssertionError(f"verdict-core did not preserve nested price fields: {first_symbol}")
+            if len(first_symbol.get("price_chart_signals", [])) != 4:
+                raise AssertionError(f"verdict-core truncated price_chart_signals: {first_symbol}")
+            if len(first_symbol.get("news_summary", [])) != 4:
+                raise AssertionError(f"verdict-core truncated news_summary: {first_symbol}")
+            if first_symbol.get("warnings") != ["w1", "w2", "w3", "w4"]:
+                raise AssertionError(f"verdict-core truncated warnings: {first_symbol}")
+            if first_symbol.get("custom_detail") != {"keep": True}:
+                raise AssertionError(f"verdict-core dropped custom detail: {first_symbol}")
+        if key == "verdict_first" and slice_payload.get("slice_type") != "verdict-first-slice":
+            raise AssertionError(f"second-verdict first slice missing slice_type: {slice_payload}")
+        if key == "verdict_first":
+            first_symbol = slice_payload["symbols"][0]
+            agent_scores = first_symbol.get("agent_scores", [])
+            if not agent_scores or agent_scores[0].get("one_line_reason") != "full reason should remain":
+                raise AssertionError(f"verdict-first slice dropped agent score reason: {first_symbol}")
+            if first_symbol.get("custom_verdict_detail") != {"keep": True}:
+                raise AssertionError(f"verdict-first slice dropped custom detail: {first_symbol}")
 
 
 def assert_invalid_spec(spec_payload: dict[str, Any], expected: str) -> None:
@@ -974,6 +1278,14 @@ def run_self_test() -> int:
                 )
                 missing_symbols["symbol_ids"] = []
                 assert_invalid_spec(missing_symbols, "symbol_ids")
+                missing_verdict_first = compact_spec(
+                    tmp,
+                    stage="second-verdict",
+                    agent_role="judge-midterm",
+                    task_name="missing-verdict-first",
+                )
+                missing_verdict_first["artifact_paths"].pop("verdict_first")
+                assert_invalid_spec(missing_verdict_first, "artifact_paths.verdict_first")
                 assert_invalid_spec(
                     compact_spec(
                         tmp,
@@ -1080,11 +1392,7 @@ def run_self_test() -> int:
                     tmp, stage="first-verdict", agent_role="analyst-jpmorgan", task_name="raw-with-artifacts"
                 )
                 raw_with_artifacts["prompt"] = '{"return":"json only"}'
-                validate_spec(raw_with_artifacts)
-                if build_prompt(raw_with_artifacts) != '{"return":"json only"}':
-                    raise AssertionError("prompt-based spec with artifact metadata did not remain raw")
-                if write_verdict_input_slices(raw_with_artifacts):
-                    raise AssertionError("prompt-based spec with artifact metadata created verdict slices")
+                assert_invalid_spec(raw_with_artifacts, "raw prompt fallback is forbidden")
             except AssertionError as exc:
                 failures.append(str(exc))
 
@@ -1095,12 +1403,12 @@ def run_self_test() -> int:
                     COLLECTION_SUBAGENT_REASONING_EFFORT,
                 ),
                 (
-                    spec(tmp, stage="first-verdict", agent_role="analyst", task_name="first"),
+                    compact_spec(tmp, stage="first-verdict", agent_role="analyst", task_name="first"),
                     FIRST_VERDICT_SUBAGENT_MODEL,
                     FIRST_VERDICT_SUBAGENT_REASONING_EFFORT,
                 ),
                 (
-                    spec(tmp, stage="second-verdict", agent_role="judge", task_name="second"),
+                    compact_spec(tmp, stage="second-verdict", agent_role="judge", task_name="second"),
                     SECOND_VERDICT_SUBAGENT_MODEL,
                     SECOND_VERDICT_SUBAGENT_REASONING_EFFORT,
                 ),
@@ -1109,6 +1417,8 @@ def run_self_test() -> int:
                 wrapper = run_one(test_spec)
                 if wrapper["status"] != "success":
                     failures.append(f"{test_spec['task_name']} returned {wrapper['status']}")
+                if wrapper.get("token_usage", {}).get("total_tokens") != 120:
+                    failures.append(f"{test_spec['task_name']} missing token usage: {wrapper}")
                 try:
                     assert_argv(argv_log, model=model, effort=effort)
                 except AssertionError as exc:
@@ -1121,6 +1431,36 @@ def run_self_test() -> int:
                 failures.append(f"compact verdict spec returned unexpected wrapper: {compact_wrapper}")
             if not compact_wrapper.get("verdict_input_paths", {}).get("decision_brief"):
                 failures.append(f"compact verdict spec did not create decision brief slice: {compact_wrapper}")
+
+            reuse_spec = compact_spec(
+                tmp, stage="first-verdict", agent_role="analyst-jpmorgan", task_name="reuse-first"
+            )
+            first_reuse_wrapper = run_one(reuse_spec)
+            argv_before = len(argv_log.read_text(encoding="utf-8").splitlines())
+            second_reuse_wrapper = run_one(reuse_spec)
+            argv_after = len(argv_log.read_text(encoding="utf-8").splitlines())
+            if first_reuse_wrapper.get("status") != "success":
+                failures.append(f"reuse setup wrapper failed: {first_reuse_wrapper}")
+            if not second_reuse_wrapper.get("reused_existing_wrapper") or argv_after != argv_before:
+                failures.append(f"successful wrapper was not reused: {second_reuse_wrapper}")
+            group_reuse_before = len(argv_log.read_text(encoding="utf-8").splitlines())
+            group_reuse = run_group([reuse_spec], max_workers=1)
+            group_reuse_after = len(argv_log.read_text(encoding="utf-8").splitlines())
+            if (
+                group_reuse.get("status") != "success"
+                or group_reuse_after != group_reuse_before
+                or not group_reuse.get("wrappers", [{}])[0].get("reused_existing_wrapper")
+            ):
+                failures.append(f"run-group did not pre-reuse successful wrapper: {group_reuse}")
+            changed_brief_path = tmp / "reports" / "runs" / "self-test" / "decision-brief.json"
+            changed_brief = load_json(changed_brief_path)
+            changed_brief["symbols"][0]["custom_detail"] = {"keep": "changed"}
+            write_json(changed_brief_path, changed_brief)
+            changed_reuse_before = len(argv_log.read_text(encoding="utf-8").splitlines())
+            changed_wrapper = run_one(reuse_spec)
+            changed_reuse_after = len(argv_log.read_text(encoding="utf-8").splitlines())
+            if changed_wrapper.get("reused_existing_wrapper") or changed_reuse_after != changed_reuse_before + 1:
+                failures.append(f"changed artifact content incorrectly reused wrapper: {changed_wrapper}")
 
             old_raw_retention = os.environ.get("CODEX_SUBAGENT_RAW_RETENTION")
             os.environ["CODEX_SUBAGENT_RAW_RETENTION"] = "failed"
@@ -1180,7 +1520,7 @@ def run_self_test() -> int:
             os.environ["FAKE_CODEX_EMPTY_TASKS"] = "required-first"
             required_group = run_group(
                 [
-                    spec(tmp, stage="first-verdict", agent_role="analyst", task_name="required-first"),
+                    compact_spec(tmp, stage="first-verdict", agent_role="analyst", task_name="required-first"),
                     spec(tmp, stage="news-collection", agent_role="news", task_name="required-news"),
                 ],
                 max_workers=2,
