@@ -110,6 +110,8 @@ def token_usage_from(raw: Any) -> dict[str, int]:
             usage[field] = int(value)
         except (TypeError, ValueError):
             usage[field] = 0
+    if usage["total_tokens"] <= 0:
+        usage["total_tokens"] = usage["input_tokens"] + usage["output_tokens"]
     return usage
 
 
@@ -131,6 +133,15 @@ def token_count_payload(item: Any) -> dict[str, Any] | None:
     return None
 
 
+def turn_completed_usage(item: Any) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
+        return None
+    if item.get("type") != "turn.completed":
+        return None
+    usage = item.get("usage")
+    return usage if isinstance(usage, dict) else None
+
+
 def parse_codex_json_events(stdout: str) -> dict[str, Any]:
     usage = zero_token_usage()
     event_count = 0
@@ -150,6 +161,12 @@ def parse_codex_json_events(stdout: str) -> dict[str, Any]:
             add_token_usage(usage, token_usage_from(info.get("last_token_usage")))
             event_count += 1
             last_rate_limits = item.get("rate_limits") or payload.get("rate_limits") or last_rate_limits
+            continue
+        completed_usage = turn_completed_usage(item)
+        if completed_usage is not None:
+            add_token_usage(usage, token_usage_from(completed_usage))
+            event_count += 1
+            last_rate_limits = item.get("rate_limits") or last_rate_limits
             continue
         if isinstance(item, dict) and item.get("type") == "event_msg":
             event_payload = item.get("payload")
