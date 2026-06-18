@@ -12,6 +12,7 @@ reports/
     ├── verdict-inputs/<task_name>.verdict-first-slice.json
     ├── verdicts/<stage>--<agent_role>--<task_name>.md
     ├── run.json
+    ├── collection-summary.json
     ├── price-chart.json
     ├── decision-brief.json
     ├── verdict-first.json
@@ -86,7 +87,8 @@ Wrapper JSON includes `token_usage`, `token_usage_event_count`, optional `rate_l
 | Artifact | Owner | Purpose |
 |---|---|---|
 | `run.json` | Main | input scope, environment, timestamps, stage statuses, artifact paths, final status |
-| `price-chart.json` | Main | required complete symbol universe, sanitized price/chart evidence, per-symbol errors |
+| `collection-summary.json` | Main/helper | compact direct KIS main-evidence path/count/token-status summary without raw payloads |
+| `price-chart.json` | Main/helper | required complete symbol universe, sanitized price/chart evidence, per-symbol errors |
 | financial memory path | optional collector/Main | reusable `memory/collect-financial-information/financial-YYYY-MM-DD.yaml` reference |
 | news memory path | optional collector/Main | reusable `memory/collect-news-information/news-YYYY-MM-DD.yaml` reference |
 | market-status text | optional collector/Main | compact `$get-market-status` summary |
@@ -94,7 +96,7 @@ Wrapper JSON includes `token_usage`, `token_usage_event_count`, optional `rate_l
 | `verdict-inputs/*.json` | Launcher | non-canonical lossless per-task `verdict-core` and first-verdict selected-symbol slices |
 | `verdict-first.json` | Main | compact first verdict responses, sidecar paths, raw score averages, confidence-adjusted final scores |
 | `verdict-second.json` | Main | single `judge-midterm` response, sidecar path, validated target quantities, and compact reasons |
-| `account-before-order.json` | Main | sanitized latest account snapshot, active pending/reserved orders, or skipped envelope |
+| `account-before-order.json` | Main/helper | sanitized latest account snapshot, active pending/reserved orders, or skipped envelope |
 | `execution.json` | Main | active-order adjustment decisions, quantity math, latest available cash, blocked/submitted/skipped/failed order results |
 
 Financial/news/market-status absence alone must not fail validation, lower eligibility, or block verdict/order flow.
@@ -125,6 +127,8 @@ Financial/news/market-status absence alone must not fail validation, lower eligi
 ```
 
 Only `active_status="active"` rows may contribute to pending/reserved quantity math or active-order adjustment. If any required field for an active order is missing or ambiguous, block cancellation, correction, replacement, and conflicting new submission for that symbol with a non-sensitive reason.
+
+When `account-before-order.json` is produced by `scripts/collect_main_evidence.py` before active-order or order-available lookup support has been collected, it must set `active_order_lookup_performed=false` or `order_available_lookup_performed=false`. That artifact is usable as account exposure context for `decision-brief.json`, but it is not sufficient for order preparation or execution until the Main agent refreshes the missing read-only fields.
 
 ## `decision-brief.json` Shape
 

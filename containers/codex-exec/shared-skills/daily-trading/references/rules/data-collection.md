@@ -4,7 +4,7 @@
 
 - Collect the complete portfolio universe once per `run_id`.
 - Universe = `$check-portfolio` JSON `universe`, which already combines `recommanded`, `specified`, and direct KIS `holding` symbols.
-- Main agent directly collects required price/chart evidence through `kis-trade-mcp` and writes `price-chart.json`.
+- Main agent runs `scripts/collect_main_evidence.py` to collect required price/chart evidence through direct KIS REST and writes `price-chart.json`.
 - `financial` and `news` reuse valid same-date memory caches when those caches cover the complete symbol universe. Only missing or incomplete optional domains run through `scripts/run_subagent.py`; record cache miss or universe mismatch reasons. `market-status` remains an optional best-effort launcher stage.
 - Verdict agents reuse saved artifacts. They never recollect and never call external tools.
 - Preserve partial successes and errors. Do not drop a symbol silently.
@@ -19,7 +19,7 @@
 
 ## Required Price/Chart Evidence
 
-Main agent owns price/chart lookup. It must write one canonical row for every input symbol:
+Main agent owns price/chart lookup through `scripts/collect_main_evidence.py`. It must write one canonical row for every input symbol:
 
 - `schema_version="1"`
 - `symbol_id`
@@ -35,7 +35,7 @@ Use `symbol_id`, `symbol_name`, and nested `price.*`; alias-only fields such as 
 
 If time or KIS volume is constrained, prioritize identity plus current-or-last price coverage for every symbol. Chart/NAV gaps may be recorded as missing evidence, but uncalled APIs must not be represented as collected evidence.
 
-Price/chart collection may use quote, ETF/ETN, and daily/weekly/monthly chart APIs plus local calculations derived from those results. It must not call account or order APIs.
+Price/chart collection may use quote, ETF/ETN, and daily/weekly/monthly chart APIs plus local calculations derived from those results. It must not call order APIs. The direct main-evidence helper may also collect the sanitized read-only account snapshot defined below, but must keep it in `account-before-order.json` rather than `price-chart.json`.
 
 ## Optional Domain Collectors
 
@@ -55,7 +55,7 @@ News cache entries are keyed by symbol code. Article fields are `article_date`, 
 
 For universe construction, the Main agent uses `$check-portfolio` JSON and must not separately re-read current live holdings only to expand the universe.
 
-Before order calculation or execution, Main agent performs read-only account lookup, sanitizes it, and writes account artifacts. It may query:
+Before order calculation or execution, Main agent performs read-only account lookup directly or through `scripts/collect_main_evidence.py`, sanitizes it, and writes account artifacts. It may query:
 
 - account asset summary
 - current live holdings
@@ -68,6 +68,8 @@ Before order calculation or execution, Main agent performs read-only account loo
 If `$check-portfolio` holdings lookup fails, current holdings are unknown; do not guess holdings or silently drop that source.
 
 Latest `account-before-order.json` is required before order calculation. If missing, invalid, or `failed`, block order preparation and execution.
+
+If `account-before-order.json` shows that active-order lookup or order-available lookup was not performed, order preparation and execution must remain blocked until the Main agent refreshes those fields with validated read-only APIs.
 
 Current live holdings already include same-day fills. Retain same-day fills as account evidence, but do not subtract them again.
 

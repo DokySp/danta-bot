@@ -1,6 +1,6 @@
 ---
 name: daily-trading
-description: "[v20260611-02] KIS MCP 기반 한국 주식·ETF 포트폴리오를 one-pass로 수집하고, compact `decision-brief.json`을 재사용해 3개 판단 축 `first-verdict`, 단일 `judge-midterm` `second-verdict`, 계좌/주문 gate를 수행한다. 가격·계좌·주문 gate는 보존하고 재무·뉴스·market-status는 optional-best-effort로 다룬다."
+description: "[v20260618-01] Direct KIS main-evidence helper 기반 한국 주식·ETF 포트폴리오를 one-pass로 수집하고, compact `decision-brief.json`을 재사용해 3개 판단 축 `first-verdict`, 단일 `judge-midterm` `second-verdict`, 계좌/주문 gate를 수행한다. 가격·계좌·주문 gate는 보존하고 재무·뉴스·market-status는 optional-best-effort로 다룬다."
 ---
 
 # Daily Trading Portfolio Orchestrator
@@ -54,8 +54,23 @@ Preserve injected `run_id` and `started_at`. If absent, generate both before wor
 Main agent only:
 
 - Resolve the portfolio universe from `$check-portfolio` JSON `universe`; do not separately re-read live holdings only to expand the universe.
-- Handle auth, account snapshots, price/chart KIS MCP calls, artifact writes, sanitization, merging, exclusions, target/order calculation, explicit approval checks, active pending/reserved order adjustment, and order submission.
+- Handle auth, account snapshots, direct price/chart evidence collection through `scripts/collect_main_evidence.py`, artifact writes, sanitization, merging, exclusions, target/order calculation, explicit approval checks, active pending/reserved order adjustment, and order submission.
 - Write canonical artifacts under `reports/runs/<run_id>/`.
+
+## Main Evidence Helper
+
+Use `scripts/collect_main_evidence.py` for required price/chart evidence and the initial sanitized account snapshot. The helper calls direct KIS REST APIs, writes only canonical JSON artifacts, and prints a compact path/count summary.
+
+```text
+python3 scripts/collect_main_evidence.py collect \
+  --run-id <run_id> \
+  --started-at <started_at> \
+  --symbols <comma-separated-universe> \
+  --output-dir reports/runs/<run_id> \
+  --env acct
+```
+
+The helper may write `collection-summary.json`, `price-chart.json`, and `account-before-order.json`. It must not submit, cancel, correct, or reserve orders. If active-order or order-available lookups are not collected, order preparation/execution remains blocked until the Main agent refreshes those required fields with validated read-only APIs.
 
 Collection sub-agents:
 
@@ -74,12 +89,12 @@ Verdict sub-agents:
 
 1. Initialize run identity and auth handling.
 2. Build the complete portfolio universe from `$check-portfolio` JSON `universe`, which already includes `recommanded`, `specified`, and direct KIS `holding` symbols.
-3. Main agent collects required price/chart evidence once and writes `price-chart.json`.
+3. Main agent runs `scripts/collect_main_evidence.py` once for the complete universe and writes `price-chart.json`, `account-before-order.json`, and optional `collection-summary.json`.
 4. Reuse valid same-date financial/news caches when they cover the full symbol universe; otherwise run missing optional `financial`, `news`, and `market-status` collection in parallel through the launcher and record the cache miss or universe mismatch reason.
 5. Merge required price/chart and account evidence plus short optional summaries into compact `decision-brief.json`.
 6. Run the selected three `first-verdict` functional personas in parallel with launcher-created `verdict-core` inputs. Main agent may reduce `symbol_ids` and merge prior valid verdict rows only when it can prove price, holdings, news, and active-order status are stable; otherwise rerun the symbol. Always re-evaluate sell/stop-loss candidates, same-day fills, price shocks, new news, active orders, and score-boundary cases. Launcher automatic wrapper reuse is limited to the same spec fingerprint. The Main agent creates human-review sidecars from parsed JSON.
 7. Build `second-verdict` set from eligible symbols with `final_first_score >= 7` plus eligible `holding` symbols from `$check-portfolio`, then run only `judge-midterm` with a selected-symbol first-verdict slice and at most two retries for the failed task only. Use the single valid judge target as the canonical target after deterministic validation.
-8. Refresh account state before orders, validate the single target set, reconcile active pending/reserved orders, apply `trade-execution.md` gates, and submit only explicitly authorized adjustments or orders.
+8. Refresh any missing required account/order-availability fields before orders, validate the single target set, reconcile active pending/reserved orders, apply `trade-execution.md` gates, and submit only explicitly authorized adjustments or orders.
 9. Write `execution.json`, final report, and final `run.json` status.
 
 ## Compact Prompt Rules

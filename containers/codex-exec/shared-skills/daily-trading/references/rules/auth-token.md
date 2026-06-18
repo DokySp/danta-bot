@@ -14,6 +14,14 @@ KIS Open API는 appkey/appsecret과 별도로 OAuth 접근토큰을 사용한다
 - sub agent에는 토큰이나 인증 응답 원문을 전달하지 않는다. 인증 프리플라이트와 재발급은 메인 Codex만 수행한다.
 - 수집 sub agent와 Main agent의 read-only 계좌 조회 KIS 호출은 허용한다. 호출량 제한, 일시 게이트웨이 오류, timeout 같은 비인증 오류는 호출 지점에서 bounded backoff로 처리한다. `first-verdict`·`second-verdict` sub agent의 KIS 호출은 금지한다.
 
+## Direct KIS Helper 인증 경계
+
+`scripts/collect_main_evidence.py`는 KIS REST를 직접 호출하므로 MCP 내부 토큰 캐시를 사용하지 않는다. 이 helper는 runtime environment의 KIS app key/secret/account 설정을 읽고, 환경별 토큰을 분리된 로컬 캐시에 저장한다. 캐시 경로는 기본적으로 `~/.cache/codex/daily-trading/kis-token-<env>.json`이며, 필요하면 `DAILY_TRADING_TOKEN_CACHE`로 재지정할 수 있다.
+
+Direct helper는 토큰 원문, app key, app secret, 계좌번호, 계좌상품코드, HTS ID를 artifact, prompt, report, user response에 쓰지 않는다. helper 출력은 artifact path/count/token-status 수준으로 제한한다.
+
+인증 오류는 KIS 호출 지점에서 실패 evidence로 기록하고, 주문 또는 계좌 gate는 실패/누락 상태에서 진행하지 않는다.
+
 ## MCP 인증 경계
 
 일반 KIS 계좌/시세/주문 API는 MCP 내부의 `kis_auth.py`가 `ka.auth()`와 로컬 토큰 캐시를 사용해 인증한다. standalone `auth_token` 호출 결과는 downstream API가 실제로 읽는 캐시와 불일치할 수 있으므로, `daily-trading`은 이를 실행 시작 preflight로 호출하지 않는다.

@@ -17,7 +17,7 @@ The execution rules in this file apply uniformly to `order_cash` and `order_resv
 
 Collection, `first-verdict`, and `second-verdict` sub-agents cannot call any account or order API.
 
-Before order calculation, the Main agent refreshes only the read-only account fields required to validate current candidates:
+Before order calculation, the Main agent refreshes only the read-only account fields required to validate current candidates. The first balance snapshot may be produced by `scripts/collect_main_evidence.py`; any missing active-order or order-available fields must be refreshed before candidate calculation:
 
 - `inquire_account_balance`
 - `inquire_balance`
@@ -27,11 +27,11 @@ Before order calculation, the Main agent refreshes only the read-only account fi
 - `inquire_psbl_order` for buy candidates
 - `inquire_psbl_sell` for sell candidates
 
-The Main agent must use validated parameter templates for known read-only account APIs, must not provide account number, account product code, or HTS ID because the MCP wrapper supplies them, and must not run ledger APIs in parallel. It sanitizes the result and writes `account-before-order.json`.
+The Main agent must use validated parameter templates for known read-only account APIs, must not expose account number, account product code, or HTS ID in artifacts, prompts, reports, or user responses, and must not run ledger APIs in parallel. Direct helpers may read account configuration from the runtime environment, but must sanitize the result before writing `account-before-order.json`.
 
-Call `find_api_detail` only when no validated template exists, when introducing a new API type, or after the API rejects a template for parameter/schema reasons. In particular, `inquire_account_balance` uses `inqr_dvsn_1="1"` and does not include `env_dv` unless the currently inspected API detail supports it. If a parameter template was already validated earlier in the same run, reuse it and record `template_reused=true` in the attempt entry rather than repeating trial calls.
+Call `find_api_detail` only when no validated template exists, when introducing a new MCP API type, or after an MCP API rejects a template for parameter/schema reasons. In particular, MCP `inquire_account_balance` uses `inqr_dvsn_1="1"` and does not include `env_dv` unless the currently inspected API detail supports it. If a parameter template was already validated earlier in the same run, reuse it and record `template_reused=true` in the attempt entry rather than repeating trial calls.
 
-If `account-before-order.json` is missing, invalid, or `failed`, the Main agent must block order candidate calculation and submission.
+If `account-before-order.json` is missing, invalid, `failed`, or shows `active_order_lookup_performed=false` or `order_available_lookup_performed=false` for a requested order path, the Main agent must block order candidate calculation and submission until those read-only fields are refreshed.
 
 ## Main-Agent Order API Boundary
 
