@@ -52,11 +52,15 @@ TOKEN_USAGE_FIELDS = (
 )
 DISALLOWED_COMPACT_VERDICT_KEYS = {
     "cash_rationale",
+    "cash_reason_code",
     "duplicate_exposure_limits",
     "evidence",
     "price_chart_view",
+    "portfolio",
     "rationale",
     "risks",
+    "target_cash_amount",
+    "one_line_portfolio_reason",
 }
 
 
@@ -622,24 +626,6 @@ def compact_verdict_payload_errors(payload: Any, stage: str) -> list[dict[str, A
                             "message": f"symbols[{index}] missing {field}",
                         }
                     )
-    if stage == "second-verdict":
-        portfolio = payload.get("portfolio")
-        if not isinstance(portfolio, dict):
-            errors.append(
-                {
-                    "code": "invalid_compact_verdict_schema",
-                    "message": "second-verdict must include portfolio object",
-                }
-            )
-        else:
-            for field in ("target_cash_amount", "cash_reason_code", "one_line_portfolio_reason"):
-                if field not in portfolio:
-                    errors.append(
-                        {
-                            "code": "invalid_compact_verdict_schema",
-                            "message": f"portfolio missing {field}",
-                        }
-                    )
     return errors
 
 
@@ -1013,12 +999,6 @@ else:
                 ],
                 "errors": [],
             }
-            if stage == "second-verdict":
-                payload["portfolio"] = {
-                    "target_cash_amount": 0,
-                    "cash_reason_code": "cash_buffer",
-                    "one_line_portfolio_reason": "self-test",
-                }
         else:
             payload = {"ok": True, "argv": sys.argv[1:]}
     output_path.write_text(json.dumps(payload), encoding="utf-8")

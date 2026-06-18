@@ -125,11 +125,6 @@ Return JSON:
   "persona": "mid-term",
   "stage": "second-verdict",
   "human_markdown_path": "reports/runs/<run_id>/verdicts/second-verdict--<agent_role>--<task_name>.md",
-  "portfolio": {
-    "target_cash_amount": 0,
-    "cash_reason_code": "cash_buffer",
-    "one_line_portfolio_reason": ""
-  },
   "symbols": [
     {
       "symbol_id": "",
@@ -158,11 +153,11 @@ Rules:
 
 Validation by Main agent:
 
-- Use the single valid `judge-midterm` target quantities and target cash as the canonical `verdict-second.json` target.
+- Use the single valid `judge-midterm` target quantities as the canonical `verdict-second.json` target.
 - If the valid judge result is missing for a symbol, set no final target and exclude it from orders.
-- Validate target holdings plus target cash against the latest available account/order gate using immutable price snapshot valuations.
+- Validate target holdings against total assets and the latest available account/order gate using immutable price snapshot valuations.
 - If targets exceed assets, reduce only buy-side quantities in reverse relative-attractiveness order. Do not increase sell targets.
-- If targets are below assets, add the unexplained remainder to final target cash. Do not increase quantities merely to spend cash.
+- If targets are below assets, leave the remainder as residual cash. Do not create, report, or optimize toward a target cash value.
 - Preserve total-asset/cash, duplicate exposure, high-price concentration, active order, same-day repeat, and market open gates.
 - Apply latest account constraints after target validation.
 

@@ -93,9 +93,9 @@ Wrapper JSON includes `token_usage`, `token_usage_event_count`, optional `rate_l
 | `decision-brief.json` | Main | compact verdict input from price/chart, account, and optional summaries |
 | `verdict-inputs/*.json` | Launcher | non-canonical lossless per-task `verdict-core` and first-verdict selected-symbol slices |
 | `verdict-first.json` | Main | compact first verdict responses, sidecar paths, raw score averages, confidence-adjusted final scores |
-| `verdict-second.json` | Main | single `judge-midterm` response, sidecar path, validated target quantities, target cash, and compact reasons |
+| `verdict-second.json` | Main | single `judge-midterm` response, sidecar path, validated target quantities, and compact reasons |
 | `account-before-order.json` | Main | sanitized latest account snapshot, active pending/reserved orders, or skipped envelope |
-| `execution.json` | Main | active-order adjustment decisions, quantity math, blocked/submitted/skipped/failed order results |
+| `execution.json` | Main | active-order adjustment decisions, quantity math, latest available cash, blocked/submitted/skipped/failed order results |
 
 Financial/news/market-status absence alone must not fail validation, lower eligibility, or block verdict/order flow.
 

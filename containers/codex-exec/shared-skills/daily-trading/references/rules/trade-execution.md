@@ -116,14 +116,14 @@ Same-day fills are account evidence only; they do not change the quantity formul
 - Record same-day buy and sell fills per symbol in both account snapshots.
 - Current live holdings already include same-day fills, so never subtract same-day filled quantity again.
 
-## Cash Decision
+## Cash Availability
 
-- `verdict-second.json` supplies the validated target cash amount from the single `judge-midterm` result.
-- There is no fixed minimum cash ratio, maximum cash ratio, or fixed investment ratio.
-- Validated target quantities plus target cash must not exceed the initial account total assets. Any unexplained remainder is target cash, not an automatic buy budget.
+- `verdict-second.json` supplies target quantities only. It does not supply a target cash amount, cash ratio, or cash judgment code.
+- Validated target quantities must not exceed the initial account total assets.
+- If validated target quantities are below assets, the remainder is residual cash, not an automatic buy budget and not a reported target.
 - Buy orders cannot exceed the latest order-available amount after active pending/reserved buys.
 - Expected proceeds from unfilled sells are not available buy cash.
-- If latest account cash is lower than the target or constraints require more cash, reduce or block buys; do not silently increase sells beyond target quantities.
+- If buy candidates exceed available cash or account constraints, reduce or block buys in reverse relative-attractiveness order; do not silently increase sells beyond target quantities.
 
 ## Order Constraints
 
@@ -158,7 +158,7 @@ Missing, partial, failed, skipped, or no-data financial/news/market-status evide
 3. Do not count unfilled sell proceeds as buy cash.
 4. Submit orders sequentially and apply the order API backoff rules at each call site.
 5. A failed or blocked order does not transfer its quantity or budget to another symbol in the same run.
-6. Do not run routine verification lookups after accepted submissions. If a submission result is uncertain because of timeout or transport ambiguity, use the minimum read-only lookup needed to prove whether that specific order was accepted before retrying or marking it failed.
+6. Treat accepted submission responses as the execution result without narrating routine verification lookups. If a submission result is uncertain because of timeout or transport ambiguity, use the minimum read-only lookup needed to prove whether that specific order was accepted before retrying or marking it failed.
 
 ## Execution JSON Fields
 
@@ -168,7 +168,6 @@ Missing, partial, failed, skipped, or no-data financial/news/market-status evide
 {
   "symbols": [],
   "request_type": "analysis | prepare | demo-submit | real-submit",
-  "target_cash_amount": 0,
   "latest_available_cash": 0,
   "order_adjustments": [
     {
