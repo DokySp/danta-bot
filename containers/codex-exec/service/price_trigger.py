@@ -114,7 +114,7 @@ def parse_price_trigger_config(path: Path, state_dir: Path) -> TriggerConfig:
 
     return TriggerConfig(
         enabled=data.get("enabled", True) is not False,
-        poll_seconds=max(10, int(data.get("poll_seconds", 60))),
+        poll_seconds=max(60, int(data.get("poll_seconds", 60))),
         cache_file=Path(data.get("cache_file") or state_dir / "price-triggers.json"),
         triggers=triggers,
     )
@@ -182,6 +182,15 @@ class PriceTriggerWatcher:
         state: dict[str, Any],
     ) -> bool:
         now = datetime.now().astimezone().isoformat(timespec="seconds")
+        if quote.value <= 0:
+            logging.warning(
+                "ignored non-positive price trigger quote id=%s value=%s observed_at=%s",
+                trigger.trigger_id,
+                quote.value,
+                quote.observed_at,
+            )
+            return False
+
         reference = parse_float(state.get("reference_value"))
         if reference is None or reference <= 0:
             state.update(
