@@ -31,6 +31,21 @@ Token budget rule: load only the reference needed for the current stage. Do not 
 
 Use `scripts/run_subagent.py` for every collection and verdict sub-agent. The launcher enforces collection sub-agents with `gpt-5.4-mini` and `model_reasoning_effort=low`, `first-verdict` sub-agents with `gpt-5.5` and `model_reasoning_effort=medium`, and `second-verdict` sub-agents with `gpt-5.5` and `model_reasoning_effort=medium`. It writes `subagents/<task_name>.wrapper.json`, raw output when retained, token usage metadata, and verdict input slices when compact verdict specs are used. It treats financial/news/market-status text stages as optional group failures. Do not use `multi_agent_v1.spawn_agent` for daily-trading stage delegation.
 
+Treat the launcher as a verified command interface, not as context to reread on every run. After install or launcher changes, validate it with:
+
+```text
+python3 <daily-trading-skill>/scripts/run_subagent.py self-test
+```
+
+Routine verdict execution should only create compact spec JSON files and call:
+
+```text
+python3 <daily-trading-skill>/scripts/run_subagent.py run-group --spec reports/runs/<run_id>/first-verdict-specs.json --max-workers 3
+python3 <daily-trading-skill>/scripts/run_subagent.py run-one --spec reports/runs/<run_id>/second-verdict-spec.json
+```
+
+Do not open or paste `scripts/run_subagent.py`, persona files, or `references/rules/*.md` in full merely to execute these stages. Read a specific rule file only when the current stage's safety gate or schema is genuinely ambiguous. The installed skill path may differ between host and container environments; resolve the actual installed path and do not treat a path mismatch as a skill failure.
+
 For verdict stages, use compact specs with `artifact_paths` and `symbol_ids`; do not include `prompt`. The launcher builds the standard prompt from those fields and writes per-task lossless `verdict-inputs/` slices containing only the listed symbols. It derives `verdict-core` from `decision-brief.json` and derives a selected-symbol first-verdict slice from `verdict-first.json` for `second-verdict`.
 
 Supported sub-agent stages:

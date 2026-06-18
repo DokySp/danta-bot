@@ -4,6 +4,8 @@
 
 Sub-agent 모델과 effort는 `scripts/run_subagent.py`가 `codex exec` 명령으로 지정한다.
 
+`Main agent`는 routine 실행에서 `scripts/run_subagent.py`, persona 파일, rule 문서 전문을 다시 읽지 않는다. 설치 또는 launcher 변경 후에는 `python3 <daily-trading-skill>/scripts/run_subagent.py self-test`로 검증하고, 평결 단계에서는 compact spec JSON을 만든 뒤 검증된 `run-group`/`run-one` 명령만 호출한다. 실행 후에는 `subagents/*.wrapper.json`과 canonical artifact만 읽어 병합, 주문 gate, 보고서를 처리한다.
+
 ## 용어 규칙
 
 | 개념 | 표준 표기 |
