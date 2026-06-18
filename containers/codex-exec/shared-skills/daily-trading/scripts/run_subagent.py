@@ -41,6 +41,11 @@ MARKET_STATUS_TEXT_OUTPUT_STAGES = {"market-status-collection"}
 TEXT_OUTPUT_STAGES = FINANCIAL_PATH_OUTPUT_STAGES | NEWS_PATH_OUTPUT_STAGES | MARKET_STATUS_TEXT_OUTPUT_STAGES
 OPTIONAL_GROUP_FAILURE_STAGES = TEXT_OUTPUT_STAGES
 VERDICT_STAGES = {"first-verdict", "second-verdict"}
+SELECTED_FIRST_VERDICT_ROLES = {
+    "analyst-quality-value",
+    "analyst-momentum-cycle",
+    "analyst-risk-allocation",
+}
 MAX_BLANK_LINES = 1
 RAW_RETENTION_VALUES = {"always", "failed", "never"}
 TOKEN_USAGE_FIELDS = (
@@ -435,7 +440,12 @@ def launcher_model_effort(stage: str, agent_role: str) -> tuple[str, str]:
 
     if role_key in {"financial", "news", "market-status"} or stage_key in COLLECTION_STAGES:
         return COLLECTION_SUBAGENT_MODEL, COLLECTION_SUBAGENT_REASONING_EFFORT
-    if role_key in {"analyst", "juror"} or role_key.startswith(("analyst-", "juror-")) or stage_key == "first-verdict":
+    if stage_key == "first-verdict":
+        if role_key in SELECTED_FIRST_VERDICT_ROLES:
+            return FIRST_VERDICT_SUBAGENT_MODEL, FIRST_VERDICT_SUBAGENT_REASONING_EFFORT
+        selected = ", ".join(sorted(SELECTED_FIRST_VERDICT_ROLES))
+        raise ValueError(f"first-verdict agent_role must be one of: {selected}")
+    if role_key in {"juror"} or role_key.startswith("juror-"):
         return FIRST_VERDICT_SUBAGENT_MODEL, FIRST_VERDICT_SUBAGENT_REASONING_EFFORT
     if role_key == "judge" or role_key.startswith("judge-") or stage_key == "second-verdict":
         return SECOND_VERDICT_SUBAGENT_MODEL, SECOND_VERDICT_SUBAGENT_REASONING_EFFORT
@@ -480,13 +490,7 @@ def assert_all_supported_stages_use_expected_models() -> None:
         ),
         (
             "first-verdict",
-            "analyst",
-            FIRST_VERDICT_SUBAGENT_MODEL,
-            FIRST_VERDICT_SUBAGENT_REASONING_EFFORT,
-        ),
-        (
-            "first-verdict",
-            "analyst-jpmorgan",
+            "analyst-momentum-cycle",
             FIRST_VERDICT_SUBAGENT_MODEL,
             FIRST_VERDICT_SUBAGENT_REASONING_EFFORT,
         ),
@@ -524,8 +528,10 @@ def validate_spec(spec: dict[str, Any]) -> None:
             raise ValueError("compact verdict spec requires symbol_ids")
     agent_role = safe_name(str(spec.get("agent_role", ""))).lower()
     task_name = safe_name(str(spec.get("task_name", ""))).lower()
-    if stage == "first-verdict" and ("analyst-statestreet" in agent_role or "analyst-statestreet" in task_name):
-        raise ValueError("analyst-statestreet is no longer a selected first-verdict persona")
+    if stage == "first-verdict":
+        if agent_role not in SELECTED_FIRST_VERDICT_ROLES:
+            selected = ", ".join(sorted(SELECTED_FIRST_VERDICT_ROLES))
+            raise ValueError(f"first-verdict agent_role must be one of: {selected}")
     if stage == "second-verdict" and ("judge-longterm" in agent_role or "judge-longterm" in task_name):
         raise ValueError("judge-longterm is no longer a selected second-verdict judge")
     if stage == "second-verdict" and agent_role == "judge-midterm":
@@ -1048,7 +1054,7 @@ def compact_spec(tmp: Path, *, stage: str, agent_role: str, task_name: str) -> d
     payload["artifact_paths"] = {
         "decision_brief": str(tmp / "reports" / "runs" / "self-test" / "decision-brief.json"),
         "verdict_first": str(tmp / "reports" / "runs" / "self-test" / "verdict-first.json"),
-        "persona": "references/personas/analyst-jpmorgan.md",
+        "persona": "references/personas/analyst-momentum-cycle.md",
         "verdict_format": "references/rules/verdict-format.md",
     }
     payload["symbol_ids"] = ["005930", {"symbol_id": "000660"}, "005930"]
@@ -1110,7 +1116,7 @@ def write_sample_verdict_inputs(tmp: Path) -> None:
                     "score": 7,
                     "agent_scores": [
                         {
-                            "agent_role": "analyst-blackrock",
+                            "agent_role": "analyst-risk-allocation",
                             "score": 7,
                             "confidence": 6,
                             "one_line_reason": "full reason should remain",
@@ -1134,16 +1140,16 @@ def assert_prompt_compaction() -> None:
 
 
 def assert_compact_verdict_prompt(tmp: Path) -> None:
-    prompt = build_prompt(compact_spec(tmp, stage="first-verdict", agent_role="analyst-jpmorgan", task_name="first"))
+    prompt = build_prompt(compact_spec(tmp, stage="first-verdict", agent_role="analyst-momentum-cycle", task_name="first"))
     required_parts = [
         "stage: first-verdict",
-        "agent_role: analyst-jpmorgan",
+        "agent_role: analyst-momentum-cycle",
         "You may use read-only local shell commands such as cat and jq only for the explicitly listed files.",
         "Do not call KIS, MCP, web, network, account/order APIs, or external data sources.",
         "Do not write files, create Markdown, emit diffs, or wrap output in code fences.",
         "Read only the listed symbol_ids from artifact files; do not load unrelated symbols, raw cache files, secrets, or unlisted paths.",
         "decision_brief:",
-        "persona: references/personas/analyst-jpmorgan.md",
+        "persona: references/personas/analyst-momentum-cycle.md",
         "verdict_format: references/rules/verdict-format.md",
         "symbol_ids: 005930,000660",
         "Return JSON only",
@@ -1249,12 +1255,12 @@ def run_self_test() -> int:
                 assert_compact_verdict_prompt(tmp)
                 assert_verdict_input_slices(tmp)
                 missing_brief = compact_spec(
-                    tmp, stage="first-verdict", agent_role="analyst-jpmorgan", task_name="missing-brief"
+                    tmp, stage="first-verdict", agent_role="analyst-momentum-cycle", task_name="missing-brief"
                 )
                 missing_brief["artifact_paths"].pop("decision_brief")
                 assert_invalid_spec(missing_brief, "artifact_paths.decision_brief")
                 missing_symbols = compact_spec(
-                    tmp, stage="first-verdict", agent_role="analyst-jpmorgan", task_name="missing-symbols"
+                    tmp, stage="first-verdict", agent_role="analyst-momentum-cycle", task_name="missing-symbols"
                 )
                 missing_symbols["symbol_ids"] = []
                 assert_invalid_spec(missing_symbols, "symbol_ids")
@@ -1270,19 +1276,10 @@ def run_self_test() -> int:
                     compact_spec(
                         tmp,
                         stage="first-verdict",
-                        agent_role="analyst-statestreet",
-                        task_name="analyst-statestreet",
+                        agent_role="analyst-random",
+                        task_name="analyst-random",
                     ),
-                    "analyst-statestreet",
-                )
-                assert_invalid_spec(
-                    compact_spec(
-                        tmp,
-                        stage="first-verdict",
-                        agent_role="analyst",
-                        task_name="analyst-statestreet-retry1",
-                    ),
-                    "analyst-statestreet",
+                    "first-verdict agent_role must be one of",
                 )
                 assert_invalid_spec(
                     compact_spec(
@@ -1369,7 +1366,7 @@ def run_self_test() -> int:
                 if not any(error.get("code") == "invalid_compact_verdict_schema" for error in invalid_second_errors):
                     raise AssertionError(f"invalid compact second-verdict schema was accepted: {invalid_second_errors}")
                 raw_with_artifacts = compact_spec(
-                    tmp, stage="first-verdict", agent_role="analyst-jpmorgan", task_name="raw-with-artifacts"
+                    tmp, stage="first-verdict", agent_role="analyst-momentum-cycle", task_name="raw-with-artifacts"
                 )
                 raw_with_artifacts["prompt"] = '{"return":"json only"}'
                 assert_invalid_spec(raw_with_artifacts, "raw prompt fallback is forbidden")
@@ -1383,7 +1380,7 @@ def run_self_test() -> int:
                     COLLECTION_SUBAGENT_REASONING_EFFORT,
                 ),
                 (
-                    compact_spec(tmp, stage="first-verdict", agent_role="analyst", task_name="first"),
+                    compact_spec(tmp, stage="first-verdict", agent_role="analyst-quality-value", task_name="first"),
                     FIRST_VERDICT_SUBAGENT_MODEL,
                     FIRST_VERDICT_SUBAGENT_REASONING_EFFORT,
                 ),
@@ -1405,7 +1402,7 @@ def run_self_test() -> int:
                     failures.append(str(exc))
 
             compact_wrapper = run_one(
-                compact_spec(tmp, stage="first-verdict", agent_role="analyst-jpmorgan", task_name="compact-first")
+                compact_spec(tmp, stage="first-verdict", agent_role="analyst-momentum-cycle", task_name="compact-first")
             )
             if compact_wrapper["status"] != "success" or compact_wrapper.get("prompt_mode") != "compact_verdict":
                 failures.append(f"compact verdict spec returned unexpected wrapper: {compact_wrapper}")
@@ -1413,7 +1410,7 @@ def run_self_test() -> int:
                 failures.append(f"compact verdict spec did not create decision brief slice: {compact_wrapper}")
 
             reuse_spec = compact_spec(
-                tmp, stage="first-verdict", agent_role="analyst-jpmorgan", task_name="reuse-first"
+                tmp, stage="first-verdict", agent_role="analyst-momentum-cycle", task_name="reuse-first"
             )
             first_reuse_wrapper = run_one(reuse_spec)
             argv_before = len(argv_log.read_text(encoding="utf-8").splitlines())
@@ -1445,7 +1442,7 @@ def run_self_test() -> int:
             old_raw_retention = os.environ.get("CODEX_SUBAGENT_RAW_RETENTION")
             os.environ["CODEX_SUBAGENT_RAW_RETENTION"] = "failed"
             retained_wrapper = run_one(
-                compact_spec(tmp, stage="first-verdict", agent_role="analyst-jpmorgan", task_name="raw-retention")
+                compact_spec(tmp, stage="first-verdict", agent_role="analyst-momentum-cycle", task_name="raw-retention")
             )
             if retained_wrapper.get("raw_output_retained") is not False:
                 failures.append(f"successful raw output was not pruned with failed retention: {retained_wrapper}")
@@ -1500,7 +1497,7 @@ def run_self_test() -> int:
             os.environ["FAKE_CODEX_EMPTY_TASKS"] = "required-first"
             required_group = run_group(
                 [
-                    compact_spec(tmp, stage="first-verdict", agent_role="analyst", task_name="required-first"),
+                    compact_spec(tmp, stage="first-verdict", agent_role="analyst-quality-value", task_name="required-first"),
                     spec(tmp, stage="news-collection", agent_role="news", task_name="required-news"),
                 ],
                 max_workers=2,

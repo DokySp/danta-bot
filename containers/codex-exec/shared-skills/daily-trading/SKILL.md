@@ -1,6 +1,6 @@
 ---
 name: daily-trading
-description: "[v20260611-02] KIS MCP 기반 한국 주식·ETF 포트폴리오를 one-pass로 수집하고, compact `decision-brief.json`을 재사용해 4개 관점 `first-verdict`, 단일 `judge-midterm` `second-verdict`, 계좌/주문 gate를 수행한다. 가격·계좌·주문 gate는 보존하고 재무·뉴스·market-status는 optional-best-effort로 다룬다."
+description: "[v20260611-02] KIS MCP 기반 한국 주식·ETF 포트폴리오를 one-pass로 수집하고, compact `decision-brief.json`을 재사용해 3개 판단 축 `first-verdict`, 단일 `judge-midterm` `second-verdict`, 계좌/주문 gate를 수행한다. 가격·계좌·주문 gate는 보존하고 재무·뉴스·market-status는 optional-best-effort로 다룬다."
 ---
 
 # Daily Trading Portfolio Orchestrator
@@ -38,7 +38,7 @@ Supported sub-agent stages:
 - `financial-collection`: `$collect-financial-information`; text output is a cache path or fixed missing-cache message. Skip this sub-agent when a valid same-date cache for the full symbol universe is already available.
 - `news-collection`: `$collect-news-information`; text output is a cache path or fixed missing-cache message. Skip this sub-agent when a valid same-date cache for the full symbol universe is already available.
 - `market-status-collection`: `$get-market-status`; text output is concise Markdown for S&P 500, Nasdaq, Dow, KOSPI, and KOSDAQ.
-- `first-verdict`: selected four personas: `analyst-blackrock`, `analyst-fidelity`, `analyst-jpmorgan`, `analyst-morganstanley`. `analyst-fidelity` also carries the former quality/value/momentum/low-volatility factor checks from `analyst-statestreet`.
+- `first-verdict`: selected three functional personas: `analyst-quality-value`, `analyst-momentum-cycle`, `analyst-risk-allocation`.
 - `second-verdict`: `judge-midterm` only. Retry the failed `judge-midterm` task at most two times when the required output is missing or unusable.
 
 ## Run Identity
@@ -77,7 +77,7 @@ Verdict sub-agents:
 3. Main agent collects required price/chart evidence once and writes `price-chart.json`.
 4. Reuse valid same-date financial/news caches when they cover the full symbol universe; otherwise run missing optional `financial`, `news`, and `market-status` collection in parallel through the launcher and record the cache miss or universe mismatch reason.
 5. Merge required price/chart and account evidence plus short optional summaries into compact `decision-brief.json`.
-6. Run the selected four `first-verdict` personas in parallel with launcher-created `verdict-core` inputs. Main agent may reduce `symbol_ids` and merge prior valid verdict rows only when it can prove price, holdings, news, and active-order status are stable; otherwise rerun the symbol. Always re-evaluate sell/stop-loss candidates, same-day fills, price shocks, new news, active orders, and score-boundary cases. Launcher automatic wrapper reuse is limited to the same spec fingerprint. The Main agent creates human-review sidecars from parsed JSON.
+6. Run the selected three `first-verdict` functional personas in parallel with launcher-created `verdict-core` inputs. Main agent may reduce `symbol_ids` and merge prior valid verdict rows only when it can prove price, holdings, news, and active-order status are stable; otherwise rerun the symbol. Always re-evaluate sell/stop-loss candidates, same-day fills, price shocks, new news, active orders, and score-boundary cases. Launcher automatic wrapper reuse is limited to the same spec fingerprint. The Main agent creates human-review sidecars from parsed JSON.
 7. Build `second-verdict` set from eligible symbols with `final_first_score >= 7` plus eligible `holding` symbols from `$check-portfolio`, then run only `judge-midterm` with a selected-symbol first-verdict slice and at most two retries for the failed task only. Use the single valid judge target as the canonical target after deterministic validation.
 8. Refresh account state before orders, validate the single target set, reconcile active pending/reserved orders, apply `trade-execution.md` gates, and submit only explicitly authorized adjustments or orders.
 9. Write `execution.json`, final report, and final `run.json` status.

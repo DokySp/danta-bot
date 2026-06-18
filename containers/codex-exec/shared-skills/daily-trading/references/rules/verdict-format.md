@@ -56,7 +56,11 @@ Verdict sub-agents receive launcher-created lossless `verdict-inputs/` slices co
 
 ## `first-verdict`
 
-Selected four first-verdict personas independently score every eligible symbol: `analyst-blackrock`, `analyst-fidelity`, `analyst-jpmorgan`, and `analyst-morganstanley`. `analyst-fidelity` includes quality, value, momentum, and low-volatility factor checks formerly covered by `analyst-statestreet`.
+Selected three first-verdict functional personas independently score every eligible symbol: `analyst-quality-value`, `analyst-momentum-cycle`, and `analyst-risk-allocation`.
+
+- `analyst-quality-value` covers financial stability, earnings growth, valuation, and quality/value factors.
+- `analyst-momentum-cycle` covers price trend, supply/demand, sector cycle, macro sensitivity, theme/event momentum, and earnings momentum.
+- `analyst-risk-allocation` covers volatility, liquidity, stop-loss room, duplicate ETF/index exposure, concentration, and portfolio fit.
 
 Score scale:
 
