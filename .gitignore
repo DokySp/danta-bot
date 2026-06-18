@@ -92,6 +92,9 @@ htmlcov/
 .coverage
 .coverage.*
 memory/
+!containers/telegram-gateway/memory/
+containers/telegram-gateway/memory/*
+!containers/telegram-gateway/memory/.gitkeep
 nosetests.xml
 coverage.xml
 *.cover

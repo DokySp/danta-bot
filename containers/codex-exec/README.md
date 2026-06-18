@@ -130,12 +130,16 @@ schedules:
   - id: weekday-open
     enabled: true
     cron: "0 9 * * 1-5"
+    model: gpt-5.4-mini
+    model_reasoning_effort: low
     route: v2
     message: |
       오늘 장 시작 전 점검을 수행해줘.
 ```
 
 스케줄 작업은 채팅 기본 세션과 독립된 one-off Codex 실행으로 처리됩니다.
+스케줄 항목의 `model`과 `model_reasoning_effort`는 선택 사항입니다. 생략하면 `CODEX_MODEL`과
+`CODEX_REASONING_EFFORT` 전역 값을 사용하고, 지정하면 해당 스케줄 실행에만 적용됩니다.
 스케줄러는 매 tick마다 `SCHEDULE_FILE`을 다시 읽습니다. `$trading-schedule-toggle` 스킬은
 `/app/config/schedules.yaml`의 `daily-{number}` 항목만 on/off로 수정하며, 수정 결과는 컨테이너
 재시작 없이 다음 scheduler tick부터 반영됩니다.

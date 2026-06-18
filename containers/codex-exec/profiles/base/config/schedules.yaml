@@ -2,6 +2,8 @@ schedules:
   - id: collect-financial-information
     enabled: true
     cron: "0 6 * * 1-5"
+    model: gpt-5.4-mini
+    model_reasoning_effort: low
     message: |
       $check-portfolio로 recommended, specified, holding, universe JSON을 확인하고, check-portfolio의 universe 전체 종목을 대상으로
       $collect-financial-information 수행하고 그 결과를 출력해줘.
@@ -9,6 +11,8 @@ schedules:
   - id: trading-toggle
     enabled: true
     cron: "0 8 * * 1-5"
+    model: gpt-5.4-mini
+    model_reasoning_effort: low
     message: |
       $check-holiday 스킬을 통해서 휴장일인지 확인하고, $trading-schedule-toggle 을 통해 휴장일이 아닌 경우 daily 스케줄을 활성화, 휴장일인 경우 daily 스케줄을 비활성화해줘.
 

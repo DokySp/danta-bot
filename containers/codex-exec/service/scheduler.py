@@ -107,17 +107,39 @@ class Scheduler:
             if key in self.last_run_keys:
                 continue
             if cron_matches(cron, now):
+                model = optional_schedule_text(item.get("model"))
+                reasoning_effort = optional_schedule_text(item.get("model_reasoning_effort"))
                 self.last_run_keys.add(key)
                 thread = threading.Thread(
                     target=self._run_job,
-                    args=(job_id, message, item.get("chat_id"), item.get("route")),
+                    args=(
+                        job_id,
+                        message,
+                        item.get("chat_id"),
+                        item.get("route"),
+                        model,
+                        reasoning_effort,
+                    ),
                     name=f"schedule-{job_id}",
                     daemon=True,
                 )
                 thread.start()
 
-    def _run_job(self, job_id: str, message: str, chat_id: Any, route: Any) -> None:
-        logging.info("running scheduled job id=%s", job_id)
+    def _run_job(
+        self,
+        job_id: str,
+        message: str,
+        chat_id: Any,
+        route: Any,
+        model: str | None,
+        reasoning_effort: str | None,
+    ) -> None:
+        logging.info(
+            "running scheduled job id=%s model=%s reasoning_effort=%s",
+            job_id,
+            model or self.config.model,
+            reasoning_effort or self.config.reasoning_effort,
+        )
         chat_id_text = str(chat_id) if chat_id else None
         route_text = str(route) if route else None
         try:
@@ -130,6 +152,8 @@ class Scheduler:
                 output = self.runner.run_once(
                     message,
                     daily_trading_hint=is_daily_trading_schedule(job_id),
+                    model=model,
+                    reasoning_effort=reasoning_effort,
                 )
             self.gateway.send_message(output, chat_id_text, route_text)
         except Exception as exc:  # noqa: BLE001 - report schedule failures to Telegram
@@ -147,3 +171,10 @@ class Scheduler:
                 chat_id_text,
                 route_text,
             )
+
+
+def optional_schedule_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None

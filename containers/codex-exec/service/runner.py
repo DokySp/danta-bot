@@ -172,8 +172,20 @@ class CodexRunner:
     def run_resume(self, session_id: str, prompt: str) -> str:
         return self._run_codex(["exec", "resume", session_id], prompt)
 
-    def run_once(self, prompt: str, daily_trading_hint: bool = False) -> str:
-        return self._run_codex(["exec"], prompt, daily_trading_hint=daily_trading_hint)
+    def run_once(
+        self,
+        prompt: str,
+        daily_trading_hint: bool = False,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> str:
+        return self._run_codex(
+            ["exec"],
+            prompt,
+            daily_trading_hint=daily_trading_hint,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
 
     def run_usage(self) -> str:
         if not self.config.usage_script.exists():
@@ -224,12 +236,16 @@ class CodexRunner:
         subcommand: list[str],
         prompt: str,
         daily_trading_hint: bool = False,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> str:
         context = new_codex_run_context()
         output_file = self.tmp_dir / f"{context.run_id}.txt"
         daily_trading_hint = daily_trading_hint or is_explicit_daily_trading_request(prompt)
         full_prompt = self._build_prompt(prompt, context, daily_trading_hint)
         usage_before = self._read_usage_snapshot()
+        model_value = model or self.config.model
+        reasoning_effort_value = reasoning_effort or self.config.reasoning_effort
 
         cmd = [
             self.config.codex_bin,
@@ -237,9 +253,9 @@ class CodexRunner:
             "--json",
             *subcommand[1:],
             "-m",
-            self.config.model,
+            model_value,
             "-c",
-            f'model_reasoning_effort="{self.config.reasoning_effort}"',
+            f'model_reasoning_effort="{reasoning_effort_value}"',
             "--skip-git-repo-check",
             "-o",
             str(output_file),

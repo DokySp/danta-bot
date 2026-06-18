@@ -142,7 +142,7 @@ def main() -> int:
             print_output(result, args.json)
             return 2
         if not args.dry_run:
-            atomic_write_text(schedule_file, "".join(lines))
+            write_text_in_place(schedule_file, "".join(lines))
         print_output(result, args.json)
         return 0
     except Exception as exc:  # noqa: BLE001 - CLI boundary
@@ -151,18 +151,10 @@ def main() -> int:
         return 1
 
 
-def atomic_write_text(path: Path, text: str) -> None:
-    tmp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
-    try:
-        mode = path.stat().st_mode
-        tmp_path.write_text(text, encoding="utf-8")
-        os.chmod(tmp_path, mode)
-        os.replace(tmp_path, path)
-    finally:
-        try:
-            tmp_path.unlink()
-        except FileNotFoundError:
-            pass
+def write_text_in_place(path: Path, text: str) -> None:
+    mode = path.stat().st_mode
+    path.write_text(text, encoding="utf-8")
+    os.chmod(path, mode)
 
 
 def print_output(result: dict[str, object], as_json: bool) -> None:

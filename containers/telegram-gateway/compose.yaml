@@ -14,7 +14,7 @@ services:
       - "127.0.0.1:8088:8080"
     volumes:
       - ./config:/app/config:ro
-      - ../../memory:/workspace/memory:rw
+      - ./memory:/workspace/memory:rw
     restart: unless-stopped
 
 networks:

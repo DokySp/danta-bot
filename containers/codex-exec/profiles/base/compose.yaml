@@ -15,7 +15,7 @@ services:
       - codex-home:/codex-home
       - codex-state:/state
       - ./config:/app/config:rw
-      - ../../:/workspace
+      - ./:/workspace
 
 volumes:
   codex-home:
