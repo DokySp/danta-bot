@@ -73,7 +73,7 @@ env_file:
 
 프로필 Compose는 `./config`를 `/app/config`로 writable bind mount합니다. 따라서 호스트의
 `containers/codex-exec/profiles/<name>/config/schedules.yaml`, `portfolio.txt`,
-`price-triggers.yaml`, `default-trade-prompt`를 수정하면 컨테이너 안의 `/app/config`에도 즉시 보이고, 다음 Codex 실행이나
+`touch-points.yaml`, `default-trade-prompt`를 수정하면 컨테이너 안의 `/app/config`에도 즉시 보이고, 다음 Codex 실행이나
 스케줄러 tick부터 새 내용이 사용됩니다. `codex-exec.env`처럼 프로세스 환경변수로 주입되는 값은
 컨테이너 시작 시점에만 읽히므로 변경 후 Compose 재생성이 필요합니다. 컨테이너 안의 Codex 스킬이
 config를 수정하려면 호스트 config 파일과 디렉터리가 컨테이너 실행 UID 1000에 쓰기 가능해야 합니다.
@@ -146,21 +146,25 @@ schedules:
 
 ## Price Triggers
 
-`PRICE_TRIGGER_FILE`은 기본적으로 `/app/config/price-triggers.yaml`입니다. base 프로필은 KIS
+`PRICE_TRIGGER_FILE`은 기본적으로 `/app/config/touch-points.yaml`입니다. base 프로필은 KIS
 국내업종 현재지수 API(`/uapi/domestic-stock/v1/quotations/inquire-index-price`,
 `tr_id=FHPUP02100000`)의 KOSPI(`FID_COND_MRKT_DIV_CODE=U`, `FID_INPUT_ISCD=0001`)만 감시하며,
-각 case의 기준값 대비 설정된 임계치에 닿으면 Telegram 알림만 보냅니다. 이 알림은 Codex 실행을
+각 case의 기준값 대비 설정된 임계치에 닿으면 터치 이벤트를 기록하고, `send_telegram`이 켜진 case만
+Telegram 알림을 보냅니다. 이 알림은 Codex 실행을
 호출하지 않습니다. 각 case는 서로 다른 `id`를 사용하므로 같은 cache file 안에서도 기준값이
 case별로 따로 저장됩니다.
 
 ```yaml
 enabled: true
 poll_seconds: 60
-cache_file: /state/price-triggers/kospi.json
+cache_file: /state/touch-points/triggers.json
+quote_history_file: /state/touch-points/quote-history.jsonl
+touch_log_file: /state/touch-points/touch-events.jsonl
 
-triggers:
+touch_points:
   - id: kospi-case-1
     enabled: true
+    send_telegram: false
     case_title: "case 1 - 기본 민감도"
     name: KOSPI
     symbol: KOSPI
@@ -172,8 +176,21 @@ triggers:
 기본 case는 `case 1 - 기본 민감도`(`+1.0%`, `-1.0%`), `case 2 - 하락 민감형`(`+1.5%`,
 `-0.8%`), `case 3 - 상승 추세 확인형`(`+1.2%`, `-1.8%`), `case 4 - 저소음형`(`+2.0%`,
 `-2.0%`), `case 5 - 급락 감지형`(`+2.0%`, `-1.2%`), `case 6 - 강한 리스크 경보`(`+3.0%`,
-`-2.0%`)입니다.
+`-2.0%`), `case 7 - 테스트 후보 1`(`+1.2%`, `-1.2%`)입니다.
 
 처음 관측한 값은 알림 없이 캐시 기준값으로 저장됩니다. 이후 관측값이 기준값 대비 임계치에 닿으면
 `case N - 제목`이 최상단에 포함된 `가격 조건 터치` Telegram 메시지를 보내고, 그 터치값을 해당
 case의 새 기준값으로 캐시합니다.
+각 case의 `send_telegram`으로 Telegram 메시지 발송 여부를 따로 제어합니다. `send_telegram: false`로
+설정하면 터치 이벤트와 기준값 갱신은 그대로 수행하되 해당 case의 Telegram 메시지만 보내지 않습니다.
+
+각 poll에서 관측된 유효 지수값은 `quote_history_file`에 JSONL로 누적됩니다. 터치 이벤트는
+`touch_log_file`에 구조화 JSONL로 누적되어, `/show-touch-point {id}`가 이후 `case_title`이 바뀌어도
+같은 id의 터치 이벤트를 찾을 수 있습니다. 이 명령은 KIS 지표 차트 API와 codex-exec의 터치 이벤트 로그를 함께 읽어,
+해당 id가 사용하는 KIS 제공 30분봉 지표 캔들 차트 위에 알림 발생 지점을 표시합니다.
+명령 형식은 `/show-touch-point kospi-case-1`입니다. KIS 30분봉 조회는 과거 데이터 포함으로
+한 번만 수행하고, 반환된 최대 99개 캔들 범위를 전체 차트 범위로 사용합니다.
+KIS 30분봉 차트 조회가 실패하면 `quote_history_file`을 보조 시계열로 사용하고, 지표 시계열이 없으면 점만
+이어 그리지 않고 실패합니다.
+Telegram Bot API의 명령명 제약 때문에 메뉴에는 `show_touch_point`로 등록되지만, 실제 codex-exec
+명령은 `/show-touch-point kospi-case-1` 형식을 처리합니다.

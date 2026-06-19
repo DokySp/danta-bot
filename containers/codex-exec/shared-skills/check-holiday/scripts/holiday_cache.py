@@ -16,28 +16,15 @@ from typing import Any
 DATE_RE = re.compile(r"^[0-9]{8}$")
 
 
-def find_repo_root(start: Path | None = None) -> Path | None:
-    current = (start or Path.cwd()).resolve()
-    for candidate in (current, *current.parents):
-        if (candidate / ".git").exists():
-            return candidate
-    return None
-
-
 def memory_root() -> Path:
     configured = os.environ.get("DAILY_TRADING_MEMORY_DIR")
     if configured:
         return Path(configured).expanduser()
-    repo_root = find_repo_root()
-    if repo_root is not None:
-        return repo_root / "memory"
-    return Path.cwd() / "memory"
+    workspace_dir = os.environ.get("WORKSPACE_DIR", "/workspace")
+    return Path(workspace_dir).expanduser() / "memory"
 
 
 def cache_dir() -> Path:
-    configured = os.environ.get("CHECK_HOLIDAY_CACHE_DIR")
-    if configured:
-        return Path(configured).expanduser()
     return memory_root() / "check-holiday"
 
 

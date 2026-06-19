@@ -1,10 +1,13 @@
 enabled: true
 poll_seconds: 60
-cache_file: /state/price-triggers/kospi.json
+cache_file: /state/touch-points/triggers.json
+quote_history_file: /state/touch-points/quote-history.jsonl
+touch_log_file: /state/touch-points/touch-events.jsonl
 
-triggers:
+touch_points:
   - id: kospi-case-1
     enabled: true
+    send_telegram: false
     case_title: "case 1 - 기본 민감도"
     name: KOSPI
     symbol: KOSPI
@@ -14,6 +17,7 @@ triggers:
 
   - id: kospi-case-2
     enabled: true
+    send_telegram: false
     case_title: "case 2 - 하락 민감형"
     name: KOSPI
     symbol: KOSPI
@@ -23,6 +27,7 @@ triggers:
 
   - id: kospi-case-3
     enabled: true
+    send_telegram: false
     case_title: "case 3 - 상승 추세 확인형"
     name: KOSPI
     symbol: KOSPI
@@ -32,6 +37,7 @@ triggers:
 
   - id: kospi-case-4
     enabled: true
+    send_telegram: false
     case_title: "case 4 - 저소음형"
     name: KOSPI
     symbol: KOSPI
@@ -41,6 +47,7 @@ triggers:
 
   - id: kospi-case-5
     enabled: true
+    send_telegram: false
     case_title: "case 5 - 급락 감지형"
     name: KOSPI
     symbol: KOSPI
@@ -50,9 +57,20 @@ triggers:
 
   - id: kospi-case-6
     enabled: true
+    send_telegram: false
     case_title: "case 6 - 강한 리스크 경보"
     name: KOSPI
     symbol: KOSPI
     source: kis_domestic_index
     up_percent: 3.0
     down_percent: -2.0
+
+  - id: kospi-case-7
+    enabled: true
+    send_telegram: true
+    case_title: "case 7 - 테스트 후보 1"
+    name: KOSPI
+    symbol: KOSPI
+    source: kis_domestic_index
+    up_percent: 1.2
+    down_percent: -1.2

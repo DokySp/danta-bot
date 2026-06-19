@@ -85,7 +85,7 @@ class Config:
             workspace_dir=Path(os.getenv("WORKSPACE_DIR", "/workspace")),
             schedule_file=Path(os.getenv("SCHEDULE_FILE", "/app/config/schedules.yaml")),
             price_trigger_file=Path(
-                os.getenv("PRICE_TRIGGER_FILE", "/app/config/price-triggers.yaml")
+                os.getenv("PRICE_TRIGGER_FILE", "/app/config/touch-points.yaml")
             ),
             telegram_gateway_url=os.getenv(
                 "TELEGRAM_GATEWAY_URL",

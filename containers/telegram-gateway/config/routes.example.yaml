@@ -10,9 +10,9 @@ routes:
       - command: usage
         description: Codex 사용량 확인
         instruction: /usage
-      - command: kospi_touch_status
-        description: KOSPI 터치 상태 확인
-        instruction: /kospi_touch_status
+      - command: show_touch_point
+        description: 가격 터치 지점 그래프
+        instruction: /show-touch-point
       - command: add_portfolio_ticker
         description: 포트폴리오 종목 추가
         instruction: /add_portfolio_ticker
@@ -37,9 +37,6 @@ routes:
       - command: usage
         description: Codex 사용량 확인
         instruction: /usage
-      - command: kospi_touch_status
-        description: KOSPI 터치 상태 확인
-        instruction: /kospi_touch_status
       - command: add_portfolio_ticker
         description: 포트폴리오 종목 추가
         instruction: /add_portfolio_ticker

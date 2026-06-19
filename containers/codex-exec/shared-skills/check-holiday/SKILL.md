@@ -59,9 +59,8 @@ Decide whether the Korean domestic stock market is open for the queried date by 
 
 ## Cache Rules
 
-- Use `CHECK_HOLIDAY_CACHE_DIR` when set.
-- Otherwise use `DAILY_TRADING_MEMORY_DIR/check-holiday` when `DAILY_TRADING_MEMORY_DIR` is set.
-- Otherwise use `<repo>/memory/check-holiday` from a local repository checkout, or `./memory/check-holiday` from the current working directory.
+- Use only the docker runtime memory root: `DAILY_TRADING_MEMORY_DIR/check-holiday` when `DAILY_TRADING_MEMORY_DIR` is set.
+- Otherwise use `WORKSPACE_DIR/memory/check-holiday`; if `WORKSPACE_DIR` is unset, use `/workspace/memory/check-holiday`.
 - Cache files are keyed by date: `holiday-YYYYMMDD.json`.
 - A valid same-date cache result is authoritative for this skill; do not refresh it unless the user explicitly asks to ignore or clear the cache.
 

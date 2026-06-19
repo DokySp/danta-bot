@@ -41,6 +41,7 @@ class PriceTrigger:
     up_percent: float
     down_percent: float
     enabled: bool
+    send_telegram: bool
     chat_id: str | None
     route: str | None
 
@@ -50,6 +51,8 @@ class TriggerConfig:
     enabled: bool
     poll_seconds: int
     cache_file: Path
+    quote_history_file: Path
+    touch_log_file: Path
     triggers: list[PriceTrigger]
 
 
@@ -65,15 +68,16 @@ class Quote:
 
 def parse_price_trigger_config(path: Path, state_dir: Path) -> TriggerConfig:
     if not path.exists():
-        return TriggerConfig(False, 60, state_dir / "price-triggers.json", [])
+        cache_file = state_dir / "touch-points" / "triggers.json"
+        return TriggerConfig(False, 60, cache_file, quote_history_path(cache_file, None), touch_log_path(cache_file, None), [])
 
     data = yaml.safe_load(path.read_text()) or {}
     if not isinstance(data, dict):
         raise ValueError("price trigger file must contain a YAML object")
 
-    raw_triggers = data.get("triggers", [])
+    raw_triggers = data.get("touch_points", data.get("triggers", []))
     if not isinstance(raw_triggers, list):
-        raise ValueError("price trigger file must contain a triggers list")
+        raise ValueError("price trigger file must contain a touch_points list")
 
     defaults = data.get("telegram", {})
     if defaults is None:
@@ -107,15 +111,19 @@ def parse_price_trigger_config(path: Path, state_dir: Path) -> TriggerConfig:
                 up_percent=up_percent,
                 down_percent=down_percent,
                 enabled=item.get("enabled", True) is not False,
+                send_telegram=item.get("send_telegram", True) is not False,
                 chat_id=str(chat_id) if chat_id else None,
                 route=str(route) if route else None,
             )
         )
 
+    cache_file = Path(data.get("cache_file") or state_dir / "touch-points" / "triggers.json")
     return TriggerConfig(
         enabled=data.get("enabled", True) is not False,
         poll_seconds=max(60, int(data.get("poll_seconds", 60))),
-        cache_file=Path(data.get("cache_file") or state_dir / "price-triggers.json"),
+        cache_file=cache_file,
+        quote_history_file=quote_history_path(cache_file, data.get("quote_history_file")),
+        touch_log_file=touch_log_path(cache_file, data.get("touch_log_file")),
         triggers=triggers,
     )
 
@@ -173,6 +181,10 @@ class PriceTriggerWatcher:
 
         if changed:
             write_cache(trigger_config.cache_file, cache)
+        try:
+            write_quote_history(trigger_config.quote_history_file, quotes.items())
+        except Exception:
+            logging.exception("failed to write price trigger quote history")
 
     def _handle_quote(
         self,
@@ -211,17 +223,18 @@ class PriceTriggerWatcher:
 
         percent = ((quote.value - reference) / reference) * 100
         if percent >= trigger.up_percent:
-            self._send_touch(trigger, quote, reference, percent, "상승")
+            self._send_touch(trigger_config, trigger, quote, reference, percent, "상승")
             update_touch_state(state, quote, reference, percent, "up")
             return True
         if percent <= trigger.down_percent:
-            self._send_touch(trigger, quote, reference, percent, "하락")
+            self._send_touch(trigger_config, trigger, quote, reference, percent, "하락")
             update_touch_state(state, quote, reference, percent, "down")
             return True
         return False
 
     def _send_touch(
         self,
+        trigger_config: TriggerConfig,
         trigger: PriceTrigger,
         quote: Quote,
         reference: float,
@@ -233,6 +246,7 @@ class PriceTriggerWatcher:
         text = (
             f"<b>{html.escape(trigger.case_title)}</b>\n"
             "<b>가격 조건 터치</b>\n"
+            f"아이디: <code>{html.escape(trigger.trigger_id)}</code>\n"
             f"대상: <code>{html.escape(trigger.name)}</code>\n"
             f"방향: {html.escape(direction_label)}\n"
             f"기준값: <code>{reference:,.2f}</code>\n"
@@ -242,6 +256,10 @@ class PriceTriggerWatcher:
         )
         if quote.market_status:
             text += f"\n시장상태: <code>{html.escape(quote.market_status)}</code>"
+        write_touch_event(trigger_config.touch_log_file, trigger, quote, reference, percent, direction_label)
+        if not trigger.send_telegram:
+            logging.info("price trigger Telegram send disabled id=%s", trigger.trigger_id)
+            return
         with TypingIndicator(
             self.gateway,
             chat_id,
@@ -329,7 +347,7 @@ def kis_token_cache_path(config: Config) -> Path:
     configured = os.environ.get("PRICE_TRIGGER_KIS_TOKEN_CACHE", "").strip()
     if configured:
         return Path(configured).expanduser()
-    return config.state_dir / "price-triggers" / f"kis-token-{config.mcp_trading_env}.json"
+    return config.state_dir / "touch-points" / f"kis-token-{config.mcp_trading_env}.json"
 
 
 def fetch_kis_token(app_key: str, app_secret: str, config: Config) -> str:
@@ -531,6 +549,77 @@ def write_json(path: Path, data: dict[str, Any]) -> None:
 
 def write_cache(path: Path, data: dict[str, Any]) -> None:
     write_json(path, data)
+
+
+def quote_history_path(cache_file: Path, configured: Any) -> Path:
+    if configured:
+        return Path(str(configured))
+    return cache_file.with_name("quote-history.jsonl")
+
+
+def touch_log_path(cache_file: Path, configured: Any) -> Path:
+    if configured:
+        return Path(str(configured))
+    return cache_file.with_name("touch-events.jsonl")
+
+
+def write_quote_history(path: Path, quote_items: Any) -> None:
+    rows: list[str] = []
+    recorded_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    for quote_key, quote in quote_items:
+        if not isinstance(quote, Quote) or quote.value <= 0:
+            continue
+        source = quote_key[0] if isinstance(quote_key, tuple) and quote_key else ""
+        rows.append(
+            json.dumps(
+                {
+                    "recorded_at": recorded_at,
+                    "source": source,
+                    "symbol": quote.symbol,
+                    "name": quote.name,
+                    "value": quote.value,
+                    "observed_at": quote.observed_at,
+                    "market_status": quote.market_status,
+                    "session_change_percent": quote.session_change_percent,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+    if not rows:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as file:
+        for row in rows:
+            file.write(row + "\n")
+
+
+def write_touch_event(
+    path: Path,
+    trigger: PriceTrigger,
+    quote: Quote,
+    reference: float,
+    percent: float,
+    direction_label: str,
+) -> None:
+    row = {
+        "type": "price_trigger_touch",
+        "recorded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "trigger_id": trigger.trigger_id,
+        "case_title": trigger.case_title,
+        "name": trigger.name,
+        "symbol": trigger.symbol,
+        "source": trigger.source,
+        "direction": direction_label,
+        "reference_value": reference,
+        "touch_value": quote.value,
+        "change_percent": round(percent, 4),
+        "observed_at": quote.observed_at,
+        "market_status": quote.market_status,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as file:
+        file.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
 
 
 def update_touch_state(
