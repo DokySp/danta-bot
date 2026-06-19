@@ -12,7 +12,7 @@ routes:
         instruction: /usage
       - command: show_touch_point
         description: 가격 터치 지점 그래프
-        instruction: /show-touch-point
+        instruction: /show_touch_point
       - command: add_portfolio_ticker
         description: 포트폴리오 종목 추가
         instruction: /add_portfolio_ticker

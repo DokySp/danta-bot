@@ -17,7 +17,7 @@ class TouchPointCommandError(RuntimeError):
         self.html_message = html_message
 
 
-def parse_show_touch_point_args(args: str, command: str = "show-touch-point") -> TouchPointRequest:
+def parse_show_touch_point_args(args: str, command: str = "show_touch_point") -> TouchPointRequest:
     parts = args.strip().split()
     if len(parts) != 1:
         raise TouchPointCommandError(

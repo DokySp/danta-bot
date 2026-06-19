@@ -185,12 +185,12 @@ case의 새 기준값으로 캐시합니다.
 설정하면 터치 이벤트와 기준값 갱신은 그대로 수행하되 해당 case의 Telegram 메시지만 보내지 않습니다.
 
 각 poll에서 관측된 유효 지수값은 `quote_history_file`에 JSONL로 누적됩니다. 터치 이벤트는
-`touch_log_file`에 구조화 JSONL로 누적되어, `/show-touch-point {id}`가 이후 `case_title`이 바뀌어도
+`touch_log_file`에 구조화 JSONL로 누적되어, `/show_touch_point {id}`가 이후 `case_title`이 바뀌어도
 같은 id의 터치 이벤트를 찾을 수 있습니다. 이 명령은 KIS 지표 차트 API와 codex-exec의 터치 이벤트 로그를 함께 읽어,
 해당 id가 사용하는 KIS 제공 30분봉 지표 캔들 차트 위에 알림 발생 지점을 표시합니다.
-명령 형식은 `/show-touch-point kospi-case-1`입니다. KIS 30분봉 조회는 과거 데이터 포함으로
+명령 형식은 `/show_touch_point kospi-case-1`입니다. KIS 30분봉 조회는 과거 데이터 포함으로
 한 번만 수행하고, 반환된 최대 99개 캔들 범위를 전체 차트 범위로 사용합니다.
 KIS 30분봉 차트 조회가 실패하면 `quote_history_file`을 보조 시계열로 사용하고, 지표 시계열이 없으면 점만
 이어 그리지 않고 실패합니다.
-Telegram Bot API의 명령명 제약 때문에 메뉴에는 `show_touch_point`로 등록되지만, 실제 codex-exec
-명령은 `/show-touch-point kospi-case-1` 형식을 처리합니다.
+Telegram Bot API의 명령명 제약 때문에 메뉴와 codex-exec 명령은 `/show_touch_point kospi-case-1`
+형식을 사용합니다. 기존 `/show-touch-point kospi-case-1` 형식도 호환 처리합니다.
