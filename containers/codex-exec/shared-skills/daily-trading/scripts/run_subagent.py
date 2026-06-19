@@ -574,6 +574,30 @@ def parse_json_output(raw: str) -> tuple[Any | None, list[dict[str, Any]]]:
         ]
 
 
+def normalize_compact_verdict_payload(payload: Any, stage: str) -> Any:
+    if not isinstance(payload, dict) or stage not in VERDICT_STAGES:
+        return payload
+    normalized = dict(payload)
+    if not isinstance(normalized.get("symbols"), list):
+        for key in ("verdicts", "results", "items"):
+            if isinstance(normalized.get(key), list):
+                normalized["symbols"] = normalized[key]
+                break
+    symbols = normalized.get("symbols")
+    if isinstance(symbols, list):
+        normalized_symbols: list[Any] = []
+        for symbol in symbols:
+            if not isinstance(symbol, dict):
+                normalized_symbols.append(symbol)
+                continue
+            copied = dict(symbol)
+            if stage == "first-verdict":
+                copied.setdefault("missing_data", [])
+            normalized_symbols.append(copied)
+        normalized["symbols"] = normalized_symbols
+    return normalized
+
+
 def compact_verdict_payload_errors(payload: Any, stage: str) -> list[dict[str, Any]]:
     errors: list[dict[str, Any]] = []
 
@@ -811,6 +835,7 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
         parsed_json, parse_errors = parse_json_output(raw_output)
         errors.extend(parse_errors)
         if stage in VERDICT_STAGES and prompt_mode == "compact_verdict" and parsed_json is not None:
+            parsed_json = normalize_compact_verdict_payload(parsed_json, stage)
             compact_verdict_errors = compact_verdict_payload_errors(parsed_json, stage)
             errors.extend(compact_verdict_errors)
     if returncode not in (0, None):
@@ -1382,6 +1407,25 @@ def run_self_test() -> int:
                 )
                 if not any(error.get("code") == "invalid_compact_verdict_schema" for error in invalid_second_errors):
                     raise AssertionError(f"invalid compact second-verdict schema was accepted: {invalid_second_errors}")
+                alias_payload = normalize_compact_verdict_payload(
+                    {
+                        "stage": "first-verdict",
+                        "verdicts": [
+                            {
+                                "symbol_id": "005930",
+                                "symbol_name": "삼성전자",
+                                "score": 6,
+                                "confidence": 5,
+                                "reason_code": "hold_neutral",
+                                "one_line_reason": "alias output",
+                            }
+                        ],
+                    },
+                    "first-verdict",
+                )
+                alias_errors = compact_verdict_payload_errors(alias_payload, "first-verdict")
+                if alias_errors:
+                    raise AssertionError(f"compact verdict alias normalization failed: {alias_errors}")
                 raw_with_artifacts = compact_spec(
                     tmp, stage="first-verdict", agent_role="analyst-momentum-cycle", task_name="raw-with-artifacts"
                 )
