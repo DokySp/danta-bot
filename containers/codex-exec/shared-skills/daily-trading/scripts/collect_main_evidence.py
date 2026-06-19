@@ -577,9 +577,7 @@ def fetch_account_balance(*, env_dv: str, app_key: str, app_secret: str, token: 
 
 def holding_symbol(row: dict[str, Any]) -> str:
     value = text_first(row, ("pdno", "PDNO", "prdt_code", "shtn_pdno", "item_code"))
-    if re.fullmatch(r"\d{6}", value):
-        return value
-    return ""
+    return value
 
 
 def holding_quantity(row: dict[str, Any]) -> int:
@@ -879,7 +877,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
     assert row["eligible_for_verdict"]
     sample_account = normalize_holding(
         {
-            "pdno": "005930",
+            "pdno": "0183J0",
             "prdt_name": "Samsung Electronics",
             "hldg_qty": "3",
             "ord_psbl_qty": "2",
@@ -890,7 +888,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
         },
         observed_at="2026-06-18T09:00:00+09:00",
     )
-    assert sample_account["symbol_id"] == "005930"
+    assert sample_account["symbol_id"] == "0183J0"
     assert sample_account["current_live_holding_quantity"] == 3
     assert build_account_summary({"dnca_tot_amt": "1000", "tot_evlu_amt": "2000"})["cash_amount"] == 1000
     print("self-test ok")

@@ -51,7 +51,7 @@ News API details:
 
 ## Output Format
 
-The YAML file is keyed by quoted 6-digit symbol strings. Repeated `collect` calls update only the requested symbols and preserve other existing symbols in the same date file.
+The YAML file is keyed by quoted symbol strings. Repeated `collect` calls update only the requested symbols and preserve other existing symbols in the same date file.
 
 ```yaml
 date: "2026-06-10"

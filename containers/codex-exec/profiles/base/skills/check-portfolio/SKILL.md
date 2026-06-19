@@ -12,7 +12,7 @@ Read portfolio symbols from three sources and output a JSON object with separate
 - The user-managed portfolio file is for symbols the user adds directly.
 - The assistant-managed recommendation cache is for symbols added by Codex recommendations.
 - Direct KIS Open API account balance lookup is for currently held domestic stock symbols.
-- `universe` is the union of the three source lists as six-digit Korean stock codes.
+- `universe` is the union of the three source lists as supplied KIS-recognized symbols.
 - Remove duplicates inside each list and in `universe`. Ordering has no meaning.
 - Keep `holding` as the deduplicated actual holdings list even when a holding symbol is also present in `specified`.
 - Do not rank, expand, or add symbols unless the user explicitly asks for a separate follow-up action.
@@ -99,7 +99,7 @@ When the user asks Codex to add recommended symbols to the assistant cache, run:
 sh scripts/update_assistant_portfolio_cache.sh 123456 234567
 ```
 
-This creates or updates `ASSISTANT_PORTFOLIO_CACHE_FILE` when set, otherwise `memory/check-portfolio/assistant-recommendations.txt`, and stores one deduplicated six-digit symbol per line.
+This creates or updates `ASSISTANT_PORTFOLIO_CACHE_FILE` when set, otherwise `memory/check-portfolio/assistant-recommendations.txt`, and stores one deduplicated symbol per line.
 
 ## Boundaries
 

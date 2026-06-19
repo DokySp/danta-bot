@@ -86,7 +86,10 @@ def symbols_from_text(text: str) -> list[str]:
     symbols: list[str] = []
     for line in text.splitlines():
         line = line.split("#", 1)[0]
-        symbols.extend(re.findall(r"(?<!\d)\d{6}(?!\d)", line))
+        for entry in line.split(","):
+            parts = entry.split()
+            if parts:
+                symbols.append(parts[0])
     return dedupe(symbols)
 
 
@@ -283,7 +286,7 @@ def balance_params(cano: str, product_code: str, ctx_fk100: str = "", ctx_nk100:
 def normalize_holding_symbol(row: dict[str, Any]) -> str:
     for key in ("pdno", "PDNO", "prdt_code", "shtn_pdno", "item_code"):
         value = str(row.get(key, "")).strip()
-        if re.fullmatch(r"\d{6}", value):
+        if value:
             return value
     return ""
 
@@ -405,10 +408,10 @@ def command_read(args: argparse.Namespace) -> int:
 
 
 def command_self_test(_args: argparse.Namespace) -> int:
-    assert symbols_from_text("005930, 000660 # 035420\n005930") == ["005930", "000660"]
+    assert symbols_from_text("005930 삼성전자, 0183J0 TIGER # 035420\nKR70183J0002") == ["005930", "0183J0", "KR70183J0002"]
     assert dedupe(["005930", "000660", "005930"]) == ["005930", "000660"]
-    sample = {"output1": [{"pdno": "005930", "hldg_qty": "10"}, {"pdno": "000660", "hldg_qty": "0"}]}
-    assert [normalize_holding_symbol(row) for row in output_rows(sample)] == ["005930", "000660"]
+    sample = {"output1": [{"pdno": "0183J0", "hldg_qty": "10"}, {"pdno": "000660", "hldg_qty": "0"}]}
+    assert [normalize_holding_symbol(row) for row in output_rows(sample)] == ["0183J0", "000660"]
     assert positive_quantity(sample["output1"][0])
     assert not positive_quantity(sample["output1"][1])
     assert continuation_context({"ctx_area_fk100": "A", "ctx_area_nk100": "B"}) == ("A", "B")

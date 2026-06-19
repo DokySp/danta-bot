@@ -35,11 +35,11 @@ awk '
 {
   line = $0
   sub(/#.*/, "", line)
-  gsub(/[^0-9]+/, " ", line)
-  count = split(line, tokens, /[[:space:]]+/)
+  count = split(line, entries, /,/)
   for (idx = 1; idx <= count; idx++) {
-    token = tokens[idx]
-    if (token ~ /^[0-9][0-9][0-9][0-9][0-9][0-9]$/ && !seen[token]++) {
+    split(entries[idx], tokens, /[[:space:]]+/)
+    token = tokens[1]
+    if (token != "" && !seen[token]++) {
       print token
     }
   }
@@ -61,11 +61,11 @@ awk '
 {
   line = $0
   sub(/#.*/, "", line)
-  gsub(/[^0-9]+/, " ", line)
-  count = split(line, tokens, /[[:space:]]+/)
+  count = split(line, entries, /,/)
   for (idx = 1; idx <= count; idx++) {
-    token = tokens[idx]
-    if (token ~ /^[0-9][0-9][0-9][0-9][0-9][0-9]$/ && !seen[token]++) {
+    split(entries[idx], tokens, /[[:space:]]+/)
+    token = tokens[1]
+    if (token != "" && !seen[token]++) {
       print token
     }
   }
