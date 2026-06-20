@@ -56,9 +56,9 @@ DAILY_TRADING_STAGE_MODEL_CONTRACT = (
     "- verdict sub-agents return compact JSON only; they do not write Markdown, emit diffs, or use long rationale/risk arrays.\n"
     "- verdict stage에서 raw prompt fallback은 금지한다. 실패 retry도 compact artifact_paths/symbol_ids spec만 사용한다.\n"
     "- sub-agent retry는 실패한 task만 수행한다. spec_fingerprint가 같은 성공 wrapper는 재사용한다.\n"
-    "- financial/news는 같은 날짜 full-universe cache hit이면 cache path만 사용한다. cache miss 또는 universe mismatch는 "
-    "pipeline 기본값에서 optional skipped로 기록하고, 사용자가 직접 재수집을 요구하거나 pipeline에 "
-    "`--collect-financial`/`--collect-news`를 명시할 때만 collector를 실행한다.\n"
+    "- financial/news는 같은 날짜 full-universe cache hit이면 cache path만 사용한다. cache miss 또는 universe mismatch면 "
+    "helper get을 확인하고 collector를 한 번만 실행한 뒤 helper get으로 cache path를 다시 확인한다. 그래도 없으면 해당 optional domain 없이 진행하고, "
+    "미완성 cache가 있으면 partial cache path를 decision-brief에 넘긴다. 같은 pipeline run에서 추가 재시도는 하지 않는다.\n"
     "- Main agent initialize, account snapshots, merge-and-brief, order-execution, report: model=gpt-5.5, effort=medium.\n"
 )
 

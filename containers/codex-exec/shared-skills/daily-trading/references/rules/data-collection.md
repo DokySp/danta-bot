@@ -5,7 +5,7 @@
 - Collect the complete portfolio universe once per `run_id`.
 - Universe = `$check-portfolio` JSON `universe`, which already combines `recommanded`, `specified`, and direct KIS `holding` symbols.
 - Main agent runs `scripts/collect_main_evidence.py` to collect required price/chart evidence through direct KIS REST and writes `price-chart.json`.
-- `financial` and `news` reuse valid same-date memory caches when those caches cover the complete symbol universe. In the token-saving pipeline, missing or incomplete optional domains are recorded as skipped by default; run collectors only when `--collect-financial` or `--collect-news` is explicitly requested. `market-status` is also skipped by default unless a focused fallback/debug path explicitly collects it.
+- `financial` and `news` reuse valid same-date memory caches when those caches cover the complete symbol universe. When a same-date cache is missing or incomplete, call the matching helper `get`, run the matching collector once, then call `get` again. If it is still missing, continue without that optional domain; if it exists but remains incomplete, pass the partial cache path into `decision-brief`. Do not retry the same optional collector more than once in a pipeline run. `market-status` is skipped by default unless a focused fallback/debug path explicitly collects it.
 - Verdict agents reuse saved artifacts. They never recollect and never call external tools.
 - Preserve partial successes and errors. Do not drop a symbol silently.
 
@@ -43,8 +43,8 @@ All optional collectors receive the full symbol universe, `run_id`, paths, and p
 
 | Stage | Required skill/source | Launcher output | Main-agent use |
 |---|---|---|---|
-| `financial-collection` | Existing same-date full-universe cache, otherwise explicit `--collect-financial` fallback; KIS financial/estimate APIs only | `memory/collect-financial-information/financial-YYYY-MM-DD.yaml` path or fixed missing-cache message | cache path plus at most three short per-symbol bullets |
-| `news-collection` | Existing same-date full-universe cache, otherwise explicit `--collect-news` fallback; KIS news/disclosure only | `memory/collect-news-information/news-YYYY-MM-DD.yaml` path or fixed missing-cache message | cache path plus at most three short per-symbol items |
+| `financial-collection` | Existing same-date full-universe cache, otherwise one collector attempt; KIS financial/estimate APIs only | `memory/collect-financial-information/financial-YYYY-MM-DD.yaml` path or fixed missing-cache message | cache path plus at most three short per-symbol bullets |
+| `news-collection` | Existing same-date full-universe cache, otherwise one collector attempt; KIS news/disclosure only | `memory/collect-news-information/news-YYYY-MM-DD.yaml` path or fixed missing-cache message | cache path plus at most three short per-symbol items |
 | `market-status-collection` | Optional focused fallback/debug `$get-market-status` | concise Markdown for S&P 500, Nasdaq, Dow, KOSPI, KOSDAQ | at most five run-level bullets |
 
 Optional launcher text must be only a cache path, fixed missing-cache message, or short market-status summary. It must contain no JSON envelope, code fences, raw API payloads, raw quote/news dumps, long source dumps, account data, tokens, app keys, app secrets, HTS IDs, or credential-like values. Main agent must not create `financial.md`, `news.md`, or `market-status.md` run artifacts.

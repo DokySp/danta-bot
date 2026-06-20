@@ -202,6 +202,22 @@ def shorten(value: Any, limit: int = 160) -> str:
     return text[: limit - 3].rstrip() + "..."
 
 
+def unwrap_financial_symbol_payload(symbol_payload: Any) -> dict[str, Any] | None:
+    if not isinstance(symbol_payload, dict):
+        return None
+    if "주식현재가 시세" in symbol_payload or "국내주식 종목추정실적" in symbol_payload:
+        return symbol_payload
+    for nested in symbol_payload.values():
+        if isinstance(nested, dict) and ("주식현재가 시세" in nested or "국내주식 종목추정실적" in nested):
+            return nested
+    return symbol_payload
+
+
+def is_no_news_content(value: Any) -> bool:
+    text = str(value or "").strip()
+    return not text or "수집된 뉴스가 없습니다" in text
+
+
 def financial_summary_for(cache: Any, symbol_id: str, cache_path: str) -> dict[str, Any]:
     summary = {
         "cache_path": cache_path or "",
@@ -213,10 +229,13 @@ def financial_summary_for(cache: Any, symbol_id: str, cache_path: str) -> dict[s
     if not isinstance(cache, dict):
         summary["cache_status"] = "supplied_unparsed"
         return summary
-    symbol_payload = ((cache.get("symbols") or {}).get(symbol_id) or {})
-    if isinstance(symbol_payload, dict) and symbol_id in symbol_payload:
-        symbol_payload = symbol_payload.get(symbol_id) or {}
-    if not isinstance(symbol_payload, dict):
+    symbols = cache.get("symbols") if isinstance(cache.get("symbols"), dict) else {}
+    if symbol_id not in symbols:
+        summary["cache_status"] = "missing_symbol"
+        return summary
+    symbol_payload = unwrap_financial_symbol_payload(symbols.get(symbol_id) or {})
+    if symbol_payload is None:
+        summary["cache_status"] = "missing_symbol"
         return summary
     price_rows = ((symbol_payload.get("주식현재가 시세") or {}).get("응답") or [])
     price = price_rows[0] if price_rows and isinstance(price_rows[0], dict) else {}
@@ -234,6 +253,8 @@ def financial_summary_for(cache: Any, symbol_id: str, cache_path: str) -> dict[s
     if price.get("업종명"):
         summary["items"].append(f"업종 {price.get('업종명')}")
     summary["items"] = summary["items"][:3]
+    if not summary["items"]:
+        summary["cache_status"] = "supplied_empty"
     return summary
 
 
@@ -250,11 +271,14 @@ def news_summary_for(cache: Any, symbol_id: str, cache_path: str) -> list[dict[s
     for item in entries[:3]:
         if not isinstance(item, dict):
             continue
+        content = shorten(item.get("content") or item.get("text") or item.get("title") or "")
+        if is_no_news_content(content):
+            continue
         result.append(
             {
                 "article_date": item.get("article_date") or item.get("date") or "",
                 "sentiment": item.get("sentiment") or "neutral",
-                "content": shorten(item.get("content") or item.get("text") or item.get("title") or ""),
+                "content": content,
             }
         )
     return result
@@ -331,12 +355,13 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
         eligible = bool(item.get("eligible_for_verdict", True)) and usable_price and not required_missing
         if not usable_price and "price.current_or_last/observed_at" not in required_missing:
             required_missing.append("price.current_or_last/observed_at")
+        financial_summary = financial_summary_for(financial_cache, symbol_id, args.financial_cache_path)
         symbol = {
             "symbol_id": symbol_id,
             "symbol_name": item.get("symbol_name") or (account_item or {}).get("symbol_name") or symbol_id,
             "product_type": item.get("product_type") or "stock",
             "eligible_for_verdict": eligible,
-            "evidence_mode": "full" if args.financial_cache_path else "price_only",
+            "evidence_mode": "full" if financial_summary["cache_status"] == "supplied" else "price_only",
             "exclusion_reasons": [] if eligible else required_missing,
             "price": {
                 "current_or_last": price.get("current_or_last"),
@@ -344,7 +369,7 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
                 "snapshot_mode": price.get("snapshot_mode") or "",
             },
             "price_chart_signals": list(item.get("local_signals") or [])[:5],
-            "financial_summary": financial_summary_for(financial_cache, symbol_id, args.financial_cache_path),
+            "financial_summary": financial_summary,
             "news_summary": news_summary_for(news_cache, symbol_id, args.news_cache_path),
             "account_exposure": compact_account_exposure(account_item),
             "required_missing": required_missing,
@@ -871,6 +896,37 @@ def run_self_test() -> int:
                 ],
             },
         )
+        financial_cache_path = tmp / "memory" / "collect-financial-information" / "financial-2026-06-18.yaml"
+        financial_cache_path.parent.mkdir(parents=True, exist_ok=True)
+        financial_cache_path.write_text(
+            '''date: "2026-06-18"
+source: kis_open_api
+symbols:
+  "005930":
+    삼성전자:
+      주식현재가 시세:
+        응답:
+          - 현재가: "70000"
+            전일 대비율: "1.2"
+            주가수익비율(PER): "12.3"
+            업종명: "전기전자"
+''',
+            encoding="utf-8",
+        )
+        news_cache_path = tmp / "memory" / "collect-news-information" / "news-2026-06-18.yaml"
+        news_cache_path.parent.mkdir(parents=True, exist_ok=True)
+        news_cache_path.write_text(
+            '''date: "2026-06-18"
+source: kis_open_api
+symbols:
+  "005930":
+    articles:
+      - article_date: ""
+        sentiment: neutral
+        content: "2026-06-18 기준 수집된 뉴스가 없습니다."
+''',
+            encoding="utf-8",
+        )
         try:
             brief = build_decision_brief(
                 argparse.Namespace(
@@ -881,14 +937,23 @@ def run_self_test() -> int:
                     account_before_order=None,
                     run_id=None,
                     started_at=None,
-                    financial_cache_path="memory/collect-financial-information/financial-2026-06-18.yaml",
-                    news_cache_path="",
+                    financial_cache_path=str(financial_cache_path),
+                    news_cache_path=str(news_cache_path),
                     market_status_json=None,
                     market_status_text=None,
                 )
             )
             if brief["status"] != "partial" or len(brief["symbols"]) != 2:
                 failures.append(f"unexpected decision brief: {brief}")
+            by_symbol = {item.get("symbol_id"): item for item in brief["symbols"]}
+            if by_symbol["005930"].get("evidence_mode") != "full":
+                failures.append(f"financial-covered symbol should be full: {by_symbol['005930']}")
+            if by_symbol["000660"].get("evidence_mode") != "price_only":
+                failures.append(f"financial-missing symbol should remain price_only: {by_symbol['000660']}")
+            if by_symbol["000660"].get("financial_summary", {}).get("cache_status") != "missing_symbol":
+                failures.append(f"financial-missing symbol should be marked missing_symbol: {by_symbol['000660']}")
+            if by_symbol["005930"].get("news_summary"):
+                failures.append(f"no-news placeholder should not be included: {by_symbol['005930']}")
             first_specs = build_first_specs(
                 argparse.Namespace(
                     output_dir=run_dir,

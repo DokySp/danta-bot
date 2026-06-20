@@ -179,13 +179,35 @@ def symbol_key(item: Any) -> str:
     return str(item.get("symbol_id") or item.get("symbol") or item.get("code") or "").strip()
 
 
+def cache_symbol_has_content(value: Any) -> bool:
+    if isinstance(value, dict):
+        if not value:
+            return False
+        if value.get("errors") and len(value) <= 1:
+            return False
+        candidates = [
+            item
+            for key, item in value.items()
+            if key not in {"symbol_name", "errors", "sentiment", "article_date", "date"}
+        ]
+        return any(cache_symbol_has_content(item) for item in candidates)
+    if isinstance(value, list):
+        return any(cache_symbol_has_content(item) for item in value)
+    text = str(value or "").strip()
+    if not text:
+        return False
+    if "수집된 뉴스가 없습니다" in text:
+        return False
+    return True
+
+
 def cache_symbol_keys(path: Path) -> set[str]:
     payload = load_json_if_exists(path) if path.suffix.lower() == ".json" else load_yaml_if_exists(path)
     if not isinstance(payload, dict):
         return set()
     symbols = payload.get("symbols")
     if isinstance(symbols, dict):
-        return {normalize_symbol_key(key) for key in symbols.keys() if normalize_symbol_key(key)}
+        return {normalize_symbol_key(key) for key, value in symbols.items() if normalize_symbol_key(key) and cache_symbol_has_content(value)}
     if isinstance(symbols, list):
         return set(normalize_symbol_ids(symbols))
     return set()
@@ -301,15 +323,42 @@ class Pipeline:
             Path("/app/skills/check-portfolio/scripts/read_portfolio.sh"),
         ]
 
-    def default_cache_path(self, domain: str) -> str:
+    def optional_cache_filename(self, domain: str) -> str:
         date = self.args.date or now_kst().strftime("%Y-%m-%d")
         if domain == "financial":
-            path = self.workspace_dir / "memory" / "collect-financial-information" / f"financial-{date}.yaml"
+            return f"financial-{date}.yaml"
+        return f"news-{date}.yaml"
+
+    def expected_cache_path(self, domain: str) -> Path:
+        return self.optional_cache_candidate_paths(domain)[0]
+
+    def optional_cache_candidate_paths(self, domain: str) -> list[Path]:
+        filename = self.optional_cache_filename(domain)
+        paths: list[Path] = []
+        if domain == "financial":
+            configured = os.environ.get("COLLECT_FINANCIAL_INFORMATION_MEMORY_DIR")
+            subdir = "collect-financial-information"
         else:
-            path = self.workspace_dir / "memory" / "collect-news-information" / f"news-{date}.yaml"
-        if path.exists():
-            return str(path)
+            configured = os.environ.get("COLLECT_NEWS_INFORMATION_MEMORY_DIR")
+            subdir = "collect-news-information"
+        if configured:
+            paths.append(Path(configured).expanduser() / filename)
+        memory_root = os.environ.get("DAILY_TRADING_MEMORY_DIR")
+        if memory_root:
+            paths.append(Path(memory_root).expanduser() / subdir / filename)
+        paths.append(self.workspace_dir / "memory" / subdir / filename)
+        return paths
+
+    def default_cache_path(self, domain: str) -> str:
+        for path in self.optional_cache_candidate_paths(domain):
+            if path.exists():
+                return str(path)
         return ""
+
+    def optional_cache_script(self, domain: str) -> Path:
+        if domain == "financial":
+            return self.repo_root / "containers/codex-exec/shared-skills/collect-financial-information/scripts/financial_cache.py"
+        return self.repo_root / "containers/codex-exec/shared-skills/collect-news-information/scripts/news_cache.py"
 
     def covered_cache_path(self, domain: str, path_text: str, symbols: list[str], *, detail: str) -> str:
         path = resolve_workspace_path(self.workspace_dir, path_text)
@@ -343,6 +392,25 @@ class Pipeline:
                 if path_text:
                     return path_text
         return text.splitlines()[-1].strip()
+
+    def parse_existing_cache_path(self, stdout: str) -> str:
+        path_text = self.parse_cache_collect_path(stdout)
+        if not path_text:
+            return ""
+        path = resolve_workspace_path(self.workspace_dir, path_text)
+        return str(path) if path.exists() else ""
+
+    def first_existing_cache_path(self, paths: list[Path], symbols: list[str]) -> Path | None:
+        wanted = {normalize_symbol_key(symbol) for symbol in symbols if normalize_symbol_key(symbol)}
+        seen: set[Path] = set()
+        for path in paths:
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            if resolved.exists() and (cache_symbol_keys(resolved) & wanted):
+                return resolved
+        return None
 
     def resolve_portfolio(self) -> tuple[dict[str, Any], Path]:
         output_path = self.output_dir / "check-portfolio.json"
@@ -408,54 +476,80 @@ class Pipeline:
 
     def collect_optional_cache(self, domain: str, symbols: list[str]) -> str:
         configured = self.args.financial_cache_path if domain == "financial" else self.args.news_cache_path
-        should_collect = self.args.collect_financial if domain == "financial" else self.args.collect_news
+        candidate_paths: list[Path] = []
         if configured:
+            configured_path = resolve_workspace_path(self.workspace_dir, configured)
+            candidate_paths.append(configured_path)
             covered = self.covered_cache_path(domain, configured, symbols, detail="using provided full-universe cache path")
             if covered:
                 return covered
-            if not should_collect:
-                self.add_stage(f"{domain}-cache", "skipped", detail="provided cache missing or incomplete; optional collection disabled", required=False)
-                return ""
 
+        for path in self.optional_cache_candidate_paths(domain):
+            if path not in candidate_paths:
+                candidate_paths.append(path)
         default_path = self.default_cache_path(domain)
         if default_path:
             covered = self.covered_cache_path(domain, default_path, symbols, detail="using existing same-date full-universe memory cache")
             if covered:
                 return covered
-            if not should_collect:
-                self.add_stage(f"{domain}-cache", "skipped", detail="same-date cache incomplete; optional collection disabled", required=False, path=Path(default_path))
-                return ""
 
-        if not should_collect:
-            self.add_stage(f"{domain}-cache", "skipped", detail="optional cache missing and collection disabled", required=False)
-            return ""
-
-        cache_script = (
-            self.repo_root / "containers/codex-exec/shared-skills/collect-financial-information/scripts/financial_cache.py"
-            if domain == "financial"
-            else self.repo_root / "containers/codex-exec/shared-skills/collect-news-information/scripts/news_cache.py"
-        )
+        cache_script = self.optional_cache_script(domain)
         if not cache_script.exists():
+            partial = self.first_existing_cache_path(candidate_paths, symbols)
+            if partial:
+                self.add_stage(f"{domain}-cache", "partial", detail="optional cache script not found; using existing incomplete cache", required=False, path=partial)
+                return str(partial)
             self.add_stage(f"{domain}-cache", "skipped", detail="optional cache script not found", required=False)
             return ""
+        date = self.args.date or now_kst().strftime("%Y-%m-%d")
+        get_cmd = [sys.executable, str(cache_script), "get", "--date", date]
+        get_result = self.run_cmd(f"{domain}-cache-get", get_cmd, required=False)
+        get_path = self.parse_existing_cache_path(get_result.stdout)
+        if get_path:
+            get_cache_path = resolve_workspace_path(self.workspace_dir, get_path)
+            if get_cache_path not in candidate_paths:
+                candidate_paths.insert(0, get_cache_path)
+            covered = self.covered_cache_path(domain, get_path, symbols, detail="using get-returned same-date full-universe cache")
+            if covered:
+                return covered
         cmd = [
             sys.executable,
             str(cache_script),
             "collect",
             "--date",
-            self.args.date or now_kst().strftime("%Y-%m-%d"),
+            date,
             "--symbols",
             ",".join(symbols),
         ]
-        result = self.run_cmd(f"{domain}-cache", cmd, required=False)
+        result = self.run_cmd(f"{domain}-cache-collect", cmd, required=False)
         if result.returncode == 0:
             path_text = self.parse_cache_collect_path(result.stdout)
-            covered = self.covered_cache_path(domain, path_text, symbols, detail="optional cache collected and covers full universe") if path_text else ""
+            if path_text:
+                collected_path = resolve_workspace_path(self.workspace_dir, path_text)
+                candidate_paths.insert(0, collected_path)
+            else:
+                collected_path = None
+            second_get_result = self.run_cmd(f"{domain}-cache-get", get_cmd, required=False)
+            second_get_path = self.parse_existing_cache_path(second_get_result.stdout)
+            if second_get_path:
+                second_path = resolve_workspace_path(self.workspace_dir, second_get_path)
+                candidate_paths.insert(0, second_path)
+            covered = self.covered_cache_path(domain, second_get_path, symbols, detail="optional cache collected once and get-returned cache covers full universe") if second_get_path else ""
+            if not covered and collected_path:
+                covered = self.covered_cache_path(domain, str(collected_path), symbols, detail="optional cache collected once and covers full universe")
             if covered:
                 return covered
-            self.add_stage(f"{domain}-cache", "partial", detail="optional cache collected but missing universe symbols", required=False, path=Path(path_text) if path_text else None)
+            partial = self.first_existing_cache_path(candidate_paths, symbols)
+            if partial:
+                self.add_stage(f"{domain}-cache", "partial", detail="optional cache collected once but still missing universe symbols; using partial cache", required=False, path=partial)
+                return str(partial)
+            self.add_stage(f"{domain}-cache", "partial", detail="optional cache collected once but no cache file was produced", required=False)
             return ""
-        self.add_stage(f"{domain}-cache", "partial", detail="optional cache collection failed", required=False, path=self.command_log_path)
+        partial = self.first_existing_cache_path(candidate_paths, symbols)
+        if partial:
+            self.add_stage(f"{domain}-cache", "partial", detail="optional cache collection failed once; using existing incomplete cache", required=False, path=partial)
+            return str(partial)
+        self.add_stage(f"{domain}-cache", "partial", detail="optional cache collection failed once", required=False, path=self.command_log_path)
         return ""
 
     def run_artifact_command(self, stage: str, args: list[str], *, required: bool = True) -> dict[str, Any] | None:
@@ -869,10 +963,31 @@ def run_self_test() -> int:
         run_dir = workspace / "reports" / "runs" / "pipeline-self-test"
         portfolio_path = write_self_test_fixtures(workspace, run_dir)
         incomplete_cache = workspace / "incomplete-cache.json"
-        write_json(incomplete_cache, {"symbols": {"005930": {}}})
+        write_json(incomplete_cache, {"symbols": {"005930": {"items": ["probe"]}}})
         covered, missing = cache_coverage(incomplete_cache, ["005930", "000660"])
         if covered or missing != ["000660"]:
             failures.append(f"cache coverage check failed: covered={covered}, missing={missing}")
+        empty_payload_cache = workspace / "empty-payload-cache.yaml"
+        empty_payload_cache.write_text('date: "2026-06-18"\nsymbols:\n  "005930": {}\n  "000660": []\n', encoding="utf-8")
+        covered, missing = cache_coverage(empty_payload_cache, ["005930", "000660"])
+        if covered or missing != ["000660", "005930"]:
+            failures.append(f"empty payload cache should be incomplete: covered={covered}, missing={missing}")
+        empty_news_cache = workspace / "empty-news-cache.yaml"
+        empty_news_cache.write_text(
+            'date: "2026-06-18"\nsymbols:\n  "005930":\n    articles:\n      - article_date: ""\n        sentiment: neutral\n        content: ""\n',
+            encoding="utf-8",
+        )
+        covered, missing = cache_coverage(empty_news_cache, ["005930"])
+        if covered or missing != ["005930"]:
+            failures.append(f"empty news article should be incomplete: covered={covered}, missing={missing}")
+        no_news_cache = workspace / "no-news-cache.yaml"
+        no_news_cache.write_text(
+            'date: "2026-06-18"\nsymbols:\n  "005930":\n    articles:\n      - article_date: ""\n        sentiment: neutral\n        content: "2026-06-18 기준 수집된 뉴스가 없습니다."\n',
+            encoding="utf-8",
+        )
+        covered, missing = cache_coverage(no_news_cache, ["005930"])
+        if covered or missing != ["005930"]:
+            failures.append(f"no-news placeholder should be incomplete: covered={covered}, missing={missing}")
         stage_status_probe = Pipeline(
             argparse.Namespace(
                 command="run",
@@ -897,6 +1012,185 @@ def run_self_test() -> int:
         stage_status_probe.add_stage("optional-noop", "skipped", required=False)
         if stage_status_probe.pipeline_status() != "success":
             failures.append(f"optional skipped stage changed pipeline status: {stage_status_probe.pipeline_status()}")
+        old_financial_memory = os.environ.get("COLLECT_FINANCIAL_INFORMATION_MEMORY_DIR")
+        old_news_memory = os.environ.get("COLLECT_NEWS_INFORMATION_MEMORY_DIR")
+        try:
+            env_financial_dir = workspace / "env-financial-cache"
+            env_news_dir = workspace / "env-news-cache"
+            env_financial_dir.mkdir(parents=True, exist_ok=True)
+            env_news_dir.mkdir(parents=True, exist_ok=True)
+            (env_financial_dir / "financial-2026-06-18.yaml").write_text('date: "2026-06-18"\nsymbols: {}\n', encoding="utf-8")
+            (env_news_dir / "news-2026-06-18.yaml").write_text('date: "2026-06-18"\nsymbols: {}\n', encoding="utf-8")
+            os.environ["COLLECT_FINANCIAL_INFORMATION_MEMORY_DIR"] = str(env_financial_dir)
+            os.environ["COLLECT_NEWS_INFORMATION_MEMORY_DIR"] = str(env_news_dir)
+            if Path(stage_status_probe.default_cache_path("financial")).parent != env_financial_dir:
+                failures.append("financial env memory dir was not preferred")
+            if Path(stage_status_probe.default_cache_path("news")).parent != env_news_dir:
+                failures.append("news env memory dir was not preferred")
+        finally:
+            if old_financial_memory is None:
+                os.environ.pop("COLLECT_FINANCIAL_INFORMATION_MEMORY_DIR", None)
+            else:
+                os.environ["COLLECT_FINANCIAL_INFORMATION_MEMORY_DIR"] = old_financial_memory
+            if old_news_memory is None:
+                os.environ.pop("COLLECT_NEWS_INFORMATION_MEMORY_DIR", None)
+            else:
+                os.environ["COLLECT_NEWS_INFORMATION_MEMORY_DIR"] = old_news_memory
+
+        class OptionalCacheProbePipeline(Pipeline):
+            def __init__(self, args: argparse.Namespace) -> None:
+                super().__init__(args)
+                self.cache_attempts = 0
+                self.get_attempts = 0
+
+            def optional_cache_script(self, domain: str) -> Path:
+                return workspace / f"{domain}_cache_probe.py"
+
+            def run_cmd(self, stage: str, cmd: list[str], *, required: bool = True, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+                if stage.endswith("-cache-get"):
+                    self.get_attempts += 1
+                    domain = stage.removesuffix("-cache-get")
+                    subdir = "collect-financial-information" if domain == "financial" else "collect-news-information"
+                    prefix = "financial" if domain == "financial" else "news"
+                    path = self.workspace_dir / "memory" / subdir / f"{prefix}-2026-06-18.yaml"
+                    stdout = str(path) if path.exists() else "missing cache"
+                    self.logs.append(
+                        {
+                            "stage": stage,
+                            "command": cmd,
+                            "returncode": 0 if path.exists() else 1,
+                            "stdout_tail": stdout,
+                            "stderr_tail": "",
+                            "required": required,
+                            "recorded_at": now_iso(),
+                        }
+                    )
+                    write_json(self.command_log_path, {"commands": self.logs})
+                    return subprocess.CompletedProcess(cmd, 0 if path.exists() else 1, stdout=stdout, stderr="")
+                if stage.endswith("-cache-collect"):
+                    self.cache_attempts += 1
+                    domain = stage.removesuffix("-cache-collect")
+                    subdir = "collect-financial-information" if domain == "financial" else "collect-news-information"
+                    prefix = "financial" if domain == "financial" else "news"
+                    path = self.workspace_dir / "memory" / subdir / f"{prefix}-2026-06-18.yaml"
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(
+                        'date: "2026-06-18"\nsource: kis_open_api\nsymbols:\n  "005930":\n    items:\n      - "probe"\n',
+                        encoding="utf-8",
+                    )
+                    self.logs.append(
+                        {
+                            "stage": stage,
+                            "command": cmd,
+                            "returncode": 0,
+                            "stdout_tail": str(path),
+                            "stderr_tail": "",
+                            "required": required,
+                            "recorded_at": now_iso(),
+                        }
+                    )
+                    write_json(self.command_log_path, {"commands": self.logs})
+                    return subprocess.CompletedProcess(cmd, 0, stdout=str(path), stderr="")
+                return super().run_cmd(stage, cmd, required=required, env=env)
+
+        optional_cache_dir = workspace / "reports" / "runs" / "optional-cache-probe"
+        for probe_script in (workspace / "financial_cache_probe.py", workspace / "news_cache_probe.py"):
+            probe_script.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        optional_probe = OptionalCacheProbePipeline(
+            argparse.Namespace(
+                command="run",
+                workspace_dir=str(workspace),
+                output_dir=str(optional_cache_dir),
+                run_id="optional-cache-probe",
+                started_at="2026-06-18T09:00:00+09:00",
+                env="acct",
+                request_type="analysis",
+                order_type="limit-reservation-unconfirmed",
+                portfolio_json=str(portfolio_path),
+                financial_cache_path="",
+                news_cache_path="",
+                date="2026-06-18",
+                reuse_existing_artifacts=True,
+                skip_account=False,
+                collect_financial=False,
+                collect_news=False,
+                max_workers=3,
+            )
+        )
+        financial_partial = optional_probe.collect_optional_cache("financial", ["005930", "000660"])
+        news_partial = optional_probe.collect_optional_cache("news", ["005930", "000660"])
+        if optional_probe.cache_attempts != 2:
+            failures.append(f"optional cache probe should collect once per domain: attempts={optional_probe.cache_attempts}")
+        if optional_probe.get_attempts != 4:
+            failures.append(f"optional cache probe should get before and after collect per domain: attempts={optional_probe.get_attempts}")
+        if not financial_partial or not news_partial:
+            failures.append("optional cache probe did not return partial cache paths")
+        if [item.get("status") for item in optional_probe.stages] != ["partial", "partial"]:
+            failures.append(f"optional cache probe stages unexpected: {optional_probe.stages}")
+        unrelated_cache = workspace / "unrelated-cache.yaml"
+        unrelated_cache.write_text('date: "2026-06-18"\nsymbols:\n  "123456":\n    items:\n      - "probe"\n', encoding="utf-8")
+        if optional_probe.first_existing_cache_path([unrelated_cache], ["005930"]):
+            failures.append("unrelated cache symbols should not be returned as partial data")
+
+        class EmptyCacheFallbackProbePipeline(Pipeline):
+            def optional_cache_script(self, domain: str) -> Path:
+                return workspace / f"{domain}_empty_cache_probe.py"
+
+            def run_cmd(self, stage: str, cmd: list[str], *, required: bool = True, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+                if stage.endswith("-cache-get") or stage.endswith("-cache-collect"):
+                    domain = stage.split("-cache-", 1)[0]
+                    subdir = "collect-financial-information" if domain == "financial" else "collect-news-information"
+                    prefix = "financial" if domain == "financial" else "news"
+                    path = self.workspace_dir / "memory" / subdir / f"{prefix}-2026-06-18.yaml"
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text('date: "2026-06-18"\nsource: kis_open_api\nsymbols: {}\n', encoding="utf-8")
+                    self.logs.append(
+                        {
+                            "stage": stage,
+                            "command": cmd,
+                            "returncode": 1,
+                            "stdout_tail": str(path),
+                            "stderr_tail": "",
+                            "required": required,
+                            "recorded_at": now_iso(),
+                        }
+                    )
+                    write_json(self.command_log_path, {"commands": self.logs})
+                    return subprocess.CompletedProcess(cmd, 1, stdout=str(path), stderr="")
+                return super().run_cmd(stage, cmd, required=required, env=env)
+
+        for probe_script in (workspace / "financial_empty_cache_probe.py", workspace / "news_empty_cache_probe.py"):
+            probe_script.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        for stale_cache in (
+            workspace / "memory" / "collect-financial-information" / "financial-2026-06-18.yaml",
+            workspace / "memory" / "collect-news-information" / "news-2026-06-18.yaml",
+        ):
+            if stale_cache.exists():
+                stale_cache.unlink()
+        empty_cache_probe = EmptyCacheFallbackProbePipeline(
+            argparse.Namespace(
+                command="run",
+                workspace_dir=str(workspace),
+                output_dir=str(workspace / "reports" / "runs" / "empty-cache-probe"),
+                run_id="empty-cache-probe",
+                started_at="2026-06-18T09:00:00+09:00",
+                env="acct",
+                request_type="analysis",
+                order_type="limit-reservation-unconfirmed",
+                portfolio_json=str(portfolio_path),
+                financial_cache_path="",
+                news_cache_path="",
+                date="2026-06-18",
+                reuse_existing_artifacts=True,
+                skip_account=False,
+                collect_financial=False,
+                collect_news=False,
+                max_workers=3,
+            )
+        )
+        if empty_cache_probe.collect_optional_cache("financial", ["005930"]):
+            failures.append("empty financial cache should not be returned as partial data")
+
         retry_dir = workspace / "reports" / "runs" / "retry-probe"
         retry_dir.mkdir(parents=True, exist_ok=True)
         write_json(
