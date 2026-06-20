@@ -67,8 +67,9 @@ def append_holding_history_from_run(workspace_dir: Path, context: CodexRunContex
         direction = str(order.get("direction", "")).lower()
         if direction not in {"buy", "sell"}:
             continue
-        order_type = str(order.get("order_type", "")).lower()
-        if "resv" in order_type or "reservation" in order_type or "예약" in order_type:
+        order_path = str(order.get("order_path", "")).lower()
+        order_api = str(order.get("order_api", "")).lower()
+        if order_path == "reservation" or order_api == "order_resv":
             continue
         quantity = int_value(order.get("validated_order_quantity"))
         if quantity <= 0:

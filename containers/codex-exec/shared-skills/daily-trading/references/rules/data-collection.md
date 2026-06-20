@@ -5,7 +5,7 @@
 - Collect the complete portfolio universe once per `run_id`.
 - Universe = `$check-portfolio` JSON `universe`, which already combines `recommanded`, `specified`, and direct KIS `holding` symbols.
 - Main agent runs `scripts/collect_main_evidence.py` to collect required price/chart evidence through direct KIS REST and writes `price-chart.json`.
-- `financial` and `news` reuse valid same-date memory caches when those caches cover the complete symbol universe. When a same-date cache is missing or incomplete, call the matching helper `get`, run the matching collector once, then call `get` again. If it is still missing, continue without that optional domain; if it exists but remains incomplete, pass the partial cache path into `decision-brief`. Do not retry the same optional collector more than once in a pipeline run. `market-status` is skipped by default unless a focused fallback/debug path explicitly collects it.
+- `financial` and `news` reuse valid same-date memory caches when those caches cover the complete symbol universe. When a same-date cache is missing or incomplete, call the matching helper `get`, run the matching collector once, then call `get` again. If it is still missing, continue without that optional domain; if it exists but remains incomplete, pass the partial cache path into `decision-brief`. Do not retry the same optional collector more than once in a pipeline run.
 - Verdict agents reuse saved artifacts. They never recollect and never call external tools.
 - Preserve partial successes and errors. Do not drop a symbol silently.
 
@@ -45,9 +45,8 @@ All optional collectors receive the full symbol universe, `run_id`, paths, and p
 |---|---|---|---|
 | `financial-collection` | Existing same-date full-universe cache, otherwise one collector attempt; KIS financial/estimate APIs only | `memory/collect-financial-information/financial-YYYY-MM-DD.yaml` path or fixed missing-cache message | cache path plus at most three short per-symbol bullets |
 | `news-collection` | Existing same-date full-universe cache, otherwise one collector attempt; KIS news/disclosure only | `memory/collect-news-information/news-YYYY-MM-DD.yaml` path or fixed missing-cache message | cache path plus at most three short per-symbol items |
-| `market-status-collection` | Optional focused fallback/debug `$get-market-status` | concise Markdown for S&P 500, Nasdaq, Dow, KOSPI, KOSDAQ | at most five run-level bullets |
 
-Optional launcher text must be only a cache path, fixed missing-cache message, or short market-status summary. It must contain no JSON envelope, code fences, raw API payloads, raw quote/news dumps, long source dumps, account data, tokens, app keys, app secrets, HTS IDs, or credential-like values. Main agent must not create `financial.md`, `news.md`, or `market-status.md` run artifacts.
+Optional launcher text must be only a cache path or fixed missing-cache message. It must contain no JSON envelope, code fences, raw API payloads, raw quote/news dumps, long source dumps, account data, tokens, app keys, app secrets, HTS IDs, or credential-like values. Main agent must not create `financial.md` or `news.md` run artifacts.
 
 News cache entries are keyed by symbol code. Article fields are `article_date`, `sentiment`, and `content`; `sentiment` is `positive`, `neutral`, `negative`, or `mixed`. Do not store `title`, `symbol_id`, `updated_at`, or `errors` in the cache.
 
@@ -82,7 +81,7 @@ Set `eligible_for_verdict=false` only when one of these blocks even a price-base
 - price/chart failure that prevents price, trend, and risk assessment
 - required identity/price errors remain unresolved
 
-Financial/news/market-status absence, no-news results, non-applicable fields, failed optional wrappers, or optional cache gaps are not exclusion reasons by themselves. If identifier, name, price, and observation time exist, keep the symbol eligible. `price_only` is descriptive only and must not lower score, confidence, target quantity, or order permission.
+Financial/news absence, no-news results, non-applicable fields, failed optional wrappers, or optional cache gaps are not exclusion reasons by themselves. If identifier, name, price, and observation time exist, keep the symbol eligible. `price_only` is descriptive only and must not lower score, confidence, target quantity, or order permission.
 
 Ineligible symbols remain in artifacts and report, but are excluded from verdict stages, target quantities, and orders.
 
@@ -97,7 +96,6 @@ Include only:
 - current-or-last price, observation timestamp, snapshot mode
 - up to five price/chart signals per symbol
 - optional financial/news summaries within the limits above
-- compact run-level market-status summary
 - account exposure summary
 - non-sensitive missing/error context
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import sys
@@ -21,7 +22,6 @@ import yaml
 
 KST = ZoneInfo("Asia/Seoul")
 KIS_BASE_URL = "https://openapi.koreainvestment.com:9443"
-TOKEN_PATH = "/oauth2/tokenP"
 NEWS_PATH = "/uapi/domestic-stock/v1/quotations/news-title"
 NEWS_TR_ID = "FHKST01011800"
 MISSING_CACHE_MESSAGE = "해당 날짜 뉴스 캐시가 아직 생성되지 않았습니다."
@@ -69,13 +69,6 @@ def cache_dir() -> Path:
 
 def news_cache_path(date_hyphen: str) -> Path:
     return cache_dir() / f"news-{date_hyphen}.yaml"
-
-
-def token_cache_path() -> Path:
-    configured = os.environ.get("COLLECT_NEWS_INFORMATION_TOKEN_CACHE")
-    if configured:
-        return Path(configured).expanduser()
-    return Path.home() / ".cache" / "codex" / "collect-news-information" / "kis-token.json"
 
 
 def today_kst() -> str:
@@ -178,42 +171,38 @@ def parse_expiry(value: Any) -> datetime | None:
         return None
 
 
-def cached_token() -> str | None:
-    path = token_cache_path()
-    if not path.exists():
-        return None
-    try:
-        payload = read_json(path)
-    except (OSError, json.JSONDecodeError):
-        return None
-    token = str(payload.get("access_token", "")).strip()
-    expires_at = parse_expiry(payload.get("expires_at"))
-    if not token or expires_at is None:
-        return None
-    if datetime.now(timezone.utc) + timedelta(minutes=30) >= expires_at:
-        return None
-    return token
+def kis_token_module_candidates() -> list[Path]:
+    configured = os.environ.get("KIS_TOKEN_HELPER_PATH", "").strip()
+    candidates: list[Path] = []
+    if configured:
+        candidates.append(Path(configured).expanduser())
+    candidates.extend(
+        [
+            Path("/app/skills/kis-token/scripts/kis_token.py"),
+            Path("/codex-home/skills/kis-token/scripts/kis_token.py"),
+            Path("/workspace/containers/codex-exec/shared-skills/kis-token/scripts/kis_token.py"),
+        ]
+    )
+    current = Path(__file__).resolve()
+    for parent in current.parents:
+        candidates.append(parent / "kis-token" / "scripts" / "kis_token.py")
+        candidates.append(parent / "shared-skills" / "kis-token" / "scripts" / "kis_token.py")
+    return candidates
+
+
+def load_kis_token_module() -> Any:
+    for path in kis_token_module_candidates():
+        if path.exists():
+            spec = importlib.util.spec_from_file_location("codex_kis_token", path)
+            if spec and spec.loader:
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                return module
+    raise RuntimeError("shared kis-token helper not found")
 
 
 def fetch_token(app_key: str, app_secret: str, retries: int) -> str:
-    cached = cached_token()
-    if cached:
-        return cached
-    body, _headers = retry_json(
-        "POST",
-        TOKEN_PATH,
-        headers={"content-type": "application/json; charset=utf-8"},
-        payload={"grant_type": "client_credentials", "appkey": app_key, "appsecret": app_secret},
-        retries=retries,
-    )
-    token = str(body.get("access_token", "")).strip()
-    if not token:
-        raise RuntimeError("KIS token response did not include access_token")
-    expires_at = parse_expiry(body.get("access_token_token_expired") or body.get("expires_at"))
-    if expires_at is None:
-        expires_at = datetime.now(timezone.utc) + timedelta(hours=23)
-    write_json(token_cache_path(), {"access_token": token, "expires_at": expires_at.isoformat()})
-    return token
+    return load_kis_token_module().get_token(app_key, app_secret, env_dv="real", retries=retries).token
 
 
 def value_from(item: dict[str, Any], *keys: str) -> str:

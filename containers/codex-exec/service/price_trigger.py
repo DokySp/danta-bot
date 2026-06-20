@@ -1,4 +1,5 @@
 import html
+import importlib.util
 import json
 import logging
 import os
@@ -20,7 +21,6 @@ from .telegram_gateway import TelegramGateway, TypingIndicator
 
 NAVER_INDEX_URL = "https://polling.finance.naver.com/api/realtime/domestic/index/{symbol}"
 KIS_BASE_URL = "https://openapi.koreainvestment.com:9443"
-KIS_TOKEN_PATH = "/oauth2/tokenP"
 KIS_INDEX_PRICE_PATH = "/uapi/domestic-stock/v1/quotations/inquire-index-price"
 KIS_INDEX_PRICE_TR_ID = "FHPUP02100000"
 KST = timezone(timedelta(hours=9))
@@ -343,68 +343,38 @@ def kis_credentials() -> tuple[str, str]:
     return app_key, app_secret
 
 
-def kis_token_cache_path(config: Config) -> Path:
-    configured = os.environ.get("PRICE_TRIGGER_KIS_TOKEN_CACHE", "").strip()
+def kis_token_module_candidates() -> list[Path]:
+    configured = os.environ.get("KIS_TOKEN_HELPER_PATH", "").strip()
+    candidates: list[Path] = []
     if configured:
-        return Path(configured).expanduser()
-    return config.state_dir / "touch-points" / f"kis-token-{config.mcp_trading_env}.json"
+        candidates.append(Path(configured).expanduser())
+    candidates.extend(
+        [
+            Path("/app/skills/kis-token/scripts/kis_token.py"),
+            Path("/codex-home/skills/kis-token/scripts/kis_token.py"),
+            Path("/workspace/containers/codex-exec/shared-skills/kis-token/scripts/kis_token.py"),
+        ]
+    )
+    current = Path(__file__).resolve()
+    for parent in current.parents:
+        candidates.append(parent / "kis-token" / "scripts" / "kis_token.py")
+        candidates.append(parent / "shared-skills" / "kis-token" / "scripts" / "kis_token.py")
+    return candidates
+
+
+def load_kis_token_module() -> Any:
+    for path in kis_token_module_candidates():
+        if path.exists():
+            spec = importlib.util.spec_from_file_location("codex_kis_token", path)
+            if spec and spec.loader:
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                return module
+    raise RuntimeError("shared kis-token helper not found")
 
 
 def fetch_kis_token(app_key: str, app_secret: str, config: Config) -> str:
-    cached = cached_kis_token(config)
-    if cached:
-        return cached
-    body = kis_request_json(
-        "POST",
-        KIS_TOKEN_PATH,
-        headers={"content-type": "application/json; charset=utf-8"},
-        payload={"grant_type": "client_credentials", "appkey": app_key, "appsecret": app_secret},
-    )
-    token = str(body.get("access_token", "")).strip()
-    if not token:
-        raise RuntimeError("KIS token response did not include access_token")
-    expires_at = parse_kis_expiry(body.get("access_token_token_expired") or body.get("expires_at"))
-    if expires_at is None:
-        expires_at = datetime.now(timezone.utc) + timedelta(hours=23)
-    write_json(
-        kis_token_cache_path(config),
-        {"access_token": token, "expires_at": expires_at.isoformat()},
-    )
-    return token
-
-
-def cached_kis_token(config: Config) -> str | None:
-    path = kis_token_cache_path(config)
-    if not path.exists():
-        return None
-    try:
-        payload = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    token = str(payload.get("access_token", "")).strip()
-    expires_at = parse_kis_expiry(payload.get("expires_at"))
-    if not token or expires_at is None:
-        return None
-    if datetime.now(timezone.utc) + timedelta(minutes=30) >= expires_at:
-        return None
-    return token
-
-
-def parse_kis_expiry(value: Any) -> datetime | None:
-    if not value:
-        return None
-    text = str(value)
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y%m%d%H%M%S"):
-        try:
-            return datetime.strptime(text, fmt).replace(tzinfo=KST).astimezone(timezone.utc)
-        except ValueError:
-            pass
-    try:
-        return datetime.fromisoformat(text).astimezone(timezone.utc)
-    except ValueError:
-        return None
+    return load_kis_token_module().get_token(app_key, app_secret, env_dv="real").token
 
 
 def kis_request_json(

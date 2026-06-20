@@ -355,10 +355,28 @@ class Pipeline:
                 return str(path)
         return ""
 
-    def optional_cache_script(self, domain: str) -> Path:
+    def optional_cache_script_candidates(self, domain: str) -> list[Path]:
         if domain == "financial":
-            return self.repo_root / "containers/codex-exec/shared-skills/collect-financial-information/scripts/financial_cache.py"
-        return self.repo_root / "containers/codex-exec/shared-skills/collect-news-information/scripts/news_cache.py"
+            skill_name = "collect-financial-information"
+            script_name = "financial_cache.py"
+        else:
+            skill_name = "collect-news-information"
+            script_name = "news_cache.py"
+
+        candidates = [
+            Path("/app/skills") / skill_name / "scripts" / script_name,
+            Path("/codex-home/skills") / skill_name / "scripts" / script_name,
+        ]
+        codex_home = os.environ.get("CODEX_HOME")
+        if codex_home:
+            candidates.insert(1, Path(codex_home).expanduser() / "skills" / skill_name / "scripts" / script_name)
+        return candidates
+
+    def optional_cache_script(self, domain: str) -> Path | None:
+        for path in self.optional_cache_script_candidates(domain):
+            if path.exists():
+                return path
+        return None
 
     def covered_cache_path(self, domain: str, path_text: str, symbols: list[str], *, detail: str) -> str:
         path = resolve_workspace_path(self.workspace_dir, path_text)
@@ -494,7 +512,7 @@ class Pipeline:
                 return covered
 
         cache_script = self.optional_cache_script(domain)
-        if not cache_script.exists():
+        if cache_script is None:
             partial = self.first_existing_cache_path(candidate_paths, symbols)
             if partial:
                 self.add_stage(f"{domain}-cache", "partial", detail="optional cache script not found; using existing incomplete cache", required=False, path=partial)
@@ -712,6 +730,10 @@ class Pipeline:
                 "order_count": len(orders),
                 "orders": orders,
                 "errors": execution.get("errors", [])[:5] if isinstance(execution.get("errors"), list) else [],
+                "requires_main_agent_order_execution": bool(execution.get("requires_main_agent_order_execution")),
+                "required_main_agent_actions": execution.get("required_main_agent_actions", [])
+                if isinstance(execution.get("required_main_agent_actions"), list)
+                else [],
             },
             "token_usage": {
                 "main": (token_summary.get("main") or {}).get("token_usage", zero_usage()),
@@ -728,7 +750,12 @@ class Pipeline:
                 "execution": str(self.output_dir / "execution.json"),
                 "token_summary": str(self.output_dir / "token-summary.json"),
             },
-            "main_agent_read_policy": "Read pipeline-summary.json first; open command_log_path or intermediate artifacts only when a stage failed and the summary is insufficient.",
+            "main_agent_read_policy": (
+                "Read pipeline-summary.json first. For demo-submit or real-submit, if execution.requires_main_agent_order_execution is true, "
+                "open only the minimal account/order artifacts and continue Main-agent order-execution; refresh listed read-only gates before submission. "
+                "For explicit limit reservation requests, treat execution-plan order_price values as the default limit price candidates unless a current API gate rejects them. "
+                "Open command_log_path or other intermediate artifacts only when a stage failed and the summary is insufficient."
+            ),
         }
         write_json(self.summary_path, summary)
         self.write_run_json(status=summary["status"])
@@ -746,7 +773,6 @@ class Pipeline:
         self.collect_main_evidence(symbols)
         financial_cache = self.collect_optional_cache("financial", symbols)
         news_cache = self.collect_optional_cache("news", symbols)
-        self.add_stage("market-status", "skipped", detail="optional market-status collection disabled in token-saving pipeline", required=False)
 
         decision_args = [
             "decision-brief",
@@ -811,16 +837,18 @@ class Pipeline:
                 str(self.output_dir),
                 "--request-type",
                 self.args.request_type,
-                "--order-type",
-                self.args.order_type,
             ],
         )
         execution_status = str((execution or {}).get("status") or "success")
         self.add_stage("execution-plan", "partial" if execution_status == "partial" else "success", detail=f"status={execution_status}", path=self.output_dir / "execution.json")
 
-        token_summary = self.run_artifact_command("token-summary", ["token-summary", "--run-dir", str(self.output_dir)], required=False)
+        token_args = ["token-summary", "--run-dir", str(self.output_dir)]
+        if self.args.main_events:
+            token_args.extend(["--main-events", str(resolve_workspace_path(self.workspace_dir, self.args.main_events))])
+        token_summary = self.run_artifact_command("token-summary", token_args, required=False)
         if token_summary is not None:
-            self.add_stage("token-summary", "success", detail="sub-agent token summary built", required=False, path=self.output_dir / "token-summary.json")
+            detail = "main/sub-agent token summary built" if self.args.main_events else "sub-agent token summary built"
+            self.add_stage("token-summary", "success", detail=detail, required=False, path=self.output_dir / "token-summary.json")
         return self.build_summary(portfolio)
 
 
@@ -997,15 +1025,13 @@ def run_self_test() -> int:
                 started_at="2026-06-18T09:00:00+09:00",
                 env="acct",
                 request_type="analysis",
-                order_type="limit-reservation-unconfirmed",
                 portfolio_json=str(portfolio_path),
                 financial_cache_path="",
                 news_cache_path="",
+                main_events="",
                 date="2026-06-18",
                 reuse_existing_artifacts=True,
                 skip_account=False,
-                collect_financial=False,
-                collect_news=False,
                 max_workers=3,
             )
         )
@@ -1036,6 +1062,22 @@ def run_self_test() -> int:
                 os.environ.pop("COLLECT_NEWS_INFORMATION_MEMORY_DIR", None)
             else:
                 os.environ["COLLECT_NEWS_INFORMATION_MEMORY_DIR"] = old_news_memory
+
+        old_codex_home_env = os.environ.get("CODEX_HOME")
+        try:
+            codex_home = workspace / "codex-home"
+            installed_financial_script = codex_home / "skills" / "collect-financial-information" / "scripts" / "financial_cache.py"
+            installed_financial_script.parent.mkdir(parents=True, exist_ok=True)
+            installed_financial_script.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+            os.environ["CODEX_HOME"] = str(codex_home)
+            resolved_installed_script = stage_status_probe.optional_cache_script("financial")
+            if resolved_installed_script != installed_financial_script:
+                failures.append(f"installed financial cache script was not resolved via CODEX_HOME: {resolved_installed_script}")
+        finally:
+            if old_codex_home_env is None:
+                os.environ.pop("CODEX_HOME", None)
+            else:
+                os.environ["CODEX_HOME"] = old_codex_home_env
 
         class OptionalCacheProbePipeline(Pipeline):
             def __init__(self, args: argparse.Namespace) -> None:
@@ -1105,15 +1147,13 @@ def run_self_test() -> int:
                 started_at="2026-06-18T09:00:00+09:00",
                 env="acct",
                 request_type="analysis",
-                order_type="limit-reservation-unconfirmed",
                 portfolio_json=str(portfolio_path),
                 financial_cache_path="",
                 news_cache_path="",
+                main_events="",
                 date="2026-06-18",
                 reuse_existing_artifacts=True,
                 skip_account=False,
-                collect_financial=False,
-                collect_news=False,
                 max_workers=3,
             )
         )
@@ -1176,15 +1216,13 @@ def run_self_test() -> int:
                 started_at="2026-06-18T09:00:00+09:00",
                 env="acct",
                 request_type="analysis",
-                order_type="limit-reservation-unconfirmed",
                 portfolio_json=str(portfolio_path),
                 financial_cache_path="",
                 news_cache_path="",
+                main_events="",
                 date="2026-06-18",
                 reuse_existing_artifacts=True,
                 skip_account=False,
-                collect_financial=False,
-                collect_news=False,
                 max_workers=3,
             )
         )
@@ -1243,15 +1281,13 @@ def run_self_test() -> int:
                 started_at="2026-06-18T09:00:00+09:00",
                 env="acct",
                 request_type="analysis",
-                order_type="limit-reservation-unconfirmed",
                 portfolio_json=str(portfolio_path),
                 financial_cache_path="",
                 news_cache_path="",
+                main_events="",
                 date="2026-06-18",
                 reuse_existing_artifacts=True,
                 skip_account=False,
-                collect_financial=False,
-                collect_news=False,
                 max_workers=3,
             )
         )
@@ -1265,6 +1301,14 @@ def run_self_test() -> int:
         os.environ["CODEX_BIN"] = str(fake_codex)
         os.environ["CODEX_SUBAGENT_REUSE_SUCCESS"] = "0"
         try:
+            main_events = workspace / "main-events.jsonl"
+            main_events.write_text(
+                json.dumps({"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}})
+                + "\n"
+                + json.dumps({"type": "token_count", "info": {"last_token_usage": {"input_tokens": 1, "output_tokens": 1}}})
+                + "\n",
+                encoding="utf-8",
+            )
             pipeline = Pipeline(
                 argparse.Namespace(
                     command="run",
@@ -1274,15 +1318,13 @@ def run_self_test() -> int:
                     started_at="2026-06-18T09:00:00+09:00",
                     env="acct",
                     request_type="real-submit",
-                    order_type="limit-reservation-unconfirmed",
                     portfolio_json=str(portfolio_path),
                     financial_cache_path="",
                     news_cache_path="",
+                    main_events=str(main_events),
                     date="2026-06-18",
                     reuse_existing_artifacts=True,
                     skip_account=False,
-                    collect_financial=False,
-                    collect_news=False,
                     max_workers=3,
                 )
             )
@@ -1291,6 +1333,17 @@ def run_self_test() -> int:
                 failures.append(f"unexpected pipeline status: {summary['status']}")
             if summary["token_usage"]["subagents"]["total_tokens"] != 480:
                 failures.append(f"unexpected subagent token total: {summary['token_usage']}")
+            if summary["token_usage"]["main"]["total_tokens"] != 17 or summary["token_usage"]["total"]["total_tokens"] != 497:
+                failures.append(f"unexpected pipeline token summary with main events: {summary['token_usage']}")
+            execution_summary = summary.get("execution") if isinstance(summary.get("execution"), dict) else {}
+            if execution_summary.get("requires_main_agent_order_execution") is not True:
+                failures.append("real-submit pipeline summary did not request Main-agent order execution")
+            expected_actions = ["refresh_active_order_lookup", "refresh_order_available_lookup", "continue_order_execution"]
+            if execution_summary.get("required_main_agent_actions") != expected_actions:
+                failures.append(f"unexpected Main-agent action list: {execution_summary.get('required_main_agent_actions')}")
+            read_policy = summary.get("main_agent_read_policy", "")
+            if "execution-plan order_price values as the default limit price candidates" not in read_policy:
+                failures.append(f"pipeline summary read policy omitted default order_price guidance: {read_policy}")
             if not (run_dir / "pipeline-summary.json").exists():
                 failures.append("pipeline-summary.json was not written")
             if not (run_dir / "execution.json").exists():
@@ -1321,15 +1374,13 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--started-at", default="")
     run.add_argument("--env", default=os.environ.get("CODEX_MCP_TRADING_ENV", "acct"), choices=["acct", "real", "paper", "demo"])
     run.add_argument("--request-type", default="analysis", choices=["analysis", "prepare", "demo-submit", "real-submit"])
-    run.add_argument("--order-type", default="limit-reservation-unconfirmed")
     run.add_argument("--portfolio-json", default="")
     run.add_argument("--financial-cache-path", default="")
     run.add_argument("--news-cache-path", default="")
+    run.add_argument("--main-events", default="", help="Optional Codex JSONL events path for Main-agent token accounting.")
     run.add_argument("--date", default="")
     run.add_argument("--reuse-existing-artifacts", action="store_true")
     run.add_argument("--skip-account", action="store_true")
-    run.add_argument("--collect-financial", action="store_true")
-    run.add_argument("--collect-news", action="store_true")
     run.add_argument("--max-workers", type=int, default=3)
 
     subparsers.add_parser("self-test", help="Run an offline pipeline smoke test with a fake codex binary.")

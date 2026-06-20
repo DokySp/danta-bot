@@ -49,6 +49,8 @@ News API details:
 - News endpoint: `/uapi/domestic-stock/v1/quotations/news-title`
 - News `tr_id`: `FHKST01011800`
 
+Use the shared `kis-token` helper for OAuth token caching. Do not create or read a news-specific token cache for new code.
+
 ## Output Format
 
 The YAML file is keyed by quoted symbol strings. Repeated `collect` calls update only the requested symbols and preserve other existing symbols in the same date file.

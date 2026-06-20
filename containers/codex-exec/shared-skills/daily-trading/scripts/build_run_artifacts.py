@@ -284,20 +284,6 @@ def news_summary_for(cache: Any, symbol_id: str, cache_path: str) -> list[dict[s
     return result
 
 
-def market_status_summary(path: str | None, text: str | None) -> dict[str, Any]:
-    if path:
-        payload = load_json(Path(path))
-        if isinstance(payload, dict):
-            return payload
-    if text:
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-        return {
-            "observed_at": "",
-            "items": [{"market": "summary", "status": "unknown", "opinion": line} for line in lines[:5]],
-        }
-    return {"observed_at": "", "items": []}
-
-
 def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
     output_dir = Path(args.output_dir)
     portfolio = read_json_arg(args.portfolio_json)
@@ -327,7 +313,6 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
                 "holding": portfolio.get("holding", []),
                 "universe": portfolio.get("universe", []),
             },
-            "market_status_summary": market_status_summary(args.market_status_json, args.market_status_text),
             "account_exposure_summary": account_summary(account),
         }
     )
@@ -674,6 +659,8 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
     artifact.update(
         {
             "request_type": args.request_type,
+            "requires_main_agent_order_execution": False,
+            "required_main_agent_actions": [],
             "latest_available_cash": None
             if account.get("order_available_lookup_performed") is not True
             else (account.get("account_summary") or {}).get("cash_amount"),
@@ -684,6 +671,7 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
 
     gate_missing = account.get("active_order_lookup_performed") is not True or account.get("order_available_lookup_performed") is not True
     blocked_any = False
+    refreshable_gate_blocked = False
     for item in verdict_second.get("symbols", []):
         if not isinstance(item, dict):
             continue
@@ -714,8 +702,9 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
         if direction != "none":
             if args.request_type in {"demo-submit", "real-submit", "prepare"} and gate_missing:
                 result = "blocked"
-                reason = "limit_price_not_explicitly_confirmed_and_active_order_or_order_available_gate_missing"
+                reason = "active_order_or_order_available_gate_missing"
                 blocked_any = True
+                refreshable_gate_blocked = True
             elif args.request_type in {"demo-submit", "real-submit", "prepare"}:
                 result = "skipped"
                 reason = "ready_for_main_agent_submission"
@@ -740,7 +729,8 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
                 "additional_required_quantity": delta,
                 "validated_order_quantity": abs(delta),
                 "order_price": order_price,
-                "order_type": args.order_type,
+                "order_path": "reservation",
+                "order_api": "order_resv",
                 "result": result,
                 "reason": reason,
                 "order_or_reservation_id": "",
@@ -748,6 +738,16 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
             }
         )
     artifact["symbols"] = [item["symbol_id"] for item in artifact["orders"]]
+    if args.request_type in {"demo-submit", "real-submit"} and any(item.get("direction") != "none" for item in artifact["orders"]):
+        artifact["requires_main_agent_order_execution"] = True
+        if refreshable_gate_blocked:
+            artifact["required_main_agent_actions"] = [
+                "refresh_active_order_lookup",
+                "refresh_order_available_lookup",
+                "continue_order_execution",
+            ]
+        elif not blocked_any:
+            artifact["required_main_agent_actions"] = ["continue_order_execution"]
     if blocked_any:
         artifact["status"] = "partial"
         artifact["errors"].append(
@@ -755,8 +755,9 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
                 "stage": "execution",
                 "source": "build_run_artifacts",
                 "code": "order_submission_blocked",
-                "message": "Real/demo reservation limit orders require explicit limit price and latest active-order/order-available gates; no order API submitted.",
+                "message": "Real/demo order candidates require latest active-order/order-available gates before Main-agent order execution; no order API submitted by the deterministic execution plan.",
                 "required": True,
+                "refreshable_by_main_agent": refreshable_gate_blocked,
             }
         )
     write_json(Path(args.output), artifact)
@@ -939,8 +940,6 @@ symbols:
                     started_at=None,
                     financial_cache_path=str(financial_cache_path),
                     news_cache_path=str(news_cache_path),
-                    market_status_json=None,
-                    market_status_text=None,
                 )
             )
             if brief["status"] != "partial" or len(brief["symbols"]) != 2:
@@ -1072,11 +1071,12 @@ symbols:
                     run_id=None,
                     started_at=None,
                     request_type="real-submit",
-                    order_type="limit-reservation-unconfirmed",
                 )
             )
             if execution["orders"][0]["result"] != "blocked":
                 failures.append(f"unexpected execution plan: {execution}")
+            if execution["orders"][0].get("order_path") != "reservation" or execution["orders"][0].get("order_api") != "order_resv":
+                failures.append(f"execution plan did not emit reservation order path/API: {execution['orders'][0]}")
             account_missing_gates = load_json(run_dir / "account-before-order.json")
             account_missing_gates.pop("active_order_lookup_performed", None)
             account_missing_gates.pop("order_available_lookup_performed", None)
@@ -1091,11 +1091,14 @@ symbols:
                     run_id=None,
                     started_at=None,
                     request_type="real-submit",
-                    order_type="limit-reservation-unconfirmed",
                 )
             )
             if missing_gate_execution["orders"][0]["result"] != "blocked":
                 failures.append(f"missing account gate fields did not block execution: {missing_gate_execution}")
+            if missing_gate_execution["orders"][0]["reason"] != "active_order_or_order_available_gate_missing":
+                failures.append(f"missing account gate used unexpected reason: {missing_gate_execution['orders'][0]}")
+            if "explicit limit price" in (missing_gate_execution.get("errors") or [{}])[0].get("message", ""):
+                failures.append(f"missing account gate error still requires explicit limit price: {missing_gate_execution['errors']}")
             account_ready = load_json(run_dir / "account-before-order.json")
             account_ready["active_order_lookup_performed"] = True
             account_ready["order_available_lookup_performed"] = True
@@ -1110,7 +1113,6 @@ symbols:
                     run_id=None,
                     started_at=None,
                     request_type="real-submit",
-                    order_type="limit-reservation-unconfirmed",
                 )
             )
             if ready_execution["orders"][0]["result"] != "skipped" or ready_execution["orders"][0]["reason"] != "ready_for_main_agent_submission":
@@ -1148,8 +1150,6 @@ def build_parser() -> argparse.ArgumentParser:
     decision.add_argument("--account-before-order")
     decision.add_argument("--financial-cache-path", default="")
     decision.add_argument("--news-cache-path", default="")
-    decision.add_argument("--market-status-json")
-    decision.add_argument("--market-status-text")
     decision.add_argument("--run-id")
     decision.add_argument("--started-at")
     decision.add_argument("--output", type=Path, default=None)
@@ -1190,7 +1190,6 @@ def build_parser() -> argparse.ArgumentParser:
     execution.add_argument("--account-before-order")
     execution.add_argument("--decision-brief")
     execution.add_argument("--request-type", choices=["analysis", "prepare", "demo-submit", "real-submit"], default="analysis")
-    execution.add_argument("--order-type", default="limit-reservation-unconfirmed")
     execution.add_argument("--run-id")
     execution.add_argument("--started-at")
     execution.add_argument("--output", type=Path, default=None)

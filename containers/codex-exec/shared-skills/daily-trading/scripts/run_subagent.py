@@ -34,11 +34,10 @@ FIRST_VERDICT_SUBAGENT_MODEL = "gpt-5.5"
 FIRST_VERDICT_SUBAGENT_REASONING_EFFORT = "medium"
 SECOND_VERDICT_SUBAGENT_MODEL = "gpt-5.5"
 SECOND_VERDICT_SUBAGENT_REASONING_EFFORT = "medium"
-COLLECTION_STAGES = {"financial-collection", "news-collection", "market-status-collection"}
+COLLECTION_STAGES = {"financial-collection", "news-collection"}
 FINANCIAL_PATH_OUTPUT_STAGES = {"financial-collection"}
 NEWS_PATH_OUTPUT_STAGES = {"news-collection"}
-MARKET_STATUS_TEXT_OUTPUT_STAGES = {"market-status-collection"}
-TEXT_OUTPUT_STAGES = FINANCIAL_PATH_OUTPUT_STAGES | NEWS_PATH_OUTPUT_STAGES | MARKET_STATUS_TEXT_OUTPUT_STAGES
+TEXT_OUTPUT_STAGES = FINANCIAL_PATH_OUTPUT_STAGES | NEWS_PATH_OUTPUT_STAGES
 OPTIONAL_GROUP_FAILURE_STAGES = TEXT_OUTPUT_STAGES
 VERDICT_STAGES = {"first-verdict", "second-verdict"}
 SELECTED_FIRST_VERDICT_ROLES = {
@@ -441,7 +440,7 @@ def compact_verdict_prompt(spec: dict[str, Any]) -> str | None:
             "",
             "Return JSON only in the required compact verdict format. human_markdown_path is informational; the Main agent creates that sidecar from JSON.",
             "Use short reason_code and one_line_reason fields instead of long rationale, risk, evidence, or prose arrays.",
-            "Optional financial/news/market-status absence is context only and must not lower score, target, or eligibility by itself.",
+            "Optional financial/news absence is context only and must not lower score, target, or eligibility by itself.",
         ]
     )
     return compact_prompt("\n".join(lines))
@@ -455,7 +454,7 @@ def launcher_model_effort(stage: str, agent_role: str) -> tuple[str, str]:
     stage_key = stage.strip().lower()
     role_key = agent_role.strip().lower()
 
-    if role_key in {"financial", "news", "market-status"} or stage_key in COLLECTION_STAGES:
+    if role_key in {"financial", "news"} or stage_key in COLLECTION_STAGES:
         return COLLECTION_SUBAGENT_MODEL, COLLECTION_SUBAGENT_REASONING_EFFORT
     if stage_key == "first-verdict":
         if role_key in SELECTED_FIRST_VERDICT_ROLES:
@@ -490,12 +489,6 @@ def assert_all_supported_stages_use_expected_models() -> None:
         (
             "financial-collection",
             "financial",
-            COLLECTION_SUBAGENT_MODEL,
-            COLLECTION_SUBAGENT_REASONING_EFFORT,
-        ),
-        (
-            "market-status-collection",
-            "market-status",
             COLLECTION_SUBAGENT_MODEL,
             COLLECTION_SUBAGENT_REASONING_EFFORT,
         ),
@@ -1005,10 +998,8 @@ if task_name in empty_tasks:
 if os.environ.get("FAKE_CODEX_INVALID_JSON") == "1":
     output_path.write_text("not json", encoding="utf-8")
 else:
-    if "financial" in task_name or "news" in task_name or "market-status" in task_name:
+    if "financial" in task_name or "news" in task_name:
         domain = "financial" if "financial" in task_name else "news"
-        if "market-status" in task_name:
-            domain = "market-status"
         payload = {
             "schema_version": "1",
             "run_id": "self-test",
@@ -1110,7 +1101,6 @@ def write_sample_verdict_inputs(tmp: Path) -> None:
         {
             "schema_version": "1",
             "brief_type": "decision-brief",
-            "market_status_summary": ["m1", "m2", "m3", "m4", "m5", "m6"],
             "errors": [
                 {"symbol_id": "005930", "code": "keep_symbol_error"},
                 {"symbol_id": "035420", "code": "drop_symbol_error"},
@@ -1524,21 +1514,15 @@ def run_self_test() -> int:
             group = run_group(
                 [
                     spec(tmp, stage="financial-collection", agent_role="financial", task_name="g-financial"),
-                    spec(
-                        tmp,
-                        stage="market-status-collection",
-                        agent_role="market-status",
-                        task_name="g-market-status",
-                    ),
                     spec(tmp, stage="news-collection", agent_role="news", task_name="g-news"),
                 ],
                 max_workers=3,
             )
-            if group["status"] != "success" or group["count"] != 3:
+            if group["status"] != "success" or group["count"] != 2:
                 failures.append(f"run-group returned unexpected result: {group}")
             wrapper_count = len(list((Path(group["wrappers"][0]["raw_output_path"]).parent).glob("g-*.wrapper.json")))
-            if wrapper_count != 3:
-                failures.append(f"expected 3 group wrapper files, got {wrapper_count}")
+            if wrapper_count != 2:
+                failures.append(f"expected 2 group wrapper files, got {wrapper_count}")
 
             os.environ["FAKE_CODEX_EMPTY_TASKS"] = "optional-news"
             optional_group = run_group(

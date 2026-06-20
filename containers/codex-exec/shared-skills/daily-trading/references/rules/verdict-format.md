@@ -50,7 +50,7 @@ Main-generated `second-verdict` sidecar content:
 
 The sidecar is never machine input. JSON captured by the launcher is authoritative. Missing, malformed, or inconsistent sidecars are warnings only.
 
-`decision-brief.json` is the canonical verdict input. It should contain compact price/chart, optional financial/news/market-status summaries, account exposure, eligibility, evidence mode, and errors. Absence of optional financial/news/market-status data is context only; it must not lower score, lower confidence, exclude a symbol, remove a target, or block orders by itself.
+`decision-brief.json` is the canonical verdict input. It should contain compact price/chart, optional financial/news summaries, account exposure, eligibility, evidence mode, and errors. Absence of optional financial/news data is context only; it must not lower score, lower confidence, exclude a symbol, remove a target, or block orders by itself.
 
 Verdict sub-agents receive launcher-created lossless `verdict-inputs/` slices containing only the listed `symbol_ids`. `first-verdict` reads a `verdict-core` slice derived from `decision-brief.json`; `second-verdict` reads `verdict-core` plus a selected-symbol slice derived from `verdict-first.json`. Raw prompt fallback is forbidden for verdict stages. Verdict sub-agents may use read-only local shell commands such as `cat` and `jq` only for explicitly listed artifact/persona/rule files. Do not load unrelated symbols, raw memory caches, optional source files, secrets, or unlisted paths.
 

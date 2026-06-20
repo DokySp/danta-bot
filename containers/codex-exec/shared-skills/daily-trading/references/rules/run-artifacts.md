@@ -23,7 +23,7 @@ reports/
 
 Create `run.json` when work starts. Write every other artifact when its stage completes, skips, or fails. Domain snapshots are write-once for the stage; retain retries and partial results in `attempts` instead of replacing evidence.
 
-The sub-agent launcher writes wrapper files, raw files, token usage metadata, and optional verdict input slices. Main agent owns canonical JSON artifacts and must not create `financial.md`, `news.md`, or `market-status.md`. Financial/news context lives in reusable memory caches; market-status is launcher text.
+The sub-agent launcher writes wrapper files, raw files, token usage metadata, and optional verdict input slices. Main agent owns canonical JSON artifacts and must not create `financial.md` or `news.md`. Financial/news context lives in reusable memory caches.
 
 `subagents/*.raw.txt` keeps the raw model output for debugging. It is retained by default. `CODEX_SUBAGENT_RAW_RETENTION=failed` may delete successful raw outputs after parsing; `never` may delete all raw outputs after parsing. Wrappers still keep status, errors, parsed output, raw path metadata, and whether the raw file was retained.
 
@@ -76,7 +76,7 @@ Omit `symbol_id` only for run-wide errors. Messages must not contain sensitive v
 
 Treat a wrapper as failed evidence when it is missing, has `status="failed"`, or has non-zero `returncode`.
 
-Financial/news/market-status text stages fail in the launcher only when `parsed_text` is empty. Do not validate returned cache-path existence in the launcher. A `run-group` result is `failed` only when a required stage fails; if only optional text stages fail, group status is `partial`.
+Financial/news text stages fail in the launcher only when `parsed_text` is empty. Do not validate returned cache-path existence in the launcher. A `run-group` result is `failed` only when a required stage fails; if only optional text stages fail, group status is `partial`.
 
 Failed wrappers remain in `subagents/`. Main agent writes failed canonical envelopes and blocks only dependent required stages. Retry only failed specs. Successful wrappers with the same `spec_fingerprint` may be reused and must not be rerun just because another parallel task failed.
 
@@ -91,7 +91,6 @@ Wrapper JSON includes `token_usage`, `token_usage_event_count`, optional `rate_l
 | `price-chart.json` | Main/helper | required complete symbol universe, sanitized price/chart evidence, per-symbol errors |
 | financial memory path | optional collector/Main | reusable `memory/collect-financial-information/financial-YYYY-MM-DD.yaml` reference |
 | news memory path | optional collector/Main | reusable `memory/collect-news-information/news-YYYY-MM-DD.yaml` reference |
-| market-status text | optional collector/Main | compact `$get-market-status` summary |
 | `decision-brief.json` | Main | compact verdict input from price/chart, account, and optional summaries |
 | `verdict-inputs/*.json` | Launcher | non-canonical lossless per-task `verdict-core` and first-verdict selected-symbol slices |
 | `verdict-first.json` | Main | compact first verdict responses, sidecar paths, raw score averages, confidence-adjusted final scores |
@@ -99,7 +98,7 @@ Wrapper JSON includes `token_usage`, `token_usage_event_count`, optional `rate_l
 | `account-before-order.json` | Main/helper | sanitized latest account snapshot, active pending/reserved orders, or skipped envelope |
 | `execution.json` | Main | active-order adjustment decisions, quantity math, latest available cash, blocked/submitted/skipped/failed order results |
 
-Financial/news/market-status absence alone must not fail validation, lower eligibility, or block verdict/order flow.
+Financial/news absence alone must not fail validation, lower eligibility, or block verdict/order flow.
 
 ## Account Order Evidence Shape
 
@@ -116,7 +115,7 @@ Financial/news/market-status absence alone must not fail validation, lower eligi
       "direction": "buy | sell",
       "remaining_quantity": 0,
       "order_price": 0,
-      "order_type": "",
+      "order_api": "order_cash | order_resv",
       "execution_environment": "demo | real",
       "order_path": "immediate | reservation",
       "active_status": "active | cancelled | filled | expired | unknown",
@@ -138,7 +137,6 @@ Use the common envelope plus:
 {
   "brief_type": "verdict-input",
   "source_artifacts": ["price-chart.json", "check-portfolio JSON"],
-  "market_status_summary": {},
   "account_exposure_summary": {},
   "symbols": [
     {
@@ -161,7 +159,7 @@ Use the common envelope plus:
 }
 ```
 
-If `symbol_id`, `symbol_name`, `price.current_or_last`, and `price.observed_at` exist, financial/news/market-status absence must not make a symbol ineligible. Keep optional summaries empty or add non-blocking notes.
+If `symbol_id`, `symbol_name`, `price.current_or_last`, and `price.observed_at` exist, financial/news absence must not make a symbol ineligible. Keep optional summaries empty or add non-blocking notes.
 
 ## Sanitization
 

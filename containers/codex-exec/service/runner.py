@@ -4,6 +4,7 @@ import logging
 import os
 import shlex
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -317,6 +318,7 @@ class CodexRunner:
             output = str(event_summary.get("last_agent_message") or "").strip() or result.stdout.strip()
         output = output.strip() or "<i>Codex completed without output.</i>"
         if daily_trading_hint or self._daily_trading_artifact_exists(context):
+            self._refresh_daily_trading_token_artifacts(context, result.stdout or "")
             self._append_holding_history_if_available(context)
             output = append_daily_trading_started_at(output, context)
         usage_after = self._read_usage_snapshot()
@@ -416,6 +418,88 @@ class CodexRunner:
 
     def _daily_trading_artifact_exists(self, context) -> bool:
         return (self.config.workspace_dir / "reports" / "runs" / context.run_id / "run.json").is_file()
+
+    def _daily_trading_run_dir(self, context) -> Path:
+        return self.config.workspace_dir / "reports" / "runs" / context.run_id
+
+    def _daily_trading_artifact_script(self) -> Path | None:
+        candidates = [
+            self.config.workspace_dir
+            / "containers/codex-exec/shared-skills/daily-trading/scripts/build_run_artifacts.py",
+            Path("/app/skills/daily-trading/scripts/build_run_artifacts.py"),
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return None
+
+    def _write_daily_trading_main_events(self, run_dir: Path, stdout: str) -> Path | None:
+        lines: list[str] = []
+        for line in stdout.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                item = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
+            if token_count_payload(item) is not None or turn_completed_usage(item) is not None:
+                lines.append(json.dumps(item, ensure_ascii=False, separators=(",", ":")))
+        if not lines:
+            return None
+        path = run_dir / "main-events.jsonl"
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return path
+
+    def _refresh_daily_trading_token_artifacts(self, context, stdout: str) -> None:
+        run_dir = self._daily_trading_run_dir(context)
+        if not run_dir.is_dir():
+            return
+        artifact_script = self._daily_trading_artifact_script()
+        if artifact_script is None:
+            logging.warning("daily-trading artifact helper not found; cannot refresh token-summary run_id=%s", context.run_id)
+            return
+        main_events = self._write_daily_trading_main_events(run_dir, stdout)
+        if main_events is None:
+            return
+
+        cmd = [
+            sys.executable,
+            str(artifact_script),
+            "token-summary",
+            "--run-dir",
+            str(run_dir),
+            "--main-events",
+            str(main_events),
+        ]
+        result = subprocess.run(
+            cmd,
+            cwd=self.config.workspace_dir,
+            env=os.environ.copy(),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if result.returncode != 0:
+            logging.warning("daily-trading token-summary refresh failed stderr=%s", (result.stderr or "").strip()[-1000:])
+            return
+        token_summary_path = run_dir / "token-summary.json"
+        pipeline_summary_path = run_dir / "pipeline-summary.json"
+        try:
+            token_summary = json.loads(token_summary_path.read_text(encoding="utf-8"))
+            pipeline_summary = json.loads(pipeline_summary_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            logging.warning("daily-trading token artifact refresh could not read summaries run_id=%s", context.run_id)
+            return
+        pipeline_summary["token_usage"] = {
+            "main": (token_summary.get("main") or {}).get("token_usage", zero_token_usage()),
+            "subagents": (token_summary.get("subagents") or {}).get("token_usage", zero_token_usage()),
+            "total": (token_summary.get("total") or {}).get("token_usage", zero_token_usage()),
+        }
+        tmp = pipeline_summary_path.with_suffix(pipeline_summary_path.suffix + ".tmp")
+        tmp.write_text(json.dumps(pipeline_summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        tmp.replace(pipeline_summary_path)
 
     def _append_holding_history_if_available(self, context) -> None:
         try:

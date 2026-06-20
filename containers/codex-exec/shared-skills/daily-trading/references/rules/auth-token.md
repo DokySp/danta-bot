@@ -16,7 +16,9 @@ KIS Open API는 appkey/appsecret과 별도로 OAuth 접근토큰을 사용한다
 
 ## Direct KIS Helper 인증 경계
 
-`scripts/collect_main_evidence.py`는 KIS REST를 직접 호출하므로 MCP 내부 토큰 캐시를 사용하지 않는다. 이 helper는 runtime environment의 KIS app key/secret/account 설정을 읽고, 환경별 토큰을 분리된 로컬 캐시에 저장한다. 캐시 경로는 기본적으로 `~/.cache/codex/daily-trading/kis-token-<env>.json`이며, 필요하면 `DAILY_TRADING_TOKEN_CACHE`로 재지정할 수 있다.
+`scripts/collect_main_evidence.py`는 KIS REST를 직접 호출하므로 MCP 내부 토큰 캐시를 사용하지 않는다. 이 helper는 runtime environment의 KIS app key/secret/account 설정을 읽고, `shared-skills/kis-token/scripts/kis_token.py` 공용 helper를 통해 환경별 토큰을 공유 캐시에 저장한다. 기본 캐시 경로는 `CODEX_HOME`이 있으면 `$CODEX_HOME/.cache/kis-token/kis-token-real.json` 및 `$CODEX_HOME/.cache/kis-token/kis-token-demo.json`이고, 없으면 `~/.cache/codex/kis-token/` 아래이다.
+
+새 direct KIS 기능을 추가할 때는 별도 토큰 파일이나 기능별 토큰 캐시를 만들지 않는다. 반드시 공용 `kis-token` helper를 import해서 사용하고, 배포상 캐시 위치 조정이 필요하면 기능별 env가 아니라 `KIS_TOKEN_CACHE_DIR`만 사용한다.
 
 Direct helper는 토큰 원문, app key, app secret, 계좌번호, 계좌상품코드, HTS ID를 artifact, prompt, report, user response에 쓰지 않는다. helper 출력은 artifact path/count/token-status 수준으로 제한한다.
 

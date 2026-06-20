@@ -66,6 +66,7 @@ Allowed access path:
 - Demo `tr_id`: `VTTC8434R`
 
 Do not use MCP for this skill's holdings lookup.
+Use the shared `kis-token` helper for OAuth token caching. Do not create or read a check-portfolio-specific token cache for new code.
 
 ## Workflow
 
