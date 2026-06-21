@@ -423,6 +423,12 @@ class Pipeline:
     def main_evidence_script(self) -> str:
         return str(script_dir() / "collect_main_evidence.py")
 
+    def order_execution_script(self) -> str:
+        return str(script_dir() / "execute_orders.py")
+
+    def telegram_summary_script(self) -> str:
+        return str(script_dir() / "render_telegram_summary.py")
+
     def portfolio_script_candidates(self) -> list[Path]:
         return [
             self.repo_root / "containers/codex-exec/profiles/base/skills/check-portfolio/scripts/read_portfolio.sh",
@@ -791,6 +797,31 @@ class Pipeline:
             last_detail = f"required second-verdict wrapper failed on attempt {attempt}"
         self.add_stage("second-verdict", "failed", detail=last_detail, path=self.command_log_path)
         raise RuntimeError("second-verdict failed")
+
+    def run_order_execution(self) -> dict[str, Any]:
+        result = self.run_cmd(
+            "order-execution",
+            [
+                sys.executable,
+                self.order_execution_script(),
+                "run",
+                "--output-dir",
+                str(self.output_dir),
+                "--env",
+                self.args.env,
+                "--submit",
+            ],
+        )
+        if result.returncode != 0:
+            self.add_stage("order-execution", "failed", detail=compact_text(result.stderr or result.stdout), path=self.output_dir / "execution.json")
+            raise RuntimeError("order-execution failed")
+        execution = load_json(self.output_dir / "execution.json")
+        status = str(execution.get("status") or "")
+        stage_status = "success" if status == "success" else "partial" if status == "partial" else "failed"
+        self.add_stage("order-execution", stage_status, detail=f"status={status}", path=self.output_dir / "execution.json")
+        if stage_status == "failed":
+            raise RuntimeError("order-execution failed")
+        return execution
 
     def write_verdict_second(self, wrapper: dict[str, Any]) -> None:
         parsed = wrapper.get("parsed_json") if isinstance(wrapper.get("parsed_json"), dict) else {}
@@ -1205,12 +1236,33 @@ class Pipeline:
                 "",
                 "## 11. 메모",
                 "- 당일 체결수량은 현재 보유수량에 이미 반영된 값으로 보고 다시 차감하지 않음",
-                "- `second-verdict`는 단일 `judge-midterm` 목표수량을 사용하며 Main agent가 총자산/주문가능금액/집중도/active 주문/same-day/account-order gate를 검증함",
+                "- `second-verdict`는 단일 `judge-midterm` 목표수량을 사용하며 deterministic helper와 `execute_orders.py`가 총자산/주문가능금액/집중도/active 주문/same-day/account-order gate를 검증함",
                 "- 투자 권유가 아니라 의사결정 보조 분석입니다.",
             ]
         )
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return path
+
+    def write_telegram_summary(self) -> Path:
+        path = self.output_dir / "telegram-summary.txt"
+        result = self.run_cmd(
+            "telegram-summary",
+            [
+                sys.executable,
+                self.telegram_summary_script(),
+                "--summary",
+                str(self.summary_path),
+                "--output",
+                str(path),
+            ],
+            required=False,
+        )
+        self.stages = [item for item in self.stages if item.get("stage") != "telegram-summary"]
+        if result.returncode != 0:
+            self.add_stage("telegram-summary", "partial", required=False, detail=compact_text(result.stderr or result.stdout), path=path)
+        else:
+            self.add_stage("telegram-summary", "success", required=False, detail="rendered telegram-summary.txt", path=path)
         return path
 
     def build_summary(self, portfolio: dict[str, Any]) -> dict[str, Any]:
@@ -1241,6 +1293,7 @@ class Pipeline:
         account_display_summary = self.build_account_display_summary(account_summary)
         evidence_summary = self.build_evidence_summary(decision_brief, stages, symbols)
         report_path = self.report_path()
+        telegram_summary_path = self.output_dir / "telegram-summary.txt"
         summary = {
             "schema_version": "1",
             "run_id": self.run_id,
@@ -1250,6 +1303,7 @@ class Pipeline:
             "summary_path": str(self.summary_path),
             "command_log_path": str(self.command_log_path),
             "report_path": str(report_path),
+            "telegram_summary_path": str(telegram_summary_path),
             "stages": stages,
             "portfolio_counts": {
                 "recommanded": len(normalize_symbol_ids(portfolio.get("recommanded"))),
@@ -1284,7 +1338,7 @@ class Pipeline:
                 "total": (token_summary.get("total") or {}).get("token_usage", zero_usage()),
             },
             "telegram_response_policy": {
-                "source": "Use pipeline-summary.json first, then report_path only for additional human-readable detail.",
+                "source": "Use telegram-summary.txt as the fixed Telegram response. Regenerate it from pipeline-summary.json with render_telegram_summary.py.",
                 "account_state_fields": [
                     "cash_amount",
                     "securities_valuation_amount",
@@ -1306,15 +1360,19 @@ class Pipeline:
                 "execution": str(self.output_dir / "execution.json"),
                 "token_summary": str(self.output_dir / "token-summary.json"),
                 "portfolio_report": str(report_path),
+                "telegram_summary": str(telegram_summary_path),
             },
             "main_agent_read_policy": (
-                "Read pipeline-summary.json first. For demo-submit or real-submit, if execution.requires_main_agent_order_execution is true, "
-                "open only the minimal account/order artifacts and continue Main-agent order-execution; refresh listed read-only gates before submission. "
-                "For explicit limit reservation requests, treat execution-plan order_price values as the default limit price candidates unless a current API gate rejects them. "
+                "Read pipeline-summary.json first. For explicit demo-submit or real-submit runs, pass --submit-orders so execute_orders.py refreshes "
+                "read-only account/order gates, reconciles active pending/reserved orders, and submits, adjusts, or blocks immediate/reservation orders before summary generation. "
+                "For explicit limit requests, treat execution-plan order_price values as the default limit price candidates unless a current API gate rejects them. "
                 "Open command_log_path or other intermediate artifacts only when a stage failed and the summary is insufficient."
             ),
         }
         self.write_portfolio_report(summary)
+        write_json(self.summary_path, summary)
+        self.write_telegram_summary()
+        summary["stages"] = self.load_summary_stages()
         write_json(self.summary_path, summary)
         self.write_run_json(status=summary["status"])
         return summary
@@ -1421,10 +1479,19 @@ class Pipeline:
                 str(self.output_dir),
                 "--request-type",
                 self.args.request_type,
+                "--order-path",
+                getattr(self.args, "order_path", "reservation"),
             ],
         )
         execution_status = str((execution or {}).get("status") or "success")
         self.add_stage("execution-plan", "partial" if execution_status == "partial" else "success", detail=f"status={execution_status}", path=self.output_dir / "execution.json")
+
+        if (
+            getattr(self.args, "submit_orders", False)
+            and self.args.request_type in {"demo-submit", "real-submit"}
+            and bool((execution or {}).get("requires_main_agent_order_execution"))
+        ):
+            execution = self.run_order_execution()
 
         token_args = ["token-summary", "--run-dir", str(self.output_dir)]
         if self.args.main_events:
@@ -1923,7 +1990,7 @@ def run_self_test() -> int:
             )
             summary = pipeline.run()
             if summary["status"] != "partial":
-                failures.append(f"real-submit summary should remain partial before Main-agent order-execution: {summary['status']}")
+                failures.append(f"real-submit summary should remain partial before submit-order execution: {summary['status']}")
             if summary["token_usage"]["subagents"]["total_tokens"] != 480:
                 failures.append(f"unexpected subagent token total: {summary['token_usage']}")
             if summary["token_usage"]["main"]["total_tokens"] != 17 or summary["token_usage"]["total"]["total_tokens"] != 497:
@@ -1942,6 +2009,16 @@ def run_self_test() -> int:
             telegram_policy = summary.get("telegram_response_policy") if isinstance(summary.get("telegram_response_policy"), dict) else {}
             if telegram_policy.get("gate_label") != "주문 전 기존 미체결/예약 주문":
                 failures.append(f"telegram response policy omitted explicit gate label: {telegram_policy}")
+            if "telegram-summary.txt" not in str(telegram_policy.get("source", "")):
+                failures.append(f"telegram response policy did not require fixed renderer output: {telegram_policy}")
+            telegram_summary_path = Path(str(summary.get("telegram_summary_path") or ""))
+            if not telegram_summary_path.exists():
+                failures.append(f"telegram summary was not written: {telegram_summary_path}")
+            else:
+                telegram_text = telegram_summary_path.read_text(encoding="utf-8")
+                for required_text in ("daily-trading 결과:", "계좌", "주문", "평결", "총 사용 토큰:"):
+                    if required_text not in telegram_text:
+                        failures.append(f"telegram summary omitted {required_text}: {telegram_summary_path}")
             report_path = Path(str(summary.get("report_path") or ""))
             if not report_path.exists():
                 failures.append(f"portfolio report was not written: {report_path}")
@@ -1955,13 +2032,86 @@ def run_self_test() -> int:
                     failures.append("portfolio report did not mark unrefreshed active-order adjustment gate")
             execution_summary = summary.get("execution") if isinstance(summary.get("execution"), dict) else {}
             if execution_summary.get("requires_main_agent_order_execution") is not True:
-                failures.append("real-submit pipeline summary did not request Main-agent order execution")
+                failures.append("real-submit pipeline summary did not request submit-order execution")
             expected_actions = ["refresh_active_order_lookup", "refresh_order_available_lookup", "continue_order_execution"]
             if execution_summary.get("required_main_agent_actions") != expected_actions:
-                failures.append(f"unexpected Main-agent action list: {execution_summary.get('required_main_agent_actions')}")
+                failures.append(f"unexpected submit-order action list: {execution_summary.get('required_main_agent_actions')}")
             read_policy = summary.get("main_agent_read_policy", "")
             if "execution-plan order_price values as the default limit price candidates" not in read_policy:
                 failures.append(f"pipeline summary read policy omitted default order_price guidance: {read_policy}")
+            fake_execute_orders = workspace / "fake-execute-orders.py"
+            fake_execute_orders.write_text(
+                """#!/usr/bin/env python3
+import json
+import sys
+from pathlib import Path
+
+output_dir = Path(sys.argv[sys.argv.index("--output-dir") + 1])
+execution_path = output_dir / "execution.json"
+account_path = output_dir / "account-before-order.json"
+execution = json.loads(execution_path.read_text(encoding="utf-8"))
+account = json.loads(account_path.read_text(encoding="utf-8"))
+account["active_order_lookup_performed"] = True
+account["order_available_lookup_performed"] = True
+account["active_orders"] = []
+orders = execution.get("orders") if isinstance(execution.get("orders"), list) else []
+for item in orders:
+    if isinstance(item, dict):
+        item["result"] = "submitted"
+        item["reason"] = "fake_submit_order"
+        item["order_or_reservation_id"] = "fake-resv-1"
+        item["attempts"] = [{"api_name": "order_resv", "result": "submitted"}]
+execution["status"] = "success"
+execution["requires_main_agent_order_execution"] = False
+execution["required_main_agent_actions"] = []
+execution["order_execution_mode"] = "submit"
+account_path.write_text(json.dumps(account, ensure_ascii=False, indent=2), encoding="utf-8")
+execution_path.write_text(json.dumps(execution, ensure_ascii=False, indent=2), encoding="utf-8")
+(output_dir / "order-execution-log.json").write_text(json.dumps({"status": "success"}, ensure_ascii=False), encoding="utf-8")
+print(json.dumps(execution, ensure_ascii=False))
+""",
+                encoding="utf-8",
+            )
+            fake_execute_orders.chmod(0o755)
+
+            class SubmitOrdersProbePipeline(Pipeline):
+                def order_execution_script(self) -> str:
+                    return str(fake_execute_orders)
+
+            submit_run_dir = workspace / "reports" / "runs" / "submit-orders-probe"
+            write_self_test_fixtures(workspace, submit_run_dir)
+            submit_pipeline = SubmitOrdersProbePipeline(
+                argparse.Namespace(
+                    command="run",
+                    workspace_dir=str(workspace),
+                    output_dir=str(submit_run_dir),
+                    run_id="submit-orders-probe",
+                    started_at="2026-06-18T09:00:00+09:00",
+                    env="acct",
+                    request_type="real-submit",
+                    portfolio_json=str(portfolio_path),
+                    financial_cache_path="",
+                    news_cache_path="",
+                    main_events=str(main_events),
+                    date="2026-06-18",
+                    reuse_existing_artifacts=True,
+                    skip_account=False,
+                    max_workers=3,
+                    submit_orders=True,
+                )
+            )
+            submit_summary = submit_pipeline.run()
+            submit_stages = [item.get("stage") for item in load_json(submit_run_dir / "run.json").get("stages", []) if isinstance(item, dict)]
+            if "order-execution" not in submit_stages:
+                failures.append(f"submit-orders pipeline did not run order-execution stage: {submit_stages}")
+            if submit_summary.get("status") != "success":
+                failures.append(f"submit-orders summary did not reflect fake submitted order: {submit_summary.get('status')}")
+            submit_execution = submit_summary.get("execution") if isinstance(submit_summary.get("execution"), dict) else {}
+            if submit_execution.get("requires_main_agent_order_execution") is not False:
+                failures.append(f"submit-orders summary did not clear execution handoff: {submit_execution}")
+            submit_telegram = Path(str(submit_summary.get("telegram_summary_path") or ""))
+            if not submit_telegram.exists():
+                failures.append(f"submit-orders summary did not render telegram summary: {submit_telegram}")
             if not (run_dir / "pipeline-summary.json").exists():
                 failures.append("pipeline-summary.json was not written")
             if not (run_dir / "execution.json").exists():
@@ -2013,6 +2163,9 @@ def run_self_test() -> int:
                 failures.append(f"summarize did not reflect completed order execution: {summarized.get('status')}")
             if (summarized.get("verdict_summary") or {}).get("submitted_order_count") != 1:
                 failures.append(f"summarize did not carry submitted order count: {summarized.get('verdict_summary')}")
+            summarized_telegram = Path(str(summarized.get("telegram_summary_path") or ""))
+            if not summarized_telegram.exists() or "selftest-resv-1" not in summarized_telegram.read_text(encoding="utf-8"):
+                failures.append("summarize did not refresh telegram summary with submitted order evidence")
             final_report = Path(str(summarized.get("report_path") or ""))
             final_report_text = final_report.read_text(encoding="utf-8") if final_report.exists() else ""
             if "selftest-resv-1" not in final_report_text or "submitted" not in final_report_text:
@@ -2130,6 +2283,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--financial-cache-path", default="")
     run.add_argument("--news-cache-path", default="")
     run.add_argument("--main-events", default="", help="Optional Codex JSONL events path for Main-agent token accounting.")
+    run.add_argument("--submit-orders", action="store_true", help="For explicit demo-submit/real-submit runs, execute immediate or reservation orders through execute_orders.py.")
+    run.add_argument("--order-path", choices=["reservation", "immediate"], default="reservation")
     run.add_argument("--date", default="")
     run.add_argument("--reuse-existing-artifacts", action="store_true")
     run.add_argument("--skip-account", action="store_true")
@@ -2142,6 +2297,7 @@ def build_parser() -> argparse.ArgumentParser:
     summarize.add_argument("--started-at", default="")
     summarize.add_argument("--env", default=os.environ.get("CODEX_MCP_TRADING_ENV", "acct"), choices=["acct", "real", "paper", "demo"])
     summarize.add_argument("--request-type", default="analysis", choices=["analysis", "prepare", "demo-submit", "real-submit"])
+    summarize.add_argument("--order-path", choices=["reservation", "immediate"], default="reservation")
     summarize.add_argument("--portfolio-json", default="")
 
     subparsers.add_parser("self-test", help="Run an offline pipeline smoke test with a fake codex binary.")

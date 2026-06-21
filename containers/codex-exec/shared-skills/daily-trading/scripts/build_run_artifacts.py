@@ -652,6 +652,10 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
     account_by_symbol = indexed_symbols(account.get("symbols"))
     brief_by_symbol = indexed_symbols(decision_brief.get("symbols"))
     active = active_quantities(account)
+    order_path = str(getattr(args, "order_path", "reservation") or "reservation")
+    if order_path not in {"reservation", "immediate"}:
+        raise ValueError(f"unsupported order_path: {order_path}")
+    order_api = "order_cash" if order_path == "immediate" else "order_resv"
 
     run_id = args.run_id or verdict_second.get("run_id") or account.get("run_id") or output_dir.name
     started_at = args.started_at or verdict_second.get("started_at") or account.get("started_at") or ""
@@ -729,8 +733,8 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
                 "additional_required_quantity": delta,
                 "validated_order_quantity": abs(delta),
                 "order_price": order_price,
-                "order_path": "reservation",
-                "order_api": "order_resv",
+                "order_path": order_path,
+                "order_api": order_api,
                 "result": result,
                 "reason": reason,
                 "order_or_reservation_id": "",
@@ -1190,6 +1194,7 @@ def build_parser() -> argparse.ArgumentParser:
     execution.add_argument("--account-before-order")
     execution.add_argument("--decision-brief")
     execution.add_argument("--request-type", choices=["analysis", "prepare", "demo-submit", "real-submit"], default="analysis")
+    execution.add_argument("--order-path", choices=["reservation", "immediate"], default="reservation")
     execution.add_argument("--run-id")
     execution.add_argument("--started-at")
     execution.add_argument("--output", type=Path, default=None)

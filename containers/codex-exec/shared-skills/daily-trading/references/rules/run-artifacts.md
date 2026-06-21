@@ -19,12 +19,13 @@ reports/
     ├── verdict-second.json
     ├── account-before-order.json
     ├── pipeline-summary.json
+    ├── telegram-summary.txt
     └── execution.json
 ```
 
 Create `run.json` when work starts. Write every other artifact when its stage completes, skips, or fails. Domain snapshots are write-once for the stage; retain retries and partial results in `attempts` instead of replacing evidence.
 
-`pipeline-summary.json` is the compact top-level read target for routine Main-agent responses. It must include `verdict_summary`, `execution`, `account_summary`, `account_display_summary`, `evidence_summary`, `telegram_response_policy`, `token_usage`, artifact paths, and `report_path`. After Main-agent order execution updates `execution.json`, rerun `scripts/run_daily_trading_pipeline.py summarize --workspace-dir <workspace> --output-dir reports/runs/<run_id>` so `pipeline-summary.json`, `reports/YYYY-MM-DD_포트폴리오.md`, and final `run.json` status describe the same final state.
+`pipeline-summary.json` is the compact top-level diagnostic source for routine Main-agent responses. It must include `verdict_summary`, `execution`, `account_summary`, `account_display_summary`, `evidence_summary`, `telegram_response_policy`, `token_usage`, artifact paths, `telegram_summary_path`, and `report_path`. `telegram-summary.txt` is the fixed Telegram/user-facing response rendered from `pipeline-summary.json`; use it instead of manually rewriting a response from raw artifacts. After order execution updates `execution.json`, rerun `scripts/run_daily_trading_pipeline.py summarize --workspace-dir <workspace> --output-dir reports/runs/<run_id>` so `pipeline-summary.json`, `telegram-summary.txt`, `reports/YYYY-MM-DD_포트폴리오.md`, and final `run.json` status describe the same final state.
 
 For Telegram/user-facing account output, use `account_display_summary` as the default source. It intentionally keeps same-day cumulative buy/sell amounts under `today_trade_amounts`; show those only as `당일 거래 누계` when useful, not as the main account state. Evidence output must use `evidence_summary.financial.display_text` and `evidence_summary.news.display_text`, preserving the difference between a missing news cache and a cache file with zero usable articles.
 
@@ -103,6 +104,7 @@ Wrapper JSON includes `token_usage`, `token_usage_event_count`, optional `rate_l
 | `account-before-order.json` | Main/helper | sanitized latest account snapshot, active pending/reserved orders, or skipped envelope |
 | `execution.json` | Main | active-order adjustment decisions, quantity math, latest available cash, blocked/submitted/skipped/failed order results |
 | `pipeline-summary.json` | Main/pipeline | compact final status, verdict summary, display-safe account summary, evidence status, execution summary, Telegram response policy, token usage, report path, and artifact paths |
+| `telegram-summary.txt` | Main/pipeline | fixed Telegram/user-facing response generated only from `pipeline-summary.json` |
 | `reports/YYYY-MM-DD_포트폴리오.md` | Main/pipeline | Korean human-readable portfolio report generated from compact canonical artifacts |
 
 Financial/news absence alone must not fail validation, lower eligibility, or block verdict/order flow.

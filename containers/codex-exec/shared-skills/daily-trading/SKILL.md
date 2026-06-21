@@ -39,15 +39,18 @@ python3 <daily-trading-skill>/scripts/run_daily_trading_pipeline.py run \
   --started-at <started_at> \
   --env <acct|paper> \
   --request-type <analysis|prepare|demo-submit|real-submit> \
+  [--submit-orders] \
+  [--order-path <reservation|immediate>] \
   [--main-events <codex-json-events-path>]
 ```
 
-After the command returns, read `reports/runs/<run_id>/pipeline-summary.json` first and use it for the user-facing response. The summary includes compact `verdict_summary` rows, `account_display_summary`, `evidence_summary`, `telegram_response_policy`, and `report_path`; use those instead of opening full verdict artifacts for routine reporting. For the account section, show the display summary fields only and keep same-day cumulative buy/sell under a separate `당일 거래 누계` label when useful. For evidence status, use the financial/news display text and preserve the difference between missing news cache and a cache with zero usable articles. For `demo-submit` or `real-submit`, if `execution.requires_main_agent_order_execution` is true, continue with the Main-agent `order-execution` stage immediately: open only the minimal account/order artifacts, refresh listed read-only gates, then submit or block according to `trade-execution.md`. After any Main-agent order-execution update to `execution.json` or `run.json`, immediately run `run_daily_trading_pipeline.py summarize --workspace-dir <workspace> --output-dir reports/runs/<run_id>` so `pipeline-summary.json` and `reports/YYYY-MM-DD_포트폴리오.md` reflect the final submitted/blocked order state. For explicit limit reservation requests, treat execution-plan `order_price` values as the default limit price candidates unless a current API gate rejects them. Open `pipeline-command-log.json` or other intermediate artifacts only when a stage failed and the compact summary does not contain enough evidence. The pipeline captures verbose helper stdout internally, writes canonical artifacts, and prints only a compact JSON pointer to stdout. When a Codex JSON event file is available, pass it as `--main-events` so `token-summary.json` and `pipeline-summary.json` include Main-agent token usage in addition to wrapper-tracked sub-agents.
+After the command returns, use `reports/runs/<run_id>/telegram-summary.txt` as the user-facing response when it exists. The pipeline renders it deterministically from `pipeline-summary.json` via `scripts/render_telegram_summary.py`; do not hand-write a new Telegram summary from raw artifacts. `pipeline-summary.json` remains the compact diagnostic source with `verdict_summary`, `account_display_summary`, `evidence_summary`, `telegram_response_policy`, `telegram_summary_path`, and `report_path`. For explicitly authorized `demo-submit` or `real-submit`, pass `--submit-orders` so the pipeline calls `scripts/execute_orders.py` after `execution-plan`; use `--order-path reservation` for `order_resv` reservation orders and `--order-path immediate` for `order_cash` immediate orders. The runner refreshes read-only account/order gates, reconciles active pending/reserved orders, submits/corrects/cancels or blocks orders, and regenerates `pipeline-summary.json` and `telegram-summary.txt` from the final `execution.json`. If `--submit-orders` was not used, `execution.requires_main_agent_order_execution=true` means the run stopped at the non-submitting gate summary and is not a final submitted/blocked order result. For explicit limit reservation requests, treat execution-plan `order_price` values as the default limit price candidates unless a current API gate rejects them. Open `pipeline-command-log.json` or other intermediate artifacts only when a stage failed and the compact summary does not contain enough evidence. The pipeline captures verbose helper stdout internally, writes canonical artifacts, and prints only a compact JSON pointer to stdout. When a Codex JSON event file is available, pass it as `--main-events` so `token-summary.json`, `pipeline-summary.json`, and `telegram-summary.txt` include Main-agent token usage in addition to wrapper-tracked sub-agents.
 
 Validation command after pipeline changes:
 
 ```text
 python3 <daily-trading-skill>/scripts/run_daily_trading_pipeline.py self-test
+python3 <daily-trading-skill>/scripts/render_telegram_summary.py --self-test
 ```
 
 ## Launcher Contract
@@ -91,7 +94,7 @@ Preserve injected `run_id` and `started_at`. If absent, generate both before wor
 Main agent only:
 
 - Resolve the portfolio universe from `$check-portfolio` JSON `universe`; do not separately re-read live holdings only to expand the universe.
-- Handle auth, account snapshots, direct price/chart evidence collection through `scripts/collect_main_evidence.py`, artifact writes, sanitization, merging, exclusions, target/order calculation, explicit approval checks, active pending/reserved order adjustment, and order submission.
+- Handle auth, account snapshots, direct price/chart evidence collection through `scripts/collect_main_evidence.py`, artifact writes, sanitization, merging, exclusions, target/order calculation, and explicit approval checks. Routine order gate refresh, active pending/reserved order reconciliation, and order submission/correction/cancellation are delegated to `scripts/execute_orders.py` when `--submit-orders` is used.
 - Write canonical artifacts under `reports/runs/<run_id>/`.
 
 ## Main Evidence Helper
@@ -107,7 +110,7 @@ python3 scripts/collect_main_evidence.py collect \
   --env acct
 ```
 
-The helper may write `collection-summary.json`, `price-chart.json`, and `account-before-order.json`. It must not submit, cancel, correct, or reserve orders. If active-order or order-available lookups are not collected, order preparation/execution remains blocked until the Main agent refreshes those required fields with validated read-only APIs.
+The helper may write `collection-summary.json`, `price-chart.json`, and `account-before-order.json`. It must not submit, cancel, correct, or reserve orders. If active-order or order-available lookups are not collected, order preparation/execution remains blocked until `scripts/execute_orders.py` refreshes those required read-only fields for explicit submit runs.
 
 ## Deterministic Artifact Helper
 
@@ -118,7 +121,9 @@ python3 <daily-trading-skill>/scripts/build_run_artifacts.py decision-brief --ou
 python3 <daily-trading-skill>/scripts/build_run_artifacts.py first-specs --output-dir reports/runs/<run_id> --workspace-dir <workspace>
 python3 <daily-trading-skill>/scripts/build_run_artifacts.py merge-first --output-dir reports/runs/<run_id>
 python3 <daily-trading-skill>/scripts/build_run_artifacts.py second-spec --output-dir reports/runs/<run_id> --portfolio-json <check-portfolio-json-path> --workspace-dir <workspace>
-python3 <daily-trading-skill>/scripts/build_run_artifacts.py execution-plan --output-dir reports/runs/<run_id> --request-type <analysis|prepare|demo-submit|real-submit>
+python3 <daily-trading-skill>/scripts/build_run_artifacts.py execution-plan --output-dir reports/runs/<run_id> --request-type <analysis|prepare|demo-submit|real-submit> --order-path <reservation|immediate>
+python3 <daily-trading-skill>/scripts/execute_orders.py run --output-dir reports/runs/<run_id> --env <acct|paper> --submit
+python3 <daily-trading-skill>/scripts/render_telegram_summary.py --summary reports/runs/<run_id>/pipeline-summary.json --output reports/runs/<run_id>/telegram-summary.txt
 python3 <daily-trading-skill>/scripts/build_run_artifacts.py token-summary --run-dir reports/runs/<run_id> --main-events <codex-json-events-path>
 python3 <daily-trading-skill>/scripts/run_daily_trading_pipeline.py summarize --workspace-dir <workspace> --output-dir reports/runs/<run_id>
 ```
@@ -127,6 +132,8 @@ After install or helper changes, validate it with:
 
 ```text
 python3 <daily-trading-skill>/scripts/build_run_artifacts.py self-test
+python3 <daily-trading-skill>/scripts/execute_orders.py self-test
+python3 <daily-trading-skill>/scripts/render_telegram_summary.py --self-test
 ```
 
 Collection sub-agents:
@@ -153,8 +160,8 @@ Routine path: run `scripts/run_daily_trading_pipeline.py run`, then read only `p
 5. Use `scripts/build_run_artifacts.py decision-brief` to merge required price/chart and account evidence plus short optional summaries into compact `decision-brief.json`.
 6. Use `scripts/build_run_artifacts.py first-specs`, then run the selected three `first-verdict` functional personas in parallel with launcher-created `verdict-core` inputs. Main agent may reduce `symbol_ids` and merge prior valid verdict rows only when it can prove price, holdings, news, and active-order status are stable; otherwise rerun the symbol. Always re-evaluate sell/stop-loss candidates, same-day fills, price shocks, new news, active orders, and score-boundary cases. Launcher automatic wrapper reuse is limited to the same spec fingerprint. Use `scripts/build_run_artifacts.py merge-first` to create `verdict-first.json` and human-review sidecars from parsed JSON.
 7. Use `scripts/build_run_artifacts.py second-spec` to build the `second-verdict` set from eligible symbols with `final_first_score >= 7` plus eligible `holding` symbols from `$check-portfolio`, then run only `judge-midterm` with a selected-symbol first-verdict slice and at most two retries for the failed task only. Use the single valid judge target as the canonical target after deterministic validation.
-8. Use `scripts/build_run_artifacts.py execution-plan` for deterministic non-submitting order math and gate summary, then for `demo-submit` or `real-submit` continue into Main-agent `order-execution` whenever `execution.requires_main_agent_order_execution=true`. Refresh any missing required account/order-availability fields before orders, validate the single target set, reconcile active pending/reserved orders, apply `trade-execution.md` gates, and submit only explicitly authorized adjustments or orders. A partial/blocked execution plan caused only by missing refreshable read-only gates is not a final result for explicit submit requests. For explicit limit reservation requests, the execution-plan `order_price` is the default limit price candidate when the user did not provide per-symbol prices; do not block solely because the price came from the deterministic pipeline.
-9. Write `execution.json`, then run `scripts/run_daily_trading_pipeline.py summarize` to regenerate `pipeline-summary.json`, `reports/YYYY-MM-DD_포트폴리오.md`, and final `run.json` status from the final execution state.
+8. Use `scripts/build_run_artifacts.py execution-plan` for deterministic non-submitting order math and gate summary, then for `demo-submit` or `real-submit` pass `--submit-orders` so `scripts/execute_orders.py` refreshes required account/order-availability fields, validates the single target set, reconciles active pending/reserved orders, applies `trade-execution.md` gates, and submits/corrects/cancels only explicitly authorized orders. A partial/blocked execution plan caused only by missing refreshable read-only gates is not a final result for explicit submit requests. For explicit limit reservation requests, the execution-plan `order_price` is the default limit price candidate when the user did not provide per-symbol prices; do not block solely because the price came from the deterministic pipeline.
+9. The pipeline writes `execution.json`, then regenerates `pipeline-summary.json`, `telegram-summary.txt`, `reports/YYYY-MM-DD_포트폴리오.md`, and final `run.json` status from the final execution state.
 
 ## Compact Prompt Rules
 

@@ -4,7 +4,7 @@
 
 Sub-agent 모델과 effort는 `scripts/run_subagent.py`가 `codex exec` 명령으로 지정한다.
 
-`Main agent`는 routine 실행에서 `scripts/run_daily_trading_pipeline.py run`을 먼저 호출하고, `pipeline-summary.json`만 우선 읽는다. `pipeline-summary.json`은 `verdict_summary`, `account_display_summary`, `evidence_summary`, `telegram_response_policy`, `report_path`를 포함하므로 routine 응답은 이 compact 요약을 우선 사용한다. 계좌 본문은 표시용 요약의 현금/주식평가/총평가/평가손익을 사용하고, 당일 누적 매수/매도는 필요할 때만 `당일 거래 누계`로 분리한다. 뉴스/재무 확인 여부는 `evidence_summary`의 표시 문구를 사용해 캐시 없음과 캐시는 있으나 기사 0건인 상태를 구분한다. 단, `demo-submit` 또는 `real-submit`에서 `execution.requires_main_agent_order_execution=true`이면 이것을 최종 차단 결과로 보지 않고, 필요한 최소 계좌/주문 아티팩트만 열어 read-only gate를 갱신한 뒤 `order-execution`을 계속한다. Main agent가 `execution.json` 또는 `run.json`에 최종 주문 실행 결과를 반영한 뒤에는 `scripts/run_daily_trading_pipeline.py summarize --workspace-dir <workspace> --output-dir reports/runs/<run_id>`를 즉시 호출해 `pipeline-summary.json`과 `reports/YYYY-MM-DD_포트폴리오.md`를 최종 상태로 재생성한다. 명시적 지정가 예약 요청에서 사용자별 종목 가격이 없으면 `execution-plan`의 `order_price`를 기본 지정가 후보로 사용하며, 해당 가격이 파이프라인에서 산출됐다는 이유만으로 차단하지 않는다. `scripts/run_subagent.py`, `scripts/build_run_artifacts.py`, persona 파일, rule 문서 전문, 중간 JSON은 pipeline 실패 진단 때만 연다. 설치 또는 pipeline/launcher/helper 변경 후에는 `python3 <daily-trading-skill>/scripts/run_daily_trading_pipeline.py self-test`, `python3 <daily-trading-skill>/scripts/run_subagent.py self-test`, `python3 <daily-trading-skill>/scripts/build_run_artifacts.py self-test`로 검증한다.
+`Main agent`는 routine 실행에서 `scripts/run_daily_trading_pipeline.py run`을 먼저 호출한다. Telegram/user-facing 응답은 `pipeline-summary.json`을 직접 말로 재구성하지 않고, `scripts/render_telegram_summary.py`가 `pipeline-summary.json`에서 생성한 `telegram-summary.txt`를 그대로 사용한다. `pipeline-summary.json`은 `verdict_summary`, `account_display_summary`, `evidence_summary`, `telegram_response_policy`, `report_path`, `telegram_summary_path`를 포함하므로 진단이 필요할 때만 읽는다. 명시적으로 승인된 `demo-submit` 또는 `real-submit`에서는 `--submit-orders`를 함께 넘겨 `scripts/execute_orders.py`가 read-only gate 갱신, 기존 pending/reserved 주문 조정 판정, 즉시/예약 주문 제출·정정·취소·차단, 최종 summary 재생성을 수행하게 한다. `--order-path reservation`은 `order_resv`, `--order-path immediate`는 `order_cash` 후보를 만든다. `--submit-orders` 없이 `execution.requires_main_agent_order_execution=true`가 남아 있으면 그 run은 비제출 gate 요약 상태이며 최종 주문 실행 결과가 아니다. 명시적 지정가 예약 요청에서 사용자별 종목 가격이 없으면 `execution-plan`의 `order_price`를 기본 지정가 후보로 사용하며, 해당 가격이 파이프라인에서 산출됐다는 이유만으로 차단하지 않는다. `scripts/run_subagent.py`, `scripts/build_run_artifacts.py`, `scripts/render_telegram_summary.py`, persona 파일, rule 문서 전문, 중간 JSON은 pipeline 실패 진단 때만 연다. 설치 또는 pipeline/launcher/helper 변경 후에는 `python3 <daily-trading-skill>/scripts/run_daily_trading_pipeline.py self-test`, `python3 <daily-trading-skill>/scripts/run_subagent.py self-test`, `python3 <daily-trading-skill>/scripts/build_run_artifacts.py self-test`, `python3 <daily-trading-skill>/scripts/execute_orders.py self-test`, `python3 <daily-trading-skill>/scripts/render_telegram_summary.py --self-test`로 검증한다.
 
 Routine command:
 
@@ -16,6 +16,8 @@ python3 <daily-trading-skill>/scripts/run_daily_trading_pipeline.py run \
   --started-at <started_at> \
   --env <acct|paper> \
   --request-type <analysis|prepare|demo-submit|real-submit> \
+  [--submit-orders] \
+  [--order-path <reservation|immediate>] \
   [--main-events <codex-json-events-path>]
 ```
 
@@ -43,8 +45,8 @@ python3 <daily-trading-skill>/scripts/run_daily_trading_pipeline.py run \
 | 4 | `Main agent` + `scripts/build_run_artifacts.py` | deterministic 병합/sanitize | `price-chart.json`, `$check-portfolio` JSON, 선택적 `memory/collect-financial-information/financial-YYYY-MM-DD.yaml`, 선택적 `memory/collect-news-information/news-YYYY-MM-DD.yaml` | `decision-brief.json`, 제외 종목 목록 | 식별자와 가격 snapshot이 있으면 재무/뉴스 누락만으로 제외하지 않음; Main agent가 직접 JSON을 조립하지 않고 helper를 호출 |
 | 5 | `first-verdict` sub-agents + `scripts/build_run_artifacts.py` | selected 3 functional personas, deterministic spec/merge | launcher-created `verdict-core`, `verdict-format.md` | `verdict-first.json`, `verdicts/first-verdict--<agent_role>--<task_name>.md` | 외부 호출·다른 agent 결과 참조 금지; sub-agent는 compact JSON만 반환하고 companion MD와 score merge는 helper가 생성 |
 | 6 | `second-verdict` sub-agent + `scripts/build_run_artifacts.py` | `judge-midterm`, deterministic 대상/spec 생성 | launcher-created `verdict-core`, selected-symbol first-verdict slice, `verdict-format.md` | `verdict-second.json`, `verdicts/second-verdict--judge-midterm--<task_name>.md` | 목표수량은 단일 judge가 제안하고 목표현금은 만들지 않으며, helper/Main agent가 schema·자산·집중도·계좌 gate만 검증; 실패 시 failed task만 최대 2회 retry |
-| 7 | `Main agent` + `scripts/build_run_artifacts.py` | KIS read-only account APIs, deterministic 주문 계산, KIS active 주문 조정, KIS `order_cash` 또는 `order_resv` | `verdict-second.json`, 최신 계좌 상태, 명시적 demo/real 실행 요청 | `account-before-order.json`, `execution.json` | helper가 비제출 주문 수학/gate 요약을 먼저 만들고, `execution.requires_main_agent_order_execution=true`이면 Main agent는 필요한 최신 계좌 gate를 갱신한 뒤 실제 주문 API를 호출하거나 명확히 차단한다. 명시적 지정가 예약 요청에서는 `execution-plan`의 `order_price`를 기본 지정가 후보로 인정한다 |
-| 8 | `Main agent` + `scripts/run_daily_trading_pipeline.py summarize` | report template, run artifact update | 최종 `execution.json`, `run.json`, `verdict-second.json`, `pipeline-summary.json` | 최종 `pipeline-summary.json`, `reports/YYYY-MM-DD_포트폴리오.md`, 최종 `run.json` | partial/failed artifact를 삭제하지 않음 |
+| 7 | `scripts/build_run_artifacts.py` + `scripts/execute_orders.py` | deterministic 주문 계산, KIS read-only pending/reserved/주문가능 조회, KIS `order_cash`/`order_resv`/정정취소 API | `verdict-second.json`, 최신 계좌 상태, 명시적 demo/real 실행 요청 | `account-before-order.json`, `execution.json`, `order-execution-log.json` | helper가 비제출 주문 수학/gate 요약을 먼저 만들고, 명시 실행 요청에서 `--submit-orders`가 있으면 `execute_orders.py`가 최신 계좌 gate를 갱신한 뒤 즉시/예약 주문을 제출·정정·취소하거나 명확히 차단한다. 명시적 지정가 예약 요청에서는 `execution-plan`의 `order_price`를 기본 지정가 후보로 인정한다 |
+| 8 | `scripts/run_daily_trading_pipeline.py summarize` + `scripts/render_telegram_summary.py` | report template, Telegram fixed template, run artifact update | 최종 `execution.json`, `run.json`, `verdict-second.json`, `pipeline-summary.json` | 최종 `pipeline-summary.json`, `telegram-summary.txt`, `reports/YYYY-MM-DD_포트폴리오.md`, 최종 `run.json` | partial/failed artifact를 삭제하지 않음; Telegram 응답은 `telegram-summary.txt`를 그대로 사용 |
 
 ## Main agent 책임
 
@@ -59,8 +61,8 @@ python3 <daily-trading-skill>/scripts/run_daily_trading_pipeline.py run \
 - `decision-brief.json` 생성
 - 평결 결과 조정과 주문 후보 생성
 - 명시적 주문 승인 여부 확인
-- 기존 active 미체결·예약 주문의 유지·취소·정정·대체 판단과 실행
-- 실행 gate를 통과한 주문 후보의 실제 주문 제출
+- 명시 submit run에서 `scripts/execute_orders.py` 실행과 실패 진단
+- Telegram/user-facing 응답은 `telegram-summary.txt`를 그대로 전달하고, 임의 재요약하지 않음
 
 ## Sub-Agent
 
@@ -81,13 +83,13 @@ python3 <daily-trading-skill>/scripts/run_daily_trading_pipeline.py run \
 - 미체결 주문
 - 예약 주문
 - 매수가능 조회
-- 매도가능 조회
+- 매도가능 조회는 검증된 direct template이 있을 때만 사용하고, 현재 runner는 현재 보유수량에서 active 매도 예약을 뺀 값을 매도 gate로 사용
 
-`Main agent` 주문 실행 허용 범위:
+`scripts/execute_orders.py` 주문 실행 허용 범위:
 
-- 명시 승인과 `references/rules/trade-execution.md` gate를 통과한 `order_cash`
 - 명시 승인과 `references/rules/trade-execution.md` gate를 통과한 `order_resv`
-- 명시 승인과 현재 KIS/MCP API detail 또는 검증된 template이 있는 기존 active 미체결·예약 주문 취소·정정·대체
+- 명시 승인과 `references/rules/trade-execution.md` gate를 통과한 `order_cash`
+- 필수 원주문 식별자가 있는 기존 active pending/reserved 주문의 정정·취소·대체 제출
 
 가격·계좌 증거 수집 허용 범위:
 
@@ -158,14 +160,14 @@ Run 아티팩트는 `reports/runs/<run_id>/` 아래에 둔다.
 
 `first-verdict`는 3개 기능형 persona(`analyst-quality-value`, `analyst-momentum-cycle`, `analyst-risk-allocation`)를 유지한다. Main agent가 가격, 보유, 뉴스, active 주문 상태의 안정성을 증명할 수 있는 unchanged symbol만 직전 유효 run의 verdict row를 병합할 수 있다. 증명할 수 없으면 재평가하고, sell/stop-loss 후보, 당일 체결, 가격 급변, 신규 뉴스, active 주문, score boundary 근처 종목은 반드시 재평가한다. Launcher 자동 wrapper 재사용은 같은 spec fingerprint에 한정된다.
 
-종목이 eligible이고 가격 관측값과 목표수량, 계좌 제약, 주문 API/경로를 통과하면 재무/뉴스 누락·partial·failed·no-data는 `order_cash`, `order_resv`, demo, real 제출을 단독으로 차단하지 않는다.
+종목이 eligible이고 가격 관측값과 목표수량, 계좌 제약, 주문 API/경로를 통과하면 재무/뉴스 누락·partial·failed·no-data는 `order_cash`/`order_resv` demo/real 제출을 단독으로 차단하지 않는다.
 
 ## 주문 경계
 
-`Main agent`는 `references/rules/trade-execution.md`의 실행 gate를 직접 적용한다. 별도 최종 리스크 sub-agent와 승인 아티팩트는 사용하지 않는다.
+`scripts/execute_orders.py`는 `references/rules/trade-execution.md`의 실행 gate를 적용한다. 별도 최종 리스크 sub-agent와 승인 아티팩트는 사용하지 않는다.
 
 `expected_holding_quantity`는 현재 후보 주문 제출 전, 이미 존재하는 미체결·예약 수량만 반영한 예상 보유수량이다. `target_holding_quantity`와 다르다는 이유만으로 후보 불일치나 주문 차단으로 판단하지 않는다.
 
-기존 active 미체결·예약 주문이 목표수량, 방향, 잔여수량, 가격, 주문 API, 예약/즉시 경로와 맞지 않으면 `Main agent`는 새 주문을 내기 전에 유지·취소·정정·대체 중 하나로 조정한다. 조정 API를 안전하게 확인할 수 없거나 조정 결과가 불확실하면 같은 종목의 대체 주문은 제출하지 않고 `execution.json`에 `blocked`로 남긴다.
+기존 active pending/reserved 주문이 목표수량, 방향, 잔여수량, 가격, 주문 API, 주문 경로와 맞지 않으면 `scripts/execute_orders.py`는 필수 원주문 식별자가 있을 때 같은 방향/API/경로 주문은 정정하고, 취소가 필요한 대체 주문은 취소 요청만 제출한 뒤 재조회가 필요하다는 `blocked` 결과로 남긴다. 식별자가 없거나 조정 결과가 불확실하면 `execution.json`에 `blocked`로 남긴다.
 
-사용자 또는 schedule이 demo 또는 real 실행을 명시했고 `references/rules/trade-execution.md`의 모든 실행 gate를 통과한 경우에만 `Main agent`가 주문을 제출한다.
+사용자 또는 schedule이 demo 또는 real 실행을 명시했고 `--submit-orders`가 전달됐으며 `references/rules/trade-execution.md`의 모든 실행 gate를 통과한 경우에만 `scripts/execute_orders.py`가 주문 API를 호출한다.

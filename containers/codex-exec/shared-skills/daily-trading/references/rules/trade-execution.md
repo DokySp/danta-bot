@@ -2,14 +2,15 @@
 
 ## Scope
 
-`second-verdict` decides portfolio target quantities. Only the Main agent converts those targets into order candidates, collects read-only account state, and calls actual order submission APIs inside the single `order-execution` stage.
+`second-verdict` decides portfolio target quantities. Deterministic helpers convert those targets into order candidates, and `scripts/execute_orders.py` refreshes read-only order gates and calls actual immediate or reservation order APIs inside the single `order-execution` stage when explicitly authorized.
 
 - Analysis-only request: calculate and report targets, but do not call order APIs. Write skipped `account-before-order.json` and `execution.json`.
 - Preparation or review request: refresh account state and create order tickets, but do not submit.
 - Explicit demo or real execution request: refresh account state, reconcile active pending/reserved orders, validate every gate, and submit allowed orders.
 - Explicit reservation request: use the reservation-order path.
+- Explicit immediate request: use the immediate cash-order path.
 
-The execution rules in this file apply uniformly to `order_cash` and `order_resv`, and to both demo and real environments, unless a rule explicitly names a narrower API constraint.
+The execution rules in this file apply to `order_cash` and `order_resv`, and to both demo and real environments, unless a rule explicitly names a narrower API constraint.
 
 `CODEX_MCP_TRADING_ENV` overrides conflicting environment wording: `paper` maps to `demo`; `acct` maps to `real`.
 
@@ -17,7 +18,7 @@ The execution rules in this file apply uniformly to `order_cash` and `order_resv
 
 Collection, `first-verdict`, and `second-verdict` sub-agents cannot call any account or order API.
 
-Before order calculation, the Main agent refreshes only the read-only account fields required to validate current candidates. The first balance snapshot may be produced by `scripts/collect_main_evidence.py`; any missing active-order or order-available fields must be refreshed before candidate calculation:
+Before order calculation, `scripts/execute_orders.py` refreshes only the read-only account fields required to validate current candidates. The first balance snapshot may be produced by `scripts/collect_main_evidence.py`; any missing active-order or order-available fields must be refreshed before candidate calculation:
 
 - `inquire_account_balance`
 - `inquire_balance`
@@ -25,23 +26,25 @@ Before order calculation, the Main agent refreshes only the read-only account fi
 - pending-order lookup supported by the current KIS API
 - `order_resv_ccnl` when supported
 - `inquire_psbl_order` for buy candidates
-- `inquire_psbl_sell` for sell candidates
+- `inquire_psbl_sell` plus current live holdings minus active sell reservations for sell candidates
 
-The Main agent must use validated parameter templates for known read-only account APIs, must not expose account number, account product code, or HTS ID in artifacts, prompts, reports, or user responses, and must not run ledger APIs in parallel. Direct helpers may read account configuration from the runtime environment, but must sanitize the result before writing `account-before-order.json`.
+The order runner must use validated parameter templates for known read-only account APIs, must not expose account number, account product code, or HTS ID in artifacts, prompts, reports, or user responses, and must not run ledger APIs in parallel. Direct helpers may read account configuration from the runtime environment, but must sanitize the result before writing `account-before-order.json`.
 
 Call `find_api_detail` only when no validated template exists, when introducing a new MCP API type, or after an MCP API rejects a template for parameter/schema reasons. In particular, MCP `inquire_account_balance` uses `inqr_dvsn_1="1"` and does not include `env_dv` unless the currently inspected API detail supports it. If a parameter template was already validated earlier in the same run, reuse it and record `template_reused=true` in the attempt entry rather than repeating trial calls.
 
-If `account-before-order.json` is missing, invalid, `failed`, or shows `active_order_lookup_performed=false` or `order_available_lookup_performed=false` for a requested order path, the Main agent must block order candidate calculation and submission until those read-only fields are refreshed.
+If `account-before-order.json` is missing, invalid, `failed`, or shows `active_order_lookup_performed=false` or `order_available_lookup_performed=false` for a requested order path, `scripts/execute_orders.py` must refresh those read-only fields before submission or block the run.
 
-## Main-Agent Order API Boundary
+## Order Runner API Boundary
 
-Only the Main agent may call actual order APIs after explicit authorization and every gate has passed.
+Only `scripts/execute_orders.py` may call actual order APIs after explicit authorization and every gate has passed.
 
 Allowed only when explicitly authorized and validated:
 
-- `order_cash`
 - `order_resv`
-- active pending/reserved order cancellation, correction, or replacement using the currently supported KIS/MCP API detail
+- `order_cash`
+- `order_rvsecncl`
+- `order_resv_rvsecncl`
+- active order keep/cancel/correct/replace decisions when all required KIS fields are available.
 
 Forbidden to every sub-agent:
 
@@ -53,23 +56,23 @@ Forbidden to every sub-agent:
 
 ## Active Order Reconciliation
 
-Before submitting any new order, the Main agent must compare active, non-cancelled pending and reserved orders from `account-before-order.json` with the validated `target_holding_quantity` from the single `judge-midterm` result. Use the `active_orders` fields defined in `run-artifacts.md`; if any required active-order field is missing or ambiguous, block cancellation, correction, replacement, and conflicting new submission for that symbol.
+Before submitting any new order, `scripts/execute_orders.py` must compare active, non-cancelled pending/reserved orders from `account-before-order.json` with the validated `target_holding_quantity` from the single `judge-midterm` result. Use the `active_orders` fields defined in `run-artifacts.md`; if any required active-order field is missing or ambiguous, block cancellation, correction, replacement, and conflicting new submission for that symbol.
 
 For each symbol:
 
 1. Keep an existing active pending/reserved order only when its symbol, direction, remaining quantity, price, execution environment, order API, and reservation/immediate path already match the desired candidate.
-2. If an active order is same-symbol but its direction, remaining quantity, price, order API, or reservation/immediate path no longer matches the desired candidate, cancel or correct that existing order before submitting a replacement.
-3. If the target delta is zero but an active pending/reserved order remains, cancel that existing order.
-4. If more than one active order exists for the same symbol and direction, collapse the desired state to one validated candidate where the API supports it; otherwise cancel conflicting excess orders and block replacement if a safe one-order target cannot be proven.
+2. If an active order is same-symbol but its direction, remaining quantity, price, order API, or order path no longer matches the desired candidate, correct it when direction/API/path match and required original-order identifiers are present; otherwise cancel it before submitting a replacement.
+3. If the target delta is zero but an active order remains, keep it only when it already matches the target delta; otherwise cancel it when required original-order identifiers are present.
+4. If more than one active order exists for the same symbol and direction, block replacement if a safe one-order target cannot be proven.
 5. Do not use proceeds from cancelled or still-unfilled sell orders as buy cash until the latest read-only account state proves the cash is available.
 
-Cancellation, correction, and replacement require the same explicit demo/real execution authorization as new submissions. They also require a current API detail or previously validated template for the exact KIS/MCP function. If no supported cancellation/correction API can be identified, do not submit a conflicting replacement; record `blocked` with reason `active_order_adjustment_unavailable`.
+Cancellation, correction, and replacement require the same explicit demo/real execution authorization as new submissions. They also require a current API detail or previously validated template for the exact KIS function. If no supported cancellation/correction API can be identified, do not submit a conflicting replacement; record `blocked` with reason `active_order_adjustment_unavailable`.
 
 After every accepted cancellation or correction, refresh only the minimum read-only order/fill/reservation state needed to prove the active order state before calculating replacement quantity. Never assume cancellation succeeded from a submitted request alone.
 
 ## Order API Backoff
 
-The Main agent calls order APIs directly. For retryable KIS/MCP API error codes or messages, including rate-limit and temporary gateway/routing errors that clearly indicate the order was not accepted, and transport failures that happened before request submission, retry the same validated order with the same parameters using exponential backoff up to 10 retries after the initial call.
+The order runner calls order APIs directly. For retryable KIS API error codes or messages, including rate-limit and temporary gateway/routing errors that clearly indicate the order was not accepted, and transport failures that happened before request submission, retry the same validated order with the same parameters using bounded backoff.
 
 Recommended delay sequence is 1, 2, 4, 8, 16, then 30 seconds capped for remaining retries. Record every order and active-order adjustment attempt in `execution.json` with non-sensitive API name, symbol, direction, quantity, error code/message, delay, and final outcome.
 
@@ -133,7 +136,7 @@ Every order must satisfy all applicable constraints:
 - latest account snapshot succeeded
 - direction and quantity match the target delta
 - buy quantity does not exceed `inquire_psbl_order`
-- sell quantity does not exceed current holdings or `inquire_psbl_sell`
+- sell quantity does not exceed current live holdings minus active sell reservations or the latest `inquire_psbl_sell` result
 - active pending/reserved quantities were included exactly once
 - conflicting active pending/reserved orders were kept, cancelled, corrected, or blocked according to Active Order Reconciliation
 - order price, order API, and reservation/immediate path were validated using known templates or current API details when templates were unavailable/rejected
@@ -142,13 +145,13 @@ Every order must satisfy all applicable constraints:
 
 If any gate fails, do not submit that order. Record `blocked` and the exact non-sensitive reason. If an active-order adjustment fails or remains uncertain, do not submit a replacement order for that symbol in the same run.
 
-Missing, partial, failed, skipped, or no-data financial/news evidence is not an execution gate by itself. The Main agent must not block, fail, reduce, or send an order to review solely because financial/news evidence is absent. This applies equally to `order_cash`, `order_resv`, demo submission, and real submission.
+Missing, partial, failed, skipped, or no-data financial/news evidence is not an execution gate by itself. The order runner must not block, fail, reduce, or send an order to review solely because financial/news evidence is absent. This applies to `order_cash`, `order_resv`, demo submission, and real submission.
 
 ## Price And Order Path
 
 - User-specified valid price and order path take priority.
 - Explicit reservation requests use `order_resv`.
-- Explicit intraday immediate execution may use `order_cash`.
+- Explicit intraday immediate requests use `order_cash`.
 - When the user or schedule explicitly requests real/demo limit reservation trading, the reservation path and `order_resv` API are explicit. If the user did not provide per-symbol limit prices, use the deterministic `execution-plan` `order_price` derived from the latest sanitized account price or `decision-brief.json` price as the default limit price candidate. Do not block solely because that candidate price was generated by the pipeline rather than typed again by the user.
 - Block a candidate when `order_price` is missing, zero or negative, stale/unsupported by the current order API detail, or inconsistent with the latest refreshed order-available response.
 - If price, order API, or reservation/immediate path remains ambiguous after current API-detail inspection, block the order.

@@ -320,6 +320,7 @@ class CodexRunner:
         if daily_trading_hint or self._daily_trading_artifact_exists(context):
             self._refresh_daily_trading_token_artifacts(context, result.stdout or "")
             self._append_holding_history_if_available(context)
+            output = self._daily_trading_telegram_summary(context) or output
             output = append_daily_trading_started_at(output, context)
         usage_after = self._read_usage_snapshot()
         output = self._append_token_usage_summary(
@@ -378,7 +379,15 @@ class CodexRunner:
         usage_after: dict[str, Any] | None,
     ) -> str:
         if "총 사용 토큰:" in output:
-            return output
+            if "5h:" in output and "weekly:" in output:
+                return output
+            summary = "\n".join(
+                [
+                    f"<b>5h: {format_percent_delta(usage_before, usage_after, 'primary')}</b>",
+                    f"<b>weekly: {format_percent_delta(usage_before, usage_after, 'secondary')}</b>",
+                ]
+            )
+            return f"{output.rstrip()}\n\n{summary}"
 
         main_usage = token_usage_from(event_summary.get("token_usage"))
         subagent_usage, subagent_has_usage = self._subagent_token_usage(context)
@@ -432,6 +441,28 @@ class CodexRunner:
             if candidate.exists():
                 return candidate
         return None
+
+    def _daily_trading_telegram_renderer(self) -> Path | None:
+        candidates = [
+            self.config.workspace_dir
+            / "containers/codex-exec/shared-skills/daily-trading/scripts/render_telegram_summary.py",
+            Path("/app/skills/daily-trading/scripts/render_telegram_summary.py"),
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return None
+
+    def _daily_trading_telegram_summary(self, context) -> str | None:
+        path = self._daily_trading_run_dir(context) / "telegram-summary.txt"
+        if not path.is_file():
+            return None
+        try:
+            text = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            logging.exception("failed to read daily-trading telegram summary run_id=%s", context.run_id)
+            return None
+        return text or None
 
     def _write_daily_trading_main_events(self, run_dir: Path, stdout: str) -> Path | None:
         lines: list[str] = []
@@ -500,6 +531,28 @@ class CodexRunner:
         tmp = pipeline_summary_path.with_suffix(pipeline_summary_path.suffix + ".tmp")
         tmp.write_text(json.dumps(pipeline_summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         tmp.replace(pipeline_summary_path)
+        renderer = self._daily_trading_telegram_renderer()
+        if renderer is None:
+            logging.warning("daily-trading telegram renderer not found; cannot refresh telegram summary run_id=%s", context.run_id)
+            return
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(renderer),
+                "--summary",
+                str(pipeline_summary_path),
+                "--output",
+                str(run_dir / "telegram-summary.txt"),
+            ],
+            cwd=self.config.workspace_dir,
+            env=os.environ.copy(),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if result.returncode != 0:
+            logging.warning("daily-trading telegram summary refresh failed stderr=%s", (result.stderr or "").strip()[-1000:])
 
     def _append_holding_history_if_available(self, context) -> None:
         try:

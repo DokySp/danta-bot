@@ -54,7 +54,7 @@ News cache entries are keyed by symbol code. Article fields are `article_date`, 
 
 For universe construction, the Main agent uses `$check-portfolio` JSON and must not separately re-read current live holdings only to expand the universe.
 
-Before order calculation or execution, Main agent performs read-only account lookup directly or through `scripts/collect_main_evidence.py`, sanitizes it, and writes account artifacts. It may query:
+Before order calculation or execution, `scripts/collect_main_evidence.py` creates the first sanitized account snapshot and `scripts/execute_orders.py` refreshes the read-only order gates needed for explicit submit runs. They may query:
 
 - account asset summary
 - current live holdings
@@ -62,13 +62,13 @@ Before order calculation or execution, Main agent performs read-only account loo
 - reservation orders
 - same-day fills
 - buy-available amount/quantity for buy candidates
-- sell-available quantity for sell candidates
+- sell-available quantity for sell candidates, cross-checked with current live holdings minus active sell reservations
 
 If `$check-portfolio` holdings lookup fails, current holdings are unknown; do not guess holdings or silently drop that source.
 
 Latest `account-before-order.json` is required before order calculation. If missing, invalid, or `failed`, block order preparation and execution.
 
-If `account-before-order.json` shows that active-order lookup or order-available lookup was not performed, order preparation and execution must remain blocked until the Main agent refreshes those fields with validated read-only APIs.
+If `account-before-order.json` shows that active-order lookup or order-available lookup was not performed, order preparation and execution must remain blocked until `scripts/execute_orders.py` refreshes the required fields with validated read-only APIs for explicit submit runs.
 
 Current live holdings already include same-day fills. Retain same-day fills as account evidence, but do not subtract them again.
 
