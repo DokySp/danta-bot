@@ -4,7 +4,7 @@
 
 Sub-agent 모델과 effort는 `scripts/run_subagent.py`가 `codex exec` 명령으로 지정한다.
 
-`Main agent`는 routine 실행에서 `scripts/run_daily_trading_pipeline.py run`을 먼저 호출하고, `pipeline-summary.json`만 우선 읽는다. 단, `demo-submit` 또는 `real-submit`에서 `execution.requires_main_agent_order_execution=true`이면 이것을 최종 차단 결과로 보지 않고, 필요한 최소 계좌/주문 아티팩트만 열어 read-only gate를 갱신한 뒤 `order-execution`을 계속한다. 명시적 지정가 예약 요청에서 사용자별 종목 가격이 없으면 `execution-plan`의 `order_price`를 기본 지정가 후보로 사용하며, 해당 가격이 파이프라인에서 산출됐다는 이유만으로 차단하지 않는다. `scripts/run_subagent.py`, `scripts/build_run_artifacts.py`, persona 파일, rule 문서 전문, 중간 JSON은 pipeline 실패 진단 때만 연다. 설치 또는 pipeline/launcher/helper 변경 후에는 `python3 <daily-trading-skill>/scripts/run_daily_trading_pipeline.py self-test`, `python3 <daily-trading-skill>/scripts/run_subagent.py self-test`, `python3 <daily-trading-skill>/scripts/build_run_artifacts.py self-test`로 검증한다.
+`Main agent`는 routine 실행에서 `scripts/run_daily_trading_pipeline.py run`을 먼저 호출하고, `pipeline-summary.json`만 우선 읽는다. `pipeline-summary.json`은 `verdict_summary`, `account_display_summary`, `evidence_summary`, `telegram_response_policy`, `report_path`를 포함하므로 routine 응답은 이 compact 요약을 우선 사용한다. 계좌 본문은 표시용 요약의 현금/주식평가/총평가/평가손익을 사용하고, 당일 누적 매수/매도는 필요할 때만 `당일 거래 누계`로 분리한다. 뉴스/재무 확인 여부는 `evidence_summary`의 표시 문구를 사용해 캐시 없음과 캐시는 있으나 기사 0건인 상태를 구분한다. 단, `demo-submit` 또는 `real-submit`에서 `execution.requires_main_agent_order_execution=true`이면 이것을 최종 차단 결과로 보지 않고, 필요한 최소 계좌/주문 아티팩트만 열어 read-only gate를 갱신한 뒤 `order-execution`을 계속한다. Main agent가 `execution.json` 또는 `run.json`에 최종 주문 실행 결과를 반영한 뒤에는 `scripts/run_daily_trading_pipeline.py summarize --workspace-dir <workspace> --output-dir reports/runs/<run_id>`를 즉시 호출해 `pipeline-summary.json`과 `reports/YYYY-MM-DD_포트폴리오.md`를 최종 상태로 재생성한다. 명시적 지정가 예약 요청에서 사용자별 종목 가격이 없으면 `execution-plan`의 `order_price`를 기본 지정가 후보로 사용하며, 해당 가격이 파이프라인에서 산출됐다는 이유만으로 차단하지 않는다. `scripts/run_subagent.py`, `scripts/build_run_artifacts.py`, persona 파일, rule 문서 전문, 중간 JSON은 pipeline 실패 진단 때만 연다. 설치 또는 pipeline/launcher/helper 변경 후에는 `python3 <daily-trading-skill>/scripts/run_daily_trading_pipeline.py self-test`, `python3 <daily-trading-skill>/scripts/run_subagent.py self-test`, `python3 <daily-trading-skill>/scripts/build_run_artifacts.py self-test`로 검증한다.
 
 Routine command:
 
@@ -37,14 +37,14 @@ python3 <daily-trading-skill>/scripts/run_daily_trading_pipeline.py run \
 
 | 단계 | 주체 | 사용하는 skill / sub-agent | 주요 입력 | 주요 출력 | 핵심 gate |
 |---:|---|---|---|---|---|
-| 1 | `Main agent` + `scripts/run_daily_trading_pipeline.py` | `$check-portfolio`(요청 시), KIS direct read-only holdings API auto-auth | 사용자 요청, portfolio 설정, `run_id`, `started_at`, `CODEX_MCP_TRADING_ENV` | `run.json`, `check-portfolio.json`, `pipeline-summary.json` | Main agent는 pipeline을 먼저 실행하고 summary만 우선 읽음 |
+| 1 | `Main agent` + `scripts/run_daily_trading_pipeline.py` | `$check-portfolio`(요청 시), KIS direct read-only holdings API auto-auth | 사용자 요청, portfolio 설정, `run_id`, `started_at`, `CODEX_MCP_TRADING_ENV` | `run.json`, `check-portfolio.json`, `pipeline-summary.json`, `reports/YYYY-MM-DD_포트폴리오.md` | Main agent는 pipeline을 먼저 실행하고 summary만 우선 읽음 |
 | 2 | `Main agent` | `$check-portfolio` JSON | check-portfolio `universe`, 거래 환경 | 전체 종목 universe | universe 확장을 위해 현재 보유 종목을 별도 재조회하지 않음 |
 | 3 | `Main agent` + Collection sub-agents | `scripts/collect_main_evidence.py` direct KIS 가격·계좌 증거 수집, cache miss/universe mismatch 시 `get` 확인 후 1회 `$collect-financial-information`, `$collect-news-information` 및 재 `get` | 전체 종목 universe, 거래 환경 | `price-chart.json`, `account-before-order.json`, 선택적 `collection-summary.json`, 선택적 full-universe 또는 partial financial/news memory 경로 | 가격·관측시각은 필수, financial/news는 같은 날짜 full-universe cache hit 시 collector를 생략하며, cache miss/universe mismatch면 get→collect→get을 한 번만 수행하고 그래도 미완성이면 partial cache를 사용함 |
 | 4 | `Main agent` + `scripts/build_run_artifacts.py` | deterministic 병합/sanitize | `price-chart.json`, `$check-portfolio` JSON, 선택적 `memory/collect-financial-information/financial-YYYY-MM-DD.yaml`, 선택적 `memory/collect-news-information/news-YYYY-MM-DD.yaml` | `decision-brief.json`, 제외 종목 목록 | 식별자와 가격 snapshot이 있으면 재무/뉴스 누락만으로 제외하지 않음; Main agent가 직접 JSON을 조립하지 않고 helper를 호출 |
 | 5 | `first-verdict` sub-agents + `scripts/build_run_artifacts.py` | selected 3 functional personas, deterministic spec/merge | launcher-created `verdict-core`, `verdict-format.md` | `verdict-first.json`, `verdicts/first-verdict--<agent_role>--<task_name>.md` | 외부 호출·다른 agent 결과 참조 금지; sub-agent는 compact JSON만 반환하고 companion MD와 score merge는 helper가 생성 |
 | 6 | `second-verdict` sub-agent + `scripts/build_run_artifacts.py` | `judge-midterm`, deterministic 대상/spec 생성 | launcher-created `verdict-core`, selected-symbol first-verdict slice, `verdict-format.md` | `verdict-second.json`, `verdicts/second-verdict--judge-midterm--<task_name>.md` | 목표수량은 단일 judge가 제안하고 목표현금은 만들지 않으며, helper/Main agent가 schema·자산·집중도·계좌 gate만 검증; 실패 시 failed task만 최대 2회 retry |
 | 7 | `Main agent` + `scripts/build_run_artifacts.py` | KIS read-only account APIs, deterministic 주문 계산, KIS active 주문 조정, KIS `order_cash` 또는 `order_resv` | `verdict-second.json`, 최신 계좌 상태, 명시적 demo/real 실행 요청 | `account-before-order.json`, `execution.json` | helper가 비제출 주문 수학/gate 요약을 먼저 만들고, `execution.requires_main_agent_order_execution=true`이면 Main agent는 필요한 최신 계좌 gate를 갱신한 뒤 실제 주문 API를 호출하거나 명확히 차단한다. 명시적 지정가 예약 요청에서는 `execution-plan`의 `order_price`를 기본 지정가 후보로 인정한다 |
-| 8 | `Main agent` | report template, run artifact update | `pipeline-summary.json`, 필요 시 실패 stage artifact | `reports/YYYY-MM-DD_포트폴리오.md`, 최종 `run.json` | partial/failed artifact를 삭제하지 않음 |
+| 8 | `Main agent` + `scripts/run_daily_trading_pipeline.py summarize` | report template, run artifact update | 최종 `execution.json`, `run.json`, `verdict-second.json`, `pipeline-summary.json` | 최종 `pipeline-summary.json`, `reports/YYYY-MM-DD_포트폴리오.md`, 최종 `run.json` | partial/failed artifact를 삭제하지 않음 |
 
 ## Main agent 책임
 
@@ -142,6 +142,9 @@ Run 아티팩트는 `reports/runs/<run_id>/` 아래에 둔다.
 - `verdicts/<stage>--<agent_role>--<task_name>.md` (verdict agent별 사람 확인용 companion Markdown)
 - `account-before-order.json`
 - `execution.json`
+- `pipeline-summary.json` (`verdict_summary`, `report_path` 포함)
+
+사람이 읽는 최종 포트폴리오 보고서는 run directory 밖의 `reports/YYYY-MM-DD_포트폴리오.md`에 둔다.
 
 ## 평결 입력
 

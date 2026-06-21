@@ -71,7 +71,7 @@ Write one Korean report at `reports/YYYY-MM-DD_포트폴리오.md`.
 
 ## 11. 메모
 - 당일 체결수량은 현재 보유수량에 이미 반영된 값으로 보고 다시 차감하지 않음
-- `second-verdict`는 단일 `judge-midterm` 목표수량을 사용하며 Main agent가 총자산/주문가능금액/집중도/active 주문/same-day/market open gate를 검증함
+- `second-verdict`는 단일 `judge-midterm` 목표수량을 사용하며 Main agent가 총자산/주문가능금액/집중도/active 주문/same-day/account-order gate를 검증함
 - 투자 권유가 아니라 의사결정 보조 분석임
 ```
 

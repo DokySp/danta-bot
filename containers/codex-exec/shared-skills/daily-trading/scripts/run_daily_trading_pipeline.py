@@ -151,6 +151,42 @@ def as_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def format_number(value: Any) -> str:
+    try:
+        return f"{int(value):,}"
+    except (TypeError, ValueError):
+        return ""
+
+
+def format_signed_number(value: Any) -> str:
+    number = as_int(value)
+    sign = "+" if number > 0 else ""
+    return f"{sign}{number:,}"
+
+
+def md_cell(value: Any) -> str:
+    return str(value if value is not None else "").replace("|", "/").replace("\n", " ").strip()
+
+
+def bool_status(value: Any) -> str:
+    if value is True:
+        return "yes"
+    if value is False:
+        return "no"
+    return "unknown"
+
+
+def report_date_from(started_at: str) -> str:
+    text = str(started_at or "").strip()
+    if not text:
+        return now_kst().strftime("%Y-%m-%d")
+    try:
+        return datetime.fromisoformat(text).astimezone(KST).strftime("%Y-%m-%d")
+    except ValueError:
+        match = re.search(r"\d{4}-\d{2}-\d{2}", text)
+        return match.group(0) if match else now_kst().strftime("%Y-%m-%d")
+
+
 def token_usage_from(raw: Any) -> dict[str, int]:
     usage = zero_usage()
     if not isinstance(raw, dict):
@@ -213,11 +249,53 @@ def cache_symbol_keys(path: Path) -> set[str]:
     return set()
 
 
+def cache_symbol_all_keys(path: Path) -> set[str]:
+    payload = load_json_if_exists(path) if path.suffix.lower() == ".json" else load_yaml_if_exists(path)
+    if not isinstance(payload, dict):
+        return set()
+    symbols = payload.get("symbols")
+    if isinstance(symbols, dict):
+        return {normalize_symbol_key(key) for key in symbols if normalize_symbol_key(key)}
+    if isinstance(symbols, list):
+        return set(normalize_symbol_ids(symbols))
+    return set()
+
+
 def cache_coverage(path: Path, symbols: list[str]) -> tuple[bool, list[str]]:
     wanted = {normalize_symbol_key(symbol) for symbol in symbols if normalize_symbol_key(symbol)}
     available = cache_symbol_keys(path)
     missing = sorted(wanted - available)
     return bool(wanted) and not missing, missing
+
+
+def cache_evidence_counts(path: Path, symbols: list[str]) -> dict[str, Any]:
+    wanted = {normalize_symbol_key(symbol) for symbol in symbols if normalize_symbol_key(symbol)}
+    available = cache_symbol_keys(path)
+    present = cache_symbol_all_keys(path)
+    usable = wanted & available
+    present_wanted = wanted & present
+    return {
+        "wanted_symbol_count": len(wanted),
+        "cache_symbol_count": len(present),
+        "present_symbol_count": len(present_wanted),
+        "usable_symbol_count": len(usable),
+        "missing_usable_symbol_count": len(wanted - available),
+        "missing_usable_symbols_sample": sorted(wanted - available)[:20],
+    }
+
+
+def count_symbol_errors(payload: Any) -> int:
+    symbols = payload.get("symbols") if isinstance(payload, dict) else []
+    if not isinstance(symbols, list):
+        return 0
+    count = 0
+    for item in symbols:
+        if not isinstance(item, dict):
+            continue
+        errors = item.get("errors")
+        if isinstance(errors, list) and errors:
+            count += 1
+    return count
 
 
 def safe_stage(name: str, status: str, *, detail: str = "", required: bool = True, path: Path | None = None) -> dict[str, Any]:
@@ -230,6 +308,35 @@ def safe_stage(name: str, status: str, *, detail: str = "", required: bool = Tru
     if path is not None:
         payload["path"] = str(path)
     return payload
+
+
+def requested_execution_completed(stages: list[dict[str, Any]], execution: dict[str, Any]) -> bool:
+    if execution.get("request_type") not in {"demo-submit", "real-submit"}:
+        return False
+    if execution.get("status") != "success":
+        return False
+    return any(item.get("stage") == "order-execution" and item.get("status") == "success" for item in stages)
+
+
+def summarized_status(stages: list[dict[str, Any]], execution: dict[str, Any]) -> str:
+    if any(item.get("required") and item.get("status") == "failed" for item in stages):
+        return "failed"
+    if (
+        execution.get("request_type") in {"demo-submit", "real-submit"}
+        and execution.get("requires_main_agent_order_execution")
+        and not requested_execution_completed(stages, execution)
+    ):
+        return "partial"
+    partial_required = [
+        item
+        for item in stages
+        if item.get("required") and (item.get("status") == "partial" or item.get("status") == "skipped")
+    ]
+    if requested_execution_completed(stages, execution):
+        partial_required = [item for item in partial_required if item.get("stage") != "execution-plan"]
+    if partial_required:
+        return "partial"
+    return "success"
 
 
 class Pipeline:
@@ -430,6 +537,26 @@ class Pipeline:
                 return resolved
         return None
 
+    def first_existing_cache_file_path(self, paths: list[Path]) -> Path | None:
+        seen: set[Path] = set()
+        for path in paths:
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            if resolved.exists():
+                return resolved
+        return None
+
+    def zero_usable_news_cache_path(self, paths: list[Path], symbols: list[str]) -> Path | None:
+        path = self.first_existing_cache_file_path(paths)
+        if path is None:
+            return None
+        counts = cache_evidence_counts(path, symbols)
+        if counts["wanted_symbol_count"] > 0 and counts["usable_symbol_count"] == 0:
+            return path
+        return None
+
     def resolve_portfolio(self) -> tuple[dict[str, Any], Path]:
         output_path = self.output_dir / "check-portfolio.json"
         if self.args.portfolio_json:
@@ -517,6 +644,16 @@ class Pipeline:
             if partial:
                 self.add_stage(f"{domain}-cache", "partial", detail="optional cache script not found; using existing incomplete cache", required=False, path=partial)
                 return str(partial)
+            zero_news = self.zero_usable_news_cache_path(candidate_paths, symbols) if domain == "news" else None
+            if zero_news:
+                self.add_stage(
+                    "news-cache",
+                    "partial",
+                    detail="optional news cache script not found; cache exists but zero usable articles",
+                    required=False,
+                    path=zero_news,
+                )
+                return str(zero_news)
             self.add_stage(f"{domain}-cache", "skipped", detail="optional cache script not found", required=False)
             return ""
         date = self.args.date or now_kst().strftime("%Y-%m-%d")
@@ -561,12 +698,32 @@ class Pipeline:
             if partial:
                 self.add_stage(f"{domain}-cache", "partial", detail="optional cache collected once but still missing universe symbols; using partial cache", required=False, path=partial)
                 return str(partial)
+            zero_news = self.zero_usable_news_cache_path(candidate_paths, symbols) if domain == "news" else None
+            if zero_news:
+                self.add_stage(
+                    "news-cache",
+                    "partial",
+                    detail="optional news cache collected once; cache exists but zero usable articles",
+                    required=False,
+                    path=zero_news,
+                )
+                return str(zero_news)
             self.add_stage(f"{domain}-cache", "partial", detail="optional cache collected once but no cache file was produced", required=False)
             return ""
         partial = self.first_existing_cache_path(candidate_paths, symbols)
         if partial:
             self.add_stage(f"{domain}-cache", "partial", detail="optional cache collection failed once; using existing incomplete cache", required=False, path=partial)
             return str(partial)
+        zero_news = self.zero_usable_news_cache_path(candidate_paths, symbols) if domain == "news" else None
+        if zero_news:
+            self.add_stage(
+                "news-cache",
+                "partial",
+                detail="optional news cache collection failed once; cache exists but zero usable articles",
+                required=False,
+                path=zero_news,
+            )
+            return str(zero_news)
         self.add_stage(f"{domain}-cache", "partial", detail="optional cache collection failed once", required=False, path=self.command_log_path)
         return ""
 
@@ -683,6 +840,379 @@ class Pipeline:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
+    def report_path(self) -> Path:
+        return self.workspace_dir / "reports" / f"{report_date_from(self.started_at)}_포트폴리오.md"
+
+    def load_summary_stages(self) -> list[dict[str, Any]]:
+        if self.stages:
+            return self.stages
+        run = load_json_if_exists(self.run_path) or {}
+        stages = run.get("stages") if isinstance(run, dict) else []
+        return stages if isinstance(stages, list) else []
+
+    def load_portfolio_for_summary(self) -> dict[str, Any]:
+        if self.args.portfolio_json:
+            path = resolve_workspace_path(self.workspace_dir, self.args.portfolio_json)
+            payload = load_json_if_exists(path)
+            if isinstance(payload, dict):
+                return payload
+        payload = load_json_if_exists(self.output_dir / "check-portfolio.json")
+        return payload if isinstance(payload, dict) else {}
+
+    def build_account_display_summary(self, account_summary: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "cash_amount": account_summary.get("cash_amount"),
+            "securities_valuation_amount": account_summary.get("securities_valuation_amount"),
+            "total_evaluation_amount": account_summary.get("total_evaluation_amount"),
+            "total_pnl_amount": account_summary.get("total_pnl_amount"),
+            "today_trade_amounts": {
+                "buy_amount": account_summary.get("today_buy_amount"),
+                "sell_amount": account_summary.get("today_sell_amount"),
+                "display_policy": "Do not mix these cumulative same-day amounts into the main account state; show only if explicitly useful as 당일 거래 누계.",
+            },
+        }
+
+    def build_evidence_summary(self, decision_brief: dict[str, Any], stages: list[dict[str, Any]], symbols: list[str]) -> dict[str, Any]:
+        stage_by_name = {item.get("stage"): item for item in stages if isinstance(item, dict)}
+        decision_symbols = decision_brief.get("symbols") if isinstance(decision_brief.get("symbols"), list) else []
+        financial_supplied = 0
+        news_with_articles = 0
+        price_only = 0
+        for item in decision_symbols:
+            if not isinstance(item, dict):
+                continue
+            financial_summary = item.get("financial_summary") if isinstance(item.get("financial_summary"), dict) else {}
+            if financial_summary.get("cache_status") == "supplied":
+                financial_supplied += 1
+            news_summary = item.get("news_summary") if isinstance(item.get("news_summary"), list) else []
+            if news_summary:
+                news_with_articles += 1
+            if item.get("evidence_mode") == "price-only":
+                price_only += 1
+
+        summary: dict[str, Any] = {
+            "symbol_count": len(symbols),
+            "price_only_symbol_count": price_only,
+            "financial": {
+                "status": "supplied" if financial_supplied else "not_supplied",
+                "symbol_count_with_summary": financial_supplied,
+                "display_text": f"재무: {financial_supplied}개 종목 반영" if financial_supplied else "재무: 반영된 요약 없음",
+            },
+            "news": {
+                "status": "supplied" if news_with_articles else "not_supplied",
+                "symbol_count_with_articles": news_with_articles,
+                "display_text": f"뉴스: {news_with_articles}개 종목 기사 반영" if news_with_articles else "뉴스: 반영된 기사 없음",
+            },
+        }
+        for domain in ("financial", "news"):
+            stage = stage_by_name.get(f"{domain}-cache")
+            if not isinstance(stage, dict):
+                continue
+            path_text = str(stage.get("path") or "").strip()
+            domain_summary = summary[domain]
+            domain_summary["cache_stage_status"] = stage.get("status")
+            domain_summary["cache_stage_detail"] = stage.get("detail")
+            if path_text:
+                domain_summary["cache_path"] = path_text
+                path = resolve_workspace_path(self.workspace_dir, path_text)
+                if path.exists():
+                    domain_summary["cache_counts"] = cache_evidence_counts(path, symbols)
+            if domain == "news":
+                counts = domain_summary.get("cache_counts") if isinstance(domain_summary.get("cache_counts"), dict) else {}
+                if counts and as_int(counts.get("usable_symbol_count")) == 0:
+                    domain_summary["status"] = "cache_exists_zero_usable_articles"
+                    domain_summary["display_text"] = "뉴스: 캐시 파일은 있으나 사용 가능한 기사 0건"
+                elif not path_text:
+                    domain_summary["status"] = "cache_missing"
+                    domain_summary["display_text"] = "뉴스: 캐시 파일 없음"
+                elif news_with_articles and news_with_articles < len(symbols):
+                    domain_summary["status"] = "partial"
+                    domain_summary["display_text"] = f"뉴스: {news_with_articles}개 종목 기사 반영, 일부 종목 기사 없음"
+            elif domain == "financial":
+                if not path_text:
+                    domain_summary["status"] = "cache_missing"
+                    domain_summary["display_text"] = "재무: 캐시 파일 없음"
+                elif financial_supplied and financial_supplied < len(symbols):
+                    domain_summary["status"] = "partial"
+                    domain_summary["display_text"] = f"재무: {financial_supplied}개 종목 반영, 일부 종목 요약 없음"
+        return summary
+
+    def adopt_existing_run_identity(self) -> None:
+        run = load_json_if_exists(self.run_path) or {}
+        if not isinstance(run, dict):
+            return
+        self.run_id = str(run.get("run_id") or self.run_id)
+        self.started_at = str(run.get("started_at") or self.started_at)
+
+    def build_verdict_summary(self, account: dict[str, Any], execution: dict[str, Any]) -> dict[str, Any]:
+        verdict_second = load_json_if_exists(self.output_dir / "verdict-second.json") or {}
+        account_by_symbol = {symbol_key(item): item for item in account.get("symbols", []) if isinstance(item, dict)}
+        execution_by_symbol = {symbol_key(item): item for item in execution.get("orders", []) if isinstance(item, dict)}
+        rows: list[dict[str, Any]] = []
+        for item in verdict_second.get("symbols", []) if isinstance(verdict_second, dict) else []:
+            if not isinstance(item, dict):
+                continue
+            symbol_id = symbol_key(item)
+            if not symbol_id:
+                continue
+            account_item = account_by_symbol.get(symbol_id, {})
+            execution_item = execution_by_symbol.get(symbol_id, {})
+            current_qty = as_int(account_item.get("current_live_holding_quantity"))
+            target_qty = as_int(item.get("target_holding_quantity"))
+            delta = target_qty - current_qty
+            rows.append(
+                {
+                    "symbol_id": symbol_id,
+                    "symbol_name": item.get("symbol_name") or account_item.get("symbol_name") or symbol_id,
+                    "current_live_holding_quantity": current_qty,
+                    "target_holding_quantity": target_qty,
+                    "delta_quantity": delta,
+                    "relative_attractiveness_rank": as_int(item.get("relative_attractiveness_rank")),
+                    "reason_code": item.get("reason_code") or "",
+                    "one_line_reason": item.get("one_line_reason") or "",
+                    "order_result": execution_item.get("result") or "",
+                    "order_direction": execution_item.get("direction") or "none",
+                    "order_quantity": as_int(execution_item.get("validated_order_quantity")),
+                    "order_or_reservation_id": execution_item.get("order_or_reservation_id") or "",
+                }
+            )
+        submitted = [item for item in rows if item.get("order_result") == "submitted"]
+        return {
+            "status": verdict_second.get("status"),
+            "symbol_count": len(rows),
+            "submitted_order_count": len(submitted),
+            "symbols": rows,
+        }
+
+    def write_portfolio_report(self, summary: dict[str, Any]) -> Path:
+        path = self.report_path()
+        account = summary.get("account_summary") if isinstance(summary.get("account_summary"), dict) else {}
+        execution = summary.get("execution") if isinstance(summary.get("execution"), dict) else {}
+        verdict = summary.get("verdict_summary") if isinstance(summary.get("verdict_summary"), dict) else {}
+        decision = summary.get("decision_brief") if isinstance(summary.get("decision_brief"), dict) else {}
+        token_total = (((summary.get("token_usage") or {}).get("total") or {}).get("total_tokens")) if isinstance(summary.get("token_usage"), dict) else 0
+        decision_brief = load_json_if_exists(self.output_dir / "decision-brief.json") or {}
+        verdict_first = load_json_if_exists(self.output_dir / "verdict-first.json") or {}
+        execution_full = load_json_if_exists(self.output_dir / "execution.json") or {}
+        account_full = load_json_if_exists(self.output_dir / "account-before-order.json") or {}
+        price_chart = load_json_if_exists(self.output_dir / "price-chart.json") or {}
+        evidence_summary = summary.get("evidence_summary") if isinstance(summary.get("evidence_summary"), dict) else {}
+        stages = summary.get("stages") if isinstance(summary.get("stages"), list) else []
+        stage_by_name = {item.get("stage"): item for item in stages if isinstance(item, dict)}
+        active_order_lookup_performed = account_full.get("active_order_lookup_performed")
+        order_available_lookup_performed = account_full.get("order_available_lookup_performed")
+        active_order_count_text = (
+            f"{len(account_full.get('active_orders', [])) if isinstance(account_full.get('active_orders'), list) else 0}건"
+            if active_order_lookup_performed is True
+            else "미조회"
+        )
+        order_reservation_check = (
+            account_full.get("active_order_checks", {}).get("order_resv_ccnl", "")
+            if isinstance(account_full.get("active_order_checks"), dict)
+            else ""
+        )
+        if active_order_lookup_performed is not True and not order_reservation_check:
+            order_reservation_check = "미조회"
+
+        lines = [
+            f"# 포트폴리오 평결문 - {report_date_from(self.started_at)}",
+            "",
+            "## 실행 정보",
+            f"- run_id: {summary.get('run_id', '')}",
+            f"- 작업 시작: {summary.get('started_at', '')}",
+            f"- 환경: {account_full.get('execution_environment') or self.args.env}",
+            f"- 최종 상태: {summary.get('status', '')}",
+            f"- 실행 디렉터리: {summary.get('run_dir', '')}",
+            "",
+            "## 1. 수집 상태",
+            "| 도메인 | 상태 | 전체 종목 수 | 오류 종목 수 | 핵심 오류 |",
+            "|---|---|---:|---:|---|",
+        ]
+        for domain, stage_name in (("시장", "main-evidence"), ("재무", "financial-cache"), ("뉴스", "news-cache")):
+            stage = stage_by_name.get(stage_name, {})
+            detail = stage.get("detail", "")
+            error_count = 0
+            if domain == "시장":
+                error_count = count_symbol_errors(price_chart)
+            elif domain in {"재무", "뉴스"}:
+                domain_summary = evidence_summary.get("financial" if domain == "재무" else "news")
+                counts = domain_summary.get("cache_counts") if isinstance(domain_summary, dict) and isinstance(domain_summary.get("cache_counts"), dict) else {}
+                error_count = as_int(counts.get("missing_usable_symbol_count"))
+            if domain == "재무":
+                detail = ((evidence_summary.get("financial") or {}).get("display_text") if isinstance(evidence_summary.get("financial"), dict) else "") or detail
+            elif domain == "뉴스":
+                detail = ((evidence_summary.get("news") or {}).get("display_text") if isinstance(evidence_summary.get("news"), dict) else "") or detail
+            lines.append(
+                f"| {domain} | {stage.get('status', '')} | {(summary.get('portfolio_counts') or {}).get('universe', 0)} | {error_count} | {md_cell(detail)} |"
+            )
+
+        lines.extend(
+            [
+                "",
+                "## 2. 평결 제외 종목",
+                "| 종목식별자 | 종목명 | 제외 사유 | 누락 필수 정보 |",
+                "|---|---|---|---|",
+            ]
+        )
+        excluded_count = 0
+        for item in decision_brief.get("symbols", []) if isinstance(decision_brief, dict) else []:
+            if not isinstance(item, dict) or item.get("eligible_for_verdict", True):
+                continue
+            excluded_count += 1
+            lines.append(
+                f"| {md_cell(item.get('symbol_id'))} | {md_cell(item.get('symbol_name'))} | "
+                f"{md_cell(', '.join(item.get('exclusion_reasons', [])) if isinstance(item.get('exclusion_reasons'), list) else item.get('exclusion_reasons'))} | "
+                f"{md_cell(', '.join(item.get('required_missing', [])) if isinstance(item.get('required_missing'), list) else item.get('required_missing'))} |"
+            )
+        if excluded_count == 0:
+            lines.append("| - | - | 없음 | - |")
+
+        price_only_count = 0
+        for item in decision_brief.get("symbols", []) if isinstance(decision_brief, dict) else []:
+            if isinstance(item, dict) and item.get("evidence_mode") == "price-only":
+                price_only_count += 1
+        lines.extend(
+            [
+                "",
+                "## 3. `decision-brief.json` 요약",
+                f"- `decision-brief.json` 생성 여부: {'yes' if decision else 'no'}",
+                f"- 포함된 eligible 종목 수: {sum(1 for item in decision_brief.get('symbols', []) if isinstance(item, dict) and item.get('eligible_for_verdict', False)) if isinstance(decision_brief, dict) else 0}",
+                f"- price-only eligible 종목 수: {price_only_count}",
+                "- 제외된 raw payload / 기사 원문 / 민감정보: yes",
+                f"- 핵심 누락 또는 오류: {decision.get('error_count', 0)}건",
+                "",
+                "## 4. `first-verdict` 독립 평결",
+                "| 종목식별자 | 종목명 | 원점수 평균(0-10) | 확신도 보정 최종점수(0-10) | 유효 응답 수 | 핵심 근거 | 핵심 리스크 |",
+                "|---|---|---:|---:|---:|---|---|",
+            ]
+        )
+        for item in verdict_first.get("symbols", []) if isinstance(verdict_first, dict) else []:
+            if not isinstance(item, dict):
+                continue
+            agent_scores = item.get("agent_scores") if isinstance(item.get("agent_scores"), list) else []
+            reasons = [str(score.get("one_line_reason", "")) for score in agent_scores if isinstance(score, dict) and score.get("one_line_reason")]
+            lines.append(
+                f"| {md_cell(item.get('symbol_id'))} | {md_cell(item.get('symbol_name'))} | {item.get('mean_score', '')} | "
+                f"{item.get('mean_confidence_adjusted_score', '')} | {len(agent_scores)} | {md_cell('; '.join(reasons[:2]))} | - |"
+            )
+
+        lines.extend(
+            [
+                "",
+                "## 5. `second-verdict` 포트폴리오 평결",
+                "- 중기 시장 판단: `judge-midterm` 목표수량 결과 사용",
+                "- 잔여 현금 처리: 목표현금을 별도 판단값으로 만들지 않고 목표수량 충족 후 남는 금액으로만 기록",
+                f"- Main agent 검증 결과: {execution.get('status', '')}",
+                "",
+                "| 종목식별자 | 종목명 | 현재 보유수량 | 목표 보유수량 | 상대매력도 | 판단 코드 | 한 줄 판단 |",
+                "|---|---|---:|---:|---:|---|---|",
+            ]
+        )
+        for item in verdict.get("symbols", []) if isinstance(verdict.get("symbols"), list) else []:
+            lines.append(
+                f"| {md_cell(item.get('symbol_id'))} | {md_cell(item.get('symbol_name'))} | {as_int(item.get('current_live_holding_quantity'))} | "
+                f"{as_int(item.get('target_holding_quantity'))} | {as_int(item.get('relative_attractiveness_rank'))} | "
+                f"{md_cell(item.get('reason_code'))} | {md_cell(item.get('one_line_reason'))} |"
+            )
+
+        submitted_orders = [item for item in execution.get("orders", []) if isinstance(item, dict) and item.get("result") == "submitted"]
+        lines.extend(
+            [
+                "",
+                "## 6. 최신 계좌 검증",
+                f"- 총자산: {format_number(account.get('total_evaluation_amount'))}원",
+                f"- 현금 또는 주문가능금액: {format_number(account.get('cash_amount'))}원",
+                f"- 주식평가: {format_number(account.get('securities_valuation_amount'))}원",
+                f"- 평가손익: {format_signed_number(account.get('total_pnl_amount'))}원",
+                f"- 주문 전 기존 미체결/예약 주문 조회: {bool_status(active_order_lookup_performed)}",
+                f"- 주문가능 조회: {bool_status(order_available_lookup_performed)}",
+                f"- 주문 전 기존 미체결/예약 주문: {active_order_count_text}",
+                f"- 예약 주문 확인: {order_reservation_check}",
+                "- 당일 체결: 계좌 요약에 반영된 스냅샷 기준",
+                "",
+                "## 7. 주문 전 기존 미체결/예약 주문 조정",
+                "| 종목식별자 | 종목명 | 기존 주문번호 | 구분 | 방향 | 잔여수량 | 가격 | 주문 API | 경로 | 조치 | 사유 | 결과 | 확인 상태 | 대체 주문번호 |",
+                "|---|---|---|---|---|---:|---:|---|---|---|---|---|---|---|",
+            ]
+        )
+        adjustments = execution_full.get("order_adjustments") if isinstance(execution_full.get("order_adjustments"), list) else []
+        if adjustments:
+            for item in adjustments:
+                if not isinstance(item, dict):
+                    continue
+                lines.append(
+                    f"| {md_cell(item.get('symbol_id'))} | {md_cell(item.get('symbol_name'))} | {md_cell(item.get('existing_order_id'))} | "
+                    f"{md_cell(item.get('existing_order_kind'))} | {md_cell(item.get('direction'))} | {as_int(item.get('remaining_quantity'))} | "
+                    f"{as_int(item.get('order_price'))} | {md_cell(item.get('order_api'))} | {md_cell(item.get('order_path'))} | "
+                    f"{md_cell(item.get('action'))} | {md_cell(item.get('reason'))} | {md_cell(item.get('result'))} | "
+                    f"{md_cell(item.get('confirmed_status'))} | {md_cell(item.get('replacement_order_id'))} |"
+                )
+        else:
+            if active_order_lookup_performed is True:
+                lines.append("| - | - | - | - | - | 0 | 0 | - | - | none | 기존 조정 대상 없음 | skipped | - | - |")
+            else:
+                lines.append("| - | - | - | - | - | 0 | 0 | - | - | refresh_required | 주문 전 기존 미체결/예약 주문 미조회 | blocked_until_refreshed | 미조회 | - |")
+
+        lines.extend(
+            [
+                "",
+                "## 8. 최종 주문 목록",
+                "| 종목식별자 | 종목명 | 방향 | 현재 실시간 보유수량 | 미체결·예약 매수 | 미체결·예약 매도 | 예상 보유수량 | 목표 보유수량 | 추가 필요수량 | 결과 |",
+                "|---|---|---|---:|---:|---:|---:|---:|---:|---|",
+            ]
+        )
+        for item in execution_full.get("orders", []) if isinstance(execution_full, dict) else []:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                f"| {md_cell(item.get('symbol_id'))} | {md_cell(item.get('symbol_name'))} | {md_cell(item.get('direction'))} | "
+                f"{as_int(item.get('current_live_holding_quantity'))} | {as_int(item.get('pending_and_reserved_buy_quantity'))} | "
+                f"{as_int(item.get('pending_and_reserved_sell_quantity'))} | {as_int(item.get('expected_holding_quantity'))} | "
+                f"{as_int(item.get('target_holding_quantity'))} | {as_int(item.get('additional_required_quantity'))} | {md_cell(item.get('result'))} |"
+            )
+
+        lines.extend(
+            [
+                "",
+                "## 9. 실행 결과",
+                f"- 요청 유형: {execution.get('request_type', '')}",
+                f"- 실제 제출 여부: {'yes' if submitted_orders else 'no'}",
+                f"- 제출된 주문번호 또는 예약번호: {', '.join(str(item.get('order_or_reservation_id') or '') for item in submitted_orders if item.get('order_or_reservation_id')) or '-'}",
+                "- 취소/정정 요청번호: -",
+                "- 취소/정정 확인 상태: -",
+                f"- 실패 또는 보류 사유: {md_cell('; '.join(error.get('message', '') for error in execution.get('errors', []) if isinstance(error, dict))) if isinstance(execution.get('errors'), list) else '-'}",
+                "| 종목 | 방향 | 수량 | 결과 | 사유 | 예약/주문번호 |",
+                "|---|---|---:|---|---|---|",
+            ]
+        )
+        for item in submitted_orders:
+            symbol_name = md_cell(f"{item.get('symbol_id', '')} {item.get('symbol_name', '')}".strip())
+            lines.append(
+                f"| {symbol_name} | {md_cell(item.get('direction'))} | {as_int(item.get('quantity'))} | {md_cell(item.get('result'))} | "
+                f"{md_cell(item.get('reason'))} | {md_cell(item.get('order_or_reservation_id') or '-')} |"
+            )
+        lines.extend(
+            [
+                "",
+                "## 10. 아티팩트",
+                f"- 실행 디렉터리: {summary.get('run_dir', '')}",
+                f"- 보존된 partial / failed 아티팩트: {sum(1 for item in stages if isinstance(item, dict) and item.get('status') in {'partial', 'failed'})}",
+                f"- pipeline-summary.json: {summary.get('summary_path', '')}",
+                f"- decision-brief.json: {(summary.get('artifacts') or {}).get('decision_brief', '')}",
+                f"- verdict-second.json: {(summary.get('artifacts') or {}).get('verdict_second', '')}",
+                f"- execution.json: {(summary.get('artifacts') or {}).get('execution', '')}",
+                f"- 총 사용 토큰: {format_number(token_total)}",
+                "",
+                "## 11. 메모",
+                "- 당일 체결수량은 현재 보유수량에 이미 반영된 값으로 보고 다시 차감하지 않음",
+                "- `second-verdict`는 단일 `judge-midterm` 목표수량을 사용하며 Main agent가 총자산/주문가능금액/집중도/active 주문/same-day/account-order gate를 검증함",
+                "- 투자 권유가 아니라 의사결정 보조 분석입니다.",
+            ]
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return path
+
     def build_summary(self, portfolio: dict[str, Any]) -> dict[str, Any]:
         token_summary = load_json_if_exists(self.output_dir / "token-summary.json") or {}
         execution = load_json_if_exists(self.output_dir / "execution.json") or {}
@@ -700,17 +1230,27 @@ class Pipeline:
                     "quantity": item.get("validated_order_quantity"),
                     "result": item.get("result"),
                     "reason": item.get("reason"),
+                    "order_or_reservation_id": item.get("order_or_reservation_id"),
                 }
             )
+        stages = self.load_summary_stages()
+        self.stages = stages
+        verdict_summary = self.build_verdict_summary(account, execution)
+        symbols = normalize_symbol_ids(portfolio.get("universe"))
+        account_summary = account.get("account_summary") if isinstance(account.get("account_summary"), dict) else {}
+        account_display_summary = self.build_account_display_summary(account_summary)
+        evidence_summary = self.build_evidence_summary(decision_brief, stages, symbols)
+        report_path = self.report_path()
         summary = {
             "schema_version": "1",
             "run_id": self.run_id,
             "started_at": self.started_at,
-            "status": self.pipeline_status(),
+            "status": summarized_status(stages, execution),
             "run_dir": str(self.output_dir),
             "summary_path": str(self.summary_path),
             "command_log_path": str(self.command_log_path),
-            "stages": self.stages,
+            "report_path": str(report_path),
+            "stages": stages,
             "portfolio_counts": {
                 "recommanded": len(normalize_symbol_ids(portfolio.get("recommanded"))),
                 "recommended": len(normalize_symbol_ids(portfolio.get("recommended"))),
@@ -723,7 +1263,10 @@ class Pipeline:
                 "symbol_count": len(decision_brief.get("symbols", [])) if isinstance(decision_brief.get("symbols"), list) else 0,
                 "error_count": len(decision_brief.get("errors", [])) if isinstance(decision_brief.get("errors"), list) else 0,
             },
-            "account_summary": account.get("account_summary") if isinstance(account.get("account_summary"), dict) else {},
+            "verdict_summary": verdict_summary,
+            "account_summary": account_summary,
+            "account_display_summary": account_display_summary,
+            "evidence_summary": evidence_summary,
             "execution": {
                 "status": execution.get("status"),
                 "request_type": execution.get("request_type"),
@@ -740,6 +1283,19 @@ class Pipeline:
                 "subagents": (token_summary.get("subagents") or {}).get("token_usage", zero_usage()),
                 "total": (token_summary.get("total") or {}).get("token_usage", zero_usage()),
             },
+            "telegram_response_policy": {
+                "source": "Use pipeline-summary.json first, then report_path only for additional human-readable detail.",
+                "account_state_fields": [
+                    "cash_amount",
+                    "securities_valuation_amount",
+                    "total_evaluation_amount",
+                    "total_pnl_amount",
+                ],
+                "today_trade_amount_policy": "Show today_buy_amount/today_sell_amount only under a separate 당일 거래 누계 label when relevant; never present them as newly caused by this command unless execution.json confirms submitted orders.",
+                "gate_label": "주문 전 기존 미체결/예약 주문",
+                "evidence_policy": "Report evidence_summary.financial.display_text and evidence_summary.news.display_text, distinguishing missing cache from cache_exists_zero_usable_articles.",
+                "verdict_policy": "Mention judge-midterm/second-verdict outcome and submitted or target-changed symbols, including target quantity and one_line_reason when available.",
+            },
             "artifacts": {
                 "check_portfolio": str(self.output_dir / "check-portfolio.json"),
                 "price_chart": str(self.output_dir / "price-chart.json"),
@@ -749,6 +1305,7 @@ class Pipeline:
                 "verdict_second": str(self.output_dir / "verdict-second.json"),
                 "execution": str(self.output_dir / "execution.json"),
                 "token_summary": str(self.output_dir / "token-summary.json"),
+                "portfolio_report": str(report_path),
             },
             "main_agent_read_policy": (
                 "Read pipeline-summary.json first. For demo-submit or real-submit, if execution.requires_main_agent_order_execution is true, "
@@ -757,9 +1314,36 @@ class Pipeline:
                 "Open command_log_path or other intermediate artifacts only when a stage failed and the summary is insufficient."
             ),
         }
+        self.write_portfolio_report(summary)
         write_json(self.summary_path, summary)
         self.write_run_json(status=summary["status"])
         return summary
+
+    def missing_summarize_artifacts(self) -> list[str]:
+        required = [
+            self.run_path,
+            self.output_dir / "check-portfolio.json",
+            self.output_dir / "decision-brief.json",
+            self.output_dir / "verdict-first.json",
+            self.output_dir / "verdict-second.json",
+            self.output_dir / "account-before-order.json",
+            self.output_dir / "execution.json",
+        ]
+        missing = [str(path) for path in required if not path.exists()]
+        for path in required:
+            if not path.exists():
+                continue
+            payload = load_json_if_exists(path)
+            if not isinstance(payload, dict):
+                missing.append(f"{path}: invalid JSON object")
+                continue
+            if path == self.run_path:
+                stages = payload.get("stages")
+                if not isinstance(stages, list):
+                    missing.append(f"{self.run_path}: missing stages")
+                elif not stages:
+                    missing.append(f"{self.run_path}: empty stages")
+        return missing
 
     def run(self) -> dict[str, Any]:
         self.write_run_json(status="running")
@@ -1016,6 +1600,9 @@ def run_self_test() -> int:
         covered, missing = cache_coverage(no_news_cache, ["005930"])
         if covered or missing != ["005930"]:
             failures.append(f"no-news placeholder should be incomplete: covered={covered}, missing={missing}")
+        no_news_counts = cache_evidence_counts(no_news_cache, ["005930"])
+        if no_news_counts.get("present_symbol_count") != 1 or no_news_counts.get("usable_symbol_count") != 0:
+            failures.append(f"no-news cache counts did not distinguish present from usable: {no_news_counts}")
         stage_status_probe = Pipeline(
             argparse.Namespace(
                 command="run",
@@ -1228,6 +1815,12 @@ def run_self_test() -> int:
         )
         if empty_cache_probe.collect_optional_cache("financial", ["005930"]):
             failures.append("empty financial cache should not be returned as partial data")
+        empty_news_path = empty_cache_probe.collect_optional_cache("news", ["005930"])
+        if not empty_news_path:
+            failures.append("empty news cache should be returned so zero usable articles can be reported")
+        news_stage = empty_cache_probe.stages[-1] if empty_cache_probe.stages else {}
+        if news_stage.get("stage") != "news-cache" or "zero usable articles" not in str(news_stage.get("detail")):
+            failures.append(f"empty news cache stage did not describe zero usable articles: {news_stage}")
 
         retry_dir = workspace / "reports" / "runs" / "retry-probe"
         retry_dir.mkdir(parents=True, exist_ok=True)
@@ -1329,12 +1922,37 @@ def run_self_test() -> int:
                 )
             )
             summary = pipeline.run()
-            if summary["status"] not in {"success", "partial"}:
-                failures.append(f"unexpected pipeline status: {summary['status']}")
+            if summary["status"] != "partial":
+                failures.append(f"real-submit summary should remain partial before Main-agent order-execution: {summary['status']}")
             if summary["token_usage"]["subagents"]["total_tokens"] != 480:
                 failures.append(f"unexpected subagent token total: {summary['token_usage']}")
             if summary["token_usage"]["main"]["total_tokens"] != 17 or summary["token_usage"]["total"]["total_tokens"] != 497:
                 failures.append(f"unexpected pipeline token summary with main events: {summary['token_usage']}")
+            verdict_summary = summary.get("verdict_summary") if isinstance(summary.get("verdict_summary"), dict) else {}
+            if verdict_summary.get("symbol_count") != 1 or not verdict_summary.get("symbols"):
+                failures.append(f"pipeline summary omitted compact verdict summary: {verdict_summary}")
+            account_display = summary.get("account_display_summary") if isinstance(summary.get("account_display_summary"), dict) else {}
+            if "today_buy_amount" in account_display or "today_sell_amount" in account_display:
+                failures.append(f"display account summary should not expose same-day totals as main fields: {account_display}")
+            if not isinstance(account_display.get("today_trade_amounts"), dict):
+                failures.append(f"display account summary omitted separate same-day trade bucket: {account_display}")
+            evidence_summary = summary.get("evidence_summary") if isinstance(summary.get("evidence_summary"), dict) else {}
+            if not isinstance(evidence_summary.get("news"), dict) or "display_text" not in evidence_summary.get("news", {}):
+                failures.append(f"pipeline summary omitted displayable news evidence status: {evidence_summary}")
+            telegram_policy = summary.get("telegram_response_policy") if isinstance(summary.get("telegram_response_policy"), dict) else {}
+            if telegram_policy.get("gate_label") != "주문 전 기존 미체결/예약 주문":
+                failures.append(f"telegram response policy omitted explicit gate label: {telegram_policy}")
+            report_path = Path(str(summary.get("report_path") or ""))
+            if not report_path.exists():
+                failures.append(f"portfolio report was not written: {report_path}")
+            else:
+                report_text = report_path.read_text(encoding="utf-8")
+                if "## 4. `first-verdict` 독립 평결" not in report_text or "## 5. `second-verdict` 포트폴리오 평결" not in report_text:
+                    failures.append(f"portfolio report omitted verdict sections: {report_path}")
+                if "주문 전 기존 미체결/예약 주문 조회: no" not in report_text or "주문 전 기존 미체결/예약 주문: 미조회" not in report_text:
+                    failures.append("portfolio report did not preserve active-order gate lookup state")
+                if "주문 전 기존 미체결/예약 주문 미조회" not in report_text:
+                    failures.append("portfolio report did not mark unrefreshed active-order adjustment gate")
             execution_summary = summary.get("execution") if isinstance(summary.get("execution"), dict) else {}
             if execution_summary.get("requires_main_agent_order_execution") is not True:
                 failures.append("real-submit pipeline summary did not request Main-agent order execution")
@@ -1348,6 +1966,140 @@ def run_self_test() -> int:
                 failures.append("pipeline-summary.json was not written")
             if not (run_dir / "execution.json").exists():
                 failures.append("execution.json was not written")
+            execution_payload = load_json(run_dir / "execution.json")
+            execution_payload["status"] = "success"
+            execution_payload["requires_main_agent_order_execution"] = False
+            execution_payload["required_main_agent_actions"] = []
+            if execution_payload.get("orders"):
+                execution_payload["orders"][0]["result"] = "submitted"
+                execution_payload["orders"][0]["reason"] = "accepted_reservation_order"
+                execution_payload["orders"][0]["order_or_reservation_id"] = "selftest-resv-1"
+            write_json(run_dir / "execution.json", execution_payload)
+            run_payload = load_json(run_dir / "run.json")
+            run_payload.setdefault("stages", []).append(
+                {
+                    "stage": "order-execution",
+                    "status": "success",
+                    "required": True,
+                    "detail": "self-test order execution completed",
+                    "path": str(run_dir / "execution.json"),
+                }
+            )
+            write_json(run_dir / "run.json", run_payload)
+            summarize_result = subprocess.run(
+                [
+                    sys.executable,
+                    str(script_dir() / "run_daily_trading_pipeline.py"),
+                    "summarize",
+                    "--workspace-dir",
+                    str(workspace),
+                    "--output-dir",
+                    str(run_dir.relative_to(workspace)),
+                    "--request-type",
+                    "real-submit",
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            if summarize_result.returncode != 0:
+                failures.append(f"summarize CLI failed: stdout={summarize_result.stdout} stderr={summarize_result.stderr}")
+            summarized = load_json(run_dir / "pipeline-summary.json")
+            summarized_run = load_json(run_dir / "run.json")
+            if len(summarized_run.get("stages", [])) != len(run_payload.get("stages", [])):
+                failures.append("summarize did not preserve run.json stages")
+            if summarized.get("status") != "success":
+                failures.append(f"summarize did not reflect completed order execution: {summarized.get('status')}")
+            if (summarized.get("verdict_summary") or {}).get("submitted_order_count") != 1:
+                failures.append(f"summarize did not carry submitted order count: {summarized.get('verdict_summary')}")
+            final_report = Path(str(summarized.get("report_path") or ""))
+            final_report_text = final_report.read_text(encoding="utf-8") if final_report.exists() else ""
+            if "selftest-resv-1" not in final_report_text or "submitted" not in final_report_text:
+                failures.append("summarized report did not include submitted order evidence")
+            empty_run_dir = workspace / "reports" / "runs" / "empty-summary-probe"
+            empty_run_dir.mkdir(parents=True, exist_ok=True)
+            empty_result = subprocess.run(
+                [
+                    sys.executable,
+                    str(script_dir() / "run_daily_trading_pipeline.py"),
+                    "summarize",
+                    "--workspace-dir",
+                    str(workspace),
+                    "--output-dir",
+                    str(empty_run_dir.relative_to(workspace)),
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            if empty_result.returncode == 0:
+                failures.append(f"summarize accepted an empty run directory: {empty_result.stdout}")
+            bad_json_dir = workspace / "reports" / "runs" / "bad-json-summary-probe"
+            bad_json_dir.mkdir(parents=True, exist_ok=True)
+            for source_name in (
+                "run.json",
+                "check-portfolio.json",
+                "decision-brief.json",
+                "verdict-first.json",
+                "verdict-second.json",
+                "account-before-order.json",
+                "execution.json",
+            ):
+                target = bad_json_dir / source_name
+                target.write_text((run_dir / source_name).read_text(encoding="utf-8"), encoding="utf-8")
+            (bad_json_dir / "execution.json").write_text("{bad-json", encoding="utf-8")
+            bad_json_result = subprocess.run(
+                [
+                    sys.executable,
+                    str(script_dir() / "run_daily_trading_pipeline.py"),
+                    "summarize",
+                    "--workspace-dir",
+                    str(workspace),
+                    "--output-dir",
+                    str(bad_json_dir.relative_to(workspace)),
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            if bad_json_result.returncode == 0:
+                failures.append(f"summarize accepted invalid required JSON: {bad_json_result.stdout}")
+            empty_stages_dir = workspace / "reports" / "runs" / "empty-stages-summary-probe"
+            empty_stages_dir.mkdir(parents=True, exist_ok=True)
+            for source_name in (
+                "run.json",
+                "check-portfolio.json",
+                "decision-brief.json",
+                "verdict-first.json",
+                "verdict-second.json",
+                "account-before-order.json",
+                "execution.json",
+            ):
+                target = empty_stages_dir / source_name
+                target.write_text((run_dir / source_name).read_text(encoding="utf-8"), encoding="utf-8")
+            empty_stages_payload = load_json(empty_stages_dir / "run.json")
+            empty_stages_payload["stages"] = []
+            write_json(empty_stages_dir / "run.json", empty_stages_payload)
+            empty_stages_result = subprocess.run(
+                [
+                    sys.executable,
+                    str(script_dir() / "run_daily_trading_pipeline.py"),
+                    "summarize",
+                    "--workspace-dir",
+                    str(workspace),
+                    "--output-dir",
+                    str(empty_stages_dir.relative_to(workspace)),
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            if empty_stages_result.returncode == 0:
+                failures.append(f"summarize accepted empty run stages: {empty_stages_result.stdout}")
         finally:
             if old_codex_bin is None:
                 os.environ.pop("CODEX_BIN", None)
@@ -1383,6 +2135,15 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--skip-account", action="store_true")
     run.add_argument("--max-workers", type=int, default=3)
 
+    summarize = subparsers.add_parser("summarize", help="Rebuild pipeline-summary.json and the portfolio Markdown report from existing run artifacts.")
+    summarize.add_argument("--workspace-dir", default=".")
+    summarize.add_argument("--output-dir", required=True)
+    summarize.add_argument("--run-id", default="")
+    summarize.add_argument("--started-at", default="")
+    summarize.add_argument("--env", default=os.environ.get("CODEX_MCP_TRADING_ENV", "acct"), choices=["acct", "real", "paper", "demo"])
+    summarize.add_argument("--request-type", default="analysis", choices=["analysis", "prepare", "demo-submit", "real-submit"])
+    summarize.add_argument("--portfolio-json", default="")
+
     subparsers.add_parser("self-test", help="Run an offline pipeline smoke test with a fake codex binary.")
     return parser
 
@@ -1413,12 +2174,47 @@ def command_run(args: argparse.Namespace) -> int:
     return 0 if summary["status"] in {"success", "partial"} else 1
 
 
+def command_summarize(args: argparse.Namespace) -> int:
+    pipeline = Pipeline(args)
+    missing = pipeline.missing_summarize_artifacts()
+    if missing:
+        print(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "run_dir": str(pipeline.output_dir),
+                    "missing_artifacts": missing,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        return 1
+    pipeline.adopt_existing_run_identity()
+    summary = pipeline.build_summary(pipeline.load_portfolio_for_summary())
+    print(
+        json.dumps(
+            {
+                "status": summary["status"],
+                "run_dir": summary["run_dir"],
+                "summary_path": summary["summary_path"],
+                "report_path": summary["report_path"],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+    return 0 if summary["status"] in {"success", "partial"} else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "self-test":
         return run_self_test()
     if args.command == "run":
         return command_run(args)
+    if args.command == "summarize":
+        return command_summarize(args)
     raise SystemExit("a subcommand is required")
 
 
