@@ -1,5 +1,7 @@
 enabled: true
 poll_seconds: 60
+active_start_time: "0850"
+active_end_time: "1540"
 cache_file: /state/touch-points/triggers.json
 quote_history_file: /state/touch-points/quote-history.jsonl
 touch_log_file: /state/touch-points/touch-events.jsonl

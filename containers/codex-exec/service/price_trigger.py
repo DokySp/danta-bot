@@ -3,9 +3,10 @@ import importlib.util
 import json
 import logging
 import os
+import re
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from time import sleep
 from typing import Any
@@ -24,6 +25,7 @@ KIS_BASE_URL = "https://openapi.koreainvestment.com:9443"
 KIS_INDEX_PRICE_PATH = "/uapi/domestic-stock/v1/quotations/inquire-index-price"
 KIS_INDEX_PRICE_TR_ID = "FHPUP02100000"
 KST = timezone(timedelta(hours=9))
+CONFIG_TIME_RE = re.compile(r"^\d{4}$")
 KIS_INDEX_CODES = {
     "KOSPI": "0001",
     "KOSDAQ": "1001",
@@ -50,6 +52,8 @@ class PriceTrigger:
 class TriggerConfig:
     enabled: bool
     poll_seconds: int
+    active_start_time: time | None
+    active_end_time: time | None
     cache_file: Path
     quote_history_file: Path
     touch_log_file: Path
@@ -69,9 +73,23 @@ class Quote:
 def parse_price_trigger_config(path: Path, state_dir: Path) -> TriggerConfig:
     if not path.exists():
         cache_file = state_dir / "touch-points" / "triggers.json"
-        return TriggerConfig(False, 60, cache_file, quote_history_path(cache_file, None), touch_log_path(cache_file, None), [])
+        return TriggerConfig(
+            False,
+            60,
+            None,
+            None,
+            cache_file,
+            quote_history_path(cache_file, None),
+            touch_log_path(cache_file, None),
+            [],
+        )
 
-    data = yaml.safe_load(path.read_text()) or {}
+    raw_text = path.read_text()
+    quoted_fields = quoted_yaml_scalar_fields(
+        raw_text,
+        {"active_start_time", "active_end_time"},
+    )
+    data = yaml.safe_load(raw_text) or {}
     if not isinstance(data, dict):
         raise ValueError("price trigger file must contain a YAML object")
 
@@ -118,9 +136,21 @@ def parse_price_trigger_config(path: Path, state_dir: Path) -> TriggerConfig:
         )
 
     cache_file = Path(data.get("cache_file") or state_dir / "touch-points" / "triggers.json")
+    for field_name in ("active_start_time", "active_end_time"):
+        if data.get(field_name) is not None and quoted_fields.get(field_name) is not True:
+            raise ValueError(f"{field_name} must use quoted HHMM string format")
+    active_start_time = parse_config_time(data.get("active_start_time"), "active_start_time")
+    active_end_time = parse_config_time(data.get("active_end_time"), "active_end_time")
+    if (active_start_time is None) != (active_end_time is None):
+        raise ValueError("active_start_time and active_end_time must be configured together")
+    if active_start_time is not None and active_start_time >= active_end_time:
+        raise ValueError("active_start_time must be earlier than active_end_time")
+
     return TriggerConfig(
         enabled=data.get("enabled", True) is not False,
         poll_seconds=max(60, int(data.get("poll_seconds", 60))),
+        active_start_time=active_start_time,
+        active_end_time=active_end_time,
         cache_file=cache_file,
         quote_history_file=quote_history_path(cache_file, data.get("quote_history_file")),
         touch_log_file=touch_log_path(cache_file, data.get("touch_log_file")),
@@ -150,7 +180,7 @@ class PriceTriggerWatcher:
                     self.config.state_dir,
                 )
                 wait_seconds = trigger_config.poll_seconds
-                if trigger_config.enabled:
+                if trigger_config.enabled and is_active_time(trigger_config, datetime.now(KST)):
                     self._tick(trigger_config)
             except Exception:
                 logging.exception("price trigger tick failed")
@@ -497,6 +527,42 @@ def parse_float(value: Any) -> float | None:
     if not text:
         return None
     return float(text)
+
+
+def parse_config_time(value: Any, field_name: str) -> time | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must use HHMM string format")
+    text = value
+    if not CONFIG_TIME_RE.fullmatch(text):
+        raise ValueError(f"{field_name} must use HHMM string format")
+    try:
+        return time(int(text[:2]), int(text[2:4]))
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must use HHMM string format") from exc
+
+
+def quoted_yaml_scalar_fields(text: str, field_names: set[str]) -> dict[str, bool]:
+    node = yaml.compose(text)
+    result: dict[str, bool] = {}
+    if node is None or not isinstance(getattr(node, "value", None), list):
+        return result
+    for key_node, value_node in node.value:
+        key = getattr(key_node, "value", None)
+        if key in field_names:
+            result[str(key)] = getattr(value_node, "style", None) in {"'", '"'}
+    return result
+
+
+def is_active_time(trigger_config: TriggerConfig, now: datetime) -> bool:
+    start = trigger_config.active_start_time
+    end = trigger_config.active_end_time
+    if start is None or end is None:
+        return True
+
+    current = now.astimezone(KST).time().replace(second=0, microsecond=0)
+    return start <= current <= end
 
 
 def read_cache(path: Path) -> dict[str, Any]:

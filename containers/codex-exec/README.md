@@ -153,10 +153,14 @@ schedules:
 Telegram 알림을 보냅니다. 이 알림은 Codex 실행을
 호출하지 않습니다. 각 case는 서로 다른 `id`를 사용하므로 같은 cache file 안에서도 기준값이
 case별로 따로 저장됩니다.
+`active_start_time`과 `active_end_time`은 KST 기준 4자리 `HHMM` 문자열 형식이며, 둘 다 설정된 경우 해당 시간
+범위 안에서만 quote 조회와 touch 계산을 수행합니다.
 
 ```yaml
 enabled: true
 poll_seconds: 60
+active_start_time: "0900"
+active_end_time: "1530"
 cache_file: /state/touch-points/triggers.json
 quote_history_file: /state/touch-points/quote-history.jsonl
 touch_log_file: /state/touch-points/touch-events.jsonl
