@@ -45,6 +45,10 @@ SENSITIVE_KEYS = {
 }
 
 
+def default_reservation_orgno() -> str:
+    return os.environ.get("KIS_RSVN_ORD_ORGNO", "001").strip() or "001"
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -74,6 +78,37 @@ def as_int(value: Any, default: int = 0) -> int:
 
 def as_price(value: Any) -> int:
     return as_int(value)
+
+
+def krx_tick_size(price: int) -> int:
+    if price < 2_000:
+        return 1
+    if price < 5_000:
+        return 5
+    if price < 20_000:
+        return 10
+    if price < 50_000:
+        return 50
+    if price < 200_000:
+        return 100
+    if price < 500_000:
+        return 500
+    return 1_000
+
+
+def normalize_limit_price(price: Any, side: str) -> int:
+    value = as_price(price)
+    if value <= 0:
+        return value
+    unit = krx_tick_size(value)
+    remainder = value % unit
+    if remainder == 0:
+        return value
+    if side == "buy":
+        return value + (unit - remainder)
+    if side == "sell":
+        return value - remainder
+    return value
 
 
 def first(row: dict[str, Any], keys: tuple[str, ...]) -> Any:
@@ -278,52 +313,79 @@ def normalize_reservation(row: dict[str, Any]) -> dict[str, Any]:
         first(row, ("rsvn_ord_seq", "rsvn_ord_no", "odno", "ord_no", "RSVN_ORD_SEQ", "RSVN_ORD_NO", "ODNO", "ORD_NO"))
         or ""
     ).strip()
-    remaining = as_int(
+    orgno = str(
+        first(
+            row,
+            (
+                "rsvn_ord_orgno",
+                "rsvn_ord_org_no",
+                "rsvn_ord_org_no_cd",
+                "ord_orgno",
+                "ord_gno_brno",
+                "RSVN_ORD_ORGNO",
+                "RSVN_ORD_ORG_NO",
+                "RSVN_ORD_ORG_NO_CD",
+                "ORD_ORGNO",
+                "ORD_GNO_BRNO",
+            ),
+        )
+        or ""
+    ).strip()
+    reserved_quantity = as_int(
         first(
             row,
             (
                 "rmn_qty",
                 "ord_uncc_qty",
                 "uncc_qty",
+                "ord_rsvn_qty",
                 "rsvn_ord_qty",
                 "ord_qty",
                 "RMN_QTY",
                 "ORD_UNCC_QTY",
                 "UNCC_QTY",
+                "ORD_RSVN_QTY",
                 "RSVN_ORD_QTY",
                 "ORD_QTY",
             ),
         )
     )
+    filled_quantity = as_int(first(row, ("tot_ccld_qty", "TOT_CCLD_QTY")))
+    remaining = max(0, reserved_quantity - filled_quantity) if filled_quantity else reserved_quantity
     status_text = " ".join(
         str(row.get(key, ""))
         for key in (
             "rsvn_ord_stat_name",
             "rsvn_ord_stat_cd",
             "prcs_stat_name",
+            "prcs_rslt",
             "cncl_yn",
             "RSVN_ORD_STAT_NAME",
             "RSVN_ORD_STAT_CD",
             "PRCS_STAT_NAME",
+            "PRCS_RSLT",
             "CNCL_YN",
         )
     )
-    inactive = any(marker in status_text for marker in ("취소", "완료", "거부", "거절", "만료", "실효"))
+    processed_time = str(first(row, ("ord_tmd", "ORD_TMD")) or "").strip()
+    inactive = any(marker in status_text for marker in ("취소", "완료", "거부", "거절", "만료", "실효", "미처리"))
+    if "처리" in status_text and processed_time:
+        inactive = True
     return {
         "symbol_id": symbol,
-        "symbol_name": str(first(row, ("prdt_name", "prdt_abrv_name", "hts_kor_isnm", "PRDT_NAME", "PRDT_ABRV_NAME", "HTS_KOR_ISNM")) or symbol),
+        "symbol_name": str(first(row, ("prdt_name", "prdt_abrv_name", "hts_kor_isnm", "kor_item_shtn_name", "PRDT_NAME", "PRDT_ABRV_NAME", "HTS_KOR_ISNM", "KOR_ITEM_SHTN_NAME")) or symbol),
         "order_id": order_id,
         "order_kind": "reservation",
         "direction": direction(first(row, ("sll_buy_dvsn_cd", "sll_buy_dvsn_name", "SLL_BUY_DVSN_CD", "SLL_BUY_DVSN_NAME"))),
         "remaining_quantity": remaining,
-        "order_price": as_int(first(row, ("ord_unpr", "rsvn_ord_unpr", "ord_prc", "ORD_UNPR", "RSVN_ORD_UNPR", "ORD_PRC"))),
+        "order_price": as_int(first(row, ("ord_unpr", "ord_rsvn_unpr", "rsvn_ord_unpr", "ord_prc", "ORD_UNPR", "ORD_RSVN_UNPR", "RSVN_ORD_UNPR", "ORD_PRC"))),
         "order_api": "order_resv",
         "order_path": "reservation",
         "execution_environment": "",
         "observed_at": now_iso(),
         "active_status": "inactive" if inactive or remaining <= 0 else "active",
         "rsvn_ord_seq": order_id,
-        "rsvn_ord_orgno": str(first(row, ("rsvn_ord_orgno", "rsvn_ord_org_no", "ord_orgno", "RSVN_ORD_ORGNO", "RSVN_ORD_ORG_NO", "ORD_ORGNO")) or "").strip(),
+        "rsvn_ord_orgno": (orgno or default_reservation_orgno()) if order_id else "",
         "rsvn_ord_ord_dt": str(first(row, ("rsvn_ord_ord_dt", "ord_dt", "RSVN_ORD_ORD_DT", "ORD_DT")) or "").strip(),
     }
 
@@ -406,6 +468,27 @@ def fetch_pending_orders(kis: Kis) -> list[dict[str, Any]]:
     for item in normalized:
         item["execution_environment"] = kis.env
     return normalized
+
+
+def normalize_execution_order_prices(execution: dict[str, Any]) -> None:
+    for item in execution.get("orders", []):
+        if not isinstance(item, dict):
+            continue
+        side = str(item.get("direction") or "")
+        target = as_int(item.get("target_holding_quantity"))
+        expected = as_int(item.get("expected_holding_quantity"), as_int(item.get("current_live_holding_quantity")))
+        if side not in {"buy", "sell"}:
+            delta = target - expected
+            side = "buy" if delta > 0 else "sell" if delta < 0 else ""
+        normalized = normalize_limit_price(item.get("order_price"), side)
+        original = as_price(item.get("order_price"))
+        if normalized > 0 and original != normalized:
+            item["order_price"] = normalized
+            item["order_price_adjustment"] = {
+                "from": original,
+                "to": normalized,
+                "reason": "krx_tick_size",
+            }
 
 
 def buy_capacity(kis: Kis, symbol: str, price: int) -> dict[str, int]:
@@ -493,6 +576,7 @@ def adjust_reservation(kis: Kis, active: dict[str, Any], desired: dict[str, Any]
         "RSVN_ORD_SEQ": str(active.get("rsvn_ord_seq") or active.get("order_id") or ""),
         "RSVN_ORD_ORGNO": str(active.get("rsvn_ord_orgno") or ""),
         "RSVN_ORD_ORD_DT": str(active.get("rsvn_ord_ord_dt") or ""),
+        "ORD_TYPE": ord_type,
     }
     missing = [key for key in ("RSVN_ORD_SEQ", "RSVN_ORD_ORGNO", "RSVN_ORD_ORD_DT") if not payload.get(key)]
     if missing:
@@ -740,12 +824,20 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
         )
 
         matching_active = active_by_symbol.get(symbol, [])
-        price = as_price(order.get("order_price"))
         qty = as_int(order.get("validated_order_quantity"))
         order_path = str(order.get("order_path") or "reservation")
         order_path, order_api = order_path_api(order_path)
         order["order_path"] = order_path
         order["order_api"] = order_api
+        price = normalize_limit_price(order.get("order_price"), side)
+        original_price = as_price(order.get("order_price"))
+        if price > 0 and original_price != price:
+            order["order_price"] = price
+            order["order_price_adjustment"] = {
+                "from": original_price,
+                "to": price,
+                "reason": "krx_tick_size",
+            }
         desired_delta = target - current
         desired_side = "buy" if desired_delta > 0 else "sell" if desired_delta < 0 else ""
         desired_qty = abs(desired_delta)
@@ -941,6 +1033,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         execution["order_execution_mode"] = "submit-blocked"
         write_json(execution_path, execution)
         return execution
+    normalize_execution_order_prices(execution)
     active, capacities, sell_capacities, gate_errors, kis = refresh_gates(args, account, execution)
     account["active_order_lookup_performed"] = True
     account["order_available_lookup_performed"] = not bool(gate_errors)
@@ -1020,6 +1113,120 @@ def self_test() -> int:
         account_after = load_json(root / "account-before-order.json")
         if account_after.get("active_order_lookup_performed") is not True or account_after.get("order_available_lookup_performed") is not True:
             failures.append("account gates not refreshed")
+
+        reservation = normalize_reservation(
+            {
+                "rsvn_ord_seq": "116426",
+                "rsvn_ord_ord_dt": "20260621",
+                "pdno": "039490",
+                "ord_rsvn_qty": "2",
+                "ord_rsvn_unpr": "346000",
+                "kor_item_shtn_name": "키움증권",
+                "sll_buy_dvsn_cd": "02",
+                "prcs_rslt": "접수",
+            }
+        )
+        if reservation.get("remaining_quantity") != 2 or reservation.get("order_price") != 346000:
+            failures.append(f"official reservation columns were not normalized: {reservation}")
+        if reservation.get("symbol_name") != "키움증권" or reservation.get("active_status") != "active":
+            failures.append(f"official reservation identity/status was not normalized: {reservation}")
+        if reservation.get("rsvn_ord_orgno") != default_reservation_orgno():
+            failures.append(f"reservation orgno fallback was not applied: {reservation}")
+
+        filled_reservation = normalize_reservation(
+            {
+                "rsvn_ord_seq": "116426",
+                "rsvn_ord_ord_dt": "20260622",
+                "pdno": "039490",
+                "ord_rsvn_qty": "2",
+                "tot_ccld_qty": "2",
+                "ord_rsvn_unpr": "346000",
+                "kor_item_shtn_name": "키움증권",
+                "sll_buy_dvsn_cd": "02",
+                "prcs_rslt": "처리",
+                "ord_tmd": "082209",
+            }
+        )
+        if filled_reservation.get("remaining_quantity") != 0 or filled_reservation.get("active_status") != "inactive":
+            failures.append(f"filled reservation was not marked inactive: {filled_reservation}")
+
+        processed_unfilled_reservation = normalize_reservation(
+            {
+                "rsvn_ord_seq": "137661",
+                "rsvn_ord_ord_dt": "20260622",
+                "pdno": "032830",
+                "ord_rsvn_qty": "1",
+                "tot_ccld_qty": "0",
+                "ord_rsvn_unpr": "497000",
+                "kor_item_shtn_name": "삼성생명",
+                "sll_buy_dvsn_cd": "01",
+                "prcs_rslt": "처리",
+                "ord_tmd": "082228",
+            }
+        )
+        if processed_unfilled_reservation.get("remaining_quantity") != 1 or processed_unfilled_reservation.get("active_status") != "inactive":
+            failures.append(f"processed unfilled reservation was not marked inactive: {processed_unfilled_reservation}")
+
+        rejected_reservation = normalize_reservation(
+            {
+                "rsvn_ord_seq": "137656",
+                "rsvn_ord_ord_dt": "20260622",
+                "pdno": "000270",
+                "ord_rsvn_qty": "2",
+                "tot_ccld_qty": "0",
+                "ord_rsvn_unpr": "154900",
+                "kor_item_shtn_name": "기아",
+                "sll_buy_dvsn_cd": "02",
+                "prcs_rslt": "미처리",
+            }
+        )
+        if rejected_reservation.get("remaining_quantity") != 2 or rejected_reservation.get("active_status") != "inactive":
+            failures.append(f"rejected reservation was not marked inactive: {rejected_reservation}")
+
+        if normalize_limit_price(474250, "sell") != 474000:
+            failures.append("sell limit price was not rounded down to KRX tick")
+        if normalize_limit_price(474250, "buy") != 474500:
+            failures.append("buy limit price was not rounded up to KRX tick")
+
+        captured_payloads: list[dict[str, Any]] = []
+        original_retry_json = globals()["retry_json"]
+
+        def fake_retry_json(method: str, url: str, headers: dict[str, Any], payload: dict[str, Any] | None = None, retries: int = 0) -> tuple[dict[str, Any], dict[str, str]]:
+            captured_payloads.append(dict(payload or {}))
+            return {"rt_cd": "0", "output": {"RSVN_ORD_SEQ": "116426"}}, {}
+
+        class FakeKis:
+            cano = "12345678"
+            product = "01"
+            env = "real"
+
+            def headers(self, tr_id: str, payload: dict[str, Any]) -> dict[str, str]:
+                return {"tr_id": tr_id}
+
+        try:
+            globals()["retry_json"] = fake_retry_json
+            request_id = adjust_reservation(
+                FakeKis(),
+                {
+                    "order_id": "116426",
+                    "rsvn_ord_seq": "116426",
+                    "rsvn_ord_orgno": default_reservation_orgno(),
+                    "rsvn_ord_ord_dt": "20260621",
+                },
+                None,
+            )
+        finally:
+            globals()["retry_json"] = original_retry_json
+        if request_id != "116426" or not captured_payloads:
+            failures.append("reservation cancel request was not built from normalized active order")
+        elif captured_payloads[0].get("RSVN_ORD_SEQ") != "116426":
+            failures.append(f"reservation cancel payload lost sequence id: {captured_payloads[0]}")
+        elif captured_payloads[0].get("RSVN_ORD_ORGNO") != default_reservation_orgno():
+            failures.append(f"reservation cancel payload lost default orgno: {captured_payloads[0]}")
+        elif captured_payloads[0].get("RSVN_ORD_ORD_DT") != "20260621":
+            failures.append(f"reservation cancel payload lost order date: {captured_payloads[0]}")
+        elif captured_payloads[0].get("ORD_TYPE") != "cancel":
+            failures.append(f"reservation cancel payload lost order type: {captured_payloads[0]}")
 
         account_after["active_orders"] = [{"symbol_id": "000660", "symbol_name": "SK하이닉스", "order_id": "r2", "order_kind": "reservation", "direction": "buy", "remaining_quantity": 1, "order_price": 140000, "active_status": "active", "order_api": "order_resv", "order_path": "reservation", "execution_environment": "real", "observed_at": now_iso()}]
         write_json(root / "account-before-order.json", account_after)
