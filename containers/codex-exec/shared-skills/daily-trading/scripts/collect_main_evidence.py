@@ -30,6 +30,26 @@ ENDPOINTS = {
         "path": "/uapi/domestic-stock/v1/quotations/inquire-price",
         "tr_id": "FHKST01010100",
     },
+    "inquire_daily_itemchartprice": {
+        "path": "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
+        "tr_id": "FHKST03010100",
+    },
+    "inquire_time_itemchartprice": {
+        "path": "/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice",
+        "tr_id": "FHKST03010200",
+    },
+    "inquire_asking_price_exp_ccn": {
+        "path": "/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn",
+        "tr_id": "FHKST01010200",
+    },
+    "inquire_ccnl": {
+        "path": "/uapi/domestic-stock/v1/quotations/inquire-ccnl",
+        "tr_id": "FHKST01010300",
+    },
+    "inquire_investor": {
+        "path": "/uapi/domestic-stock/v1/quotations/inquire-investor",
+        "tr_id": "FHKST01010900",
+    },
     "inquire_balance": {
         "path": "/uapi/domestic-stock/v1/trading/inquire-balance",
         "tr_id_real": "TTTC8434R",
@@ -300,7 +320,155 @@ def price_signal(name: str, value: Any) -> dict[str, Any] | None:
     return {"name": name, "value": value}
 
 
-def build_price_row(symbol: str, info: dict[str, Any], price: dict[str, Any], *, observed_at: str, env_dv: str, market: str, errors: list[dict[str, Any]]) -> dict[str, Any]:
+def compact_ohlcv_bar(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "date": text_first(row, ("stck_bsop_date", "bsop_date", "date")),
+        "open": parse_int(first_present(row, ("stck_oprc", "oprc", "open"))),
+        "high": parse_int(first_present(row, ("stck_hgpr", "hgpr", "high"))),
+        "low": parse_int(first_present(row, ("stck_lwpr", "lwpr", "low"))),
+        "close": parse_int(first_present(row, ("stck_clpr", "clpr", "close", "stck_prpr"))),
+        "volume": parse_int(first_present(row, ("acml_vol", "cntg_vol", "vol"))),
+        "trading_value": parse_int(first_present(row, ("acml_tr_pbmn", "tr_pbmn"))),
+    }
+
+
+def compact_intraday_bar(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "time": text_first(row, ("stck_cntg_hour", "cntg_hour", "time")),
+        "price": parse_int(first_present(row, ("stck_prpr", "stck_clpr", "price"))),
+        "volume": parse_int(first_present(row, ("cntg_vol", "acml_vol", "vol"))),
+    }
+
+
+def output_rows_from_body(body: dict[str, Any], preferred_key: str) -> list[dict[str, Any]]:
+    rows = normalize_output(body.get(preferred_key))
+    if rows:
+        return rows
+    for key in ("output2", "output1", "output"):
+        rows = normalize_output(body.get(key))
+        if rows:
+            return rows
+    return []
+
+
+def trim_compact_rows(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    return [row for row in rows if any(value not in (None, "") for value in row.values())][:limit]
+
+
+def pct_change(start: int | float | None, end: int | float | None) -> float | None:
+    if start in (None, 0) or end is None:
+        return None
+    return round(((float(end) - float(start)) / float(start)) * 100, 2)
+
+
+def avg(values: list[int | float | None]) -> float | None:
+    usable = [float(value) for value in values if value is not None]
+    if not usable:
+        return None
+    return sum(usable) / len(usable)
+
+
+def chart_signal_summary(charts: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    signals: list[dict[str, Any]] = []
+    for timeframe, rows in charts.items():
+        if not rows:
+            continue
+        chronological = list(reversed(rows))
+        closes = [row.get("close") for row in chronological if row.get("close") is not None]
+        volumes = [row.get("volume") for row in chronological if row.get("volume") is not None]
+        latest_close = closes[-1] if closes else None
+        if len(closes) >= 2:
+            signals.append({"name": f"{timeframe}_change_pct", "value": pct_change(closes[0], latest_close)})
+        if len(closes) >= 20:
+            ma20 = avg(closes[-20:])
+            signals.append({"name": f"{timeframe}_pct_vs_ma20", "value": pct_change(ma20, latest_close)})
+        if len(closes) >= 60:
+            ma60 = avg(closes[-60:])
+            signals.append({"name": f"{timeframe}_pct_vs_ma60", "value": pct_change(ma60, latest_close)})
+        if len(volumes) >= 20 and volumes[-1] is not None:
+            avg_volume = avg(volumes[-20:])
+            signals.append({"name": f"{timeframe}_volume_vs_20_avg_pct", "value": pct_change(avg_volume, volumes[-1])})
+    return [signal for signal in signals if signal.get("value") is not None][:8]
+
+
+def summarize_orderbook(row: dict[str, Any], expected_row: dict[str, Any] | None = None) -> dict[str, Any]:
+    expected_row = expected_row or {}
+    best_ask = parse_int(first_present(row, ("askp1", "askp")))
+    best_bid = parse_int(first_present(row, ("bidp1", "bidp")))
+    ask_qty = parse_int(first_present(row, ("askp_rsqn1", "askp_rsqn")))
+    bid_qty = parse_int(first_present(row, ("bidp_rsqn1", "bidp_rsqn")))
+    total_ask_qty = parse_int(first_present(row, ("total_askp_rsqn", "askp_rsqn_tots")))
+    total_bid_qty = parse_int(first_present(row, ("total_bidp_rsqn", "bidp_rsqn_tots")))
+    mid = ((best_ask or 0) + (best_bid or 0)) / 2 if best_ask and best_bid else None
+    spread_pct = round(((best_ask - best_bid) / mid) * 100, 3) if mid else None
+    total_depth = (total_ask_qty or 0) + (total_bid_qty or 0)
+    imbalance = round(((total_bid_qty or 0) - (total_ask_qty or 0)) / total_depth, 4) if total_depth else None
+    return {
+        "best_ask": best_ask,
+        "best_bid": best_bid,
+        "ask_quantity_1": ask_qty,
+        "bid_quantity_1": bid_qty,
+        "total_ask_quantity": total_ask_qty,
+        "total_bid_quantity": total_bid_qty,
+        "spread_pct": spread_pct,
+        "depth_imbalance": imbalance,
+        "expected_price": parse_int(first_present(expected_row, ("antc_cnpr", "stck_prpr")) or first_present(row, ("antc_cnpr", "stck_prpr"))),
+        "expected_volume": parse_int(first_present(expected_row, ("antc_vol",)) or first_present(row, ("antc_vol",))),
+        "vi_status": text_first(expected_row, ("vi_cls_code", "vi_stnd_prc")) or text_first(row, ("vi_cls_code", "vi_stnd_prc")),
+    }
+
+
+def summarize_trade_flow(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    compact = trim_compact_rows(
+        [
+            {
+                "time": text_first(row, ("stck_cntg_hour", "cntg_hour")),
+                "price": parse_int(first_present(row, ("stck_prpr", "cnpr"))),
+                "volume": parse_int(first_present(row, ("cntg_vol", "acml_vol"))),
+                "change_pct": parse_float(first_present(row, ("prdy_ctrt",))),
+            }
+            for row in rows
+        ],
+        10,
+    )
+    prices = [row.get("price") for row in compact if row.get("price") is not None]
+    return {
+        "recent": compact[:5],
+        "tick_count": len(compact),
+        "latest_price": prices[0] if prices else None,
+        "oldest_price": prices[-1] if prices else None,
+        "recent_price_change_pct": pct_change(prices[-1], prices[0]) if len(prices) >= 2 else None,
+    }
+
+
+def summarize_investor_flow(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "foreign_net_buy_quantity": parse_int(first_present(row, ("frgn_ntby_qty", "frgn_ntby_vol"))),
+        "institution_net_buy_quantity": parse_int(first_present(row, ("orgn_ntby_qty", "orgn_ntby_vol"))),
+        "foreign_net_buy_value": parse_int(first_present(row, ("frgn_ntby_tr_pbmn", "frgn_ntby_tr_pbmn"))),
+        "institution_net_buy_value": parse_int(first_present(row, ("orgn_ntby_tr_pbmn", "orgn_ntby_tr_pbmn"))),
+        "foreign_buy_volume": parse_int(first_present(row, ("frgn_shnu_vol",))),
+        "foreign_sell_volume": parse_int(first_present(row, ("frgn_seln_vol",))),
+        "institution_buy_volume": parse_int(first_present(row, ("orgn_shnu_vol",))),
+        "institution_sell_volume": parse_int(first_present(row, ("orgn_seln_vol",))),
+    }
+
+
+def build_price_row(
+    symbol: str,
+    info: dict[str, Any],
+    price: dict[str, Any],
+    *,
+    observed_at: str,
+    env_dv: str,
+    market: str,
+    errors: list[dict[str, Any]],
+    charts: dict[str, list[dict[str, Any]]] | None = None,
+    intraday: list[dict[str, Any]] | None = None,
+    orderbook: dict[str, Any] | None = None,
+    trade_flow: dict[str, Any] | None = None,
+    investor_flow: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     symbol_name = text_first(info, ("prdt_abrv_name", "prdt_name", "prdt_name120")) or text_first(price, ("hts_kor_isnm", "bstp_kor_isnm")) or symbol
     current_price = parse_int(first_present(price, ("stck_prpr", "thdt_clpr", "stck_prdy_clpr")))
     required_missing: list[str] = []
@@ -311,6 +479,8 @@ def build_price_row(symbol: str, info: dict[str, Any], price: dict[str, Any], *,
     if not observed_at:
         required_missing.append("price.observed_at")
 
+    charts = charts or {"daily": [], "weekly": [], "monthly": []}
+    intraday = intraday or []
     signals = [
         price_signal("day_change_pct", parse_float(price.get("prdy_ctrt"))),
         price_signal("volume", parse_int(price.get("acml_vol"))),
@@ -330,11 +500,22 @@ def build_price_row(symbol: str, info: dict[str, Any], price: dict[str, Any], *,
     }
     if risk_flags:
         signals.append(price_signal("risk_flags", risk_flags))
+    signals.extend(chart_signal_summary(charts))
 
     sources = [
         {"api": "direct_kis.search_stock_info", "env_dv": env_dv, "market": market},
         {"api": "direct_kis.inquire_price", "env_dv": env_dv, "market": market},
     ]
+    if any(charts.values()):
+        sources.append({"api": "direct_kis.inquire_daily_itemchartprice", "env_dv": env_dv, "market": market})
+    if intraday:
+        sources.append({"api": "direct_kis.inquire_time_itemchartprice", "env_dv": env_dv, "market": market})
+    if orderbook:
+        sources.append({"api": "direct_kis.inquire_asking_price_exp_ccn", "env_dv": env_dv, "market": market})
+    if trade_flow:
+        sources.append({"api": "direct_kis.inquire_ccnl", "env_dv": env_dv, "market": market})
+    if investor_flow:
+        sources.append({"api": "direct_kis.inquire_investor", "env_dv": env_dv, "market": market})
     return {
         "schema_version": "1",
         "symbol_id": symbol,
@@ -348,6 +529,11 @@ def build_price_row(symbol: str, info: dict[str, Any], price: dict[str, Any], *,
         "eligible_for_verdict": not required_missing and not any(error.get("required") for error in errors),
         "required_missing": required_missing,
         "local_signals": [signal for signal in signals if signal is not None],
+        "charts": charts,
+        "intraday": intraday,
+        "orderbook_summary": orderbook or {},
+        "trade_flow_summary": trade_flow or {},
+        "investor_flow_summary": investor_flow or {},
         "sources": sources,
         "errors": errors,
     }
@@ -379,13 +565,185 @@ def call_endpoint(endpoint_name: str, params: dict[str, str], app_key: str, app_
     return body, response_headers
 
 
-def collect_price_chart(symbols: list[str], *, run_id: str, started_at: str, env_dv: str, market: str, app_key: str, app_secret: str, token: str, retries: int) -> dict[str, Any]:
+def yyyymmdd(value: datetime) -> str:
+    return value.astimezone(KST).strftime("%Y%m%d")
+
+
+def collect_period_chart(
+    symbol: str,
+    period_code: str,
+    *,
+    market: str,
+    app_key: str,
+    app_secret: str,
+    token: str,
+    retries: int,
+    env_dv: str,
+    end_at: datetime,
+) -> list[dict[str, Any]]:
+    days = {"D": 140, "W": 500, "M": 1500}.get(period_code, 140)
+    start_at = end_at - timedelta(days=days)
+    body, _headers = call_endpoint(
+        "inquire_daily_itemchartprice",
+        {
+            "FID_COND_MRKT_DIV_CODE": market,
+            "FID_INPUT_ISCD": symbol,
+            "FID_INPUT_DATE_1": yyyymmdd(start_at),
+            "FID_INPUT_DATE_2": yyyymmdd(end_at),
+            "FID_PERIOD_DIV_CODE": period_code,
+            "FID_ORG_ADJ_PRC": "0",
+        },
+        app_key,
+        app_secret,
+        token,
+        retries,
+        env_dv=env_dv,
+    )
+    rows = [compact_ohlcv_bar(row) for row in output_rows_from_body(body, "output2")]
+    limits = {"D": 60, "W": 52, "M": 36}
+    return trim_compact_rows(rows, limits.get(period_code, 60))
+
+
+def collect_intraday_chart(
+    symbol: str,
+    *,
+    market: str,
+    app_key: str,
+    app_secret: str,
+    token: str,
+    retries: int,
+    env_dv: str,
+    end_at: datetime,
+) -> list[dict[str, Any]]:
+    body, _headers = call_endpoint(
+        "inquire_time_itemchartprice",
+        {
+            "FID_COND_MRKT_DIV_CODE": market,
+            "FID_INPUT_ISCD": symbol,
+            "FID_INPUT_HOUR_1": end_at.astimezone(KST).strftime("%H%M%S"),
+            "FID_PW_DATA_INCU_YN": "Y",
+            "FID_ETC_CLS_CODE": "",
+        },
+        app_key,
+        app_secret,
+        token,
+        retries,
+        env_dv=env_dv,
+    )
+    rows = [compact_intraday_bar(row) for row in output_rows_from_body(body, "output2")]
+    return trim_compact_rows(rows, 30)
+
+
+def collect_orderbook_summary(symbol: str, *, market: str, app_key: str, app_secret: str, token: str, retries: int, env_dv: str) -> dict[str, Any]:
+    body, _headers = call_endpoint(
+        "inquire_asking_price_exp_ccn",
+        {"FID_COND_MRKT_DIV_CODE": market, "FID_INPUT_ISCD": symbol},
+        app_key,
+        app_secret,
+        token,
+        retries,
+        env_dv=env_dv,
+    )
+    orderbook_rows = normalize_output(body.get("output1"))
+    expected_rows = normalize_output(body.get("output2"))
+    return summarize_orderbook(orderbook_rows[0], expected_rows[0] if expected_rows else None) if orderbook_rows else {}
+
+
+def collect_trade_flow_summary(symbol: str, *, market: str, app_key: str, app_secret: str, token: str, retries: int, env_dv: str) -> dict[str, Any]:
+    body, _headers = call_endpoint(
+        "inquire_ccnl",
+        {"FID_COND_MRKT_DIV_CODE": market, "FID_INPUT_ISCD": symbol},
+        app_key,
+        app_secret,
+        token,
+        retries,
+        env_dv=env_dv,
+    )
+    return summarize_trade_flow(output_rows_from_body(body, "output"))
+
+
+def collect_investor_flow_summary(symbol: str, *, market: str, app_key: str, app_secret: str, token: str, retries: int, env_dv: str) -> dict[str, Any]:
+    body, _headers = call_endpoint(
+        "inquire_investor",
+        {"FID_COND_MRKT_DIV_CODE": market, "FID_INPUT_ISCD": symbol},
+        app_key,
+        app_secret,
+        token,
+        retries,
+        env_dv=env_dv,
+    )
+    rows = output_rows_from_body(body, "output")
+    return summarize_investor_flow(rows[0]) if rows else {}
+
+
+def collect_extended_market_evidence(
+    symbol: str,
+    *,
+    market: str,
+    app_key: str,
+    app_secret: str,
+    token: str,
+    retries: int,
+    env_dv: str,
+) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]], dict[str, Any], dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    charts = {"daily": [], "weekly": [], "monthly": []}
+    intraday: list[dict[str, Any]] = []
+    orderbook: dict[str, Any] = {}
+    trade_flow: dict[str, Any] = {}
+    investor_flow: dict[str, Any] = {}
+    errors: list[dict[str, Any]] = []
+    end_at = datetime.now(KST)
+
+    for period_code, key in (("D", "daily"), ("W", "weekly"), ("M", "monthly")):
+        try:
+            charts[key] = collect_period_chart(
+                symbol,
+                period_code,
+                market=market,
+                app_key=app_key,
+                app_secret=app_secret,
+                token=token,
+                retries=retries,
+                env_dv=env_dv,
+                end_at=end_at,
+            )
+        except Exception as exc:  # noqa: BLE001 - preserve price-based verdict eligibility
+            errors.append(safe_error(exc, code=f"{key}_chart_failed", stage="price-chart", symbol_id=symbol, source="direct_kis.inquire_daily_itemchartprice", required=False))
+
+    for source, code, collector in (
+        ("direct_kis.inquire_time_itemchartprice", "intraday_chart_failed", lambda: collect_intraday_chart(symbol, market=market, app_key=app_key, app_secret=app_secret, token=token, retries=retries, env_dv=env_dv, end_at=end_at)),
+        ("direct_kis.inquire_asking_price_exp_ccn", "orderbook_failed", lambda: collect_orderbook_summary(symbol, market=market, app_key=app_key, app_secret=app_secret, token=token, retries=retries, env_dv=env_dv)),
+        ("direct_kis.inquire_ccnl", "trade_flow_failed", lambda: collect_trade_flow_summary(symbol, market=market, app_key=app_key, app_secret=app_secret, token=token, retries=retries, env_dv=env_dv)),
+        ("direct_kis.inquire_investor", "investor_flow_failed", lambda: collect_investor_flow_summary(symbol, market=market, app_key=app_key, app_secret=app_secret, token=token, retries=retries, env_dv=env_dv)),
+    ):
+        try:
+            value = collector()
+            if code == "intraday_chart_failed":
+                intraday = value
+            elif code == "orderbook_failed":
+                orderbook = value
+            elif code == "trade_flow_failed":
+                trade_flow = value
+            elif code == "investor_flow_failed":
+                investor_flow = value
+        except Exception as exc:  # noqa: BLE001 - extended evidence is non-blocking
+            errors.append(safe_error(exc, code=code, stage="price-chart", symbol_id=symbol, source=source, required=False))
+
+    return charts, intraday, orderbook, trade_flow, investor_flow, errors
+
+
+def collect_price_chart(symbols: list[str], *, run_id: str, started_at: str, env_dv: str, market: str, app_key: str, app_secret: str, token: str, retries: int, include_extended: bool = True) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     artifact_errors: list[dict[str, Any]] = []
     for symbol in symbols:
         symbol_errors: list[dict[str, Any]] = []
         info: dict[str, Any] = {}
         price: dict[str, Any] = {}
+        charts: dict[str, list[dict[str, Any]]] = {"daily": [], "weekly": [], "monthly": []}
+        intraday: list[dict[str, Any]] = []
+        orderbook: dict[str, Any] = {}
+        trade_flow: dict[str, Any] = {}
+        investor_flow: dict[str, Any] = {}
         observed_at = now_kst_iso()
         try:
             body, _headers = call_endpoint(
@@ -414,7 +772,31 @@ def collect_price_chart(symbols: list[str], *, run_id: str, started_at: str, env
             observed_at = now_kst_iso()
         except Exception as exc:  # noqa: BLE001 - required price failure becomes a row error
             symbol_errors.append(safe_error(exc, code="inquire_price_failed", stage="price-chart", symbol_id=symbol, source="direct_kis.inquire_price", required=True))
-        row = build_price_row(symbol, info, price, observed_at=observed_at, env_dv=env_dv, market=market, errors=symbol_errors)
+        if include_extended:
+            charts, intraday, orderbook, trade_flow, investor_flow, extended_errors = collect_extended_market_evidence(
+                symbol,
+                market=market,
+                app_key=app_key,
+                app_secret=app_secret,
+                token=token,
+                retries=retries,
+                env_dv=env_dv,
+            )
+            symbol_errors.extend(extended_errors)
+        row = build_price_row(
+            symbol,
+            info,
+            price,
+            observed_at=observed_at,
+            env_dv=env_dv,
+            market=market,
+            errors=symbol_errors,
+            charts=charts,
+            intraday=intraday,
+            orderbook=orderbook,
+            trade_flow=trade_flow,
+            investor_flow=investor_flow,
+        )
         rows.append(row)
         artifact_errors.extend(symbol_errors)
 
@@ -790,6 +1172,7 @@ def command_collect(args: argparse.Namespace) -> int:
         app_secret=app_secret,
         token=token,
         retries=args.retries,
+        include_extended=not args.skip_extended_market_evidence,
     )
     price_path = output_dir / "price-chart.json"
     write_json(price_path, price_artifact)
@@ -844,11 +1227,40 @@ def command_self_test(_args: argparse.Namespace) -> int:
     assert parse_symbols("5930,000660,000660") == ["005930", "000660"]
     assert parse_int("1,234.00") == 1234
     assert parse_float("-1.25") == -1.25
+    orderbook = summarize_orderbook(
+        {"askp1": "1010", "bidp1": "1000", "total_askp_rsqn": "20", "total_bidp_rsqn": "30"},
+        {"antc_cnpr": "1005", "antc_vol": "12", "vi_cls_code": "N"},
+    )
+    assert orderbook["expected_price"] == 1005
+    assert orderbook["expected_volume"] == 12
     info = {"prdt_abrv_name": "ACE GOLD ETF", "scty_grp_id_cd": "EF", "etf_dvsn_cd": "02"}
     price = {"stck_prpr": "18590", "prdy_ctrt": "1.23", "acml_vol": "1000"}
-    row = build_price_row("411060", info, price, observed_at="2026-06-18T09:00:00+09:00", env_dv="real", market="J", errors=[])
+    row = build_price_row(
+        "411060",
+        info,
+        price,
+        observed_at="2026-06-18T09:00:00+09:00",
+        env_dv="real",
+        market="J",
+        errors=[],
+        charts={
+            "daily": [
+                {"date": "20260617", "close": 18000, "volume": 100},
+                {"date": "20260618", "close": 18590, "volume": 150},
+            ],
+            "weekly": [],
+            "monthly": [],
+        },
+        orderbook={"best_ask": 18600, "best_bid": 18590, "spread_pct": 0.054, "expected_price": 18595},
+        investor_flow={"foreign_net_buy_quantity": 1000},
+    )
     assert row["product_type"] == "etf"
     assert row["price"]["current_or_last"] == 18590
+    assert row["charts"]["daily"][0]["date"] == "20260617"
+    assert any(signal["name"] == "daily_change_pct" for signal in row["local_signals"])
+    assert row["orderbook_summary"]["best_bid"] == 18590
+    assert row["orderbook_summary"]["expected_price"] == 18595
+    assert row["investor_flow_summary"]["foreign_net_buy_quantity"] == 1000
     assert row["eligible_for_verdict"]
     sample_account = normalize_holding(
         {
@@ -883,6 +1295,7 @@ def build_parser() -> argparse.ArgumentParser:
     collect_parser.add_argument("--market", default="J")
     collect_parser.add_argument("--request-type", default="analysis", choices=["analysis", "prepare", "demo-submit", "real-submit"])
     collect_parser.add_argument("--skip-account", action="store_true")
+    collect_parser.add_argument("--skip-extended-market-evidence", action="store_true", help="Collect only identity/current price/account artifacts.")
     collect_parser.add_argument("--retries", type=int, default=3)
     collect_parser.add_argument("--max-account-pages", type=int, default=20)
     collect_parser.set_defaults(func=command_collect)

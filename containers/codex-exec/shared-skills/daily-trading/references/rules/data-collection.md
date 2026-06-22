@@ -30,6 +30,8 @@ Main agent owns price/chart lookup through `scripts/collect_main_evidence.py`. I
 - `price.snapshot_mode`
 - `eligible_for_verdict`
 - `required_missing`, `local_signals`, `sources`, `errors`
+- compact `charts.daily`, `charts.weekly`, `charts.monthly`, optional `intraday`
+- compact `orderbook_summary`, `trade_flow_summary`, `investor_flow_summary`
 
 Use `symbol_id`, `symbol_name`, and nested `price.*`; alias-only fields such as `symbol`, `stock_code`, `pdno`, `current_or_latest_price`, or numeric schema versions are not canonical.
 
@@ -94,7 +96,8 @@ Include only:
 - symbol id/name/product type
 - eligibility, evidence mode, exclusion reasons, warnings
 - current-or-last price, observation timestamp, snapshot mode
-- up to five price/chart signals per symbol
+- up to twelve price/chart signals per symbol
+- compact chart/orderbook/trade-flow/investor-flow context when collected
 - optional financial/news summaries within the limits above
 - account exposure summary
 - non-sensitive missing/error context

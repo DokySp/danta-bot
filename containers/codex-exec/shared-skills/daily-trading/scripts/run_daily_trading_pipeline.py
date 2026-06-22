@@ -491,10 +491,61 @@ class Pipeline:
                 return path
         return None
 
+    def etf_or_etn_symbol_ids(self) -> list[str]:
+        price = load_json_if_exists(self.output_dir / "price-chart.json")
+        if not isinstance(price, dict):
+            return []
+        result: list[str] = []
+        for item in price.get("symbols", []):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("product_type") or "").lower() not in {"etf", "etn"}:
+                continue
+            symbol_id = str(item.get("symbol_id") or "").strip()
+            if symbol_id:
+                result.append(symbol_id)
+        return result
+
+    def cache_has_etf_nav_evidence(self, path: Path, etf_symbols: list[str]) -> bool:
+        payload = load_yaml_if_exists(path)
+        if not isinstance(payload, dict):
+            return False
+        symbols = payload.get("symbols")
+        if not isinstance(symbols, dict):
+            return False
+
+        def contains_key(value: Any, wanted: str) -> bool:
+            if isinstance(value, dict):
+                if wanted in value:
+                    return True
+                return any(contains_key(child, wanted) for child in value.values())
+            if isinstance(value, list):
+                return any(contains_key(child, wanted) for child in value)
+            return False
+
+        for symbol_id in etf_symbols:
+            symbol_payload = symbols.get(symbol_id)
+            if not contains_key(symbol_payload, "ETF/ETN 현재가") or not contains_key(symbol_payload, "NAV 비교추이(종목)"):
+                return False
+        return True
+
     def covered_cache_path(self, domain: str, path_text: str, symbols: list[str], *, detail: str) -> str:
         path = resolve_workspace_path(self.workspace_dir, path_text)
         covered, missing = cache_coverage(path, symbols)
         if covered:
+            etf_symbols = self.etf_or_etn_symbol_ids() if domain == "financial" else []
+            if etf_symbols and not self.cache_has_etf_nav_evidence(path, etf_symbols):
+                self.logs.append(
+                    {
+                        "stage": f"{domain}-cache-coverage",
+                        "path": str(path),
+                        "missing_etf_nav_symbol_count": len(etf_symbols),
+                        "missing_etf_nav_symbols_sample": etf_symbols[:20],
+                        "recorded_at": now_iso(),
+                    }
+                )
+                write_json(self.command_log_path, {"commands": self.logs})
+                return ""
             self.add_stage(f"{domain}-cache", "success", detail=detail, required=False, path=path)
             return str(path)
         self.logs.append(
@@ -682,6 +733,8 @@ class Pipeline:
             "--symbols",
             ",".join(symbols),
         ]
+        if domain == "financial" and self.has_etf_or_etn_price_rows():
+            cmd.append("--include-etf")
         result = self.run_cmd(f"{domain}-cache-collect", cmd, required=False)
         if result.returncode == 0:
             path_text = self.parse_cache_collect_path(result.stdout)
@@ -732,6 +785,9 @@ class Pipeline:
             return str(zero_news)
         self.add_stage(f"{domain}-cache", "partial", detail="optional cache collection failed once", required=False, path=self.command_log_path)
         return ""
+
+    def has_etf_or_etn_price_rows(self) -> bool:
+        return bool(self.etf_or_etn_symbol_ids())
 
     def run_artifact_command(self, stage: str, args: list[str], *, required: bool = True) -> dict[str, Any] | None:
         result = self.run_cmd(stage, [sys.executable, self.artifact_script(), *args], required=required)
@@ -1670,6 +1726,45 @@ def run_self_test() -> int:
         no_news_counts = cache_evidence_counts(no_news_cache, ["005930"])
         if no_news_counts.get("present_symbol_count") != 1 or no_news_counts.get("usable_symbol_count") != 0:
             failures.append(f"no-news cache counts did not distinguish present from usable: {no_news_counts}")
+        etf_probe_dir = workspace / "reports" / "runs" / "etf-cache-probe"
+        write_json(
+            etf_probe_dir / "price-chart.json",
+            {
+                "symbols": [
+                    {"symbol_id": "069500", "symbol_name": "KODEX 200", "product_type": "etf"},
+                ]
+            },
+        )
+        stale_etf_cache = workspace / "stale-etf-financial.yaml"
+        stale_etf_cache.write_text('date: "2026-06-18"\nsymbols:\n  "069500":\n    items:\n      - "price only"\n', encoding="utf-8")
+        fresh_etf_cache = workspace / "fresh-etf-financial.yaml"
+        fresh_etf_cache.write_text(
+            'date: "2026-06-18"\nsymbols:\n  "069500":\n    KODEX 200:\n      ETF/ETN 현재가:\n        응답:\n          - nav: "10000"\n      NAV 비교추이(종목):\n        NAV 비교 요약:\n          - nav: "10000"\n',
+            encoding="utf-8",
+        )
+        etf_probe = Pipeline(
+            argparse.Namespace(
+                command="run",
+                workspace_dir=str(workspace),
+                output_dir=str(etf_probe_dir),
+                run_id="etf-cache-probe",
+                started_at="2026-06-18T09:00:00+09:00",
+                env="acct",
+                request_type="analysis",
+                portfolio_json=str(portfolio_path),
+                financial_cache_path="",
+                news_cache_path="",
+                main_events="",
+                date="2026-06-18",
+                reuse_existing_artifacts=True,
+                skip_account=False,
+                max_workers=3,
+            )
+        )
+        if etf_probe.covered_cache_path("financial", str(stale_etf_cache), ["069500"], detail="stale etf cache"):
+            failures.append("ETF financial cache without NAV evidence should not be accepted as covered")
+        if not etf_probe.covered_cache_path("financial", str(fresh_etf_cache), ["069500"], detail="fresh etf cache"):
+            failures.append("ETF financial cache with NAV evidence should be accepted as covered")
         stage_status_probe = Pipeline(
             argparse.Namespace(
                 command="run",

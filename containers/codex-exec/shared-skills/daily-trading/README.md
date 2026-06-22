@@ -152,7 +152,7 @@ Run 아티팩트는 `reports/runs/<run_id>/` 아래에 둔다.
 
 `decision-brief.json`은 Main agent가 수집 결과를 합쳐 만든 canonical verdict input이다. Sub-agent에는 launcher가 `decision-brief.json`에서 파생한 lossless `verdict-core` slice를 전달한다. `second-verdict`에는 `verdict-first.json` 전체가 아니라 selected-symbol first-verdict slice를 전달하고, 보유/가격 정보는 함께 전달되는 `verdict-core`에서 읽는다.
 
-`decision-brief.json`에는 종목 식별자, eligibility, `evidence_mode`, 가격, 핵심 price/chart signal, 가능한 financial memory 경로와 짧은 financial summary, 가능한 뉴스 memory 경로와 짧은 KIS 뉴스/공시 요약, 계좌 노출, 누락/오류 사유를 압축해서 담는다. financial/news memory 파일은 사람이 읽는 참고자료이다. Main agent는 그중 짧은 bullet만 선별해 `decision-brief.json`에 복사한다. `reports/runs/<run_id>/financial.md`, `reports/runs/<run_id>/news.md`는 만들지 않는다. 긴 raw API payload, 기사 원문, 반복 source detail, 민감정보는 제외한다. 종목별 price/chart signal은 최대 5개, financial summary는 최대 3개 bullet, KIS 뉴스/공시는 최대 3개 item, warning/error는 최대 5개로 제한하고 반복되는 domain-wide 누락 사유는 한 번만 요약한다.
+`decision-brief.json`에는 종목 식별자, eligibility, `evidence_mode`, 가격, 핵심 price/chart signal, compact 기간봉/분봉·호가·체결·수급 요약, 가능한 financial memory 경로와 짧은 financial/ETF summary, 가능한 뉴스 memory 경로와 짧은 KIS 뉴스/공시 요약, 계좌 노출, 누락/오류 사유를 압축해서 담는다. financial/news memory 파일은 사람이 읽는 참고자료이다. Main agent는 그중 짧은 bullet만 선별해 `decision-brief.json`에 복사한다. `reports/runs/<run_id>/financial.md`, `reports/runs/<run_id>/news.md`는 만들지 않는다. 긴 raw API payload, 기사 원문, 반복 source detail, 민감정보는 제외한다. 종목별 price/chart signal은 최대 12개, financial summary는 최대 3개 bullet, KIS 뉴스/공시는 최대 3개 item, warning/error는 최대 5개로 제한하고 반복되는 domain-wide 누락 사유는 한 번만 요약한다.
 
 재무/뉴스가 없더라도 식별자, 종목명, 현재가 또는 직전 거래일 가격 snapshot, 관측시각이 있으면 `eligible_for_verdict=true`로 유지한다.
 

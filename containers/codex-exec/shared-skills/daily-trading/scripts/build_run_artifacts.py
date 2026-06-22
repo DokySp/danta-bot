@@ -258,6 +258,54 @@ def financial_summary_for(cache: Any, symbol_id: str, cache_path: str) -> dict[s
     return summary
 
 
+def etf_summary_for(cache: Any, symbol_id: str, cache_path: str) -> dict[str, Any]:
+    summary = {
+        "cache_path": cache_path or "",
+        "cache_status": "supplied" if cache_path else "missing",
+        "items": [],
+    }
+    if not cache_path:
+        return summary
+    if not isinstance(cache, dict):
+        summary["cache_status"] = "supplied_unparsed"
+        return summary
+    symbols = cache.get("symbols") if isinstance(cache.get("symbols"), dict) else {}
+    if symbol_id not in symbols:
+        summary["cache_status"] = "missing_symbol"
+        return summary
+    symbol_payload = unwrap_financial_symbol_payload(symbols.get(symbol_id) or {})
+    if not isinstance(symbol_payload, dict):
+        summary["cache_status"] = "missing_symbol"
+        return summary
+    etf_price_rows = ((symbol_payload.get("ETF/ETN 현재가") or {}).get("응답") or [])
+    etf_price = etf_price_rows[0] if etf_price_rows and isinstance(etf_price_rows[0], dict) else {}
+    nav_payload = symbol_payload.get("NAV 비교추이(종목)") or {}
+    nav_summary_rows = nav_payload.get("NAV 비교 요약") or nav_payload.get("응답 1") or nav_payload.get("output1") or []
+    nav_trend_rows = nav_payload.get("NAV 비교 추이") or nav_payload.get("응답 2") or nav_payload.get("output2") or []
+    nav_summary = nav_summary_rows[0] if isinstance(nav_summary_rows, list) and nav_summary_rows and isinstance(nav_summary_rows[0], dict) else {}
+    nav_trend = nav_trend_rows[0] if isinstance(nav_trend_rows, list) and nav_trend_rows and isinstance(nav_trend_rows[0], dict) else {}
+    parts = []
+    for label, keys in (
+        ("NAV", ("NAV", "nav")),
+        ("괴리율", ("괴리율", "dprt")),
+        ("추적오차", ("추적오차", "ETF 추적수익률 차이", "etf_chas_erng_rt_dbnb")),
+        ("거래량", ("누적 거래량", "acml_vol")),
+    ):
+        value = first_present(etf_price, keys) or first_present(nav_summary, keys) or first_present(nav_trend, keys)
+        if value not in (None, ""):
+            parts.append(f"{label} {value}")
+    if parts:
+        summary["items"].append(", ".join(parts[:4]))
+    for label, keys in (("NAV 전일대비율", ("NAV 전일 대비율", "nav_prdy_ctrt")), ("전일대비율", ("전일 대비율", "prdy_ctrt"))):
+        value = first_present(nav_summary, keys) or first_present(nav_trend, keys) or first_present(etf_price, keys)
+        if value not in (None, ""):
+            summary["items"].append(f"{label} {value}")
+    summary["items"] = summary["items"][:3]
+    if not summary["items"]:
+        summary["cache_status"] = "supplied_empty"
+    return summary
+
+
 def news_summary_for(cache: Any, symbol_id: str, cache_path: str) -> list[dict[str, Any]]:
     if not cache_path or not isinstance(cache, dict):
         return []
@@ -282,6 +330,30 @@ def news_summary_for(cache: Any, symbol_id: str, cache_path: str) -> list[dict[s
             }
         )
     return result
+
+
+def compact_chart_context(item: dict[str, Any]) -> dict[str, Any]:
+    charts = item.get("charts") if isinstance(item.get("charts"), dict) else {}
+    result: dict[str, Any] = {}
+    for key in ("daily", "weekly", "monthly"):
+        rows = charts.get(key) if isinstance(charts, dict) else []
+        if not isinstance(rows, list):
+            rows = []
+        compact_rows = [row for row in rows if isinstance(row, dict)][:20]
+        if compact_rows:
+            result[key] = compact_rows
+    intraday = item.get("intraday") if isinstance(item.get("intraday"), list) else []
+    compact_intraday = [row for row in intraday if isinstance(row, dict)][:10]
+    if compact_intraday:
+        result["intraday"] = compact_intraday
+    return result
+
+
+def compact_optional_dict(item: dict[str, Any], key: str) -> dict[str, Any]:
+    value = item.get(key)
+    if not isinstance(value, dict):
+        return {}
+    return {str(k): v for k, v in value.items() if v not in (None, "", [], {})}
 
 
 def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
@@ -341,6 +413,7 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
         if not usable_price and "price.current_or_last/observed_at" not in required_missing:
             required_missing.append("price.current_or_last/observed_at")
         financial_summary = financial_summary_for(financial_cache, symbol_id, args.financial_cache_path)
+        etf_summary = etf_summary_for(financial_cache, symbol_id, args.financial_cache_path) if str(item.get("product_type") or "").lower() in {"etf", "etn"} else {}
         symbol = {
             "symbol_id": symbol_id,
             "symbol_name": item.get("symbol_name") or (account_item or {}).get("symbol_name") or symbol_id,
@@ -353,8 +426,13 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
                 "observed_at": price.get("observed_at") or "",
                 "snapshot_mode": price.get("snapshot_mode") or "",
             },
-            "price_chart_signals": list(item.get("local_signals") or [])[:5],
+            "price_chart_signals": list(item.get("local_signals") or [])[:12],
+            "chart_context": compact_chart_context(item),
+            "orderbook_summary": compact_optional_dict(item, "orderbook_summary"),
+            "trade_flow_summary": compact_optional_dict(item, "trade_flow_summary"),
+            "investor_flow_summary": compact_optional_dict(item, "investor_flow_summary"),
             "financial_summary": financial_summary,
+            "etf_summary": etf_summary,
             "news_summary": news_summary_for(news_cache, symbol_id, args.news_cache_path),
             "account_exposure": compact_account_exposure(account_item),
             "required_missing": required_missing,
@@ -869,7 +947,19 @@ def run_self_test() -> int:
                         "product_type": "stock",
                         "eligible_for_verdict": True,
                         "price": {"current_or_last": 70000, "observed_at": "2026-06-18T09:00:00+09:00", "snapshot_mode": "live"},
-                        "local_signals": [{"name": "day_change_pct", "value": 1.2}],
+                        "local_signals": [
+                            {"name": "day_change_pct", "value": 1.2},
+                            {"name": "daily_pct_vs_ma20", "value": 3.4},
+                        ],
+                        "charts": {
+                            "daily": [{"date": "20260618", "open": 69000, "high": 71000, "low": 68000, "close": 70000, "volume": 1000}],
+                            "weekly": [{"date": "20260614", "close": 69500, "volume": 5000}],
+                            "monthly": [],
+                        },
+                        "intraday": [{"time": "093000", "price": 70000, "volume": 100}],
+                        "orderbook_summary": {"best_bid": 69900, "best_ask": 70000, "spread_pct": 0.143},
+                        "trade_flow_summary": {"tick_count": 3, "recent_price_change_pct": 0.2},
+                        "investor_flow_summary": {"foreign_net_buy_quantity": 1000},
                         "required_missing": [],
                         "errors": [],
                     },
@@ -957,6 +1047,14 @@ symbols:
                 failures.append(f"financial-missing symbol should be marked missing_symbol: {by_symbol['000660']}")
             if by_symbol["005930"].get("news_summary"):
                 failures.append(f"no-news placeholder should not be included: {by_symbol['005930']}")
+            if not by_symbol["005930"].get("chart_context", {}).get("daily"):
+                failures.append(f"chart context should be preserved: {by_symbol['005930']}")
+            if by_symbol["005930"].get("orderbook_summary", {}).get("best_bid") != 69900:
+                failures.append(f"orderbook summary should be preserved: {by_symbol['005930']}")
+            if by_symbol["005930"].get("trade_flow_summary", {}).get("tick_count") != 3:
+                failures.append(f"trade flow summary should be preserved: {by_symbol['005930']}")
+            if by_symbol["005930"].get("investor_flow_summary", {}).get("foreign_net_buy_quantity") != 1000:
+                failures.append(f"investor flow summary should be preserved: {by_symbol['005930']}")
             first_specs = build_first_specs(
                 argparse.Namespace(
                     output_dir=run_dir,

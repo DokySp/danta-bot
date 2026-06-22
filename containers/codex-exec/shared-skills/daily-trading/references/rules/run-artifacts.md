@@ -144,7 +144,7 @@ Use the common envelope plus:
 
 ```json
 {
-  "brief_type": "verdict-input",
+  "brief_type": "decision-brief",
   "source_artifacts": ["price-chart.json", "check-portfolio JSON"],
   "account_exposure_summary": {},
   "symbols": [
@@ -157,7 +157,12 @@ Use the common envelope plus:
       "exclusion_reasons": [],
       "price": {"current_or_last": null, "observed_at": "", "snapshot_mode": "live | previous_trading_day"},
       "price_chart_signals": [],
+      "chart_context": {},
+      "orderbook_summary": {},
+      "trade_flow_summary": {},
+      "investor_flow_summary": {},
       "financial_summary": {},
+      "etf_summary": {},
       "news_summary": [],
       "account_exposure": {},
       "required_missing": [],
