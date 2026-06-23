@@ -35,6 +35,11 @@ FIRST_VERDICT_ROLES = (
     "analyst-risk-allocation",
 )
 COMMAND_OUTPUT_LIMIT = 2000
+ORDER_PATH_AUTO = "auto"
+REGULAR_ORDER_START_MINUTE = 9 * 60
+REGULAR_ORDER_END_MINUTE = 15 * 60 + 30
+RESERVATION_ORDER_START_MINUTE = 15 * 60 + 40
+RESERVATION_ORDER_END_MINUTE = 7 * 60 + 30
 
 
 def now_kst() -> datetime:
@@ -43,6 +48,40 @@ def now_kst() -> datetime:
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def parse_kst_datetime(value: str) -> datetime:
+    text = str(value or "").strip()
+    if not text:
+        return now_kst()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(text)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=KST)
+    return parsed.astimezone(KST)
+
+
+def resolve_order_path(order_path: str, started_at: str) -> tuple[str, str]:
+    requested = str(order_path or ORDER_PATH_AUTO)
+    if requested in {"reservation", "immediate"}:
+        return requested, "explicit"
+    if requested != ORDER_PATH_AUTO:
+        raise ValueError(f"unsupported order_path: {requested}")
+
+    started = parse_kst_datetime(started_at)
+    if started.weekday() >= 5:
+        return "reservation", "auto_closed_weekend"
+    minute = started.hour * 60 + started.minute
+    if REGULAR_ORDER_START_MINUTE <= minute < REGULAR_ORDER_END_MINUTE:
+        return "immediate", "auto_regular_session"
+    if minute >= RESERVATION_ORDER_START_MINUTE or minute < RESERVATION_ORDER_END_MINUTE:
+        return "reservation", "auto_reservation_session"
+    raise ValueError(
+        "auto order path cannot select a supported KIS order API for "
+        f"{started.isoformat(timespec='minutes')}; regular order_cash window is "
+        "09:00-15:30 KST and order_resv window is 15:40-07:30 KST"
+    )
 
 
 def write_json(path: Path, payload: Any) -> None:
@@ -353,6 +392,16 @@ class Pipeline:
         self.command_log_path = self.output_dir / "pipeline-command-log.json"
         self.summary_path = self.output_dir / "pipeline-summary.json"
         self.run_path = self.output_dir / "run.json"
+        self.order_path_requested = str(getattr(args, "order_path", ORDER_PATH_AUTO) or ORDER_PATH_AUTO)
+        try:
+            self.order_path, self.order_path_reason = resolve_order_path(self.order_path_requested, self.started_at)
+        except ValueError:
+            if self.order_path_requested == ORDER_PATH_AUTO and (
+                getattr(args, "command", "") == "summarize" or getattr(args, "request_type", "") not in {"prepare", "demo-submit", "real-submit"}
+            ):
+                self.order_path, self.order_path_reason = "reservation", "auto_unresolved_non_submit"
+            else:
+                raise
         self.logs: list[dict[str, Any]] = []
         self.stages: list[dict[str, Any]] = []
 
@@ -381,6 +430,11 @@ class Pipeline:
                 "updated_at": now_iso(),
                 "status": status or self.pipeline_status(),
                 "pipeline_summary": str(self.summary_path),
+                "order_path_selection": {
+                    "requested": self.order_path_requested,
+                    "resolved": self.order_path,
+                    "reason": self.order_path_reason,
+                },
                 "stages": self.stages,
             },
         )
@@ -1380,6 +1434,11 @@ class Pipeline:
             "execution": {
                 "status": execution.get("status"),
                 "request_type": execution.get("request_type"),
+                "order_path_selection": {
+                    "requested": self.order_path_requested,
+                    "resolved": self.order_path,
+                    "reason": self.order_path_reason,
+                },
                 "order_count": len(orders),
                 "orders": orders,
                 "errors": execution.get("errors", [])[:5] if isinstance(execution.get("errors"), list) else [],
@@ -1421,6 +1480,7 @@ class Pipeline:
             "main_agent_read_policy": (
                 "Read pipeline-summary.json first. For explicit demo-submit or real-submit runs, pass --submit-orders so execute_orders.py refreshes "
                 "read-only account/order gates, reconciles active pending/reserved orders, and submits, adjusts, or blocks immediate/reservation orders before summary generation. "
+                "When --order-path auto is used, the pipeline resolves weekday 09:00 <= t < 15:30 KST runs to immediate/order_cash, and 15:40 <= t or t < 07:30 plus weekends to reservation/order_resv before execution-plan. "
                 "For explicit limit requests, treat execution-plan order_price values as the default limit price candidates unless a current API gate rejects them. "
                 "Open command_log_path or other intermediate artifacts only when a stage failed and the summary is insufficient."
             ),
@@ -1536,7 +1596,7 @@ class Pipeline:
                 "--request-type",
                 self.args.request_type,
                 "--order-path",
-                getattr(self.args, "order_path", "reservation"),
+                self.order_path,
             ],
         )
         execution_status = str((execution or {}).get("status") or "success")
@@ -1726,6 +1786,21 @@ def run_self_test() -> int:
         no_news_counts = cache_evidence_counts(no_news_cache, ["005930"])
         if no_news_counts.get("present_symbol_count") != 1 or no_news_counts.get("usable_symbol_count") != 0:
             failures.append(f"no-news cache counts did not distinguish present from usable: {no_news_counts}")
+        if resolve_order_path(ORDER_PATH_AUTO, "2026-06-18T09:00:00+09:00") != ("immediate", "auto_regular_session"):
+            failures.append("auto order path did not select immediate during regular KST session")
+        if resolve_order_path(ORDER_PATH_AUTO, "2026-06-18T07:00:00+09:00") != ("reservation", "auto_reservation_session"):
+            failures.append("auto order path did not select reservation during KIS reservation session")
+        if resolve_order_path(ORDER_PATH_AUTO, "2026-06-20T10:00:00+09:00") != ("reservation", "auto_closed_weekend"):
+            failures.append("auto order path did not select reservation during weekend closed session")
+        if resolve_order_path("reservation", "2026-06-18T10:00:00+09:00") != ("reservation", "explicit"):
+            failures.append("explicit reservation order path was not preserved")
+        if resolve_order_path("immediate", "2026-06-18T07:00:00+09:00") != ("immediate", "explicit"):
+            failures.append("explicit immediate order path was not preserved")
+        try:
+            resolve_order_path(ORDER_PATH_AUTO, "2026-06-18T08:00:00+09:00")
+            failures.append("auto order path should reject unsupported KIS order window")
+        except ValueError:
+            pass
         etf_probe_dir = workspace / "reports" / "runs" / "etf-cache-probe"
         write_json(
             etf_probe_dir / "price-chart.json",
@@ -2086,6 +2161,9 @@ def run_self_test() -> int:
             summary = pipeline.run()
             if summary["status"] != "partial":
                 failures.append(f"real-submit summary should remain partial before submit-order execution: {summary['status']}")
+            order_path_selection = (summary.get("execution") or {}).get("order_path_selection") if isinstance(summary.get("execution"), dict) else {}
+            if order_path_selection.get("resolved") != "immediate" or order_path_selection.get("reason") != "auto_regular_session":
+                failures.append(f"pipeline did not resolve auto order path to immediate: {order_path_selection}")
             if summary["token_usage"]["subagents"]["total_tokens"] != 480:
                 failures.append(f"unexpected subagent token total: {summary['token_usage']}")
             if summary["token_usage"]["main"]["total_tokens"] != 17 or summary["token_usage"]["total"]["total_tokens"] != 497:
@@ -2379,7 +2457,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--news-cache-path", default="")
     run.add_argument("--main-events", default="", help="Optional Codex JSONL events path for Main-agent token accounting.")
     run.add_argument("--submit-orders", action="store_true", help="For explicit demo-submit/real-submit runs, execute immediate or reservation orders through execute_orders.py.")
-    run.add_argument("--order-path", choices=["reservation", "immediate"], default="reservation")
+    run.add_argument(
+        "--order-path",
+        choices=[ORDER_PATH_AUTO, "reservation", "immediate"],
+        default=ORDER_PATH_AUTO,
+        help="Order API path. auto uses KST order-session time: order_cash for weekday 09:00 <= t < 15:30, order_resv for 15:40 <= t or t < 07:30 and weekends.",
+    )
     run.add_argument("--date", default="")
     run.add_argument("--reuse-existing-artifacts", action="store_true")
     run.add_argument("--skip-account", action="store_true")
@@ -2392,7 +2475,7 @@ def build_parser() -> argparse.ArgumentParser:
     summarize.add_argument("--started-at", default="")
     summarize.add_argument("--env", default=os.environ.get("CODEX_MCP_TRADING_ENV", "acct"), choices=["acct", "real", "paper", "demo"])
     summarize.add_argument("--request-type", default="analysis", choices=["analysis", "prepare", "demo-submit", "real-submit"])
-    summarize.add_argument("--order-path", choices=["reservation", "immediate"], default="reservation")
+    summarize.add_argument("--order-path", choices=[ORDER_PATH_AUTO, "reservation", "immediate"], default=ORDER_PATH_AUTO)
     summarize.add_argument("--portfolio-json", default="")
 
     subparsers.add_parser("self-test", help="Run an offline pipeline smoke test with a fake codex binary.")
