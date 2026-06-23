@@ -631,6 +631,141 @@ def attempt(api_name: str, result: str, message: str, error_code: str = "") -> d
     return {"api_name": api_name, "attempt": 1, "delay_seconds": 0, "error_code": error_code, "message": message, "result": result}
 
 
+def reduce_order_quantity(order: dict[str, Any], *, from_qty: int, to_qty: int, reason: str, gate: str, limit: int) -> None:
+    original_qty = as_int(order.get("requested_order_quantity"), from_qty)
+    order.setdefault("requested_order_quantity", from_qty)
+    order.setdefault("requested_additional_required_quantity", as_int(order.get("additional_required_quantity")))
+    order["validated_order_quantity"] = to_qty
+    if order.get("direction") == "sell":
+        order["additional_required_quantity"] = -to_qty
+    elif order.get("direction") == "buy":
+        order["additional_required_quantity"] = to_qty
+    order["quantity_adjustment"] = {
+        "from": original_qty,
+        "to": to_qty,
+        "reason": reason,
+        "limit": limit,
+    }
+    order["attempts"].append(attempt(gate, "adjusted", f"quantity reduced from {from_qty} to {to_qty}", "quantity_adjustment"))
+
+
+def block_order(order: dict[str, Any], *, reason: str, gate: str, message: str, error_code: str) -> None:
+    order.setdefault("requested_order_quantity", as_int(order.get("validated_order_quantity")))
+    order.setdefault("requested_additional_required_quantity", as_int(order.get("additional_required_quantity")))
+    order["result"] = "blocked"
+    order["reason"] = reason
+    order["attempts"].append(attempt(gate, "blocked", message, error_code))
+
+
+def apply_quantity_gates(
+    order: dict[str, Any],
+    *,
+    symbol: str,
+    side: str,
+    qty: int,
+    price: int,
+    current: int,
+    active_sell_quantity: int,
+    capacities: dict[str, dict[str, int]],
+    sell_capacities: dict[str, dict[str, int]],
+    used_cash: int,
+    cash_limit: int,
+    local_sell_gate: bool,
+) -> tuple[int, int, bool]:
+    if local_sell_gate and side == "sell":
+        available_sell = max(0, current - active_sell_quantity)
+        if qty > available_sell:
+            if available_sell <= 0:
+                block_order(
+                    order,
+                    reason="sell_quantity_exceeds_available_holding",
+                    gate="local_sell_gate",
+                    message=f"available_sell={available_sell}",
+                    error_code="sell_gate",
+                )
+                return qty, 0, True
+            reduce_order_quantity(
+                order,
+                from_qty=qty,
+                to_qty=available_sell,
+                reason="sell_quantity_reduced_to_available_holding",
+                gate="local_sell_gate",
+                limit=available_sell,
+            )
+            qty = available_sell
+    if side == "sell":
+        sell_cap = sell_capacities.get(symbol)
+        if isinstance(sell_cap, dict) and "max_sell_qty" in sell_cap:
+            max_sell_qty = as_int(sell_cap.get("max_sell_qty"))
+            if qty > max_sell_qty:
+                if max_sell_qty <= 0:
+                    block_order(
+                        order,
+                        reason="sell_quantity_exceeds_order_available_quantity",
+                        gate="inquire_psbl_sell",
+                        message=f"max_sell_qty={max_sell_qty}",
+                        error_code="sell_gate",
+                    )
+                    return qty, 0, True
+                reduce_order_quantity(
+                    order,
+                    from_qty=qty,
+                    to_qty=max_sell_qty,
+                    reason="sell_quantity_reduced_to_order_available_quantity",
+                    gate="inquire_psbl_sell",
+                    limit=max_sell_qty,
+                )
+                qty = max_sell_qty
+    required_cash = 0
+    if side == "buy":
+        cap = capacities.get(symbol)
+        if isinstance(cap, dict) and "max_buy_qty" in cap:
+            max_qty = as_int(cap.get("max_buy_qty"))
+            if qty > max_qty:
+                if max_qty <= 0:
+                    block_order(
+                        order,
+                        reason="buy_quantity_exceeds_order_available_quantity",
+                        gate="inquire_psbl_order",
+                        message=f"max_buy_qty={max_qty}",
+                        error_code="cash_gate",
+                    )
+                    return qty, 0, True
+                reduce_order_quantity(
+                    order,
+                    from_qty=qty,
+                    to_qty=max_qty,
+                    reason="buy_quantity_reduced_to_order_available_quantity",
+                    gate="inquire_psbl_order",
+                    limit=max_qty,
+                )
+                qty = max_qty
+        required_cash = qty * price
+        if cash_limit and used_cash + required_cash > cash_limit:
+            remaining_cash = max(0, cash_limit - used_cash)
+            affordable_qty = remaining_cash // price if price > 0 else 0
+            if affordable_qty <= 0:
+                block_order(
+                    order,
+                    reason="buy_cash_gate_reduced_reverse_rank",
+                    gate="inquire_psbl_order",
+                    message=f"buy candidates exceeded latest max_buy_amt {cash_limit}",
+                    error_code="cash_gate",
+                )
+                return qty, 0, True
+            reduce_order_quantity(
+                order,
+                from_qty=qty,
+                to_qty=affordable_qty,
+                reason="buy_quantity_reduced_to_remaining_cash",
+                gate="inquire_psbl_order",
+                limit=remaining_cash,
+            )
+            qty = affordable_qty
+            required_cash = qty * price
+    return qty, required_cash, False
+
+
 def error(code: str, message: str) -> dict[str, Any]:
     return {"stage": "order-execution", "source": "execute_orders", "code": code, "message": message, "required": True}
 
@@ -888,6 +1023,60 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
                 desired_order["direction"] = desired_side
                 desired_order["validated_order_quantity"] = desired_qty
                 desired_order["additional_required_quantity"] = desired_delta
+                desired_qty, required_cash, quantity_blocked = apply_quantity_gates(
+                    desired_order,
+                    symbol=symbol,
+                    side=desired_side,
+                    qty=desired_qty,
+                    price=price,
+                    current=current,
+                    active_sell_quantity=active_item["sell"],
+                    capacities=capacities,
+                    sell_capacities=sell_capacities,
+                    used_cash=used_cash,
+                    cash_limit=cash_limit,
+                    local_sell_gate=False,
+                )
+                if quantity_blocked:
+                    order.update(
+                        {
+                            key: value
+                            for key, value in desired_order.items()
+                            if key
+                            in {
+                                "result",
+                                "reason",
+                                "direction",
+                                "requested_order_quantity",
+                                "requested_additional_required_quantity",
+                                "quantity_adjustment",
+                                "validated_order_quantity",
+                                "additional_required_quantity",
+                                "attempts",
+                            }
+                        }
+                    )
+                    order["order_or_reservation_id"] = conflict.get("order_id", "")
+                    order_adjustments.append(adjustment_row(conflict, action="block", reason=order.get("reason") or "quantity_gate_blocked", result="blocked"))
+                    blocked += 1
+                    continue
+                desired_delta = desired_qty if desired_side == "buy" else -desired_qty
+                desired_order["validated_order_quantity"] = desired_qty
+                desired_order["additional_required_quantity"] = desired_delta
+                reduced_kept = matching_single_order([conflict], desired_side, desired_qty, price, order_path, order_api)
+                if reduced_kept:
+                    order["result"] = "skipped"
+                    order["reason"] = "existing_matching_reservation_kept" if order_path == "reservation" else "existing_matching_order_kept"
+                    order["direction"] = desired_side
+                    order["additional_required_quantity"] = desired_delta
+                    order["validated_order_quantity"] = desired_qty
+                    if "requested_order_quantity" in desired_order:
+                        order["requested_order_quantity"] = desired_order.get("requested_order_quantity")
+                        order["requested_additional_required_quantity"] = desired_order.get("requested_additional_required_quantity")
+                        order["quantity_adjustment"] = desired_order.get("quantity_adjustment")
+                    order["order_or_reservation_id"] = reduced_kept.get("order_id", "")
+                    order_adjustments.append(adjustment_row(reduced_kept, action="keep", reason="matches_reduced_target_delta", result="skipped"))
+                    continue
             try:
                 request_id, action, message = adjust_active_order(
                     kis,
@@ -914,6 +1103,12 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
                 order["direction"] = desired_side
                 order["additional_required_quantity"] = desired_delta
                 order["validated_order_quantity"] = desired_qty
+                if "requested_order_quantity" in desired_order:
+                    order["requested_order_quantity"] = desired_order.get("requested_order_quantity")
+                    order["requested_additional_required_quantity"] = desired_order.get("requested_additional_required_quantity")
+                    order["quantity_adjustment"] = desired_order.get("quantity_adjustment")
+                if desired_side == "buy":
+                    used_cash += required_cash
                 order["order_or_reservation_id"] = request_id
                 submitted += 1
                 continue
@@ -946,36 +1141,24 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
             order["reason"] = "invalid_order_quantity_or_price"
             blocked += 1
             continue
-        if side == "sell" and qty > max(0, current - active_item["sell"]):
-            order["result"] = "blocked"
-            order["reason"] = "sell_quantity_exceeds_available_holding"
-            order["attempts"].append(attempt("local_sell_gate", "blocked", f"available_sell={max(0, current - active_item['sell'])}", "sell_gate"))
+        qty, required_cash, quantity_blocked = apply_quantity_gates(
+            order,
+            symbol=symbol,
+            side=side,
+            qty=qty,
+            price=price,
+            current=current,
+            active_sell_quantity=active_item["sell"],
+            capacities=capacities,
+            sell_capacities=sell_capacities,
+            used_cash=used_cash,
+            cash_limit=cash_limit,
+            local_sell_gate=True,
+        )
+        if quantity_blocked:
             blocked += 1
             continue
-        if side == "sell":
-            max_sell_qty = as_int((sell_capacities.get(symbol) or {}).get("max_sell_qty"))
-            if max_sell_qty and qty > max_sell_qty:
-                order["result"] = "blocked"
-                order["reason"] = "sell_quantity_exceeds_order_available_quantity"
-                order["attempts"].append(attempt("inquire_psbl_sell", "blocked", f"max_sell_qty={max_sell_qty}", "sell_gate"))
-                blocked += 1
-                continue
         if side == "buy":
-            cap = capacities.get(symbol, {})
-            max_qty = as_int(cap.get("max_buy_qty"))
-            if max_qty and qty > max_qty:
-                order["result"] = "blocked"
-                order["reason"] = "buy_quantity_exceeds_order_available_quantity"
-                order["attempts"].append(attempt("inquire_psbl_order", "blocked", f"max_buy_qty={max_qty}", "cash_gate"))
-                blocked += 1
-                continue
-            required_cash = qty * price
-            if cash_limit and used_cash + required_cash > cash_limit:
-                order["result"] = "blocked"
-                order["reason"] = "buy_cash_gate_reduced_reverse_rank"
-                order["attempts"].append(attempt("inquire_psbl_order", "blocked", f"buy candidates exceeded latest max_buy_amt {cash_limit}", "cash_gate"))
-                blocked += 1
-                continue
             used_cash += required_cash
         if not submit:
             order["result"] = "skipped"
@@ -1304,6 +1487,115 @@ def self_test() -> int:
         multiple_order = multiple_payload["orders"][0]
         if multiple_order.get("reason") != "multiple_active_orders_require_manual_review":
             failures.append(f"multiple active immediate orders were not blocked: {multiple_order}")
+
+        reduction_account = {
+            "account_summary": {"cash_amount": 1_000_000},
+            "symbols": [
+                {"symbol_id": "000270", "symbol_name": "기아", "current_live_holding_quantity": 0},
+                {"symbol_id": "005930", "symbol_name": "삼성전자", "current_live_holding_quantity": 10},
+                {"symbol_id": "000810", "symbol_name": "삼성화재", "current_live_holding_quantity": 0},
+            ],
+        }
+        reduction_execution = {
+            "orders": [
+                {"symbol_id": "000270", "symbol_name": "기아", "target_holding_quantity": 12, "order_price": 100000, "order_path": "immediate"},
+                {"symbol_id": "005930", "symbol_name": "삼성전자", "target_holding_quantity": 4, "order_price": 70000, "order_path": "immediate"},
+                {"symbol_id": "000810", "symbol_name": "삼성화재", "target_holding_quantity": 3, "order_price": 400000, "order_path": "immediate"},
+            ]
+        }
+        reconcile(
+            reduction_account,
+            reduction_execution,
+            [],
+            {"000270": {"max_buy_qty": 3, "max_buy_amt": 1_000_000}, "000810": {"max_buy_qty": 3, "max_buy_amt": 1_000_000}},
+            {"005930": {"max_sell_qty": 2}},
+            submit=False,
+            kis=None,
+        )
+        reduction_orders = {item["symbol_id"]: item for item in reduction_execution["orders"]}
+        if reduction_orders["000270"].get("validated_order_quantity") != 3:
+            failures.append(f"buy order was not reduced to max_buy_qty: {reduction_orders['000270']}")
+        if (reduction_orders["000270"].get("quantity_adjustment") or {}).get("reason") != "buy_quantity_reduced_to_order_available_quantity":
+            failures.append(f"buy order reduction reason missing: {reduction_orders['000270']}")
+        if reduction_orders["005930"].get("validated_order_quantity") != 2:
+            failures.append(f"sell order was not reduced to max_sell_qty: {reduction_orders['005930']}")
+        if (reduction_orders["005930"].get("quantity_adjustment") or {}).get("reason") != "sell_quantity_reduced_to_order_available_quantity":
+            failures.append(f"sell order reduction reason missing: {reduction_orders['005930']}")
+        if reduction_orders["000810"].get("validated_order_quantity") != 1:
+            failures.append(f"buy order was not reduced to remaining cash: {reduction_orders['000810']}")
+        if (reduction_orders["000810"].get("quantity_adjustment") or {}).get("reason") != "buy_quantity_reduced_to_remaining_cash":
+            failures.append(f"cash reduction reason missing: {reduction_orders['000810']}")
+
+        zero_capacity_execution = {
+            "orders": [
+                {"symbol_id": "000270", "symbol_name": "기아", "target_holding_quantity": 2, "order_price": 100000, "order_path": "immediate"},
+                {"symbol_id": "005930", "symbol_name": "삼성전자", "target_holding_quantity": 0, "order_price": 70000, "order_path": "immediate"},
+            ]
+        }
+        reconcile(
+            reduction_account,
+            zero_capacity_execution,
+            [],
+            {"000270": {"max_buy_qty": 0, "max_buy_amt": 1_000_000}},
+            {"005930": {"max_sell_qty": 0}},
+            submit=False,
+            kis=None,
+        )
+        zero_orders = {item["symbol_id"]: item for item in zero_capacity_execution["orders"]}
+        if zero_orders["000270"].get("reason") != "buy_quantity_exceeds_order_available_quantity":
+            failures.append(f"zero max_buy_qty did not block buy order: {zero_orders['000270']}")
+        if zero_orders["005930"].get("reason") != "sell_quantity_exceeds_order_available_quantity":
+            failures.append(f"zero max_sell_qty did not block sell order: {zero_orders['005930']}")
+
+        active_correction_execution = {
+            "orders": [
+                {"symbol_id": "000270", "symbol_name": "기아", "target_holding_quantity": 5, "order_price": 100000, "order_path": "immediate"}
+            ]
+        }
+        original_adjust_active_order = globals()["adjust_active_order"]
+
+        def fake_adjust_active_order(kis: Any, active: dict[str, Any], desired: dict[str, Any] | None) -> tuple[str, str, str]:
+            if desired is None:
+                return "adj1", "cancel", "fake cancel"
+            if as_int(desired.get("validated_order_quantity")) != 2:
+                failures.append(f"active correction submitted unreduced quantity: {desired}")
+            return "adj1", "correct", "fake correction"
+
+        try:
+            globals()["adjust_active_order"] = fake_adjust_active_order
+            reconcile(
+                {"account_summary": {"cash_amount": 1_000_000}, "symbols": [{"symbol_id": "000270", "symbol_name": "기아", "current_live_holding_quantity": 0}]},
+                active_correction_execution,
+                [
+                    {
+                        "symbol_id": "000270",
+                        "symbol_name": "기아",
+                        "order_id": "a1",
+                        "order_kind": "pending",
+                        "direction": "buy",
+                        "remaining_quantity": 1,
+                        "order_price": 100000,
+                        "active_status": "active",
+                        "order_api": "order_cash",
+                        "order_path": "immediate",
+                        "execution_environment": "real",
+                        "observed_at": now_iso(),
+                    }
+                ],
+                {"000270": {"max_buy_qty": 2, "max_buy_amt": 1_000_000}},
+                {},
+                submit=True,
+                kis=FakeKis(),
+            )
+        finally:
+            globals()["adjust_active_order"] = original_adjust_active_order
+        active_correction_order = active_correction_execution["orders"][0]
+        if active_correction_order.get("result") != "submitted" or active_correction_order.get("validated_order_quantity") != 2:
+            failures.append(f"active correction quantity gate did not reduce and submit buy order: {active_correction_order}")
+        if active_correction_order.get("requested_order_quantity") != 5:
+            failures.append(f"active correction did not keep requested quantity: {active_correction_order}")
+        if (active_correction_order.get("quantity_adjustment") or {}).get("reason") != "buy_quantity_reduced_to_order_available_quantity":
+            failures.append(f"active correction reduction reason missing: {active_correction_order}")
         if failures:
             print(json.dumps({"status": "failed", "failures": failures}, ensure_ascii=False, indent=2))
             return 1

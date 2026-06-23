@@ -124,9 +124,9 @@ Same-day fills are account evidence only; they do not change the quantity formul
 - `verdict-second.json` supplies target quantities only. It does not supply a target cash amount, cash ratio, or cash judgment code.
 - Validated target quantities must not exceed the initial account total assets.
 - If validated target quantities are below assets, the remainder is residual cash, not an automatic buy budget and not a reported target.
-- Buy orders cannot exceed the latest order-available amount after active pending/reserved buys.
+- Buy orders must be reduced to the latest order-available quantity or remaining cash amount after active pending/reserved buys. If the reduced quantity is zero, block the order.
 - Expected proceeds from unfilled sells are not available buy cash.
-- If buy candidates exceed available cash or account constraints, reduce or block buys in reverse relative-attractiveness order; do not silently increase sells beyond target quantities.
+- If buy candidates exceed available cash or account constraints, reduce buys to the executable quantity in reverse relative-attractiveness order or block them when the executable quantity is zero; do not silently increase sells beyond target quantities. Record the requested and adjusted quantities.
 
 ## Order Constraints
 
@@ -135,15 +135,15 @@ Every order must satisfy all applicable constraints:
 - symbol remains eligible and has a valid target
 - latest account snapshot succeeded
 - direction and quantity match the target delta
-- buy quantity does not exceed `inquire_psbl_order`
-- sell quantity does not exceed current live holdings minus active sell reservations or the latest `inquire_psbl_sell` result
+- buy quantity has been reduced to not exceed `inquire_psbl_order` and remaining cash
+- sell quantity has been reduced to not exceed current live holdings minus active sell reservations or the latest `inquire_psbl_sell` result
 - active pending/reserved quantities were included exactly once
 - conflicting active pending/reserved orders were kept, cancelled, corrected, or blocked according to Active Order Reconciliation
 - order price, order API, and reservation/immediate path were validated using known templates or current API details when templates were unavailable/rejected
 - missing financial/news evidence is allowed when the symbol remains eligible and has a valid price observation
 - demo or real submission was explicitly requested
 
-If any gate fails, do not submit that order. Record `blocked` and the exact non-sensitive reason. If an active-order adjustment fails or remains uncertain, do not submit a replacement order for that symbol in the same run.
+If any non-quantity gate fails, do not submit that order. Record `blocked` and the exact non-sensitive reason. If a quantity gate leaves a positive executable quantity, submit only the reduced quantity and record `requested_order_quantity` plus `quantity_adjustment`; if the executable quantity is zero, block the order. If an active-order adjustment fails or remains uncertain, do not submit a replacement order for that symbol in the same run.
 
 Missing, partial, failed, skipped, or no-data financial/news evidence is not an execution gate by itself. The order runner must not block, fail, reduce, or send an order to review solely because financial/news evidence is absent. This applies to `order_cash`, `order_resv`, demo submission, and real submission.
 

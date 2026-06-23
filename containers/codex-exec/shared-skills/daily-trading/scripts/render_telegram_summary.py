@@ -53,11 +53,16 @@ def order_line(item: dict[str, Any]) -> str:
     symbol = text(f"{item.get('symbol_id', '')} {item.get('symbol_name', '')}".strip())
     direction = text(item.get("direction") or "none")
     quantity = as_int(item.get("quantity"))
+    requested_quantity = as_int(item.get("requested_quantity"))
     result = text(item.get("result") or "-")
     reason = text(item.get("reason") or "-")
     order_id = text(item.get("order_or_reservation_id") or "")
     suffix = f" / {order_id}" if order_id else ""
-    return f"- {symbol}: {direction} {quantity}주, {result} ({reason}){suffix}"
+    adjustment = item.get("quantity_adjustment") if isinstance(item.get("quantity_adjustment"), dict) else {}
+    quantity_text = f"{requested_quantity}주 -> {quantity}주" if requested_quantity and requested_quantity != quantity else f"{quantity}주"
+    adjustment_reason = text(adjustment.get("reason") or "")
+    adjustment_suffix = f", 조정={adjustment_reason}" if adjustment_reason else ""
+    return f"- {symbol}: {direction} {quantity_text}, {result} ({reason}{adjustment_suffix}){suffix}"
 
 
 def verdict_line(item: dict[str, Any]) -> str:
@@ -171,7 +176,19 @@ def self_test() -> int:
             "request_type": "real-submit",
             "status": "success",
             "order_count": 1,
-            "orders": [{"symbol_id": "005930", "symbol_name": "삼성전자", "direction": "buy", "quantity": 1, "result": "submitted", "reason": "accepted", "order_or_reservation_id": "r1"}],
+            "orders": [
+                {
+                    "symbol_id": "005930",
+                    "symbol_name": "삼성전자",
+                    "direction": "buy",
+                    "requested_quantity": 3,
+                    "quantity": 1,
+                    "quantity_adjustment": {"reason": "buy_quantity_reduced_to_order_available_quantity"},
+                    "result": "submitted",
+                    "reason": "accepted",
+                    "order_or_reservation_id": "r1",
+                }
+            ],
         },
         "verdict_summary": {
             "symbols": [{"symbol_id": "005930", "symbol_name": "삼성전자", "current_live_holding_quantity": 0, "target_holding_quantity": 1, "one_line_reason": "테스트"}]
@@ -179,7 +196,7 @@ def self_test() -> int:
         "token_usage": {"total": {"total_tokens": 123}},
     }
     rendered = render(payload)
-    required = ["daily-trading 결과: success", "계좌", "주문", "평결", "총 사용 토큰: 123"]
+    required = ["daily-trading 결과: success", "계좌", "주문", "005930 삼성전자: buy 3주 -> 1주", "조정=buy_quantity_reduced_to_order_available_quantity", "평결", "총 사용 토큰: 123"]
     missing = [item for item in required if item not in rendered]
     if missing:
         print(json.dumps({"status": "failed", "missing": missing}, ensure_ascii=False))

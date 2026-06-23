@@ -1114,6 +1114,8 @@ class Pipeline:
                     "order_result": execution_item.get("result") or "",
                     "order_direction": execution_item.get("direction") or "none",
                     "order_quantity": as_int(execution_item.get("validated_order_quantity")),
+                    "requested_order_quantity": as_int(execution_item.get("requested_order_quantity")),
+                    "quantity_adjustment": execution_item.get("quantity_adjustment") if isinstance(execution_item.get("quantity_adjustment"), dict) else {},
                     "order_or_reservation_id": execution_item.get("order_or_reservation_id") or "",
                 }
             )
@@ -1257,6 +1259,16 @@ class Pipeline:
             )
 
         submitted_orders = [item for item in execution.get("orders", []) if isinstance(item, dict) and item.get("result") == "submitted"]
+        result_orders = [
+            item
+            for item in execution.get("orders", [])
+            if isinstance(item, dict)
+            and (
+                item.get("result") == "submitted"
+                or isinstance(item.get("quantity_adjustment"), dict)
+                or str(item.get("reason") or "").startswith(("buy_quantity_", "sell_quantity_", "buy_cash_gate_"))
+            )
+        ]
         lines.extend(
             [
                 "",
@@ -1298,18 +1310,24 @@ class Pipeline:
             [
                 "",
                 "## 8. 최종 주문 목록",
-                "| 종목식별자 | 종목명 | 방향 | 현재 실시간 보유수량 | 미체결·예약 매수 | 미체결·예약 매도 | 예상 보유수량 | 목표 보유수량 | 추가 필요수량 | 결과 |",
-                "|---|---|---|---:|---:|---:|---:|---:|---:|---|",
+                "| 종목식별자 | 종목명 | 방향 | 현재 실시간 보유수량 | 미체결·예약 매수 | 미체결·예약 매도 | 예상 보유수량 | 목표 보유수량 | 요청수량 | 검증수량 | 추가 필요수량 | 수량조정 | 결과 |",
+                "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|",
             ]
         )
         for item in execution_full.get("orders", []) if isinstance(execution_full, dict) else []:
             if not isinstance(item, dict):
                 continue
+            adjustment = item.get("quantity_adjustment") if isinstance(item.get("quantity_adjustment"), dict) else {}
+            requested_qty = as_int(item.get("requested_order_quantity")) or as_int(item.get("validated_order_quantity"))
+            adjustment_text = ""
+            if adjustment:
+                adjustment_text = f"{as_int(adjustment.get('from'))}->{as_int(adjustment.get('to'))} ({adjustment.get('reason', '')})"
             lines.append(
                 f"| {md_cell(item.get('symbol_id'))} | {md_cell(item.get('symbol_name'))} | {md_cell(item.get('direction'))} | "
                 f"{as_int(item.get('current_live_holding_quantity'))} | {as_int(item.get('pending_and_reserved_buy_quantity'))} | "
                 f"{as_int(item.get('pending_and_reserved_sell_quantity'))} | {as_int(item.get('expected_holding_quantity'))} | "
-                f"{as_int(item.get('target_holding_quantity'))} | {as_int(item.get('additional_required_quantity'))} | {md_cell(item.get('result'))} |"
+                f"{as_int(item.get('target_holding_quantity'))} | {requested_qty} | {as_int(item.get('validated_order_quantity'))} | "
+                f"{as_int(item.get('additional_required_quantity'))} | {md_cell(adjustment_text or '-')} | {md_cell(item.get('result'))} |"
             )
 
         lines.extend(
@@ -1322,15 +1340,20 @@ class Pipeline:
                 "- 취소/정정 요청번호: -",
                 "- 취소/정정 확인 상태: -",
                 f"- 실패 또는 보류 사유: {md_cell('; '.join(error.get('message', '') for error in execution.get('errors', []) if isinstance(error, dict))) if isinstance(execution.get('errors'), list) else '-'}",
-                "| 종목 | 방향 | 수량 | 결과 | 사유 | 예약/주문번호 |",
-                "|---|---|---:|---|---|---|",
+                "| 종목 | 방향 | 요청수량 | 제출수량 | 결과 | 사유 | 수량조정 | 예약/주문번호 |",
+                "|---|---|---:|---:|---|---|---|---|",
             ]
         )
-        for item in submitted_orders:
+        for item in result_orders:
             symbol_name = md_cell(f"{item.get('symbol_id', '')} {item.get('symbol_name', '')}".strip())
+            adjustment = item.get("quantity_adjustment") if isinstance(item.get("quantity_adjustment"), dict) else {}
+            requested_qty = as_int(item.get("requested_quantity")) or as_int(item.get("quantity"))
+            adjustment_text = ""
+            if adjustment:
+                adjustment_text = f"{as_int(adjustment.get('from'))}->{as_int(adjustment.get('to'))} ({adjustment.get('reason', '')})"
             lines.append(
-                f"| {symbol_name} | {md_cell(item.get('direction'))} | {as_int(item.get('quantity'))} | {md_cell(item.get('result'))} | "
-                f"{md_cell(item.get('reason'))} | {md_cell(item.get('order_or_reservation_id') or '-')} |"
+                f"| {symbol_name} | {md_cell(item.get('direction'))} | {requested_qty} | {as_int(item.get('quantity'))} | {md_cell(item.get('result'))} | "
+                f"{md_cell(item.get('reason'))} | {md_cell(adjustment_text or '-')} | {md_cell(item.get('order_or_reservation_id') or '-')} |"
             )
         lines.extend(
             [
@@ -1390,6 +1413,8 @@ class Pipeline:
                     "symbol_name": item.get("symbol_name"),
                     "direction": item.get("direction"),
                     "quantity": item.get("validated_order_quantity"),
+                    "requested_quantity": item.get("requested_order_quantity"),
+                    "quantity_adjustment": item.get("quantity_adjustment") if isinstance(item.get("quantity_adjustment"), dict) else {},
                     "result": item.get("result"),
                     "reason": item.get("reason"),
                     "order_or_reservation_id": item.get("order_or_reservation_id"),
