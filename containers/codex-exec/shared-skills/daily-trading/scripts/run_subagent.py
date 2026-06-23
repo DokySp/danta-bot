@@ -430,6 +430,7 @@ def compact_verdict_prompt(spec: dict[str, Any]) -> str | None:
                 "",
                 "For second-verdict, use the lossless selected-symbol first-verdict slice from verdict_first.",
                 "Interpret final_first_score as the confidence-adjusted first-verdict score: 5 is neutral, below 5 is a sell/reduce opinion, and above 5 is a buy/increase opinion.",
+                "When referring to per-analyst scores in agent_scores, use confidence_adjusted_score as the score; score and confidence are supporting inputs explaining that adjusted score.",
                 "If a symbol's first-verdict score is missing, unavailable, or unusable, treat it as neutral 5 and continue.",
                 "First-verdict scores are judgment inputs, not hard buy/sell gates.",
             ]
@@ -463,14 +464,22 @@ def launcher_model_effort(stage: str, agent_role: str) -> tuple[str, str]:
         raise ValueError(f"first-verdict agent_role must be one of: {selected}")
     if role_key in {"juror"} or role_key.startswith("juror-"):
         return FIRST_VERDICT_SUBAGENT_MODEL, FIRST_VERDICT_SUBAGENT_REASONING_EFFORT
-    if role_key == "judge" or role_key.startswith("judge-") or stage_key == "second-verdict":
-        return SECOND_VERDICT_SUBAGENT_MODEL, SECOND_VERDICT_SUBAGENT_REASONING_EFFORT
+    if stage_key == "second-verdict":
+        if role_key == "judge-final":
+            return SECOND_VERDICT_SUBAGENT_MODEL, SECOND_VERDICT_SUBAGENT_REASONING_EFFORT
+        raise ValueError("second-verdict agent_role must be judge-final")
     raise ValueError(f"unsupported daily-trading sub-agent stage/role: stage={stage!r}, agent_role={agent_role!r}")
 
 
 def assert_unsupported_stage_rejected() -> None:
     try:
         launcher_model_effort("unsupported-stage", "unsupported-role")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("unsupported daily-trading sub-agent stage/role was accepted")
+    try:
+        launcher_model_effort("unsupported-stage", "judge-final")
     except ValueError:
         return
     raise AssertionError("unsupported daily-trading sub-agent stage/role was accepted")
@@ -506,7 +515,7 @@ def assert_all_supported_stages_use_expected_models() -> None:
         ),
         (
             "second-verdict",
-            "judge",
+            "judge-final",
             SECOND_VERDICT_SUBAGENT_MODEL,
             SECOND_VERDICT_SUBAGENT_REASONING_EFFORT,
         ),
@@ -542,15 +551,15 @@ def validate_spec(spec: dict[str, Any]) -> None:
         if agent_role not in SELECTED_FIRST_VERDICT_ROLES:
             selected = ", ".join(sorted(SELECTED_FIRST_VERDICT_ROLES))
             raise ValueError(f"first-verdict agent_role must be one of: {selected}")
-    if stage == "second-verdict" and ("judge-longterm" in agent_role or "judge-longterm" in task_name):
-        raise ValueError("judge-longterm is no longer a selected second-verdict judge")
-    if stage == "second-verdict" and agent_role == "judge-midterm":
+    if stage == "second-verdict":
+        if agent_role != "judge-final":
+            raise ValueError("second-verdict agent_role must be judge-final")
         retry_numbers = [
             int(match.group(1))
             for match in re.finditer(r"(?:retry|attempt)-?(\d+)", task_name)
         ]
         if retry_numbers and max(retry_numbers) > 2:
-            raise ValueError("judge-midterm retry is limited to at most 2 retries")
+            raise ValueError("judge-final retry is limited to at most 2 retries")
 
 
 def parse_json_output(raw: str) -> tuple[Any | None, list[dict[str, Any]]]:
@@ -1191,13 +1200,14 @@ def assert_compact_verdict_prompt(tmp: Path) -> None:
         raise AssertionError(f"compact verdict prompt missing {missing}: {prompt}")
 
     second_prompt = build_prompt(
-        compact_spec(tmp, stage="second-verdict", agent_role="judge-midterm", task_name="second")
+        compact_spec(tmp, stage="second-verdict", agent_role="judge-final", task_name="second")
     )
     second_required_parts = [
         "stage: second-verdict",
         "verdict_first:",
         "For second-verdict, use the lossless selected-symbol first-verdict slice from verdict_first.",
         "Interpret final_first_score as the confidence-adjusted first-verdict score: 5 is neutral, below 5 is a sell/reduce opinion, and above 5 is a buy/increase opinion.",
+        "When referring to per-analyst scores in agent_scores, use confidence_adjusted_score as the score;",
         "If a symbol's first-verdict score is missing, unavailable, or unusable, treat it as neutral 5 and continue.",
         "First-verdict scores are judgment inputs, not hard buy/sell gates.",
     ]
@@ -1299,7 +1309,7 @@ def run_self_test() -> int:
                 missing_verdict_first = compact_spec(
                     tmp,
                     stage="second-verdict",
-                    agent_role="judge-midterm",
+                    agent_role="judge-final",
                     task_name="missing-verdict-first",
                 )
                 missing_verdict_first["artifact_paths"].pop("verdict_first")
@@ -1320,7 +1330,7 @@ def run_self_test() -> int:
                         agent_role="judge-longterm",
                         task_name="judge-longterm",
                     ),
-                    "judge-longterm",
+                    "agent_role must be judge-final",
                 )
                 assert_invalid_spec(
                     compact_spec(
@@ -1329,14 +1339,23 @@ def run_self_test() -> int:
                         agent_role="judge",
                         task_name="judge-longterm-retry1",
                     ),
-                    "judge-longterm",
+                    "agent_role must be judge-final",
                 )
                 assert_invalid_spec(
                     compact_spec(
                         tmp,
                         stage="second-verdict",
-                        agent_role="judge-midterm",
-                        task_name="judge-midterm-retry3",
+                        agent_role="judge-random",
+                        task_name="judge-random",
+                    ),
+                    "agent_role must be judge-final",
+                )
+                assert_invalid_spec(
+                    compact_spec(
+                        tmp,
+                        stage="second-verdict",
+                        agent_role="judge-final",
+                        task_name="judge-final-retry3",
                     ),
                     "at most 2 retries",
                 )
@@ -1344,8 +1363,8 @@ def run_self_test() -> int:
                     compact_spec(
                         tmp,
                         stage="second-verdict",
-                        agent_role="judge-midterm",
-                        task_name="judge-midterm-attempt3",
+                        agent_role="judge-final",
+                        task_name="judge-final-attempt3",
                     ),
                     "at most 2 retries",
                 )
@@ -1353,8 +1372,8 @@ def run_self_test() -> int:
                     compact_spec(
                         tmp,
                         stage="second-verdict",
-                        agent_role="judge-midterm",
-                        task_name="judge-midterm-retry-3",
+                        agent_role="judge-final",
+                        task_name="judge-final-retry-3",
                     ),
                     "at most 2 retries",
                 )
@@ -1362,8 +1381,8 @@ def run_self_test() -> int:
                     compact_spec(
                         tmp,
                         stage="second-verdict",
-                        agent_role="judge-midterm",
-                        task_name="judge-midterm-attempt-3",
+                        agent_role="judge-final",
+                        task_name="judge-final-attempt-3",
                     ),
                     "at most 2 retries",
                 )
@@ -1371,8 +1390,8 @@ def run_self_test() -> int:
                     compact_spec(
                         tmp,
                         stage="second-verdict",
-                        agent_role="judge-midterm",
-                        task_name="judge-midterm-retry1-attempt3",
+                        agent_role="judge-final",
+                        task_name="judge-final-retry1-attempt3",
                     ),
                     "at most 2 retries",
                 )
@@ -1436,7 +1455,7 @@ def run_self_test() -> int:
                     FIRST_VERDICT_SUBAGENT_REASONING_EFFORT,
                 ),
                 (
-                    compact_spec(tmp, stage="second-verdict", agent_role="judge", task_name="second"),
+                    compact_spec(tmp, stage="second-verdict", agent_role="judge-final", task_name="second"),
                     SECOND_VERDICT_SUBAGENT_MODEL,
                     SECOND_VERDICT_SUBAGENT_REASONING_EFFORT,
                 ),

@@ -965,7 +965,7 @@ class Pipeline:
             "symbols": symbols,
         }
         write_json(self.output_dir / "verdict-second.json", artifact)
-        self.write_second_sidecar(str(wrapper.get("agent_role") or "judge-midterm"), str(wrapper.get("task_name") or "second-judge-midterm"), symbols)
+        self.write_second_sidecar(str(wrapper.get("agent_role") or "judge-final"), str(wrapper.get("task_name") or "second-judge-final"), symbols)
 
     def write_second_sidecar(self, role: str, task_name: str, symbols: list[dict[str, Any]]) -> None:
         path = self.output_dir / "verdicts" / f"second-verdict--{safe_name(role)}--{safe_name(task_name)}.md"
@@ -1243,7 +1243,7 @@ class Pipeline:
             [
                 "",
                 "## 5. `second-verdict` 포트폴리오 평결",
-                "- 중기 시장 판단: `judge-midterm` 목표수량 결과 사용",
+                "- 최종 포트폴리오 판단: `judge-final` 목표수량 결과 사용",
                 "- 잔여 현금 처리: 목표현금을 별도 판단값으로 만들지 않고 목표수량 충족 후 남는 금액으로만 기록",
                 f"- Main agent 검증 결과: {execution.get('status', '')}",
                 "",
@@ -1369,7 +1369,7 @@ class Pipeline:
                 "",
                 "## 11. 메모",
                 "- 당일 체결수량은 현재 보유수량에 이미 반영된 값으로 보고 다시 차감하지 않음",
-                "- `second-verdict`는 단일 `judge-midterm` 목표수량을 사용하며 deterministic helper와 `execute_orders.py`가 총자산/주문가능금액/집중도/active 주문/same-day/account-order gate를 검증함",
+                "- `second-verdict`는 단일 `judge-final` 목표수량을 사용하며 deterministic helper와 `execute_orders.py`가 총자산/주문가능금액/집중도/active 주문/same-day/account-order gate를 검증함",
                 "- 투자 권유가 아니라 의사결정 보조 분석입니다.",
             ]
         )
@@ -1488,7 +1488,7 @@ class Pipeline:
                 "today_trade_amount_policy": "Show today_buy_amount/today_sell_amount only under a separate 당일 거래 누계 label when relevant; never present them as newly caused by this command unless execution.json confirms submitted orders.",
                 "gate_label": "주문 전 기존 미체결/예약 주문",
                 "evidence_policy": "Report evidence_summary.financial.display_text and evidence_summary.news.display_text, distinguishing missing cache from cache_exists_zero_usable_articles.",
-                "verdict_policy": "Mention judge-midterm/second-verdict outcome and submitted or target-changed symbols, including target quantity and one_line_reason when available.",
+                "verdict_policy": "Mention judge-final/second-verdict outcome and submitted or target-changed symbols, including target quantity and one_line_reason when available.",
             },
             "artifacts": {
                 "check_portfolio": str(self.output_dir / "check-portfolio.json"),
@@ -2108,8 +2108,8 @@ def run_self_test() -> int:
                 wrapper = {
                     "status": "success",
                     "stage": "second-verdict",
-                    "agent_role": "judge-midterm",
-                    "task_name": "judge-midterm",
+                    "agent_role": "judge-final",
+                    "task_name": "judge-final",
                     "parsed_json": {
                         "stage": "second-verdict",
                         "symbols": [

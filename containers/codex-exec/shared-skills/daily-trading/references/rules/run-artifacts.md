@@ -100,7 +100,7 @@ Wrapper JSON includes `token_usage`, `token_usage_event_count`, optional `rate_l
 | `decision-brief.json` | Main | compact verdict input from price/chart, account, and optional summaries |
 | `verdict-inputs/*.json` | Launcher | non-canonical lossless per-task `verdict-core` and first-verdict selected-symbol slices |
 | `verdict-first.json` | Main | compact first verdict responses, sidecar paths, raw score averages, confidence-adjusted final scores |
-| `verdict-second.json` | Main | single `judge-midterm` response, sidecar path, validated target quantities, and compact reasons |
+| `verdict-second.json` | Main | single `judge-final` response, sidecar path, validated target quantities, and compact reasons |
 | `account-before-order.json` | Main/helper | sanitized latest account snapshot, active pending/reserved orders, or skipped envelope |
 | `execution.json` | Main | active-order adjustment decisions, quantity math, latest available cash, blocked/submitted/skipped/failed order results |
 | `pipeline-summary.json` | Main/pipeline | compact final status, verdict summary, display-safe account summary, evidence status, execution summary, Telegram response policy, token usage, report path, and artifact paths |

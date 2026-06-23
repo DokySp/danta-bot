@@ -61,7 +61,7 @@ DAILY_TRADING_STAGE_MODEL_CONTRACT = (
     "- collection sub-agent: model=gpt-5.4-mini, effort=low.\n"
     "- first-verdict sub-agent: model=gpt-5.5, effort=medium, selected 3 functional analysts only "
     "(analyst-quality-value, analyst-momentum-cycle, analyst-risk-allocation).\n"
-    "- second-verdict sub-agent: model=gpt-5.5, effort=medium, judge-midterm only with at most 2 retries.\n"
+    "- second-verdict sub-agent: model=gpt-5.5, effort=medium, judge-final only with at most 2 retries.\n"
     "- verdict sub-agent 입력은 canonical decision-brief.json을 직접 넘기지 않고 launcher가 만든 verdict-core slice를 사용한다.\n"
     "- second-verdict 입력은 verdict-first.json 전체가 아니라 launcher가 만든 selected-symbol first-verdict slice를 사용한다.\n"
     "- verdict sub-agents return compact JSON only; they do not write Markdown, emit diffs, or use long rationale/risk arrays.\n"

@@ -56,7 +56,7 @@ Forbidden to every sub-agent:
 
 ## Active Order Reconciliation
 
-Before submitting any new order, `scripts/execute_orders.py` must compare active, non-cancelled pending/reserved orders from `account-before-order.json` with the validated `target_holding_quantity` from the single `judge-midterm` result. Use the `active_orders` fields defined in `run-artifacts.md`; if any required active-order field is missing or ambiguous, block cancellation, correction, replacement, and conflicting new submission for that symbol.
+Before submitting any new order, `scripts/execute_orders.py` must compare active, non-cancelled pending/reserved orders from `account-before-order.json` with the validated `target_holding_quantity` from the single `judge-final` result. Use the `active_orders` fields defined in `run-artifacts.md`; if any required active-order field is missing or ambiguous, block cancellation, correction, replacement, and conflicting new submission for that symbol.
 
 For each symbol:
 

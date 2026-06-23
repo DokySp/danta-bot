@@ -119,14 +119,14 @@ If no valid score exists, exclude that symbol from `second-verdict` and trading.
 
 ## `second-verdict`
 
-Input set = eligible symbols with `final_first_score >= 7` plus every eligible `holding` symbol from `$check-portfolio`. Only `judge-midterm` compares that set at portfolio level. If its required output is missing or unusable, retry only the failed `judge-midterm` task at most two times.
+Input set = eligible symbols with `final_first_score >= 7` plus every eligible `holding` symbol from `$check-portfolio`. Only `judge-final` compares that set at portfolio level. If its required output is missing or unusable, retry only the failed `judge-final` task at most two times.
 
 Return JSON:
 
 ```json
 {
   "agent_id": "",
-  "persona": "mid-term",
+  "persona": "final",
   "stage": "second-verdict",
   "human_markdown_path": "reports/runs/<run_id>/verdicts/second-verdict--<agent_role>--<task_name>.md",
   "symbols": [
@@ -145,10 +145,11 @@ Return JSON:
 
 Rules:
 
-- `target_holding_quantity` is a non-negative integer.
+- `target_holding_quantity` is a non-negative integer final target holding quantity, not an order quantity; order delta is calculated against expected holdings after active pending/reserved orders.
 - Every second-verdict symbol receives a target quantity, including reduce-to-zero holdings.
 - Consider relative attractiveness, duplicate exposure, current weight, price/chart conditions, and the supplied selected-symbol first-verdict results.
 - Treat `final_first_score` as the confidence-adjusted first-verdict score: `5` is neutral, below `5` is a sell/reduce opinion, and above `5` is a buy/increase opinion.
+- When referring to per-analyst scores in `agent_scores`, use `confidence_adjusted_score` as the score. `score` and `confidence` are supporting inputs explaining that adjusted score.
 - If a symbol's first-verdict score is missing, unavailable, or unusable, treat its score as neutral `5` instead of failing the judgment.
 - First-verdict scores are judgment inputs, not hard buy/sell gates.
 - No fixed cash ratio or fixed investment ratio.
@@ -157,7 +158,7 @@ Rules:
 
 Validation by Main agent:
 
-- Use the single valid `judge-midterm` target quantities as the canonical `verdict-second.json` target.
+- Use the single valid `judge-final` target quantities as the canonical `verdict-second.json` target.
 - If the valid judge result is missing for a symbol, set no final target and exclude it from orders.
 - Validate target holdings against total assets and the latest available account/order gate using immutable price snapshot valuations.
 - If targets exceed assets, reduce only buy-side quantities in reverse relative-attractiveness order. Do not increase sell targets.
