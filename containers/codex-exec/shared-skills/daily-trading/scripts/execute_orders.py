@@ -1121,8 +1121,43 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
                 order["order_or_reservation_id"] = request_id
                 submitted += 1
                 continue
+            if desired_order and action == "cancel":
+                row["replacement_required"] = True
+                order["direction"] = desired_side
+                order["additional_required_quantity"] = desired_delta
+                order["validated_order_quantity"] = desired_qty
+                if "requested_order_quantity" in desired_order:
+                    order["requested_order_quantity"] = desired_order.get("requested_order_quantity")
+                    order["requested_additional_required_quantity"] = desired_order.get("requested_additional_required_quantity")
+                    order["quantity_adjustment"] = desired_order.get("quantity_adjustment")
+                try:
+                    replacement_id = submit_order(kis, desired_order) if kis is not None else ""
+                except Exception as exc:  # noqa: BLE001
+                    order["result"] = "blocked"
+                    order["reason"] = "replacement_order_submission_failed"
+                    order["order_or_reservation_id"] = request_id
+                    order["attempts"].append(attempt(order_api, "blocked", redact(exc), "api_error"))
+                    blocked += 1
+                    continue
+                if not replacement_id:
+                    order["result"] = "blocked"
+                    order["reason"] = "replacement_order_submission_uncertain"
+                    order["order_or_reservation_id"] = request_id
+                    order["attempts"].append(attempt(order_api, "blocked", "replacement order accepted without order id", "uncertain_order_id"))
+                    blocked += 1
+                    continue
+                row["replacement_order_id"] = replacement_id
+                order["result"] = "submitted"
+                order["reason"] = "active_order_cancel_and_replacement_submitted"
+                order["order_or_reservation_id"] = replacement_id
+                order["cancel_request_id"] = request_id
+                order["attempts"].append(attempt(order_api, "submitted", f"replacement_order_id={replacement_id}" if replacement_id else "replacement order accepted"))
+                if desired_side == "buy":
+                    used_cash += required_cash
+                submitted += 1
+                continue
             order["result"] = "blocked"
-            order["reason"] = "replacement_requires_post_adjustment_refresh"
+            order["reason"] = "active_order_adjustment_unavailable"
             order["direction"] = desired_side
             order["additional_required_quantity"] = desired_delta
             order["validated_order_quantity"] = desired_qty
@@ -1596,6 +1631,151 @@ def self_test() -> int:
             failures.append(f"active correction did not keep requested quantity: {active_correction_order}")
         if (active_correction_order.get("quantity_adjustment") or {}).get("reason") != "buy_quantity_reduced_to_order_available_quantity":
             failures.append(f"active correction reduction reason missing: {active_correction_order}")
+
+        replacement_execution = {
+            "orders": [
+                {"symbol_id": "005930", "symbol_name": "삼성전자", "target_holding_quantity": 5, "order_price": 70000, "order_path": "immediate"}
+            ]
+        }
+        replacement_submissions: list[dict[str, Any]] = []
+        original_adjust_active_order = globals()["adjust_active_order"]
+        original_submit_order = globals()["submit_order"]
+
+        def fake_cancel_active_order(kis: Any, active: dict[str, Any], desired: dict[str, Any] | None) -> tuple[str, str, str]:
+            if desired is not None:
+                failures.append(f"replacement path should cancel before submitting new order: {desired}")
+            return "cancel1", "cancel", "fake cancel"
+
+        def fake_submit_order(kis: Any, order: dict[str, Any]) -> str:
+            replacement_submissions.append(dict(order))
+            return "replace1"
+
+        try:
+            globals()["adjust_active_order"] = fake_cancel_active_order
+            globals()["submit_order"] = fake_submit_order
+            reconcile(
+                {"account_summary": {"cash_amount": 1_000_000}, "symbols": [{"symbol_id": "005930", "symbol_name": "삼성전자", "current_live_holding_quantity": 10}]},
+                replacement_execution,
+                [
+                    {
+                        "symbol_id": "005930",
+                        "symbol_name": "삼성전자",
+                        "order_id": "old-buy",
+                        "order_kind": "pending",
+                        "direction": "buy",
+                        "remaining_quantity": 1,
+                        "order_price": 70000,
+                        "active_status": "active",
+                        "order_api": "order_cash",
+                        "order_path": "immediate",
+                        "execution_environment": "real",
+                        "observed_at": now_iso(),
+                    }
+                ],
+                {},
+                {"005930": {"max_sell_qty": 5}},
+                submit=True,
+                kis=FakeKis(),
+            )
+        finally:
+            globals()["adjust_active_order"] = original_adjust_active_order
+            globals()["submit_order"] = original_submit_order
+        replacement_order = replacement_execution["orders"][0]
+        replacement_adjustment = (replacement_execution.get("order_adjustments") or [{}])[0]
+        if replacement_order.get("result") != "submitted" or replacement_order.get("reason") != "active_order_cancel_and_replacement_submitted":
+            failures.append(f"cancelled active order did not submit replacement: {replacement_order}")
+        if replacement_order.get("cancel_request_id") != "cancel1" or replacement_order.get("order_or_reservation_id") != "replace1":
+            failures.append(f"replacement ids were not recorded: {replacement_order}")
+        if not replacement_submissions or replacement_submissions[0].get("direction") != "sell" or replacement_submissions[0].get("validated_order_quantity") != 5:
+            failures.append(f"replacement sell order was not submitted with expected quantity: {replacement_submissions}")
+        if replacement_adjustment.get("replacement_order_id") != "replace1":
+            failures.append(f"replacement adjustment row did not record replacement order id: {replacement_adjustment}")
+
+        uncertain_replacement_execution = {
+            "orders": [
+                {"symbol_id": "005930", "symbol_name": "삼성전자", "target_holding_quantity": 5, "order_price": 70000, "order_path": "immediate"}
+            ]
+        }
+
+        def fake_empty_submit_order(kis: Any, order: dict[str, Any]) -> str:
+            return ""
+
+        try:
+            globals()["adjust_active_order"] = fake_cancel_active_order
+            globals()["submit_order"] = fake_empty_submit_order
+            reconcile(
+                {"account_summary": {"cash_amount": 1_000_000}, "symbols": [{"symbol_id": "005930", "symbol_name": "삼성전자", "current_live_holding_quantity": 10}]},
+                uncertain_replacement_execution,
+                [
+                    {
+                        "symbol_id": "005930",
+                        "symbol_name": "삼성전자",
+                        "order_id": "old-buy-2",
+                        "order_kind": "pending",
+                        "direction": "buy",
+                        "remaining_quantity": 1,
+                        "order_price": 70000,
+                        "active_status": "active",
+                        "order_api": "order_cash",
+                        "order_path": "immediate",
+                        "execution_environment": "real",
+                        "observed_at": now_iso(),
+                    }
+                ],
+                {},
+                {"005930": {"max_sell_qty": 5}},
+                submit=True,
+                kis=FakeKis(),
+            )
+        finally:
+            globals()["adjust_active_order"] = original_adjust_active_order
+            globals()["submit_order"] = original_submit_order
+        uncertain_replacement_order = uncertain_replacement_execution["orders"][0]
+        if uncertain_replacement_order.get("result") != "blocked" or uncertain_replacement_order.get("reason") != "replacement_order_submission_uncertain":
+            failures.append(f"empty replacement order id was not blocked as uncertain: {uncertain_replacement_order}")
+
+        failed_replacement_execution = {
+            "orders": [
+                {"symbol_id": "005930", "symbol_name": "삼성전자", "target_holding_quantity": 5, "order_price": 70000, "order_path": "immediate"}
+            ]
+        }
+
+        def fake_failing_submit_order(kis: Any, order: dict[str, Any]) -> str:
+            raise RuntimeError("fake replacement submit failure")
+
+        try:
+            globals()["adjust_active_order"] = fake_cancel_active_order
+            globals()["submit_order"] = fake_failing_submit_order
+            reconcile(
+                {"account_summary": {"cash_amount": 1_000_000}, "symbols": [{"symbol_id": "005930", "symbol_name": "삼성전자", "current_live_holding_quantity": 10}]},
+                failed_replacement_execution,
+                [
+                    {
+                        "symbol_id": "005930",
+                        "symbol_name": "삼성전자",
+                        "order_id": "old-buy-3",
+                        "order_kind": "pending",
+                        "direction": "buy",
+                        "remaining_quantity": 1,
+                        "order_price": 70000,
+                        "active_status": "active",
+                        "order_api": "order_cash",
+                        "order_path": "immediate",
+                        "execution_environment": "real",
+                        "observed_at": now_iso(),
+                    }
+                ],
+                {},
+                {"005930": {"max_sell_qty": 5}},
+                submit=True,
+                kis=FakeKis(),
+            )
+        finally:
+            globals()["adjust_active_order"] = original_adjust_active_order
+            globals()["submit_order"] = original_submit_order
+        failed_replacement_order = failed_replacement_execution["orders"][0]
+        if failed_replacement_order.get("result") != "blocked" or failed_replacement_order.get("reason") != "replacement_order_submission_failed":
+            failures.append(f"replacement submit exception was not blocked: {failed_replacement_order}")
         if failures:
             print(json.dumps({"status": "failed", "failures": failures}, ensure_ascii=False, indent=2))
             return 1

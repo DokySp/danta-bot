@@ -68,7 +68,7 @@ For each symbol:
 
 Cancellation, correction, and replacement require the same explicit demo/real execution authorization as new submissions. They also require a current API detail or previously validated template for the exact KIS function. If no supported cancellation/correction API can be identified, do not submit a conflicting replacement; record `blocked` with reason `active_order_adjustment_unavailable`.
 
-After every accepted cancellation or correction, refresh only the minimum read-only order/fill/reservation state needed to prove the active order state before calculating replacement quantity. Never assume cancellation succeeded from a submitted request alone.
+After an accepted cancellation for a conflicting active order, the same explicitly authorized run may submit the already validated replacement order without waiting for a separate refresh, and must record both the cancellation request id and replacement order id when available. If the cancellation or replacement submission fails or remains uncertain, do not submit another replacement order for that symbol in the same run.
 
 ## Order API Backoff
 
@@ -143,7 +143,7 @@ Every order must satisfy all applicable constraints:
 - missing financial/news evidence is allowed when the symbol remains eligible and has a valid price observation
 - demo or real submission was explicitly requested
 
-If any non-quantity gate fails, do not submit that order. Record `blocked` and the exact non-sensitive reason. If a quantity gate leaves a positive executable quantity, submit only the reduced quantity and record `requested_order_quantity` plus `quantity_adjustment`; if the executable quantity is zero, block the order. If an active-order adjustment fails or remains uncertain, do not submit a replacement order for that symbol in the same run.
+If any non-quantity gate fails, do not submit that order. Record `blocked` and the exact non-sensitive reason. If a quantity gate leaves a positive executable quantity, submit only the reduced quantity and record `requested_order_quantity` plus `quantity_adjustment`; if the executable quantity is zero, block the order. If an active-order cancellation is accepted, submit the validated replacement order in the same explicitly authorized run; if an active-order adjustment or replacement submission fails or remains uncertain, do not submit another replacement order for that symbol in the same run.
 
 Missing, partial, failed, skipped, or no-data financial/news evidence is not an execution gate by itself. The order runner must not block, fail, reduce, or send an order to review solely because financial/news evidence is absent. This applies to `order_cash`, `order_resv`, demo submission, and real submission.
 
