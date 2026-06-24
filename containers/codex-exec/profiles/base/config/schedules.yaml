@@ -22,6 +22,9 @@ schedules:
     message: |
       $check-portfolio로 recommended, specified, holding, universe JSON을 확인하고, check-portfolio의 universe를 $daily-trading 대상으로 사용해줘. 
       $daily-trading 스킬로 실전(acct) 거래를 지정가 예약 거래로 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
+      예약 거래로 진행하는 경우, 장중 가격·호가·수급 정보는 이미 관측된 정적 근거로 보고 과도하게 추격 반영하지 마.
+      예약 거래 판단에서는 회사 재무 정보, 신규 뉴스·공시·이벤트성 재료와 다음 장 갭 리스크의 비중을 상대적으로 높여 목표수량을 판단해.
+      단, financial-information 혹은 news-information가 없다는 이유만으로 점수·확신도·목표수량을 낮추거나 주문을 차단하지 마.
 
   - id: daily-10
     enabled: true
@@ -58,3 +61,6 @@ schedules:
     message: |
       $check-portfolio로 recommended, specified, holding, universe JSON을 확인하고, check-portfolio의 universe를 $daily-trading 대상으로 사용해줘. 
       $daily-trading 스킬로 실전(acct) 거래를 지정가 예약 거래로 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
+      예약 거래로 진행하는 경우, 장중 가격·호가·수급 정보는 이미 관측된 정적 근거로 보고 과도하게 추격 반영하지 마.
+      예약 거래 판단에서는 회사 재무 정보, 신규 뉴스·공시·이벤트성 재료와 다음 장 갭 리스크의 비중을 상대적으로 높여 목표수량을 판단해.
+      단, financial-information 혹은 news-information가 없다는 이유만으로 점수·확신도·목표수량을 낮추거나 주문을 차단하지 마.
