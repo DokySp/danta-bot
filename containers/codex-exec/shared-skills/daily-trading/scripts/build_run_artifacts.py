@@ -61,7 +61,7 @@ def load_yaml(path: Path | None) -> Any:
 def write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+        json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
         handle.write("\n")
 
 
@@ -1039,6 +1039,9 @@ symbols:
             )
             if brief["status"] != "partial" or len(brief["symbols"]) != 2:
                 failures.append(f"unexpected decision brief: {brief}")
+            decision_brief_text = (run_dir / "decision-brief.json").read_text(encoding="utf-8")
+            if "\n  " in decision_brief_text:
+                failures.append("decision-brief.json should be stored as compact JSON")
             by_symbol = {item.get("symbol_id"): item for item in brief["symbols"]}
             if by_symbol["005930"].get("evidence_mode") != "full":
                 failures.append(f"financial-covered symbol should be full: {by_symbol['005930']}")

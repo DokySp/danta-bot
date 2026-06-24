@@ -88,7 +88,7 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     with open(tmp, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+        json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
         handle.write("\n")
     tmp.replace(path)
 
@@ -1224,6 +1224,9 @@ def assert_verdict_input_slices(tmp: Path) -> None:
     if set(slices) != expected_keys:
         raise AssertionError(f"unexpected slice keys: {slices}")
     for key, slice_path_text in slices.items():
+        slice_text = Path(slice_path_text).read_text(encoding="utf-8")
+        if "\n  " in slice_text:
+            raise AssertionError(f"verdict input slice should be stored as compact JSON: {slice_path_text}")
         slice_payload = load_json(Path(slice_path_text))
         symbols = [item.get("symbol_id") for item in slice_payload.get("symbols", [])]
         if symbols != ["005930", "000660"]:
