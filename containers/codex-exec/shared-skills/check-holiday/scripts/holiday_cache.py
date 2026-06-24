@@ -49,10 +49,25 @@ def read_json_stdin_or_file(path: str | None) -> Any:
     return json.load(sys.stdin)
 
 
+def parse_embedded_json(value: str) -> Any | None:
+    text = value.strip()
+    if not text or text[0] not in "[{":
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+
 def iter_dicts(value: Any):
     if isinstance(value, dict):
         yield value
-        for child in value.values():
+        for key, child in value.items():
+            if key == "data" and isinstance(child, str):
+                parsed = parse_embedded_json(child)
+                if parsed is not None:
+                    yield from iter_dicts(parsed)
+                    continue
             yield from iter_dicts(child)
     elif isinstance(value, list):
         for child in value:
@@ -60,10 +75,14 @@ def iter_dicts(value: Any):
 
 
 def find_bass_dt_row(response: Any, date: str) -> dict[str, Any] | None:
+    first_match: dict[str, Any] | None = None
     for item in iter_dicts(response):
         if str(item.get("bass_dt", "")) == date:
-            return item
-    return None
+            if first_match is None:
+                first_match = item
+            if "opnd_yn" in item:
+                return item
+    return first_match
 
 
 def response_ok(response: Any) -> bool:
