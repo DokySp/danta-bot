@@ -726,7 +726,8 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
     output_dir = Path(args.output_dir)
     verdict_second = load_json(Path(args.verdict_second or output_dir / "verdict-second.json"))
     account = load_json(Path(args.account_before_order or output_dir / "account-before-order.json"))
-    decision_brief = load_json(Path(args.decision_brief)) if args.decision_brief else {}
+    decision_brief_path = Path(args.decision_brief) if args.decision_brief else output_dir / "decision-brief.json"
+    decision_brief = load_json(decision_brief_path)
     account_by_symbol = indexed_symbols(account.get("symbols"))
     brief_by_symbol = indexed_symbols(decision_brief.get("symbols"))
     active = active_quantities(account)
@@ -1219,6 +1220,25 @@ symbols:
             )
             if ready_execution["orders"][0]["result"] != "skipped" or ready_execution["orders"][0]["reason"] != "ready_for_main_agent_submission":
                 failures.append(f"gate-ready execution plan was not marked ready: {ready_execution}")
+            account_default_brief = load_json(run_dir / "account-before-order-ready.json")
+            account_default_brief["symbols"][0]["current_price"] = None
+            write_json(run_dir / "account-before-order-default-brief.json", account_default_brief)
+            default_brief_execution = build_execution_plan(
+                argparse.Namespace(
+                    output_dir=run_dir,
+                    output=run_dir / "execution-default-brief.json",
+                    verdict_second=str(run_dir / "verdict-second.json"),
+                    account_before_order=str(run_dir / "account-before-order-default-brief.json"),
+                    decision_brief="",
+                    run_id=None,
+                    started_at=None,
+                    request_type="real-submit",
+                )
+            )
+            if default_brief_execution["orders"][0].get("order_price") != 70000:
+                failures.append(
+                    f"default decision-brief price fallback did not populate order_price: {default_brief_execution}"
+                )
             write_json(subagent_dir / "token.wrapper.json", {"token_usage": {"input_tokens": 2, "output_tokens": 3}})
             events = tmp / "events.jsonl"
             events.write_text(
@@ -1290,7 +1310,7 @@ def build_parser() -> argparse.ArgumentParser:
     execution.add_argument("--output-dir", type=Path, required=True)
     execution.add_argument("--verdict-second")
     execution.add_argument("--account-before-order")
-    execution.add_argument("--decision-brief")
+    execution.add_argument("--decision-brief", help="Path to decision-brief.json. Defaults to <output-dir>/decision-brief.json.")
     execution.add_argument("--request-type", choices=["analysis", "prepare", "demo-submit", "real-submit"], default="analysis")
     execution.add_argument("--order-path", choices=["reservation", "immediate"], default="reservation")
     execution.add_argument("--run-id")

@@ -1768,7 +1768,7 @@ def write_self_test_fixtures(workspace: Path, run_dir: Path) -> Path:
             "account_summary": {"cash_amount": 1000000, "total_evaluation_amount": 1500000},
             "active_orders": [],
             "symbols": [
-                {"symbol_id": "005930", "symbol_name": "삼성전자", "current_live_holding_quantity": 0, "current_price": 70000},
+                {"symbol_id": "005930", "symbol_name": "삼성전자", "current_live_holding_quantity": 0, "current_price": None},
                 {"symbol_id": "000660", "symbol_name": "SK하이닉스", "current_live_holding_quantity": 0, "current_price": 200000},
             ],
         },
@@ -2189,6 +2189,22 @@ def run_self_test() -> int:
             order_path_selection = (summary.get("execution") or {}).get("order_path_selection") if isinstance(summary.get("execution"), dict) else {}
             if order_path_selection.get("resolved") != "immediate" or order_path_selection.get("reason") != "auto_regular_session":
                 failures.append(f"pipeline did not resolve auto order path to immediate: {order_path_selection}")
+            command_log = load_json(run_dir / "pipeline-command-log.json")
+            execution_commands = [
+                item.get("command")
+                for item in command_log.get("commands", [])
+                if isinstance(item, dict) and item.get("stage") == "execution-plan"
+            ]
+            if not execution_commands or "--decision-brief" in execution_commands[-1]:
+                failures.append(f"execution-plan command should rely on the default decision-brief path: {execution_commands}")
+            execution_payload = load_json(run_dir / "execution.json")
+            execution_by_symbol = {
+                symbol_key(item): item for item in execution_payload.get("orders", []) if isinstance(item, dict)
+            }
+            if as_int(execution_by_symbol.get("005930", {}).get("order_price")) != 70000:
+                failures.append(
+                    "execution-plan did not fall back to decision-brief price for a new holding with missing account current_price"
+                )
             if summary["token_usage"]["subagents"]["total_tokens"] != 480:
                 failures.append(f"unexpected subagent token total: {summary['token_usage']}")
             if summary["token_usage"]["main"]["total_tokens"] != 17 or summary["token_usage"]["total"]["total_tokens"] != 497:
