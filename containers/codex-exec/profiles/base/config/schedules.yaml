@@ -25,28 +25,36 @@ schedules:
 
   - id: daily-10
     enabled: true
-    cron: "5 9 * * 1-5"
+    cron: "5,30 9 * * 1-5"
     message: |
       $check-portfolio로 recommended, specified, holding, universe JSON을 확인하고, check-portfolio의 universe를 $daily-trading 대상으로 사용해줘. 
       예약 거래 내역을 확인하고 $daily-trading 스킬로 실전(acct) 거래를 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
 
   - id: daily-20
     enabled: true
-    cron: "0 10,12 * * 1-5"
+    cron: "0,30 10,11,12 * * 1-5"
     message: |
       $check-portfolio로 recommended, specified, holding, universe JSON을 확인하고, check-portfolio의 universe를 $daily-trading 대상으로 사용해줘. 
       $daily-trading 스킬로 실전(acct) 거래를 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
 
+  - id: daily-21
+    enabled: true
+    cron: "0 13,14 * * 1-5"
+    message: |
+      $check-portfolio로 recommended, specified, holding, universe JSON을 확인하고, check-portfolio의 universe를 $daily-trading 대상으로 사용해줘. 
+      $daily-trading 스킬로 실전(acct) 거래를 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
+
+
   - id: daily-30
     enabled: true
-    cron: "5 15 * * 1-5"
+    cron: "10 15 * * 1-5"
     message: |
       $check-portfolio로 recommended, specified, holding, universe JSON을 확인하고, check-portfolio의 universe를 $daily-trading 대상으로 사용해줘. 
       이번 거래가 오늘의 마지막 거래임을 참고하여 $daily-trading 스킬로 실전(acct) 거래를 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
 
   - id: weekend-01
     enabled: true
-    cron: "0 22 * * 0,6"
+    cron: "0 22 * * 0"
     message: |
       $check-portfolio로 recommended, specified, holding, universe JSON을 확인하고, check-portfolio의 universe를 $daily-trading 대상으로 사용해줘. 
       $daily-trading 스킬로 실전(acct) 거래를 지정가 예약 거래로 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
