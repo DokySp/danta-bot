@@ -22,7 +22,22 @@ FIRST_VERDICT_ROLES = (
     "analyst-quality-value",
     "analyst-momentum-cycle",
     "analyst-risk-allocation",
+    "analyst-news-flow",
 )
+FIRST_VERDICT_SPEC_ROLES = (
+    "analyst-fundamental-risk",
+    "analyst-market-news",
+)
+COMBINED_FIRST_VERDICT_ROLES = {
+    "analyst-fundamental-risk": (
+        "analyst-quality-value",
+        "analyst-risk-allocation",
+    ),
+    "analyst-market-news": (
+        "analyst-momentum-cycle",
+        "analyst-news-flow",
+    ),
+}
 TOKEN_USAGE_FIELDS = (
     "input_tokens",
     "cached_input_tokens",
@@ -30,6 +45,12 @@ TOKEN_USAGE_FIELDS = (
     "reasoning_output_tokens",
     "total_tokens",
 )
+CHART_RECENT_ROW_LIMITS = {
+    "daily": 5,
+    "weekly": 4,
+    "monthly": 4,
+    "intraday": 5,
+}
 
 
 def now_iso() -> str:
@@ -102,6 +123,25 @@ def as_number(value: Any) -> int | float | None:
     if number.is_integer():
         return int(number)
     return number
+
+
+def as_float(value: Any) -> float | None:
+    number = as_number(value)
+    if number is None:
+        return None
+    return float(number)
+
+
+def round_float(value: float | None, digits: int = 4) -> float | None:
+    if value is None or not math.isfinite(value):
+        return None
+    return round(value, digits)
+
+
+def pct_change(current: float | None, previous: float | None) -> float | None:
+    if current is None or previous in (None, 0):
+        return None
+    return ((current - previous) / previous) * 100
 
 
 def clamp_score(value: Any, default: int = 5) -> int:
@@ -202,6 +242,24 @@ def shorten(value: Any, limit: int = 160) -> str:
     return text[: limit - 3].rstrip() + "..."
 
 
+def first_present(row: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    if not isinstance(row, dict):
+        return None
+    for key in keys:
+        value = row.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def first_present_from(sources: tuple[dict[str, Any], ...], keys: tuple[str, ...]) -> Any:
+    for source in sources:
+        value = first_present(source, keys)
+        if value not in (None, ""):
+            return value
+    return None
+
+
 def unwrap_financial_symbol_payload(symbol_payload: Any) -> dict[str, Any] | None:
     if not isinstance(symbol_payload, dict):
         return None
@@ -291,13 +349,13 @@ def etf_summary_for(cache: Any, symbol_id: str, cache_path: str) -> dict[str, An
         ("추적오차", ("추적오차", "ETF 추적수익률 차이", "etf_chas_erng_rt_dbnb")),
         ("거래량", ("누적 거래량", "acml_vol")),
     ):
-        value = first_present(etf_price, keys) or first_present(nav_summary, keys) or first_present(nav_trend, keys)
+        value = first_present_from((etf_price, nav_summary, nav_trend), keys)
         if value not in (None, ""):
             parts.append(f"{label} {value}")
     if parts:
         summary["items"].append(", ".join(parts[:4]))
     for label, keys in (("NAV 전일대비율", ("NAV 전일 대비율", "nav_prdy_ctrt")), ("전일대비율", ("전일 대비율", "prdy_ctrt"))):
-        value = first_present(nav_summary, keys) or first_present(nav_trend, keys) or first_present(etf_price, keys)
+        value = first_present_from((nav_summary, nav_trend, etf_price), keys)
         if value not in (None, ""):
             summary["items"].append(f"{label} {value}")
     summary["items"] = summary["items"][:3]
@@ -332,6 +390,110 @@ def news_summary_for(cache: Any, symbol_id: str, cache_path: str) -> list[dict[s
     return result
 
 
+def chart_row_value(row: dict[str, Any], key: str) -> float | None:
+    return as_float(row.get(key)) if isinstance(row, dict) else None
+
+
+def compact_ohlcv_rows(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    keys = ("date", "open", "high", "low", "close", "volume", "trading_value")
+    for row in rows[:limit]:
+        if not isinstance(row, dict):
+            continue
+        compact = {key: row.get(key) for key in keys if row.get(key) not in (None, "")}
+        if compact:
+            result.append(compact)
+    return result
+
+
+def compact_intraday_rows(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    keys = ("time", "price", "volume")
+    for row in rows[:limit]:
+        if not isinstance(row, dict):
+            continue
+        compact = {key: row.get(key) for key in keys if row.get(key) not in (None, "")}
+        if compact:
+            result.append(compact)
+    return result
+
+
+def average(values: list[float]) -> float | None:
+    return sum(values) / len(values) if values else None
+
+
+def moving_average(values: list[float], window: int) -> float | None:
+    if len(values) < window:
+        return None
+    return average(values[:window])
+
+
+def chart_series_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    valid_rows = [row for row in rows if isinstance(row, dict)]
+    if not valid_rows:
+        return {}
+    latest = valid_rows[0]
+    closes = [value for row in valid_rows if (value := chart_row_value(row, "close")) is not None]
+    highs = [value for row in valid_rows if (value := chart_row_value(row, "high")) is not None]
+    lows = [value for row in valid_rows if (value := chart_row_value(row, "low")) is not None]
+    volumes = [value for row in valid_rows if (value := chart_row_value(row, "volume")) is not None]
+    latest_close = chart_row_value(latest, "close")
+    previous_close = closes[1] if len(closes) > 1 else None
+    range_high = max(highs) if highs else (max(closes) if closes else None)
+    range_low = min(lows) if lows else (min(closes) if closes else None)
+    range_position_pct = None
+    if latest_close is not None and range_high is not None and range_low is not None and range_high != range_low:
+        range_position_pct = ((latest_close - range_low) / (range_high - range_low)) * 100
+    ma5 = moving_average(closes, 5)
+    ma20 = moving_average(closes, 20)
+    latest_volume = chart_row_value(latest, "volume")
+    avg_volume = average(volumes[1:]) if len(volumes) > 1 else None
+    summary = {
+        "latest_date": latest.get("date") or "",
+        "latest_close": as_number(latest.get("close")),
+        "latest_open": as_number(latest.get("open")),
+        "latest_high": as_number(latest.get("high")),
+        "latest_low": as_number(latest.get("low")),
+        "change_1_period_pct": round_float(pct_change(latest_close, previous_close)),
+        "change_5_period_pct": round_float(pct_change(latest_close, closes[5] if len(closes) > 5 else None)),
+        "change_20_period_pct": round_float(pct_change(latest_close, closes[20] if len(closes) > 20 else None)),
+        "range_high": round_float(range_high, 2),
+        "range_low": round_float(range_low, 2),
+        "range_position_pct": round_float(range_position_pct),
+        "ma5": round_float(ma5, 2),
+        "ma20": round_float(ma20, 2),
+        "distance_ma5_pct": round_float(pct_change(latest_close, ma5)),
+        "distance_ma20_pct": round_float(pct_change(latest_close, ma20)),
+        "latest_volume": as_number(latest.get("volume")),
+        "avg_volume_ex_latest": round_float(avg_volume, 2),
+        "volume_vs_avg_pct": round_float(pct_change(latest_volume, avg_volume)),
+        "sample_count": len(valid_rows),
+    }
+    return {key: value for key, value in summary.items() if value not in (None, "", [], {})}
+
+
+def intraday_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    valid_rows = [row for row in rows if isinstance(row, dict)]
+    if not valid_rows:
+        return {}
+    latest = valid_rows[0]
+    prices = [value for row in valid_rows if (value := chart_row_value(row, "price")) is not None]
+    volumes = [value for row in valid_rows if (value := chart_row_value(row, "volume")) is not None]
+    latest_price = chart_row_value(latest, "price")
+    oldest_price = prices[-1] if prices else None
+    summary = {
+        "latest_time": latest.get("time") or "",
+        "latest_price": as_number(latest.get("price")),
+        "change_observed_pct": round_float(pct_change(latest_price, oldest_price)),
+        "observed_high": round_float(max(prices), 2) if prices else None,
+        "observed_low": round_float(min(prices), 2) if prices else None,
+        "latest_volume": as_number(latest.get("volume")),
+        "total_observed_volume": round_float(sum(volumes), 2) if volumes else None,
+        "sample_count": len(valid_rows),
+    }
+    return {key: value for key, value in summary.items() if value not in (None, "", [], {})}
+
+
 def compact_chart_context(item: dict[str, Any]) -> dict[str, Any]:
     charts = item.get("charts") if isinstance(item.get("charts"), dict) else {}
     result: dict[str, Any] = {}
@@ -339,13 +501,15 @@ def compact_chart_context(item: dict[str, Any]) -> dict[str, Any]:
         rows = charts.get(key) if isinstance(charts, dict) else []
         if not isinstance(rows, list):
             rows = []
-        compact_rows = [row for row in rows if isinstance(row, dict)][:20]
+        compact_rows = [row for row in rows if isinstance(row, dict)]
         if compact_rows:
-            result[key] = compact_rows
+            result[f"{key}_summary"] = chart_series_summary(compact_rows)
+            result[f"recent_{key}"] = compact_ohlcv_rows(compact_rows, CHART_RECENT_ROW_LIMITS[key])
     intraday = item.get("intraday") if isinstance(item.get("intraday"), list) else []
-    compact_intraday = [row for row in intraday if isinstance(row, dict)][:10]
+    compact_intraday = [row for row in intraday if isinstance(row, dict)]
     if compact_intraday:
-        result["intraday"] = compact_intraday
+        result["intraday_summary"] = intraday_summary(compact_intraday)
+        result["recent_intraday"] = compact_intraday_rows(compact_intraday, CHART_RECENT_ROW_LIMITS["intraday"])
     return result
 
 
@@ -473,7 +637,7 @@ def build_first_specs(args: argparse.Namespace) -> dict[str, Any]:
     absolute_paths = not args.relative_paths
 
     specs = []
-    for role in FIRST_VERDICT_ROLES:
+    for role in FIRST_VERDICT_SPEC_ROLES:
         specs.append(
             {
                 "run_id": run_id,
@@ -544,6 +708,28 @@ def write_first_sidecar(path: Path, symbols: list[dict[str, Any]]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def write_combined_first_sidecar(
+    path: Path,
+    role: str,
+    symbols: list[dict[str, Any]],
+    symbols_by_id: dict[str, dict[str, Any]] | None = None,
+) -> None:
+    lines = [
+        "| 관점 | 종목 | 점수 | confidence(확신도) | 의견(판단) |",
+        "|---|---|---:|---:|---|",
+    ]
+    for item in symbols:
+        symbol_name = f"{item.get('symbol_id', '')} {item.get('symbol_name', '')}".strip()
+        for score in expanded_first_scores(role, item):
+            if symbols_by_id is not None:
+                score = enforce_news_flow_neutral_without_news(score, symbols_by_id.get(symbol_key(item), {}))
+            lines.append(
+                f"| {score.get('agent_role', '')} | {symbol_name} | {as_int(score.get('score'))} | {as_int(score.get('confidence'))} | {score.get('one_line_reason', '')} |"
+            )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def write_second_sidecar(path: Path, symbols: list[dict[str, Any]]) -> None:
     lines = [
         "| 종목 | 목표수량 | 상대매력도 | 판단코드 | 의견(판단) |",
@@ -573,7 +759,7 @@ def load_success_first_wrappers(subagent_dir: Path) -> tuple[dict[str, dict[str,
         previous = by_role.get(role)
         if previous is None or str(wrapper.get("ended_at", "")) >= str(previous.get("ended_at", "")):
             by_role[role] = wrapper
-    for role in FIRST_VERDICT_ROLES:
+    for role in FIRST_VERDICT_SPEC_ROLES:
         if role in by_role:
             continue
         for source in failures_by_role.get(role, []):
@@ -587,6 +773,59 @@ def load_success_first_wrappers(subagent_dir: Path) -> tuple[dict[str, dict[str,
                 }
             )
     return by_role, errors
+
+
+def view_payload(item: dict[str, Any], role: str) -> dict[str, Any] | None:
+    views = item.get("views")
+    if isinstance(views, dict) and isinstance(views.get(role), dict):
+        return dict(views[role])
+    agent_scores = item.get("agent_scores")
+    if isinstance(agent_scores, list):
+        for score in agent_scores:
+            if isinstance(score, dict) and str(score.get("agent_role") or "") == role:
+                return dict(score)
+    return None
+
+
+def expanded_first_scores(role: str, item: dict[str, Any]) -> list[dict[str, Any]]:
+    expanded_roles = COMBINED_FIRST_VERDICT_ROLES.get(role)
+    if not expanded_roles:
+        score = dict(item)
+        score["agent_role"] = role
+        return [score]
+
+    scores: list[dict[str, Any]] = []
+    for expanded_role in expanded_roles:
+        score = view_payload(item, expanded_role)
+        if score is None:
+            continue
+        score.setdefault("symbol_id", item.get("symbol_id"))
+        score.setdefault("symbol_name", item.get("symbol_name"))
+        score["agent_role"] = expanded_role
+        scores.append(score)
+    return scores
+
+
+def has_usable_news_summary(symbol: dict[str, Any]) -> bool:
+    news_summary = symbol.get("news_summary")
+    return isinstance(news_summary, list) and any(isinstance(item, dict) for item in news_summary)
+
+
+def enforce_news_flow_neutral_without_news(score_item: dict[str, Any], brief_symbol: dict[str, Any]) -> dict[str, Any]:
+    if str(score_item.get("agent_role") or "") != "analyst-news-flow" or has_usable_news_summary(brief_symbol):
+        return score_item
+    normalized = dict(score_item)
+    normalized["score"] = 5
+    normalized["confidence"] = 5
+    normalized["reason_code"] = "no_news_neutral"
+    normalized["one_line_reason"] = normalized.get("one_line_reason") or "뉴스 정보가 없어 중립 5점"
+    missing_data = normalized.get("missing_data")
+    if not isinstance(missing_data, list):
+        missing_data = []
+    if "news_summary" not in missing_data:
+        missing_data = [*missing_data, "news_summary"]
+    normalized["missing_data"] = missing_data
+    return normalized
 
 
 def build_verdict_first(args: argparse.Namespace) -> dict[str, Any]:
@@ -611,24 +850,32 @@ def build_verdict_first(args: argparse.Namespace) -> dict[str, Any]:
             )
             continue
         symbols = [item for item in payload.get("symbols", []) if isinstance(item, dict)]
-        write_first_sidecar(first_sidecar_path(output_dir, role, str(wrapper.get("task_name") or role)), symbols)
+        sidecar = first_sidecar_path(output_dir, role, str(wrapper.get("task_name") or role))
+        if role in COMBINED_FIRST_VERDICT_ROLES:
+            write_combined_first_sidecar(sidecar, role, symbols, symbols_by_id)
+        else:
+            write_first_sidecar(sidecar, symbols)
         for item in symbols:
             symbol_id = symbol_key(item)
             if symbol_id not in agent_scores:
                 continue
-            score = clamp_score(item.get("score"), 5)
-            confidence = clamp_score(item.get("confidence"), 5)
-            agent_scores[symbol_id].append(
-                {
-                    "agent_role": role,
-                    "score": score,
-                    "confidence": confidence,
-                    "confidence_adjusted_score": confidence_adjusted_score(score, confidence),
-                    "reason_code": safe_name(str(item.get("reason_code") or "hold_neutral")).lower(),
-                    "one_line_reason": item.get("one_line_reason") or "",
-                    "missing_data": item.get("missing_data") if isinstance(item.get("missing_data"), list) else [],
-                }
-            )
+            for score_item in expanded_first_scores(role, item):
+                score_item = enforce_news_flow_neutral_without_news(score_item, symbols_by_id.get(symbol_id, {}))
+                expanded_role = str(score_item.get("agent_role") or role)
+                score = clamp_score(score_item.get("score"), 5)
+                confidence = clamp_score(score_item.get("confidence"), 5)
+                agent_scores[symbol_id].append(
+                    {
+                        "agent_role": expanded_role,
+                        "source_agent_role": role,
+                        "score": score,
+                        "confidence": confidence,
+                        "confidence_adjusted_score": confidence_adjusted_score(score, confidence),
+                        "reason_code": safe_name(str(score_item.get("reason_code") or "hold_neutral")).lower(),
+                        "one_line_reason": score_item.get("one_line_reason") or "",
+                        "missing_data": score_item.get("missing_data") if isinstance(score_item.get("missing_data"), list) else [],
+                    }
+                )
 
     artifact = common_envelope(decision_brief.get("run_id") or output_dir.name, decision_brief.get("started_at") or "", "verdict-first")
     artifact["errors"] = errors
@@ -936,6 +1183,44 @@ def run_self_test() -> int:
             "universe": ["005930", "000660"],
         }
         write_json(tmp / "portfolio.json", portfolio)
+        daily_rows = [
+            {
+                "date": f"202606{18 - index:02d}",
+                "open": 69000 - (index * 1000),
+                "high": 71000 - (index * 1000),
+                "low": 68000 - (index * 1000),
+                "close": 70000 - (index * 1000),
+                "volume": 1000 + (index * 100),
+                "trading_value": (70000 - (index * 1000)) * (1000 + (index * 100)),
+            }
+            for index in range(21)
+        ]
+        weekly_rows = [
+            {
+                "date": f"2026W{24 - index:02d}",
+                "open": 68000 - (index * 500),
+                "high": 70000 - (index * 500),
+                "low": 67000 - (index * 500),
+                "close": 69500 - (index * 500),
+                "volume": 5000 + (index * 200),
+            }
+            for index in range(8)
+        ]
+        monthly_rows = [
+            {
+                "date": f"2026{6 - index:02d}",
+                "open": 66000 - (index * 700),
+                "high": 70500 - (index * 700),
+                "low": 65000 - (index * 700),
+                "close": 69000 - (index * 700),
+                "volume": 12000 + (index * 300),
+            }
+            for index in range(6)
+        ]
+        intraday_rows = [
+            {"time": f"09{30 + index:02d}00", "price": 70000 + (index * 100), "volume": 100 + index}
+            for index in range(7)
+        ]
         write_json(
             run_dir / "price-chart.json",
             {
@@ -953,11 +1238,11 @@ def run_self_test() -> int:
                             {"name": "daily_pct_vs_ma20", "value": 3.4},
                         ],
                         "charts": {
-                            "daily": [{"date": "20260618", "open": 69000, "high": 71000, "low": 68000, "close": 70000, "volume": 1000}],
-                            "weekly": [{"date": "20260614", "close": 69500, "volume": 5000}],
-                            "monthly": [],
+                            "daily": daily_rows,
+                            "weekly": weekly_rows,
+                            "monthly": monthly_rows,
                         },
-                        "intraday": [{"time": "093000", "price": 70000, "volume": 100}],
+                        "intraday": intraday_rows,
                         "orderbook_summary": {"best_bid": 69900, "best_ask": 70000, "spread_pct": 0.143},
                         "trade_flow_summary": {"tick_count": 3, "recent_price_change_pct": 0.2},
                         "investor_flow_summary": {"foreign_net_buy_quantity": 1000},
@@ -1051,8 +1336,37 @@ symbols:
                 failures.append(f"financial-missing symbol should be marked missing_symbol: {by_symbol['000660']}")
             if by_symbol["005930"].get("news_summary"):
                 failures.append(f"no-news placeholder should not be included: {by_symbol['005930']}")
-            if not by_symbol["005930"].get("chart_context", {}).get("daily"):
-                failures.append(f"chart context should be preserved: {by_symbol['005930']}")
+            chart_context = by_symbol["005930"].get("chart_context", {})
+            if chart_context.get("daily_summary", {}).get("latest_close") != 70000:
+                failures.append(f"chart summary should include latest close: {by_symbol['005930']}")
+            if chart_context.get("daily_summary", {}).get("change_1_period_pct") != 1.4493:
+                failures.append(f"chart summary should include one-period change: {by_symbol['005930']}")
+            if chart_context.get("daily_summary", {}).get("ma5") != 68000.0:
+                failures.append(f"chart summary should include ma5: {by_symbol['005930']}")
+            if chart_context.get("daily_summary", {}).get("ma20") != 60500.0:
+                failures.append(f"chart summary should include ma20: {by_symbol['005930']}")
+            if chart_context.get("daily_summary", {}).get("distance_ma20_pct") != 15.7025:
+                failures.append(f"chart summary should include ma20 distance: {by_symbol['005930']}")
+            if chart_context.get("recent_daily", [{}])[0].get("close") != 70000:
+                failures.append(f"recent chart rows should be preserved: {by_symbol['005930']}")
+            if len(chart_context.get("recent_daily", [])) != CHART_RECENT_ROW_LIMITS["daily"]:
+                failures.append(f"recent daily rows should be capped: {by_symbol['005930']}")
+            if len(chart_context.get("recent_weekly", [])) != CHART_RECENT_ROW_LIMITS["weekly"]:
+                failures.append(f"recent weekly rows should be capped: {by_symbol['005930']}")
+            if len(chart_context.get("recent_monthly", [])) != CHART_RECENT_ROW_LIMITS["monthly"]:
+                failures.append(f"recent monthly rows should be capped: {by_symbol['005930']}")
+            if len(chart_context.get("recent_intraday", [])) != CHART_RECENT_ROW_LIMITS["intraday"]:
+                failures.append(f"recent intraday rows should be capped: {by_symbol['005930']}")
+            if chart_context.get("intraday_summary", {}).get("latest_price") != 70000:
+                failures.append(f"intraday summary should include latest price: {by_symbol['005930']}")
+            if chart_context.get("intraday_summary", {}).get("change_observed_pct") != -0.8499:
+                failures.append(f"intraday summary should include observed change: {by_symbol['005930']}")
+            if chart_context.get("intraday_summary", {}).get("observed_high") != 70600.0:
+                failures.append(f"intraday summary should include observed high: {by_symbol['005930']}")
+            if chart_context.get("intraday_summary", {}).get("observed_low") != 70000.0:
+                failures.append(f"intraday summary should include observed low: {by_symbol['005930']}")
+            if chart_context.get("intraday_summary", {}).get("total_observed_volume") != 721.0:
+                failures.append(f"intraday summary should include total volume: {by_symbol['005930']}")
             if by_symbol["005930"].get("orderbook_summary", {}).get("best_bid") != 69900:
                 failures.append(f"orderbook summary should be preserved: {by_symbol['005930']}")
             if by_symbol["005930"].get("trade_flow_summary", {}).get("tick_count") != 3:
@@ -1072,10 +1386,47 @@ symbols:
                     symbol_ids="",
                 )
             )
-            if len(first_specs["specs"]) != 3 or not Path(first_specs["specs"][0]["artifact_paths"]["persona"]).is_absolute():
+            if len(first_specs["specs"]) != 2 or not Path(first_specs["specs"][0]["artifact_paths"]["persona"]).is_absolute():
                 failures.append(f"unexpected first specs: {first_specs}")
             subagent_dir = run_dir / "subagents"
-            for role in FIRST_VERDICT_ROLES:
+            for role in FIRST_VERDICT_SPEC_ROLES:
+                parsed_symbols = [
+                    {
+                        "symbol_id": "005930",
+                        "symbol_name": "삼성전자",
+                        "score": 7,
+                        "confidence": 5,
+                        "reason_code": "buy_candidate",
+                        "one_line_reason": "test",
+                    },
+                    {
+                        "symbol_id": "000660",
+                        "symbol_name": "SK하이닉스",
+                        "score": 5,
+                        "confidence": 5,
+                        "reason_code": "hold_neutral",
+                        "one_line_reason": "test",
+                    },
+                ]
+                if role in COMBINED_FIRST_VERDICT_ROLES:
+                    view_roles = COMBINED_FIRST_VERDICT_ROLES[role]
+                    parsed_symbols = [
+                        {
+                            "symbol_id": item["symbol_id"],
+                            "symbol_name": item["symbol_name"],
+                            "views": {
+                                view_role: {
+                                    "score": item["score"],
+                                    "confidence": item["confidence"],
+                                    "reason_code": item["reason_code"],
+                                    "one_line_reason": f"{view_role} {item['one_line_reason']}",
+                                    "missing_data": [],
+                                }
+                                for view_role in view_roles
+                            },
+                        }
+                        for item in parsed_symbols
+                    ]
                 write_json(
                     subagent_dir / f"first-{role}.wrapper.json",
                     {
@@ -1086,24 +1437,7 @@ symbols:
                         "ended_at": "2026-06-18T00:00:00+00:00",
                         "parsed_json": {
                             "stage": "first-verdict",
-                            "symbols": [
-                                {
-                                    "symbol_id": "005930",
-                                    "symbol_name": "삼성전자",
-                                    "score": 7,
-                                    "confidence": 5,
-                                    "reason_code": "buy_candidate",
-                                    "one_line_reason": "test",
-                                },
-                                {
-                                    "symbol_id": "000660",
-                                    "symbol_name": "SK하이닉스",
-                                    "score": 5,
-                                    "confidence": 5,
-                                    "reason_code": "hold_neutral",
-                                    "one_line_reason": "test",
-                                },
-                            ],
+                            "symbols": parsed_symbols,
                         },
                     },
                 )
@@ -1117,9 +1451,24 @@ symbols:
             )
             if verdict_first["symbols"][0]["final_first_score"] != 6:
                 failures.append(f"unexpected first verdict score: {verdict_first}")
-            missing_wrapper_path = subagent_dir / "first-analyst-risk-allocation.wrapper.json"
+            news_scores = [
+                item
+                for item in verdict_first["symbols"][0].get("agent_scores", [])
+                if item.get("agent_role") == "analyst-news-flow"
+            ]
+            if not news_scores or news_scores[0].get("score") != 5 or news_scores[0].get("confidence") != 5:
+                failures.append(f"news-flow without news should be neutral 5/5: {verdict_first}")
+            market_news_sidecar = (
+                run_dir
+                / "verdicts"
+                / "first-verdict--analyst-market-news--first-analyst-market-news.md"
+            )
+            market_news_text = market_news_sidecar.read_text(encoding="utf-8")
+            if "| analyst-news-flow | 005930 삼성전자 | 5 | 5 |" not in market_news_text:
+                failures.append(f"news-flow sidecar should reflect neutral 5/5: {market_news_text}")
+            missing_wrapper_path = subagent_dir / "first-analyst-fundamental-risk.wrapper.json"
             missing_wrapper = load_json(missing_wrapper_path)
-            missing_wrapper["parsed_json"]["symbols"] = missing_wrapper["parsed_json"]["symbols"][:1]
+            missing_wrapper["parsed_json"]["symbols"][1]["views"].pop("analyst-risk-allocation")
             write_json(missing_wrapper_path, missing_wrapper)
             missing_verdict_first = build_verdict_first(
                 argparse.Namespace(

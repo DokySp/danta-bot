@@ -31,7 +31,7 @@ python3 <daily-trading-skill>/scripts/run_daily_trading_pipeline.py run \
 | 1차 독립 종목 평결 단계 | `first-verdict` |
 | 2차 포트폴리오 목표수량 평결 단계 | `second-verdict` |
 | canonical 평결 입력 | `decision-brief.json` |
-| sub-agent 평결 입력 | launcher-created lossless selected-symbol slices |
+| sub-agent 평결 입력 | launcher-created selected-symbol slices; first-verdict는 output view profile 기반 role-scoped slice |
 
 문장 설명은 한국어로 쓰되, stage 이름, 파일명, JSON enum 값은 위 표준 표기를 그대로 사용한다.
 
@@ -43,7 +43,7 @@ python3 <daily-trading-skill>/scripts/run_daily_trading_pipeline.py run \
 | 2 | `Main agent` | `$check-portfolio` JSON | check-portfolio `universe`, 거래 환경 | 전체 종목 universe | universe 확장을 위해 현재 보유 종목을 별도 재조회하지 않음 |
 | 3 | `Main agent` + Collection sub-agents | `scripts/collect_main_evidence.py` direct KIS 가격·계좌 증거 수집, cache miss/universe mismatch 시 `get` 확인 후 1회 `$collect-financial-information`, `$collect-news-information` 및 재 `get` | 전체 종목 universe, 거래 환경 | `price-chart.json`, `account-before-order.json`, 선택적 `collection-summary.json`, 선택적 full-universe 또는 partial financial/news memory 경로 | 가격·관측시각은 필수, financial/news는 같은 날짜 full-universe cache hit 시 collector를 생략하며, cache miss/universe mismatch면 get→collect→get을 한 번만 수행하고 그래도 미완성이면 partial cache를 사용함 |
 | 4 | `Main agent` + `scripts/build_run_artifacts.py` | deterministic 병합/sanitize | `price-chart.json`, `$check-portfolio` JSON, 선택적 `memory/collect-financial-information/financial-YYYY-MM-DD.yaml`, 선택적 `memory/collect-news-information/news-YYYY-MM-DD.yaml` | `decision-brief.json`, 제외 종목 목록 | 식별자와 가격 snapshot이 있으면 재무/뉴스 누락만으로 제외하지 않음; Main agent가 직접 JSON을 조립하지 않고 helper를 호출 |
-| 5 | `first-verdict` sub-agents + `scripts/build_run_artifacts.py` | selected 3 functional personas, deterministic spec/merge | launcher-created `verdict-core`, `verdict-format.md` | `verdict-first.json`, `verdicts/first-verdict--<agent_role>--<task_name>.md` | 외부 호출·다른 agent 결과 참조 금지; sub-agent는 compact JSON만 반환하고 companion MD와 score merge는 helper가 생성 |
+| 5 | `first-verdict` sub-agents + `scripts/build_run_artifacts.py` | selected 2 execution personas, deterministic spec/merge into 4 canonical views | launcher-created role-scoped `verdict-core`, `verdict-format.md` | `verdict-first.json`, `verdicts/first-verdict--<agent_role>--<task_name>.md` | `analyst-fundamental-risk`는 `analyst-quality-value`와 `analyst-risk-allocation` view를 독립 산출하고, `analyst-market-news`는 `analyst-momentum-cycle`과 `analyst-news-flow` view를 독립 산출; sub-agent는 compact JSON만 반환하고 companion MD와 score merge는 helper가 생성 |
 | 6 | `second-verdict` sub-agent + `scripts/build_run_artifacts.py` | `judge-final`, deterministic 대상/spec 생성 | launcher-created `verdict-core`, selected-symbol first-verdict slice, `verdict-format.md` | `verdict-second.json`, `verdicts/second-verdict--judge-final--<task_name>.md` | 목표수량은 단일 judge가 제안하고 목표현금은 만들지 않으며, helper/Main agent가 schema·자산·집중도·계좌 gate만 검증; 실패 시 failed task만 최대 2회 retry |
 | 7 | `scripts/build_run_artifacts.py` + `scripts/execute_orders.py` | deterministic 주문 계산, KIS read-only pending/reserved/주문가능 조회, KIS `order_cash`/`order_resv`/정정취소 API | `verdict-second.json`, 최신 계좌 상태, 명시적 demo/real 실행 요청 | `account-before-order.json`, `execution.json`, `order-execution-log.json` | helper가 비제출 주문 수학/gate 요약을 먼저 만들고, 명시 실행 요청에서 `--submit-orders`가 있으면 `execute_orders.py`가 최신 계좌 gate를 갱신한 뒤 즉시/예약 주문을 제출·정정·취소하거나 명확히 차단한다. 명시적 지정가 예약 요청에서는 `execution-plan`의 `order_price`를 기본 지정가 후보로 인정한다 |
 | 8 | `scripts/run_daily_trading_pipeline.py summarize` + `scripts/render_telegram_summary.py` | report template, Telegram fixed template, run artifact update | 최종 `execution.json`, `run.json`, `verdict-second.json`, `pipeline-summary.json` | 최종 `pipeline-summary.json`, `telegram-summary.txt`, `reports/YYYY-MM-DD_포트폴리오.md`, 최종 `run.json` | partial/failed artifact를 삭제하지 않음; Telegram 응답은 `telegram-summary.txt`를 그대로 사용 |
@@ -70,7 +70,7 @@ python3 <daily-trading-skill>/scripts/run_daily_trading_pipeline.py run \
 |---|---|---|---|
 | `collect-financial-information` | KIS quotation/financial/estimate API 기반 재무 YAML 캐시 경로 | `gpt-5.4-mini` | `low` |
 | `collect-news-information` | KIS 뉴스 YAML 캐시 경로/요약 | `gpt-5.4-mini` | `low` |
-| selected 3 functional personas | `first-verdict` 독립 종목 점수 | `gpt-5.5` | `medium` |
+| selected 2 first-verdict execution personas | `first-verdict` 독립 종목 점수 (`analyst-fundamental-risk`와 `analyst-market-news`가 각각 두 view 산출) | `gpt-5.5` | `medium` |
 | `judge-final` | `second-verdict` 포트폴리오 목표수량 | `gpt-5.5` | `medium` |
 
 ## API 권한
@@ -138,7 +138,7 @@ Run 아티팩트는 `reports/runs/<run_id>/` 아래에 둔다.
 - financial memory 경로 `memory/collect-financial-information/financial-YYYY-MM-DD.yaml` (optional best-effort cache path)
 - 뉴스 memory 경로 `memory/collect-news-information/news-YYYY-MM-DD.yaml` (optional best-effort cache path)
 - `decision-brief.json`
-- `verdict-inputs/*.verdict-core.json` / `verdict-inputs/*.verdict-first-slice.json` (launcher-created non-canonical lossless slices)
+- `verdict-inputs/*.verdict-core.json` / `verdict-inputs/*.verdict-first-slice.json` (launcher-created non-canonical selected-symbol slices; first-verdict `verdict-core`는 role-scoped)
 - `verdict-first.json`
 - `verdict-second.json`
 - `verdicts/<stage>--<agent_role>--<task_name>.md` (verdict agent별 사람 확인용 companion Markdown)
@@ -150,7 +150,7 @@ Run 아티팩트는 `reports/runs/<run_id>/` 아래에 둔다.
 
 ## 평결 입력
 
-`decision-brief.json`은 Main agent가 수집 결과를 합쳐 만든 canonical verdict input이다. Sub-agent에는 launcher가 `decision-brief.json`에서 파생한 lossless `verdict-core` slice를 전달한다. `second-verdict`에는 `verdict-first.json` 전체가 아니라 selected-symbol first-verdict slice를 전달하고, 보유/가격 정보는 함께 전달되는 `verdict-core`에서 읽는다.
+`decision-brief.json`은 Main agent가 수집 결과를 합쳐 만든 canonical verdict input이다. First-verdict sub-agent에는 launcher가 `decision-brief.json`에서 파생한 role-scoped `verdict-core` slice를 전달한다. 이 slice는 해당 execution agent가 산출해야 하는 view들의 입력 profile union만 보존한다. `second-verdict`에는 `verdict-first.json` 전체가 아니라 selected-symbol first-verdict slice를 전달하고, 보유/가격 정보는 함께 전달되는 `verdict-core`에서 읽는다.
 
 `decision-brief.json`에는 종목 식별자, eligibility, `evidence_mode`, 가격, 핵심 price/chart signal, compact 기간봉/분봉·호가·체결·수급 요약, 가능한 financial memory 경로와 짧은 financial/ETF summary, 가능한 뉴스 memory 경로와 짧은 KIS 뉴스/공시 요약, 계좌 노출, 누락/오류 사유를 압축해서 담는다. financial/news memory 파일은 사람이 읽는 참고자료이다. Main agent는 그중 짧은 bullet만 선별해 `decision-brief.json`에 복사한다. `reports/runs/<run_id>/financial.md`, `reports/runs/<run_id>/news.md`는 만들지 않는다. 긴 raw API payload, 기사 원문, 반복 source detail, 민감정보는 제외한다. 종목별 price/chart signal은 최대 12개, financial summary는 최대 3개 bullet, KIS 뉴스/공시는 최대 3개 item, warning/error는 최대 5개로 제한하고 반복되는 domain-wide 누락 사유는 한 번만 요약한다.
 
@@ -158,7 +158,7 @@ Run 아티팩트는 `reports/runs/<run_id>/` 아래에 둔다.
 
 같은 날짜 financial/news cache는 top-level `symbols` 키가 전체 universe를 덮으면 그대로 사용한다. Cache miss 또는 universe mismatch면 helper `get`을 확인한 뒤 collector를 한 번 실행하고, 다시 `get`으로 받은 cache가 전체 universe를 덮지 못하면 존재하는 partial cache를 그대로 사용한다. 수집 실패 후 추가 재시도는 하지 않으며, 캐시가 없으면 해당 optional domain 없이 진행한다.
 
-`first-verdict`는 3개 기능형 persona(`analyst-quality-value`, `analyst-momentum-cycle`, `analyst-risk-allocation`)를 유지한다. Main agent가 가격, 보유, 뉴스, active 주문 상태의 안정성을 증명할 수 있는 unchanged symbol만 직전 유효 run의 verdict row를 병합할 수 있다. 증명할 수 없으면 재평가하고, sell/stop-loss 후보, 당일 체결, 가격 급변, 신규 뉴스, active 주문, score boundary 근처 종목은 반드시 재평가한다. Launcher 자동 wrapper 재사용은 같은 spec fingerprint에 한정된다.
+`first-verdict`는 canonical score 관점 4개(`analyst-quality-value`, `analyst-risk-allocation`, `analyst-momentum-cycle`, `analyst-news-flow`)를 유지하되 실행 sub-agent는 2개다. `analyst-fundamental-risk`가 `analyst-quality-value`와 `analyst-risk-allocation` view를 서로 독립적으로 산출하고, `analyst-market-news`가 `analyst-momentum-cycle`과 `analyst-news-flow` view를 서로 독립적으로 산출한다. `analyst-news-flow`는 usable 뉴스/공시 요약이 없으면 중립 `5`를 반환한다. Main agent가 가격, 보유, 뉴스, active 주문 상태의 안정성을 증명할 수 있는 unchanged symbol만 직전 유효 run의 verdict row를 병합할 수 있다. 증명할 수 없으면 재평가하고, sell/stop-loss 후보, 당일 체결, 가격 급변, 신규 뉴스, active 주문, score boundary 근처 종목은 반드시 재평가한다. Launcher 자동 wrapper 재사용은 같은 spec fingerprint에 한정된다.
 
 종목이 eligible이고 가격 관측값과 목표수량, 계좌 제약, 주문 API/경로를 통과하면 재무/뉴스 누락·partial·failed·no-data는 `order_cash`/`order_resv` demo/real 제출을 단독으로 차단하지 않는다.
 

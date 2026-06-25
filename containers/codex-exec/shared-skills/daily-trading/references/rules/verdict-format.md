@@ -16,15 +16,24 @@ Main-generated `first-verdict` sidecar content:
 
 - Korean prose.
 - Exactly one per-symbol Markdown table.
-- Header exactly:
+- For single-view legacy output, header exactly:
 
   ```markdown
   | 종목 | 점수 | confidence(확신도) | 의견(판단) |
   |---|---:|---:|---|
   ```
 
+- For combined execution output, header exactly:
+
+  ```markdown
+  | 관점 | 종목 | 점수 | confidence(확신도) | 의견(판단) |
+  |---|---|---:|---:|---|
+  ```
+
 - One row for every supplied eligible asset.
+- Combined execution output has one row per view per supplied eligible asset.
 - `종목` includes symbol id and name.
+- `관점` is the canonical view role such as `analyst-quality-value`.
 - `점수` and `confidence(확신도)` are `0` to `10`.
 - `의견(판단)` is concise and cites only supplied evidence.
 - No extra per-symbol sections or sensitive values.
@@ -52,15 +61,45 @@ The sidecar is never machine input. JSON captured by the launcher is authoritati
 
 `decision-brief.json` is the canonical verdict input. It should contain compact price/chart, optional financial/news summaries, account exposure, eligibility, evidence mode, and errors. Absence of optional financial/news data is context only; it must not lower score, lower confidence, exclude a symbol, remove a target, or block orders by itself.
 
-Verdict sub-agents receive launcher-created lossless `verdict-inputs/` slices containing only the listed `symbol_ids`. `first-verdict` reads a `verdict-core` slice derived from `decision-brief.json`; `second-verdict` reads `verdict-core` plus a selected-symbol slice derived from `verdict-first.json`. Raw prompt fallback is forbidden for verdict stages. Verdict sub-agents may use read-only local shell commands such as `cat` and `jq` only for explicitly listed artifact/persona/rule files. Do not load unrelated symbols, raw memory caches, optional source files, secrets, or unlisted paths.
+Verdict sub-agents receive launcher-created `verdict-inputs/` slices containing only the listed `symbol_ids`. `first-verdict` reads a role-scoped `verdict-core` slice derived from `decision-brief.json` and filtered to the execution agent's output view input profiles. `second-verdict` reads `verdict-core` plus a selected-symbol slice derived from `verdict-first.json`. Raw prompt fallback is forbidden for verdict stages. Verdict sub-agents may use read-only local shell commands such as `cat` and `jq` only for explicitly listed artifact/persona/rule files. Do not load unrelated symbols, raw memory caches, optional source files, secrets, or unlisted paths.
 
 ## `first-verdict`
 
-Selected three first-verdict functional personas independently score every eligible symbol: `analyst-quality-value`, `analyst-momentum-cycle`, and `analyst-risk-allocation`.
+Selected first-verdict execution personas produce four canonical independent scores for every eligible symbol. `analyst-fundamental-risk` runs once and must return two independent views: `analyst-quality-value` and `analyst-risk-allocation`. `analyst-market-news` runs once and must return two independent views: `analyst-momentum-cycle` and `analyst-news-flow`.
 
 - `analyst-quality-value` covers financial stability, earnings growth, valuation, and quality/value factors.
 - `analyst-momentum-cycle` covers price trend, supply/demand, sector cycle, macro sensitivity, theme/event momentum, and earnings momentum.
 - `analyst-risk-allocation` covers volatility, liquidity, stop-loss room, duplicate ETF/index exposure, concentration, and portfolio fit.
+- `analyst-news-flow` covers supplied KIS news/disclosure direction, materiality, freshness, and mixed-news risk. If no usable news/disclosure summary is supplied, it must return neutral `score=5` and `confidence=5`.
+
+When `agent_role` is `analyst-fundamental-risk` or `analyst-market-news`, return each symbol with a `views` object instead of top-level `score` and `confidence`:
+
+```json
+{
+  "symbol_id": "005930",
+  "symbol_name": "삼성전자",
+  "views": {
+    "analyst-quality-value": {
+      "score": 6,
+      "confidence": 7,
+      "reason_code": "hold_neutral",
+      "one_line_reason": "quality/value-only reason",
+      "missing_data": []
+    },
+    "analyst-risk-allocation": {
+      "score": 5,
+      "confidence": 6,
+      "reason_code": "risk_neutral",
+      "one_line_reason": "risk/allocation-only reason",
+      "missing_data": []
+    }
+  }
+}
+```
+
+For `analyst-market-news`, use the same shape with `views.analyst-momentum-cycle` and `views.analyst-news-flow`.
+
+The two views in each combined execution agent must be evaluated independently. Do not copy one view's score, confidence, reason_code, or one_line_reason into the other view.
 
 Score scale:
 
@@ -84,11 +123,22 @@ Return JSON:
     {
       "symbol_id": "",
       "symbol_name": "",
-      "score": 5,
-      "confidence": 5,
-      "reason_code": "hold_neutral",
-      "one_line_reason": "",
-      "missing_data": []
+      "views": {
+        "analyst-momentum-cycle": {
+          "score": 5,
+          "confidence": 5,
+          "reason_code": "hold_neutral",
+          "one_line_reason": "",
+          "missing_data": []
+        },
+        "analyst-news-flow": {
+          "score": 5,
+          "confidence": 5,
+          "reason_code": "no_news_neutral",
+          "one_line_reason": "",
+          "missing_data": []
+        }
+      }
     }
   ],
   "errors": []

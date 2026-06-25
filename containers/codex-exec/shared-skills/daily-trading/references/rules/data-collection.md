@@ -30,7 +30,7 @@ Main agent owns price/chart lookup through `scripts/collect_main_evidence.py`. I
 - `price.snapshot_mode`
 - `eligible_for_verdict`
 - `required_missing`, `local_signals`, `sources`, `errors`
-- compact `charts.daily`, `charts.weekly`, `charts.monthly`, optional `intraday`
+- compact `charts.daily`, `charts.weekly`, `charts.monthly`, optional `intraday` in `price-chart.json`
 - compact `orderbook_summary`, `trade_flow_summary`, `investor_flow_summary`
 
 Use `symbol_id`, `symbol_name`, and nested `price.*`; alias-only fields such as `symbol`, `stock_code`, `pdno`, `current_or_latest_price`, or numeric schema versions are not canonical.
@@ -89,7 +89,7 @@ Ineligible symbols remain in artifacts and report, but are excluded from verdict
 
 ## `decision-brief.json`
 
-`decision-brief.json` is the compact canonical verdict input for the run record. Verdict sub-agents receive launcher-created lossless `verdict-core` slices derived from it; `second-verdict` also receives a selected-symbol first-verdict slice instead of full `verdict-first.json`.
+`decision-brief.json` is the compact canonical verdict input for the run record. Verdict sub-agents receive launcher-created `verdict-core` slices derived from it; first-verdict slices are role-scoped by output view input profiles, and `second-verdict` also receives a selected-symbol first-verdict slice instead of full `verdict-first.json`.
 
 Include only:
 
@@ -97,7 +97,9 @@ Include only:
 - eligibility, evidence mode, exclusion reasons, warnings
 - current-or-last price, observation timestamp, snapshot mode
 - up to twelve price/chart signals per symbol
-- compact chart/orderbook/trade-flow/investor-flow context when collected
+- compact chart summaries plus recent chart rows, and orderbook/trade-flow/investor-flow context when collected
+
+`price-chart.json` remains the canonical raw chart artifact. `decision-brief.json` should not fan out full daily/weekly/monthly/intraday row sets to verdict sub-agents; include deterministic chart summaries and a small recent-row sample so model input stays compact while the original rows remain available for regeneration or audit.
 - optional financial/news summaries within the limits above
 - account exposure summary
 - non-sensitive missing/error context

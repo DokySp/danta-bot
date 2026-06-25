@@ -30,9 +30,8 @@ TOKEN_USAGE_FIELDS = (
     "total_tokens",
 )
 FIRST_VERDICT_ROLES = (
-    "analyst-quality-value",
-    "analyst-momentum-cycle",
-    "analyst-risk-allocation",
+    "analyst-fundamental-risk",
+    "analyst-market-news",
 )
 COMMAND_OUTPUT_LIMIT = 2000
 ORDER_PATH_AUTO = "auto"
@@ -1664,6 +1663,10 @@ if output_path is None:
 
 prompt = sys.argv[-1] if sys.argv else ""
 stage = "second-verdict" if "stage: second-verdict" in prompt else "first-verdict"
+agent_role = ""
+role_match = re.search(r"agent_role:\\s*([^\\n]+)", prompt)
+if role_match:
+    agent_role = role_match.group(1).strip()
 match = re.search(r"symbol_ids:\\s*([^\\n]+)", prompt)
 symbols = [item.strip() for item in (match.group(1).split(",") if match else ["005930"]) if item.strip()]
 rows = []
@@ -1678,15 +1681,50 @@ for index, symbol in enumerate(symbols, start=1):
             "one_line_reason": "self-test"
         })
     else:
-        rows.append({
-            "symbol_id": symbol,
-            "symbol_name": symbol,
-            "score": 8 if symbol == "005930" else 5,
-            "confidence": 8,
-            "reason_code": "buy_candidate" if symbol == "005930" else "hold_neutral",
-            "one_line_reason": "self-test",
-            "missing_data": []
-        })
+        row = {"symbol_id": symbol, "symbol_name": symbol}
+        if agent_role == "analyst-fundamental-risk":
+            row["views"] = {
+                "analyst-quality-value": {
+                    "score": 8 if symbol == "005930" else 5,
+                    "confidence": 8,
+                    "reason_code": "buy_candidate" if symbol == "005930" else "hold_neutral",
+                    "one_line_reason": "quality self-test",
+                    "missing_data": []
+                },
+                "analyst-risk-allocation": {
+                    "score": 8 if symbol == "005930" else 5,
+                    "confidence": 8,
+                    "reason_code": "buy_candidate" if symbol == "005930" else "hold_neutral",
+                    "one_line_reason": "risk self-test",
+                    "missing_data": []
+                }
+            }
+        elif agent_role == "analyst-market-news":
+            row["views"] = {
+                "analyst-momentum-cycle": {
+                    "score": 8 if symbol == "005930" else 5,
+                    "confidence": 8,
+                    "reason_code": "buy_candidate" if symbol == "005930" else "hold_neutral",
+                    "one_line_reason": "momentum self-test",
+                    "missing_data": []
+                },
+                "analyst-news-flow": {
+                    "score": 5,
+                    "confidence": 5,
+                    "reason_code": "no_news_neutral",
+                    "one_line_reason": "뉴스 정보가 없어 중립 5점",
+                    "missing_data": ["news_summary"]
+                }
+            }
+        else:
+            row.update({
+                "score": 8 if symbol == "005930" else 5,
+                "confidence": 8,
+                "reason_code": "buy_candidate" if symbol == "005930" else "hold_neutral",
+                "one_line_reason": "self-test",
+                "missing_data": []
+            })
+        rows.append(row)
 payload = {"stage": stage, "agent_id": "fake", "persona": "fake", "human_markdown_path": "", "symbols": rows, "errors": []}
 output_path.parent.mkdir(parents=True, exist_ok=True)
 output_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
@@ -2180,7 +2218,7 @@ def run_self_test() -> int:
                     date="2026-06-18",
                     reuse_existing_artifacts=True,
                     skip_account=False,
-                    max_workers=3,
+                    max_workers=2,
                 )
             )
             summary = pipeline.run()
@@ -2205,9 +2243,9 @@ def run_self_test() -> int:
                 failures.append(
                     "execution-plan did not fall back to decision-brief price for a new holding with missing account current_price"
                 )
-            if summary["token_usage"]["subagents"]["total_tokens"] != 480:
+            if summary["token_usage"]["subagents"]["total_tokens"] != 360:
                 failures.append(f"unexpected subagent token total: {summary['token_usage']}")
-            if summary["token_usage"]["main"]["total_tokens"] != 17 or summary["token_usage"]["total"]["total_tokens"] != 497:
+            if summary["token_usage"]["main"]["total_tokens"] != 17 or summary["token_usage"]["total"]["total_tokens"] != 377:
                 failures.append(f"unexpected pipeline token summary with main events: {summary['token_usage']}")
             verdict_summary = summary.get("verdict_summary") if isinstance(summary.get("verdict_summary"), dict) else {}
             if verdict_summary.get("symbol_count") != 1 or not verdict_summary.get("symbols"):
@@ -2507,7 +2545,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--date", default="")
     run.add_argument("--reuse-existing-artifacts", action="store_true")
     run.add_argument("--skip-account", action="store_true")
-    run.add_argument("--max-workers", type=int, default=3)
+    run.add_argument("--max-workers", type=int, default=2)
 
     summarize = subparsers.add_parser("summarize", help="Rebuild pipeline-summary.json and the portfolio Markdown report from existing run artifacts.")
     summarize.add_argument("--workspace-dir", default=".")

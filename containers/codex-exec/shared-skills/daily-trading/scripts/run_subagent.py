@@ -41,9 +41,60 @@ TEXT_OUTPUT_STAGES = FINANCIAL_PATH_OUTPUT_STAGES | NEWS_PATH_OUTPUT_STAGES
 OPTIONAL_GROUP_FAILURE_STAGES = TEXT_OUTPUT_STAGES
 VERDICT_STAGES = {"first-verdict", "second-verdict"}
 SELECTED_FIRST_VERDICT_ROLES = {
-    "analyst-quality-value",
-    "analyst-momentum-cycle",
-    "analyst-risk-allocation",
+    "analyst-fundamental-risk",
+    "analyst-market-news",
+}
+COMBINED_FIRST_VERDICT_ROLE_OUTPUTS = {
+    "analyst-fundamental-risk": (
+        "analyst-quality-value",
+        "analyst-risk-allocation",
+    ),
+    "analyst-market-news": (
+        "analyst-momentum-cycle",
+        "analyst-news-flow",
+    ),
+}
+FIRST_VERDICT_VIEW_INPUT_FIELDS = {
+    "analyst-quality-value": {
+        "price",
+        "financial_summary",
+        "etf_summary",
+        "news_summary",
+    },
+    "analyst-risk-allocation": {
+        "price",
+        "account_exposure",
+        "orderbook_summary",
+        "trade_flow_summary",
+        "investor_flow_summary",
+        "etf_summary",
+    },
+    "analyst-momentum-cycle": {
+        "price",
+        "price_chart_signals",
+        "chart_context",
+        "orderbook_summary",
+        "trade_flow_summary",
+        "investor_flow_summary",
+    },
+    "analyst-news-flow": {
+        "price",
+        "news_summary",
+    },
+}
+FIRST_VERDICT_ALWAYS_SYMBOL_FIELDS = {
+    "symbol_id",
+    "symbol",
+    "symbol_name",
+    "code",
+    "name",
+    "market",
+    "eligible_for_verdict",
+    "evidence_mode",
+    "warnings",
+    "errors",
+    "missing_data",
+    "exclusion_reasons",
 }
 MAX_BLANK_LINES = 1
 RAW_RETENTION_VALUES = {"always", "failed", "never"}
@@ -291,11 +342,57 @@ def filter_symbols(payload: Any, symbol_ids: list[str]) -> Any:
     return filtered
 
 
-def build_verdict_core_payload(payload: Any, symbol_ids: list[str]) -> Any:
+def first_verdict_output_roles(agent_role: str) -> tuple[str, ...]:
+    role = safe_name(agent_role).lower()
+    return COMBINED_FIRST_VERDICT_ROLE_OUTPUTS.get(role, (role,))
+
+
+def first_verdict_symbol_fields(agent_role: str) -> set[str] | None:
+    roles = first_verdict_output_roles(agent_role)
+    if not roles:
+        return None
+    fields = set(FIRST_VERDICT_ALWAYS_SYMBOL_FIELDS)
+    matched = False
+    for role in roles:
+        role_fields = FIRST_VERDICT_VIEW_INPUT_FIELDS.get(role)
+        if role_fields:
+            fields.update(role_fields)
+            matched = True
+    return fields if matched else None
+
+
+def filter_symbol_fields_for_agent(payload: Any, agent_role: str) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+    fields = first_verdict_symbol_fields(agent_role)
+    if not fields:
+        return payload
+    filtered = dict(payload)
+    symbols = filtered.get("symbols")
+    if isinstance(symbols, list):
+        filtered["symbols"] = [
+            {key: value for key, value in item.items() if key in fields}
+            if isinstance(item, dict)
+            else item
+            for item in symbols
+        ]
+    elif isinstance(symbols, dict):
+        filtered["symbols"] = {
+            symbol_id: {key: value for key, value in item.items() if key in fields}
+            if isinstance(item, dict)
+            else item
+            for symbol_id, item in symbols.items()
+        }
+    filtered["slice_agent_role"] = safe_name(agent_role).lower()
+    filtered["slice_output_roles"] = list(first_verdict_output_roles(agent_role))
+    return filtered
+
+
+def build_verdict_core_payload(payload: Any, symbol_ids: list[str], agent_role: str = "") -> Any:
     filtered = filter_symbols(payload, symbol_ids)
     if not isinstance(filtered, dict):
         return filtered
-    core = dict(filtered)
+    core = dict(filter_symbol_fields_for_agent(filtered, agent_role) if agent_role else filtered)
     core["slice_type"] = "verdict-core"
     core["source_brief_type"] = filtered.get("brief_type") or "decision-brief"
     return core
@@ -339,7 +436,7 @@ def write_verdict_input_slices(spec: dict[str, Any]) -> dict[str, str]:
         if payload is None:
             continue
         if artifact_key == "decision_brief":
-            sliced = build_verdict_core_payload(payload, symbols)
+            sliced = build_verdict_core_payload(payload, symbols, str(spec.get("agent_role") or ""))
             relative_name = "verdict-core"
             slice_paths["verdict_core"] = str(slice_dir / f"{task_name}.{relative_name}.json")
         else:
@@ -424,6 +521,17 @@ def compact_verdict_prompt(spec: dict[str, Any]) -> str | None:
         lines.append(f"verdict_format: {verdict_format}")
     if symbols:
         lines.append("symbol_ids: " + ",".join(symbols))
+    if stage == "first-verdict" and agent_role in COMBINED_FIRST_VERDICT_ROLE_OUTPUTS:
+        output_roles = COMBINED_FIRST_VERDICT_ROLE_OUTPUTS[agent_role]
+        lines.extend(
+            [
+                "",
+                f"For this combined first-verdict task, return two independent view results for every symbol: {', '.join(output_roles)}.",
+                "Use a separate pass for each view and evaluate that view only from its own rubric and supplied evidence.",
+                "Do not let either view's score, confidence, reason_code, or one_line_reason depend on the other view's conclusion.",
+                f"Return each symbol with a views object keyed by {', '.join(output_roles)}; each view must contain score, confidence, reason_code, one_line_reason, and missing_data.",
+            ]
+        )
     if stage == "second-verdict":
         lines.extend(
             [
@@ -509,7 +617,7 @@ def assert_all_supported_stages_use_expected_models() -> None:
         ),
         (
             "first-verdict",
-            "analyst-momentum-cycle",
+            "analyst-market-news",
             FIRST_VERDICT_SUBAGENT_MODEL,
             FIRST_VERDICT_SUBAGENT_REASONING_EFFORT,
         ),
@@ -595,12 +703,21 @@ def normalize_compact_verdict_payload(payload: Any, stage: str) -> Any:
             copied = dict(symbol)
             if stage == "first-verdict":
                 copied.setdefault("missing_data", [])
+                views = copied.get("views")
+                if isinstance(views, dict):
+                    copied_views = {}
+                    for role, view in views.items():
+                        if isinstance(view, dict):
+                            copied_view = dict(view)
+                            copied_view.setdefault("missing_data", [])
+                            copied_views[role] = copied_view
+                    copied["views"] = copied_views
             normalized_symbols.append(copied)
         normalized["symbols"] = normalized_symbols
     return normalized
 
 
-def compact_verdict_payload_errors(payload: Any, stage: str) -> list[dict[str, Any]]:
+def compact_verdict_payload_errors(payload: Any, stage: str, agent_role: str = "") -> list[dict[str, Any]]:
     errors: list[dict[str, Any]] = []
 
     def walk(value: Any, path: str) -> None:
@@ -649,7 +766,22 @@ def compact_verdict_payload_errors(payload: Any, stage: str) -> list[dict[str, A
                 }
             )
             continue
-        for field in ("symbol_id", "symbol_name", "reason_code", "one_line_reason"):
+        views = symbol.get("views")
+        output_roles = COMBINED_FIRST_VERDICT_ROLE_OUTPUTS.get(agent_role, ())
+        requires_combined_views = stage == "first-verdict" and bool(output_roles)
+        has_combined_views = stage == "first-verdict" and bool(output_roles) and isinstance(views, dict) and all(
+            isinstance(views.get(role), dict)
+            for role in output_roles
+        )
+        if requires_combined_views and not has_combined_views:
+            errors.append(
+                {
+                    "code": "invalid_compact_verdict_schema",
+                    "message": f"symbols[{index}] for {agent_role} must include views.{', views.'.join(output_roles)}",
+                }
+            )
+        required_symbol_fields = ("symbol_id", "symbol_name") if has_combined_views else ("symbol_id", "symbol_name", "reason_code", "one_line_reason")
+        for field in required_symbol_fields:
             if field not in symbol:
                 errors.append(
                     {
@@ -658,14 +790,26 @@ def compact_verdict_payload_errors(payload: Any, stage: str) -> list[dict[str, A
                     }
                 )
         if stage == "first-verdict":
-            for field in ("score", "confidence"):
-                if field not in symbol:
-                    errors.append(
-                        {
-                            "code": "invalid_compact_verdict_schema",
-                            "message": f"symbols[{index}] missing {field}",
-                        }
-                    )
+            if has_combined_views:
+                for role in output_roles:
+                    view = views[role]
+                    for field in ("score", "confidence", "reason_code", "one_line_reason"):
+                        if field not in view:
+                            errors.append(
+                                {
+                                    "code": "invalid_compact_verdict_schema",
+                                    "message": f"symbols[{index}].views.{role} missing {field}",
+                                }
+                            )
+            else:
+                for field in ("score", "confidence"):
+                    if field not in symbol:
+                        errors.append(
+                            {
+                                "code": "invalid_compact_verdict_schema",
+                                "message": f"symbols[{index}] missing {field}",
+                            }
+                        )
         if stage == "second-verdict":
             for field in ("target_holding_quantity", "relative_attractiveness_rank"):
                 if field not in symbol:
@@ -838,7 +982,7 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
         errors.extend(parse_errors)
         if stage in VERDICT_STAGES and prompt_mode == "compact_verdict" and parsed_json is not None:
             parsed_json = normalize_compact_verdict_payload(parsed_json, stage)
-            compact_verdict_errors = compact_verdict_payload_errors(parsed_json, stage)
+            compact_verdict_errors = compact_verdict_payload_errors(parsed_json, stage, str(spec.get("agent_role") or ""))
             errors.extend(compact_verdict_errors)
     if returncode not in (0, None):
         errors.append({"code": "nonzero_returncode", "message": f"codex exec exited with {returncode}"})
@@ -1027,6 +1171,46 @@ else:
         prompt = sys.argv[-1] if sys.argv else ""
         if "stage: first-verdict" in prompt or "stage: second-verdict" in prompt:
             stage = "second-verdict" if "stage: second-verdict" in prompt else "first-verdict"
+            if "agent_role: analyst-fundamental-risk" in prompt:
+                first_payload = {
+                    "views": {
+                        "analyst-quality-value": {
+                            "score": 5,
+                            "confidence": 5,
+                            "reason_code": "hold_neutral",
+                            "one_line_reason": "quality self-test",
+                            "missing_data": [],
+                        },
+                        "analyst-risk-allocation": {
+                            "score": 5,
+                            "confidence": 5,
+                            "reason_code": "hold_neutral",
+                            "one_line_reason": "risk self-test",
+                            "missing_data": [],
+                        },
+                    }
+                }
+            elif "agent_role: analyst-market-news" in prompt:
+                first_payload = {
+                    "views": {
+                        "analyst-momentum-cycle": {
+                            "score": 5,
+                            "confidence": 5,
+                            "reason_code": "hold_neutral",
+                            "one_line_reason": "momentum self-test",
+                            "missing_data": [],
+                        },
+                        "analyst-news-flow": {
+                            "score": 5,
+                            "confidence": 5,
+                            "reason_code": "no_news_neutral",
+                            "one_line_reason": "뉴스 정보가 없어 중립 5점",
+                            "missing_data": ["news_summary"],
+                        },
+                    }
+                }
+            else:
+                first_payload = {"score": 5, "confidence": 5, "missing_data": []}
             payload = {
                 "agent_id": "fake",
                 "persona": "fake",
@@ -1041,7 +1225,7 @@ else:
                         **(
                             {"target_holding_quantity": 0, "relative_attractiveness_rank": 1}
                             if stage == "second-verdict"
-                            else {"score": 5, "confidence": 5, "missing_data": []}
+                            else first_payload
                         ),
                     }
                 ],
@@ -1096,7 +1280,7 @@ def compact_spec(tmp: Path, *, stage: str, agent_role: str, task_name: str) -> d
     payload["artifact_paths"] = {
         "decision_brief": str(tmp / "reports" / "runs" / "self-test" / "decision-brief.json"),
         "verdict_first": str(tmp / "reports" / "runs" / "self-test" / "verdict-first.json"),
-        "persona": "references/personas/analyst-momentum-cycle.md",
+        "persona": f"references/personas/{agent_role}.md",
         "verdict_format": "references/rules/verdict-format.md",
     }
     payload["symbol_ids"] = ["005930", {"symbol_id": "000660"}, "005930"]
@@ -1132,6 +1316,12 @@ def write_sample_verdict_inputs(tmp: Path) -> None:
                         {"signal": "s3", "strength": 3, "timeframe": "M"},
                         {"signal": "s4", "strength": 4, "timeframe": "Y"},
                     ],
+                    "chart_context": {"daily": [{"close": 70000}], "weekly": [{"close": 69000}]},
+                    "financial_summary": [{"metric": "roe", "value": "10"}],
+                    "account_exposure": {"holding_quantity": 1},
+                    "orderbook_summary": {"bid_depth": 100},
+                    "trade_flow_summary": {"tick_count": 3},
+                    "investor_flow_summary": {"foreign_net_buy_quantity": 1000},
                     "news_summary": [
                         {"content": "n1", "url": "u1"},
                         {"content": "n2", "url": "u2"},
@@ -1181,18 +1371,19 @@ def assert_prompt_compaction() -> None:
 
 
 def assert_compact_verdict_prompt(tmp: Path) -> None:
-    prompt = build_prompt(compact_spec(tmp, stage="first-verdict", agent_role="analyst-momentum-cycle", task_name="first"))
+    prompt = build_prompt(compact_spec(tmp, stage="first-verdict", agent_role="analyst-fundamental-risk", task_name="first"))
     required_parts = [
         "stage: first-verdict",
-        "agent_role: analyst-momentum-cycle",
+        "agent_role: analyst-fundamental-risk",
         "You may use read-only local shell commands such as cat and jq only for the explicitly listed files.",
         "Do not call KIS, MCP, web, network, account/order APIs, or external data sources.",
         "Do not write files, create Markdown, emit diffs, or wrap output in code fences.",
         "Read only the listed symbol_ids from artifact files; do not load unrelated symbols, raw cache files, secrets, or unlisted paths.",
         "decision_brief:",
-        "persona: references/personas/analyst-momentum-cycle.md",
+        "persona: references/personas/analyst-fundamental-risk.md",
         "verdict_format: references/rules/verdict-format.md",
         "symbol_ids: 005930,000660",
+        "Return each symbol with a views object keyed by analyst-quality-value, analyst-risk-allocation",
         "Return JSON only",
     ]
     missing = [part for part in required_parts if part not in prompt]
@@ -1218,6 +1409,19 @@ def assert_compact_verdict_prompt(tmp: Path) -> None:
 
 def assert_verdict_input_slices(tmp: Path) -> None:
     write_sample_verdict_inputs(tmp)
+    first_payload = compact_spec(tmp, stage="first-verdict", agent_role="analyst-market-news", task_name="slice-first")
+    first_slices = write_verdict_input_slices(first_payload)
+    first_core = load_json(Path(first_slices["decision_brief"]))
+    first_symbol = first_core["symbols"][0]
+    if first_core.get("slice_output_roles") != ["analyst-momentum-cycle", "analyst-news-flow"]:
+        raise AssertionError(f"first-verdict slice did not record output roles: {first_core}")
+    if first_symbol.get("chart_context", {}).get("daily", [{}])[0].get("close") != 70000:
+        raise AssertionError(f"market-news slice dropped chart_context: {first_symbol}")
+    if len(first_symbol.get("news_summary", [])) != 4:
+        raise AssertionError(f"market-news slice dropped news_summary: {first_symbol}")
+    if "financial_summary" in first_symbol or "account_exposure" in first_symbol or "custom_detail" in first_symbol:
+        raise AssertionError(f"market-news slice kept unrelated fields: {first_symbol}")
+
     payload = compact_spec(tmp, stage="second-verdict", agent_role="judge", task_name="slice-test")
     slices = write_verdict_input_slices(payload)
     expected_keys = {"decision_brief", "verdict_core", "verdict_first"}
@@ -1247,7 +1451,7 @@ def assert_verdict_input_slices(tmp: Path) -> None:
             if first_symbol.get("warnings") != ["w1", "w2", "w3", "w4"]:
                 raise AssertionError(f"verdict-core truncated warnings: {first_symbol}")
             if first_symbol.get("custom_detail") != {"keep": True}:
-                raise AssertionError(f"verdict-core dropped custom detail: {first_symbol}")
+                raise AssertionError(f"second-verdict verdict-core dropped custom detail: {first_symbol}")
         if key == "verdict_first" and slice_payload.get("slice_type") != "verdict-first-slice":
             raise AssertionError(f"second-verdict first slice missing slice_type: {slice_payload}")
         if key == "verdict_first":
@@ -1300,12 +1504,12 @@ def run_self_test() -> int:
                 assert_compact_verdict_prompt(tmp)
                 assert_verdict_input_slices(tmp)
                 missing_brief = compact_spec(
-                    tmp, stage="first-verdict", agent_role="analyst-momentum-cycle", task_name="missing-brief"
+                    tmp, stage="first-verdict", agent_role="analyst-market-news", task_name="missing-brief"
                 )
                 missing_brief["artifact_paths"].pop("decision_brief")
                 assert_invalid_spec(missing_brief, "artifact_paths.decision_brief")
                 missing_symbols = compact_spec(
-                    tmp, stage="first-verdict", agent_role="analyst-momentum-cycle", task_name="missing-symbols"
+                    tmp, stage="first-verdict", agent_role="analyst-market-news", task_name="missing-symbols"
                 )
                 missing_symbols["symbol_ids"] = []
                 assert_invalid_spec(missing_symbols, "symbol_ids")
@@ -1438,8 +1642,11 @@ def run_self_test() -> int:
                 alias_errors = compact_verdict_payload_errors(alias_payload, "first-verdict")
                 if alias_errors:
                     raise AssertionError(f"compact verdict alias normalization failed: {alias_errors}")
+                combined_old_shape_errors = compact_verdict_payload_errors(alias_payload, "first-verdict", "analyst-fundamental-risk")
+                if not any("must include views" in error.get("message", "") for error in combined_old_shape_errors):
+                    raise AssertionError(f"combined first-verdict old shape was accepted: {combined_old_shape_errors}")
                 raw_with_artifacts = compact_spec(
-                    tmp, stage="first-verdict", agent_role="analyst-momentum-cycle", task_name="raw-with-artifacts"
+                    tmp, stage="first-verdict", agent_role="analyst-market-news", task_name="raw-with-artifacts"
                 )
                 raw_with_artifacts["prompt"] = '{"return":"json only"}'
                 assert_invalid_spec(raw_with_artifacts, "raw prompt fallback is forbidden")
@@ -1453,7 +1660,7 @@ def run_self_test() -> int:
                     COLLECTION_SUBAGENT_REASONING_EFFORT,
                 ),
                 (
-                    compact_spec(tmp, stage="first-verdict", agent_role="analyst-quality-value", task_name="first"),
+                    compact_spec(tmp, stage="first-verdict", agent_role="analyst-fundamental-risk", task_name="first"),
                     FIRST_VERDICT_SUBAGENT_MODEL,
                     FIRST_VERDICT_SUBAGENT_REASONING_EFFORT,
                 ),
@@ -1474,16 +1681,18 @@ def run_self_test() -> int:
                 except AssertionError as exc:
                     failures.append(str(exc))
 
+            write_sample_verdict_inputs(tmp)
             compact_wrapper = run_one(
-                compact_spec(tmp, stage="first-verdict", agent_role="analyst-momentum-cycle", task_name="compact-first")
+                compact_spec(tmp, stage="first-verdict", agent_role="analyst-market-news", task_name="compact-first")
             )
             if compact_wrapper["status"] != "success" or compact_wrapper.get("prompt_mode") != "compact_verdict":
                 failures.append(f"compact verdict spec returned unexpected wrapper: {compact_wrapper}")
             if not compact_wrapper.get("verdict_input_paths", {}).get("decision_brief"):
                 failures.append(f"compact verdict spec did not create decision brief slice: {compact_wrapper}")
 
+            write_sample_verdict_inputs(tmp)
             reuse_spec = compact_spec(
-                tmp, stage="first-verdict", agent_role="analyst-momentum-cycle", task_name="reuse-first"
+                tmp, stage="first-verdict", agent_role="analyst-market-news", task_name="reuse-first"
             )
             first_reuse_wrapper = run_one(reuse_spec)
             argv_before = len(argv_log.read_text(encoding="utf-8").splitlines())
@@ -1515,7 +1724,7 @@ def run_self_test() -> int:
             old_raw_retention = os.environ.get("CODEX_SUBAGENT_RAW_RETENTION")
             os.environ["CODEX_SUBAGENT_RAW_RETENTION"] = "failed"
             retained_wrapper = run_one(
-                compact_spec(tmp, stage="first-verdict", agent_role="analyst-momentum-cycle", task_name="raw-retention")
+                compact_spec(tmp, stage="first-verdict", agent_role="analyst-market-news", task_name="raw-retention")
             )
             if retained_wrapper.get("raw_output_retained") is not False:
                 failures.append(f"successful raw output was not pruned with failed retention: {retained_wrapper}")
@@ -1564,7 +1773,7 @@ def run_self_test() -> int:
             os.environ["FAKE_CODEX_EMPTY_TASKS"] = "required-first"
             required_group = run_group(
                 [
-                    compact_spec(tmp, stage="first-verdict", agent_role="analyst-quality-value", task_name="required-first"),
+                    compact_spec(tmp, stage="first-verdict", agent_role="analyst-fundamental-risk", task_name="required-first"),
                     spec(tmp, stage="news-collection", agent_role="news", task_name="required-news"),
                 ],
                 max_workers=2,
