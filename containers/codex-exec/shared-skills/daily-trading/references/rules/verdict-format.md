@@ -196,6 +196,9 @@ Return JSON:
 Rules:
 
 - `target_holding_quantity` is a non-negative integer final target holding quantity, not an order quantity; order delta is calculated against expected holdings after active pending/reserved orders.
+- Use each symbol's `holding_quantity_context.expected_holding_quantity` as the explicit baseline for that target.
+- A reduce rationale must set `target_holding_quantity` below `expected_holding_quantity`; an increase rationale must set it above; a hold rationale must set it equal.
+- `reason_code` and `one_line_reason` must describe the same reduce/hold/increase direction implied by `target_holding_quantity`.
 - Every second-verdict symbol receives a target quantity, including reduce-to-zero holdings.
 - Consider relative attractiveness, duplicate exposure, current weight, price/chart conditions, and the supplied selected-symbol first-verdict results.
 - Treat `final_first_score` as the confidence-adjusted first-verdict score: `5` is neutral, below `5` is a sell/reduce opinion, and above `5` is a buy/increase opinion.

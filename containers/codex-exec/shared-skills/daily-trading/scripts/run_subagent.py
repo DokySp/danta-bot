@@ -398,6 +398,100 @@ def build_verdict_core_payload(payload: Any, symbol_ids: list[str], agent_role: 
     return core
 
 
+def int_or_zero(raw: Any) -> int:
+    if isinstance(raw, bool):
+        return 0
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, float):
+        return int(raw)
+    if isinstance(raw, str):
+        text = raw.strip().replace(",", "")
+        if not text:
+            return 0
+        try:
+            return int(float(text))
+        except ValueError:
+            return 0
+    return 0
+
+
+def first_present_int_value(*values: Any) -> int:
+    for value in values:
+        if value is not None:
+            return int_or_zero(value)
+    return 0
+
+
+def build_holding_quantity_context(symbol: dict[str, Any]) -> dict[str, Any]:
+    account = symbol.get("account_exposure")
+    if not isinstance(account, dict):
+        account = {}
+    pending_buy = first_present_int_value(
+        account.get("pending_and_reserved_buy_quantity"),
+        account.get("active_pending_buy_quantity"),
+        account.get("reserved_buy_quantity"),
+        symbol.get("pending_and_reserved_buy_quantity"),
+        symbol.get("active_pending_buy_quantity"),
+        symbol.get("reserved_buy_quantity"),
+    )
+    pending_sell = first_present_int_value(
+        account.get("pending_and_reserved_sell_quantity"),
+        account.get("active_pending_sell_quantity"),
+        account.get("reserved_sell_quantity"),
+        symbol.get("pending_and_reserved_sell_quantity"),
+        symbol.get("active_pending_sell_quantity"),
+        symbol.get("reserved_sell_quantity"),
+    )
+    current = first_present_int_value(
+        account.get("current_live_holding_quantity"),
+        account.get("holding_quantity"),
+        symbol.get("current_live_holding_quantity"),
+        symbol.get("holding_quantity"),
+    )
+    expected = current + pending_buy - pending_sell
+    return {
+        "current_live_holding_quantity": current,
+        "pending_and_reserved_buy_quantity": pending_buy,
+        "pending_and_reserved_sell_quantity": pending_sell,
+        "expected_holding_quantity": expected,
+        "target_holding_quantity_semantics": "final total holding quantity after active pending/reserved orders; not order quantity",
+        "direction_examples": {
+            "maintain": expected,
+            "increase_by_1": expected + 1,
+            "reduce_by_1": max(0, expected - 1),
+        },
+    }
+
+
+def add_second_verdict_holding_context(payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+    symbols = payload.get("symbols")
+    if isinstance(symbols, list):
+        enriched: list[Any] = []
+        for item in symbols:
+            if isinstance(item, dict):
+                copied = dict(item)
+                copied["holding_quantity_context"] = build_holding_quantity_context(copied)
+                enriched.append(copied)
+            else:
+                enriched.append(item)
+        copied_payload = dict(payload)
+        copied_payload["symbols"] = enriched
+        return copied_payload
+    if isinstance(symbols, dict):
+        copied_payload = dict(payload)
+        copied_payload["symbols"] = {
+            symbol_id: dict(item, holding_quantity_context=build_holding_quantity_context(item))
+            if isinstance(item, dict)
+            else item
+            for symbol_id, item in symbols.items()
+        }
+        return copied_payload
+    return payload
+
+
 def build_verdict_first_slice_payload(payload: Any, symbol_ids: list[str]) -> Any:
     filtered = filter_symbols(payload, symbol_ids)
     if not isinstance(filtered, dict):
@@ -437,6 +531,8 @@ def write_verdict_input_slices(spec: dict[str, Any]) -> dict[str, str]:
             continue
         if artifact_key == "decision_brief":
             sliced = build_verdict_core_payload(payload, symbols, str(spec.get("agent_role") or ""))
+            if stage == "second-verdict":
+                sliced = add_second_verdict_holding_context(sliced)
             relative_name = "verdict-core"
             slice_paths["verdict_core"] = str(slice_dir / f"{task_name}.{relative_name}.json")
         else:
@@ -1318,7 +1414,11 @@ def write_sample_verdict_inputs(tmp: Path) -> None:
                     ],
                     "chart_context": {"daily": [{"close": 70000}], "weekly": [{"close": 69000}]},
                     "financial_summary": [{"metric": "roe", "value": "10"}],
-                    "account_exposure": {"holding_quantity": 1},
+                    "account_exposure": {
+                        "current_live_holding_quantity": 10,
+                        "pending_and_reserved_buy_quantity": 2,
+                        "pending_and_reserved_sell_quantity": 1,
+                    },
                     "orderbook_summary": {"bid_depth": 100},
                     "trade_flow_summary": {"tick_count": 3},
                     "investor_flow_summary": {"foreign_net_buy_quantity": 1000},
@@ -1452,6 +1552,11 @@ def assert_verdict_input_slices(tmp: Path) -> None:
                 raise AssertionError(f"verdict-core truncated warnings: {first_symbol}")
             if first_symbol.get("custom_detail") != {"keep": True}:
                 raise AssertionError(f"second-verdict verdict-core dropped custom detail: {first_symbol}")
+            holding_context = first_symbol.get("holding_quantity_context", {})
+            if holding_context.get("expected_holding_quantity") != 11:
+                raise AssertionError(f"verdict-core did not add expected holding context: {first_symbol}")
+            if holding_context.get("direction_examples", {}).get("reduce_by_1") != 10:
+                raise AssertionError(f"verdict-core did not add target direction examples: {first_symbol}")
         if key == "verdict_first" and slice_payload.get("slice_type") != "verdict-first-slice":
             raise AssertionError(f"second-verdict first slice missing slice_type: {slice_payload}")
         if key == "verdict_first":
