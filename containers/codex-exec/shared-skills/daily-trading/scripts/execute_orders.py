@@ -657,6 +657,13 @@ def block_order(order: dict[str, Any], *, reason: str, gate: str, message: str, 
     order["attempts"].append(attempt(gate, "blocked", message, error_code))
 
 
+def buy_cash_limit(capacities: dict[str, dict[str, int]]) -> int | None:
+    positive = [as_int(item.get("max_buy_amt")) for item in capacities.values() if as_int(item.get("max_buy_amt")) > 0]
+    if positive:
+        return min(positive)
+    return None
+
+
 def apply_quantity_gates(
     order: dict[str, Any],
     *,
@@ -669,7 +676,7 @@ def apply_quantity_gates(
     capacities: dict[str, dict[str, int]],
     sell_capacities: dict[str, dict[str, int]],
     used_cash: int,
-    cash_limit: int,
+    cash_limit: int | None,
     local_sell_gate: bool,
 ) -> tuple[int, int, bool]:
     if local_sell_gate and side == "sell":
@@ -740,7 +747,25 @@ def apply_quantity_gates(
                     limit=max_qty,
                 )
                 qty = max_qty
+        if not isinstance(cap, dict) or as_int(cap.get("max_buy_amt")) <= 0:
+            block_order(
+                order,
+                reason="buy_cash_limit_missing",
+                gate="inquire_psbl_order",
+                message="max_buy_amt unavailable from order-available lookup",
+                error_code="cash_gate",
+            )
+            return qty, 0, True
         required_cash = qty * price
+        if cash_limit is None:
+            block_order(
+                order,
+                reason="buy_cash_limit_missing",
+                gate="inquire_psbl_order",
+                message="max_buy_amt unavailable from order-available lookup",
+                error_code="cash_gate",
+            )
+            return qty, 0, True
         if cash_limit and used_cash + required_cash > cash_limit:
             remaining_cash = max(0, cash_limit - used_cash)
             affordable_qty = remaining_cash // price if price > 0 else 0
@@ -749,7 +774,7 @@ def apply_quantity_gates(
                     order,
                     reason="buy_cash_gate_reduced_reverse_rank",
                     gate="inquire_psbl_order",
-                    message=f"buy candidates exceeded latest max_buy_amt {cash_limit}",
+                    message=f"buy candidates exceeded latest buy cash limit {cash_limit}",
                     error_code="cash_gate",
                 )
                 return qty, 0, True
@@ -923,11 +948,7 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
         if item.get("active_status") == "active":
             active_by_symbol.setdefault(symbol_key(item), []).append(item)
     account_by_symbol = {symbol_key(item): item for item in account.get("symbols", []) if isinstance(item, dict)}
-    cash_limit = as_int((account.get("account_summary") or {}).get("cash_amount"))
-    if capacities:
-        positive = [as_int(item.get("max_buy_amt")) for item in capacities.values() if as_int(item.get("max_buy_amt")) > 0]
-        if positive:
-            cash_limit = min(cash_limit or positive[0], *positive)
+    cash_limit = buy_cash_limit(capacities)
     used_cash = 0
     order_adjustments: list[dict[str, Any]] = []
     submitted = 0
@@ -1326,8 +1347,8 @@ def self_test() -> int:
             failures.append("requires_main_agent_order_execution not cleared")
         if orders["005930"].get("reason") != "existing_matching_reservation_kept":
             failures.append("matching existing reservation not kept")
-        if orders["000270"].get("reason") != "validated_dry_run_not_submitted":
-            failures.append("dry-run buy not validated")
+        if orders["000270"].get("reason") != "buy_cash_limit_missing":
+            failures.append(f"dry-run buy without max_buy_amt was not blocked: {orders['000270']}")
         account_after = load_json(root / "account-before-order.json")
         if account_after.get("active_order_lookup_performed") is not True or account_after.get("order_available_lookup_performed") is not True:
             failures.append("account gates not refreshed")
@@ -1499,8 +1520,8 @@ def self_test() -> int:
         immediate_order = immediate_payload["orders"][0]
         if immediate_order.get("order_api") != "order_cash" or immediate_order.get("order_path") != "immediate":
             failures.append(f"immediate order path did not select order_cash: {immediate_order}")
-        if immediate_order.get("reason") != "validated_dry_run_not_submitted":
-            failures.append(f"immediate dry-run was not validated: {immediate_order}")
+        if immediate_order.get("reason") != "buy_cash_limit_missing":
+            failures.append(f"immediate dry-run without max_buy_amt was not blocked: {immediate_order}")
 
         account_after["active_orders"] = [
             {"symbol_id": "000270", "symbol_name": "기아", "order_id": "c1", "order_kind": "pending", "direction": "buy", "remaining_quantity": 1, "order_price": 100000, "active_status": "active", "order_api": "order_cash", "order_path": "immediate", "execution_environment": "real", "observed_at": now_iso()},
@@ -1560,6 +1581,122 @@ def self_test() -> int:
             failures.append(f"buy order was not reduced to remaining cash: {reduction_orders['000810']}")
         if (reduction_orders["000810"].get("quantity_adjustment") or {}).get("reason") != "buy_quantity_reduced_to_remaining_cash":
             failures.append(f"cash reduction reason missing: {reduction_orders['000810']}")
+
+        order_available_cash_execution = {
+            "orders": [
+                {"symbol_id": "000660", "symbol_name": "SK하이닉스", "target_holding_quantity": 1, "order_price": 2_955_000, "order_path": "immediate"}
+            ]
+        }
+        reconcile(
+            {"account_summary": {"cash_amount": 861_938}, "symbols": [{"symbol_id": "000660", "symbol_name": "SK하이닉스", "current_live_holding_quantity": 0}]},
+            order_available_cash_execution,
+            [],
+            {"000660": {"max_buy_qty": 1, "max_buy_amt": 4_181_123}},
+            {},
+            submit=False,
+            kis=None,
+        )
+        order_available_cash_order = order_available_cash_execution["orders"][0]
+        if order_available_cash_execution.get("latest_available_cash") != 4_181_123:
+            failures.append(f"latest available cash should come from KIS max_buy_amt: {order_available_cash_execution}")
+        if order_available_cash_order.get("reason") != "validated_dry_run_not_submitted":
+            failures.append(f"KIS order-available cash should allow one high-price share despite lower cash_amount: {order_available_cash_order}")
+
+        order_available_multi_execution = {
+            "orders": [
+                {"symbol_id": "000660", "symbol_name": "SK하이닉스", "target_holding_quantity": 1, "order_price": 2_000_000, "order_path": "immediate"},
+                {"symbol_id": "005930", "symbol_name": "삼성전자", "target_holding_quantity": 10, "order_price": 100_000, "order_path": "immediate"},
+            ]
+        }
+        reconcile(
+            {
+                "account_summary": {"cash_amount": 100_000},
+                "symbols": [
+                    {"symbol_id": "000660", "symbol_name": "SK하이닉스", "current_live_holding_quantity": 0},
+                    {"symbol_id": "005930", "symbol_name": "삼성전자", "current_live_holding_quantity": 0},
+                ],
+            },
+            order_available_multi_execution,
+            [],
+            {"000660": {"max_buy_qty": 1, "max_buy_amt": 2_500_000}, "005930": {"max_buy_qty": 10, "max_buy_amt": 2_500_000}},
+            {},
+            submit=False,
+            kis=None,
+        )
+        order_available_multi_orders = {item["symbol_id"]: item for item in order_available_multi_execution["orders"]}
+        if order_available_multi_execution.get("latest_available_cash") != 2_500_000:
+            failures.append(f"multi-buy latest cash should come from KIS max_buy_amt: {order_available_multi_execution}")
+        if order_available_multi_orders["000660"].get("reason") != "validated_dry_run_not_submitted":
+            failures.append(f"first KIS-cash buy should pass despite lower cash_amount: {order_available_multi_orders['000660']}")
+        if order_available_multi_orders["005930"].get("validated_order_quantity") != 5:
+            failures.append(f"second KIS-cash buy should be reduced to remaining KIS cash: {order_available_multi_orders['005930']}")
+        if (order_available_multi_orders["005930"].get("quantity_adjustment") or {}).get("reason") != "buy_quantity_reduced_to_remaining_cash":
+            failures.append(f"second KIS-cash buy reduction reason missing: {order_available_multi_orders['005930']}")
+
+        missing_max_buy_amt_execution = {
+            "orders": [
+                {"symbol_id": "000270", "symbol_name": "기아", "target_holding_quantity": 3, "order_price": 100_000, "order_path": "immediate"}
+            ]
+        }
+        reconcile(
+            {"account_summary": {"cash_amount": 250_000}, "symbols": [{"symbol_id": "000270", "symbol_name": "기아", "current_live_holding_quantity": 0}]},
+            missing_max_buy_amt_execution,
+            [],
+            {},
+            {},
+            submit=False,
+            kis=None,
+        )
+        missing_max_buy_amt_order = missing_max_buy_amt_execution["orders"][0]
+        if missing_max_buy_amt_execution.get("latest_available_cash") is not None:
+            failures.append(f"latest available cash should stay unset without max_buy_amt: {missing_max_buy_amt_execution}")
+        if missing_max_buy_amt_order.get("reason") != "buy_cash_limit_missing":
+            failures.append(f"buy without max_buy_amt should be blocked instead of using account cash: {missing_max_buy_amt_order}")
+
+        mixed_max_buy_amt_execution = {
+            "orders": [
+                {"symbol_id": "000270", "symbol_name": "기아", "target_holding_quantity": 1, "order_price": 100_000, "order_path": "immediate"},
+                {"symbol_id": "005930", "symbol_name": "삼성전자", "target_holding_quantity": 1, "order_price": 70_000, "order_path": "immediate"},
+            ]
+        }
+        reconcile(
+            {
+                "account_summary": {"cash_amount": 1_000_000},
+                "symbols": [
+                    {"symbol_id": "000270", "symbol_name": "기아", "current_live_holding_quantity": 0},
+                    {"symbol_id": "005930", "symbol_name": "삼성전자", "current_live_holding_quantity": 0},
+                ],
+            },
+            mixed_max_buy_amt_execution,
+            [],
+            {"000270": {"max_buy_qty": 1}, "005930": {"max_buy_qty": 1, "max_buy_amt": 1_000_000}},
+            {},
+            submit=False,
+            kis=None,
+        )
+        mixed_max_buy_amt_orders = {item["symbol_id"]: item for item in mixed_max_buy_amt_execution["orders"]}
+        if mixed_max_buy_amt_orders["000270"].get("reason") != "buy_cash_limit_missing":
+            failures.append(f"symbol missing max_buy_amt should not use another symbol's max_buy_amt: {mixed_max_buy_amt_orders['000270']}")
+        if mixed_max_buy_amt_orders["005930"].get("reason") != "validated_dry_run_not_submitted":
+            failures.append(f"symbol with max_buy_amt should still pass: {mixed_max_buy_amt_orders['005930']}")
+
+        zero_max_buy_amt_execution = {
+            "orders": [
+                {"symbol_id": "000270", "symbol_name": "기아", "target_holding_quantity": 1, "order_price": 100_000, "order_path": "immediate"}
+            ]
+        }
+        reconcile(
+            {"account_summary": {"cash_amount": 1_000_000}, "symbols": [{"symbol_id": "000270", "symbol_name": "기아", "current_live_holding_quantity": 0}]},
+            zero_max_buy_amt_execution,
+            [],
+            {"000270": {"max_buy_qty": 1, "max_buy_amt": 0}},
+            {},
+            submit=False,
+            kis=None,
+        )
+        zero_max_buy_amt_order = zero_max_buy_amt_execution["orders"][0]
+        if zero_max_buy_amt_order.get("reason") != "buy_cash_limit_missing":
+            failures.append(f"zero max_buy_amt should block buy order: {zero_max_buy_amt_order}")
 
         zero_capacity_execution = {
             "orders": [
