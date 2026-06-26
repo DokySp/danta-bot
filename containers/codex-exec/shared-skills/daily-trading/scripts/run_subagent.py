@@ -28,12 +28,15 @@ REQUIRED_SPEC_FIELDS = {
     "workspace_dir",
     "output_dir",
 }
-COLLECTION_SUBAGENT_MODEL = "gpt-5.4-mini"
-COLLECTION_SUBAGENT_REASONING_EFFORT = "low"
-FIRST_VERDICT_SUBAGENT_MODEL = "gpt-5.5"
-FIRST_VERDICT_SUBAGENT_REASONING_EFFORT = "medium"
-SECOND_VERDICT_SUBAGENT_MODEL = "gpt-5.5"
-SECOND_VERDICT_SUBAGENT_REASONING_EFFORT = "medium"
+SUBAGENT_MODEL_CONFIG_ENV = "DAILY_TRADING_SUBAGENT_MODEL_CONFIG"
+SUBAGENT_MODEL_CONFIG_FILENAME = "daily-trading-subagents.yaml"
+DEFAULT_SUBAGENT_MODEL_CONFIG = {
+    "collection": {"model": "gpt-5.4-mini", "model_reasoning_effort": "low"},
+    "first_verdict": {"model": "gpt-5.5", "model_reasoning_effort": "medium"},
+    "second_verdict": {"model": "gpt-5.5", "model_reasoning_effort": "medium"},
+}
+SUBAGENT_MODEL_CONFIG_KEYS = ("collection", "first_verdict", "second_verdict")
+VALID_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
 COLLECTION_STAGES = {"financial-collection", "news-collection"}
 FINANCIAL_PATH_OUTPUT_STAGES = {"financial-collection"}
 NEWS_PATH_OUTPUT_STAGES = {"news-collection"}
@@ -130,9 +133,85 @@ def env_bool(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def script_dir() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def repo_root_from(path: Path) -> Path:
+    current = path.resolve()
+    for candidate in (current, *current.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return current
+
+
 def load_json(path: Path) -> Any:
     with open(path, "r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def load_config_payload(path: Path) -> Any:
+    if path.suffix.lower() == ".json":
+        return load_json(path)
+    try:
+        import yaml  # type: ignore[import-not-found]
+    except Exception as exc:  # pragma: no cover - depends on runtime image
+        raise RuntimeError(f"PyYAML is required to read {path}") from exc
+    with path.open("r", encoding="utf-8") as handle:
+        return yaml.safe_load(handle)
+
+
+def subagent_model_config_candidates() -> list[Path]:
+    configured = os.getenv(SUBAGENT_MODEL_CONFIG_ENV, "").strip()
+    if configured:
+        return [Path(configured).expanduser()]
+    repo_root = repo_root_from(script_dir())
+    return [
+        Path("/app/config") / SUBAGENT_MODEL_CONFIG_FILENAME,
+        repo_root / "containers/codex-exec/profiles/base/config" / SUBAGENT_MODEL_CONFIG_FILENAME,
+        Path("containers/codex-exec/profiles/base/config") / SUBAGENT_MODEL_CONFIG_FILENAME,
+    ]
+
+
+def normalize_model_config(payload: Any, source: Path | None) -> dict[str, dict[str, str]]:
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict):
+        where = str(source) if source else "built-in defaults"
+        raise ValueError(f"sub-agent model config must be an object: {where}")
+    config = json.loads(json.dumps(DEFAULT_SUBAGENT_MODEL_CONFIG))
+    for key in SUBAGENT_MODEL_CONFIG_KEYS:
+        if key not in payload:
+            continue
+        entry = payload[key]
+        if not isinstance(entry, dict):
+            raise ValueError(f"sub-agent model config entry must be an object: {key}")
+        for field in ("model", "model_reasoning_effort"):
+            if field not in entry:
+                continue
+            value = str(entry.get(field, "")).strip()
+            if not value:
+                raise ValueError(f"sub-agent model config {key}.{field} must not be empty")
+            config[key][field] = value
+    extra_keys = sorted(str(key) for key in payload if str(key) not in SUBAGENT_MODEL_CONFIG_KEYS)
+    if extra_keys:
+        raise ValueError(f"unsupported sub-agent model config keys: {', '.join(extra_keys)}")
+    for key, entry in config.items():
+        effort = entry["model_reasoning_effort"]
+        if effort not in VALID_REASONING_EFFORTS:
+            raise ValueError(f"unsupported model_reasoning_effort for {key}: {effort}")
+    return config
+
+
+def load_subagent_model_config() -> dict[str, dict[str, str]]:
+    candidates = subagent_model_config_candidates()
+    explicit = bool(os.getenv(SUBAGENT_MODEL_CONFIG_ENV, "").strip())
+    for path in candidates:
+        if path.exists():
+            return normalize_model_config(load_config_payload(path), path)
+    if explicit:
+        raise FileNotFoundError(f"{SUBAGENT_MODEL_CONFIG_ENV} does not exist: {candidates[0]}")
+    return normalize_model_config(DEFAULT_SUBAGENT_MODEL_CONFIG, None)
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -658,19 +737,24 @@ def build_prompt(spec: dict[str, Any]) -> str:
 def launcher_model_effort(stage: str, agent_role: str) -> tuple[str, str]:
     stage_key = stage.strip().lower()
     role_key = agent_role.strip().lower()
+    model_config = load_subagent_model_config()
 
     if role_key in {"financial", "news"} or stage_key in COLLECTION_STAGES:
-        return COLLECTION_SUBAGENT_MODEL, COLLECTION_SUBAGENT_REASONING_EFFORT
+        entry = model_config["collection"]
+        return entry["model"], entry["model_reasoning_effort"]
     if stage_key == "first-verdict":
         if role_key in SELECTED_FIRST_VERDICT_ROLES:
-            return FIRST_VERDICT_SUBAGENT_MODEL, FIRST_VERDICT_SUBAGENT_REASONING_EFFORT
+            entry = model_config["first_verdict"]
+            return entry["model"], entry["model_reasoning_effort"]
         selected = ", ".join(sorted(SELECTED_FIRST_VERDICT_ROLES))
         raise ValueError(f"first-verdict agent_role must be one of: {selected}")
     if role_key in {"juror"} or role_key.startswith("juror-"):
-        return FIRST_VERDICT_SUBAGENT_MODEL, FIRST_VERDICT_SUBAGENT_REASONING_EFFORT
+        entry = model_config["first_verdict"]
+        return entry["model"], entry["model_reasoning_effort"]
     if stage_key == "second-verdict":
         if role_key == "judge-final":
-            return SECOND_VERDICT_SUBAGENT_MODEL, SECOND_VERDICT_SUBAGENT_REASONING_EFFORT
+            entry = model_config["second_verdict"]
+            return entry["model"], entry["model_reasoning_effort"]
         raise ValueError("second-verdict agent_role must be judge-final")
     raise ValueError(f"unsupported daily-trading sub-agent stage/role: stage={stage!r}, agent_role={agent_role!r}")
 
@@ -698,30 +782,31 @@ def assert_model_effort(stage: str, agent_role: str, *, model: str, effort: str)
 
 
 def assert_all_supported_stages_use_expected_models() -> None:
+    model_config = load_subagent_model_config()
     cases = [
         (
             "financial-collection",
             "financial",
-            COLLECTION_SUBAGENT_MODEL,
-            COLLECTION_SUBAGENT_REASONING_EFFORT,
+            model_config["collection"]["model"],
+            model_config["collection"]["model_reasoning_effort"],
         ),
         (
             "news-collection",
             "news",
-            COLLECTION_SUBAGENT_MODEL,
-            COLLECTION_SUBAGENT_REASONING_EFFORT,
+            model_config["collection"]["model"],
+            model_config["collection"]["model_reasoning_effort"],
         ),
         (
             "first-verdict",
             "analyst-market-news",
-            FIRST_VERDICT_SUBAGENT_MODEL,
-            FIRST_VERDICT_SUBAGENT_REASONING_EFFORT,
+            model_config["first_verdict"]["model"],
+            model_config["first_verdict"]["model_reasoning_effort"],
         ),
         (
             "second-verdict",
             "judge-final",
-            SECOND_VERDICT_SUBAGENT_MODEL,
-            SECOND_VERDICT_SUBAGENT_REASONING_EFFORT,
+            model_config["second_verdict"]["model"],
+            model_config["second_verdict"]["model_reasoning_effort"],
         ),
     ]
     for stage, role, model, effort in cases:
@@ -1180,7 +1265,7 @@ def run_group(specs: list[dict[str, Any]], max_workers: int | None = None) -> di
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run daily-trading sub-agents with fixed model/effort.")
+    parser = argparse.ArgumentParser(description="Run daily-trading sub-agents with configured model/effort.")
     parser.add_argument("--self-test", action="store_true", help="Run launcher self-tests with a fake codex binary.")
     subparsers = parser.add_subparsers(dest="command")
 
@@ -1758,21 +1843,22 @@ def run_self_test() -> int:
             except AssertionError as exc:
                 failures.append(str(exc))
 
+            model_config = load_subagent_model_config()
             cases = [
                 (
                     spec(tmp, stage="financial-collection", agent_role="financial", task_name="financial"),
-                    COLLECTION_SUBAGENT_MODEL,
-                    COLLECTION_SUBAGENT_REASONING_EFFORT,
+                    model_config["collection"]["model"],
+                    model_config["collection"]["model_reasoning_effort"],
                 ),
                 (
                     compact_spec(tmp, stage="first-verdict", agent_role="analyst-fundamental-risk", task_name="first"),
-                    FIRST_VERDICT_SUBAGENT_MODEL,
-                    FIRST_VERDICT_SUBAGENT_REASONING_EFFORT,
+                    model_config["first_verdict"]["model"],
+                    model_config["first_verdict"]["model_reasoning_effort"],
                 ),
                 (
                     compact_spec(tmp, stage="second-verdict", agent_role="judge-final", task_name="second"),
-                    SECOND_VERDICT_SUBAGENT_MODEL,
-                    SECOND_VERDICT_SUBAGENT_REASONING_EFFORT,
+                    model_config["second_verdict"]["model"],
+                    model_config["second_verdict"]["model_reasoning_effort"],
                 ),
             ]
             for test_spec, model, effort in cases:
@@ -1785,6 +1871,36 @@ def run_self_test() -> int:
                     assert_argv(argv_log, model=model, effort=effort)
                 except AssertionError as exc:
                     failures.append(str(exc))
+
+            custom_model_config = tmp / "daily-trading-subagents.yaml"
+            custom_model_config.write_text(
+                "\n".join(
+                    [
+                        "collection:",
+                        "  model: gpt-5.4-mini",
+                        "  model_reasoning_effort: low",
+                        "first_verdict:",
+                        "  model: gpt-5.4",
+                        "  model_reasoning_effort: high",
+                        "second_verdict:",
+                        "  model: gpt-5.5",
+                        "  model_reasoning_effort: medium",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            os.environ[SUBAGENT_MODEL_CONFIG_ENV] = str(custom_model_config)
+            custom_wrapper = run_one(
+                compact_spec(tmp, stage="first-verdict", agent_role="analyst-market-news", task_name="first-custom-model")
+            )
+            if custom_wrapper["status"] != "success":
+                failures.append(f"custom model config returned {custom_wrapper['status']}")
+            try:
+                assert_argv(argv_log, model="gpt-5.4", effort="high")
+            except AssertionError as exc:
+                failures.append(str(exc))
+            os.environ.pop(SUBAGENT_MODEL_CONFIG_ENV, None)
 
             write_sample_verdict_inputs(tmp)
             compact_wrapper = run_one(
