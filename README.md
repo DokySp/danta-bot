@@ -20,14 +20,16 @@
 ```bash
 $ docker login -u dokysp
 
-# version is optional. default is `latest`
+# version is optional. if omitted, image tag is `latest` and APP_VERSION is resolved from git
 $ ./scripts/deploy-telegram-gateway.sh dokysp
 $ ./scripts/deploy-codex-exec.sh dokysp 1.2.1
 $ ./scripts/deploy-codex-exec-experimental.sh dokysp
 ```
 
 스크립트는 Docker Hub namespace를 필수로 받고, 버전 태그는 선택으로 받습니다.
-버전 태그를 생략하면 `latest`로 빌드/배포합니다. 이미지 내부 `APP_VERSION` 메타데이터도 같은 값으로 설정합니다.
+버전 태그를 생략하면 Docker 이미지 태그는 `latest`로 빌드/배포하고, 이미지 내부
+`APP_VERSION` 메타데이터는 `git describe --tags --always --dirty` 결과로 설정합니다.
+버전 태그를 직접 넘기면 Docker 이미지 태그와 `APP_VERSION` 모두 그 값으로 설정합니다.
 namespace 인자가 없으면 실행하지 않고 사용법을 출력한 뒤 실패합니다.
 
 수동 빌드:
@@ -44,7 +46,9 @@ $ docker build -f ./containers/codex-exec/Dockerfile --build-arg APP_VERSION=$IM
 `org.opencontainers.image.version` 라벨과 컨테이너 환경변수 `APP_VERSION`으로 들어갑니다.
 값을 넘기지 않으면 Dockerfile의 `RUN test -n "$APP_VERSION"` 단계에서 빌드가 실패합니다.
 이미지 태그는 Docker가 이미지를 찾고 배포할 때 쓰는 외부 이름입니다.
-현재 편의 스크립트는 이미지 태그와 `APP_VERSION`을 같은 값으로 맞춥니다.
+현재 편의 스크립트는 버전 태그를 직접 넘긴 경우에만 이미지 태그와 `APP_VERSION`을 같은 값으로 맞춥니다.
+버전 태그를 생략한 `latest` 배포에서는 원격 컨테이너의 `/version` 출력이 git describe 기반
+배포 버전을 보여주도록 `APP_VERSION`만 git 버전으로 설정합니다.
 
 기존 tar 파일 배포 방식:
 
