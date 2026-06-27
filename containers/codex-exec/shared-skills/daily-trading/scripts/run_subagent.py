@@ -374,6 +374,12 @@ def normalize_symbol_ids(raw: Any) -> list[str]:
     return symbols
 
 
+def symbol_key(item: Any) -> str:
+    if not isinstance(item, dict):
+        return ""
+    return str(item.get("symbol_id") or item.get("symbol") or item.get("code") or "").strip()
+
+
 def raw_retention_mode() -> str:
     mode = os.getenv("CODEX_SUBAGENT_RAW_RETENTION", "always").strip().lower()
     if mode not in RAW_RETENTION_VALUES:
@@ -543,9 +549,68 @@ def build_holding_quantity_context(symbol: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def add_second_verdict_holding_context(payload: Any) -> Any:
+def run_started_sort_key(run_dir: Path, payload: dict[str, Any]) -> tuple[str, str]:
+    started_at = str(payload.get("started_at") or "").strip()
+    return (started_at or run_dir.name, run_dir.name)
+
+
+def recent_submitted_trade_context(output_dir: Path, symbol_id: str, run_limit: int = 2) -> dict[str, Any]:
+    if not symbol_id or run_limit <= 0:
+        return {"recent_submitted_trades": [], "policy": "no recent submitted trade context"}
+    runs_dir = output_dir.parent
+    if not runs_dir.is_dir():
+        return {"recent_submitted_trades": [], "policy": "no recent submitted trade context"}
+
+    previous_runs: list[tuple[tuple[str, str], Path, dict[str, Any]]] = []
+    for run_dir in (path for path in runs_dir.iterdir() if path.is_dir()):
+        if run_dir.resolve() == output_dir.resolve():
+            continue
+        payload = read_json_if_exists(run_dir / "execution.json")
+        if isinstance(payload, dict):
+            previous_runs.append((run_started_sort_key(run_dir, payload), run_dir, payload))
+    previous_runs.sort(key=lambda item: item[0], reverse=True)
+
+    trades: list[dict[str, Any]] = []
+    inspected_runs: list[str] = []
+    for _, run_dir, payload in previous_runs[:run_limit]:
+        inspected_runs.append(str(payload.get("run_id") or run_dir.name))
+        orders = payload.get("orders")
+        if not isinstance(orders, list):
+            continue
+        for order in orders:
+            if not isinstance(order, dict) or symbol_key(order) != symbol_id:
+                continue
+            direction = str(order.get("direction", "")).lower()
+            result = str(order.get("result", "")).lower()
+            if direction not in {"buy", "sell"} or not result.startswith("submitted"):
+                continue
+            trades.append(
+                {
+                    "run_id": payload.get("run_id") or run_dir.name,
+                    "started_at": payload.get("started_at") or "",
+                    "direction": direction,
+                    "result": order.get("result"),
+                    "submitted_quantity": int_or_zero(order.get("validated_order_quantity")),
+                    "current_live_holding_quantity": int_or_zero(order.get("current_live_holding_quantity")),
+                    "expected_holding_quantity": int_or_zero(order.get("expected_holding_quantity")),
+                    "target_holding_quantity": int_or_zero(order.get("target_holding_quantity")),
+                    "additional_required_quantity": int_or_zero(order.get("additional_required_quantity")),
+                    "order_path": order.get("order_path") or "",
+                    "order_api": order.get("order_api") or "",
+                    "reason": str(order.get("reason") or "")[:120],
+                }
+            )
+    return {
+        "recent_submitted_trades": trades,
+        "inspected_run_ids": inspected_runs,
+        "policy": "If a recent submitted trade is opposite to the new target direction, default to hold unless thesis break, risk-limit breach, or order/fill-state correction is explicit.",
+    }
+
+
+def add_second_verdict_holding_context(payload: Any, output_dir: Path | None = None) -> Any:
     if not isinstance(payload, dict):
         return payload
+    context_output_dir = output_dir or Path("")
     symbols = payload.get("symbols")
     if isinstance(symbols, list):
         enriched: list[Any] = []
@@ -553,6 +618,7 @@ def add_second_verdict_holding_context(payload: Any) -> Any:
             if isinstance(item, dict):
                 copied = dict(item)
                 copied["holding_quantity_context"] = build_holding_quantity_context(copied)
+                copied["recent_trade_context"] = recent_submitted_trade_context(context_output_dir, symbol_key(copied))
                 enriched.append(copied)
             else:
                 enriched.append(item)
@@ -562,7 +628,11 @@ def add_second_verdict_holding_context(payload: Any) -> Any:
     if isinstance(symbols, dict):
         copied_payload = dict(payload)
         copied_payload["symbols"] = {
-            symbol_id: dict(item, holding_quantity_context=build_holding_quantity_context(item))
+            symbol_id: dict(
+                item,
+                holding_quantity_context=build_holding_quantity_context(item),
+                recent_trade_context=recent_submitted_trade_context(context_output_dir, symbol_id),
+            )
             if isinstance(item, dict)
             else item
             for symbol_id, item in symbols.items()
@@ -611,7 +681,7 @@ def write_verdict_input_slices(spec: dict[str, Any]) -> dict[str, str]:
         if artifact_key == "decision_brief":
             sliced = build_verdict_core_payload(payload, symbols, str(spec.get("agent_role") or ""))
             if stage == "second-verdict":
-                sliced = add_second_verdict_holding_context(sliced)
+                sliced = add_second_verdict_holding_context(sliced, output_dir)
             relative_name = "verdict-core"
             slice_paths["verdict_core"] = str(slice_dir / f"{task_name}.{relative_name}.json")
         else:
@@ -716,6 +786,8 @@ def compact_verdict_prompt(spec: dict[str, Any]) -> str | None:
                 "When referring to per-analyst scores in agent_scores, use confidence_adjusted_score as the score; score and confidence are supporting inputs explaining that adjusted score.",
                 "If a symbol's first-verdict score is missing, unavailable, or unusable, treat it as neutral 5 and continue.",
                 "First-verdict scores are judgment inputs, not hard buy/sell gates.",
+                "Use recent_trade_context to avoid churn: a recent opposite-direction submitted trade defaults to hold unless thesis break, risk-limit breach, or order/fill-state correction is explicit.",
+                "Treat long_term_thesis_intact as a sell/reduce suppression signal, not as add permission; increase only when add_allowed evidence is also present.",
             ]
         )
 
@@ -1471,6 +1543,81 @@ def compact_spec(tmp: Path, *, stage: str, agent_role: str, task_name: str) -> d
 def write_sample_verdict_inputs(tmp: Path) -> None:
     run_dir = tmp / "reports" / "runs" / "self-test"
     write_json(
+        run_dir / "execution.json",
+        {
+            "schema_version": "1",
+            "run_id": "self-test",
+            "started_at": "2026-06-08T10:00:00+09:00",
+            "orders": [
+                {
+                    "symbol_id": "005930",
+                    "direction": "buy",
+                    "result": "submitted",
+                    "validated_order_quantity": 99,
+                }
+            ],
+        },
+    )
+    newer_other_run_dir = tmp / "reports" / "runs" / "self-test-newer-other"
+    write_json(
+        newer_other_run_dir / "execution.json",
+        {
+            "schema_version": "1",
+            "run_id": "self-test-newer-other",
+            "started_at": "2026-06-08T09:05:00+09:00",
+            "orders": [
+                {
+                    "symbol_id": "000660",
+                    "direction": "buy",
+                    "result": "submitted",
+                    "validated_order_quantity": 1,
+                }
+            ],
+        },
+    )
+    previous_run_dir = tmp / "reports" / "runs" / "self-test-prev"
+    write_json(
+        previous_run_dir / "execution.json",
+        {
+            "schema_version": "1",
+            "run_id": "self-test-prev",
+            "started_at": "2026-06-08T09:00:00+09:00",
+            "orders": [
+                {
+                    "symbol_id": "005930",
+                    "symbol_name": "삼성전자",
+                    "direction": "sell",
+                    "result": "submitted",
+                    "validated_order_quantity": 1,
+                    "current_live_holding_quantity": 12,
+                    "expected_holding_quantity": 12,
+                    "target_holding_quantity": 11,
+                    "additional_required_quantity": -1,
+                    "order_path": "immediate",
+                    "order_api": "order_cash",
+                    "reason": "self-test recent sell",
+                }
+            ],
+        },
+    )
+    older_run_dir = tmp / "reports" / "runs" / "self-test-older"
+    write_json(
+        older_run_dir / "execution.json",
+        {
+            "schema_version": "1",
+            "run_id": "self-test-older",
+            "started_at": "2026-06-08T08:00:00+09:00",
+            "orders": [
+                {
+                    "symbol_id": "005930",
+                    "direction": "buy",
+                    "result": "submitted",
+                    "validated_order_quantity": 1,
+                }
+            ],
+        },
+    )
+    write_json(
         run_dir / "decision-brief.json",
         {
             "schema_version": "1",
@@ -1586,6 +1733,8 @@ def assert_compact_verdict_prompt(tmp: Path) -> None:
         "When referring to per-analyst scores in agent_scores, use confidence_adjusted_score as the score;",
         "If a symbol's first-verdict score is missing, unavailable, or unusable, treat it as neutral 5 and continue.",
         "First-verdict scores are judgment inputs, not hard buy/sell gates.",
+        "Use recent_trade_context to avoid churn:",
+        "Treat long_term_thesis_intact as a sell/reduce suppression signal",
     ]
     missing = [part for part in second_required_parts if part not in second_prompt]
     if missing:
@@ -1642,6 +1791,14 @@ def assert_verdict_input_slices(tmp: Path) -> None:
                 raise AssertionError(f"verdict-core did not add expected holding context: {first_symbol}")
             if holding_context.get("direction_examples", {}).get("reduce_by_1") != 10:
                 raise AssertionError(f"verdict-core did not add target direction examples: {first_symbol}")
+            if "recent_trade_context" not in first_symbol:
+                raise AssertionError(f"verdict-core did not add recent trade context: {first_symbol}")
+            recent_trades = first_symbol.get("recent_trade_context", {}).get("recent_submitted_trades", [])
+            if len(recent_trades) != 1 or recent_trades[0].get("direction") != "sell":
+                raise AssertionError(f"verdict-core did not preserve recent submitted trade context: {first_symbol}")
+            inspected_runs = first_symbol.get("recent_trade_context", {}).get("inspected_run_ids", [])
+            if inspected_runs != ["self-test-newer-other", "self-test-prev"]:
+                raise AssertionError(f"verdict-core inspected wrong recent runs: {first_symbol}")
         if key == "verdict_first" and slice_payload.get("slice_type") != "verdict-first-slice":
             raise AssertionError(f"second-verdict first slice missing slice_type: {slice_payload}")
         if key == "verdict_first":
