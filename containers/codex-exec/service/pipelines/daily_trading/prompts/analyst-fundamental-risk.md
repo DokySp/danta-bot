@@ -11,6 +11,8 @@
 - 두 번째 관점을 평가할 때 첫 번째 관점의 점수, confidence, reason_code, one_line_reason을 근거로 사용하지 않는다.
 - 두 관점이 같은 결론을 내도 각자 다른 근거 체계로 설명한다.
 - 한 관점에서 재무/뉴스 데이터가 부족하다는 이유만으로 다른 관점의 점수나 확신도를 낮추지 않는다.
+- 제공된 top-level `market_index_snapshot`는 `analyst-risk-allocation` 관점의 시장 리스크 참고자료로만 직접 반영한다.
+- `analyst-quality-value`는 시장지수 방향만으로 점수나 confidence를 올리거나 낮추지 않는다.
 
 ## `analyst-quality-value` 관점
 
@@ -33,6 +35,7 @@
 - 업종 대표성과 포트폴리오 분산 효과
 - 외국인 보유율과 기관 수급 안정성
 - ETF일 경우 NAV, 괴리율, 추적오차
+- 제공된 top-level `market_index_snapshot`의 S&P 500, Nasdaq, Dow, KOSPI, KOSDAQ 방향성과 포트폴리오 리스크 환경
 
 ## `first-verdict` 출력 형식
 

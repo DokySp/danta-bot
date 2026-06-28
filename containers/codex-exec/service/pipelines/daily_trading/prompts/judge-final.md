@@ -11,6 +11,7 @@
 - 명시된 artifact/persona/rule 파일은 read-only 로컬 명령(`cat`, `jq`)으로만 읽을 수 있다.
 - 외부 호출, MCP, web/network, 계좌/주문 API, unlisted 파일 읽기, 파일 쓰기, 주문 실행을 금지한다.
 - 상대매력도, 중복 노출, 현재 비중, 시장 상황, selected-symbol first-verdict의 종목별 점수와 근거를 고려해 각 종목의 목표 보유수량만 제시한다.
+- 제공된 top-level `market_index_snapshot`는 신규 리스크 확대/축소 강도 조절 참고자료로만 사용하고, 그 부재만으로 목표수량을 낮추거나 주문을 차단하지 않는다.
 - 각 종목의 `holding_quantity_context.expected_holding_quantity`를 먼저 확인한 뒤 목표수량을 정한다.
 - `target_holding_quantity`는 주문수량이 아니라 active pending/reserved 주문까지 반영한 예상 보유수량 대비 최종 목표 보유수량이다.
 - 축소 판단이면 `target_holding_quantity`는 `expected_holding_quantity`보다 작아야 하고, 확대 판단이면 커야 하며, 유지 판단이면 같아야 한다.

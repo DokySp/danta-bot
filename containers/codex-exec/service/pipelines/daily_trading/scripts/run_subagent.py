@@ -47,6 +47,7 @@ SELECTED_FIRST_VERDICT_ROLES = {
     "analyst-fundamental-risk",
     "analyst-market-news",
 }
+MARKET_INDEX_SNAPSHOT_AGENT_ROLES = {"analyst-fundamental-risk", "analyst-market-news", "judge-final"}
 COMBINED_FIRST_VERDICT_ROLE_OUTPUTS = {
     "analyst-fundamental-risk": (
         "analyst-quality-value",
@@ -482,6 +483,8 @@ def build_verdict_core_payload(payload: Any, symbol_ids: list[str], agent_role: 
     if not isinstance(filtered, dict):
         return filtered
     core = dict(filter_symbol_fields_for_agent(filtered, agent_role) if agent_role else filtered)
+    if agent_role and safe_name(agent_role).lower() not in MARKET_INDEX_SNAPSHOT_AGENT_ROLES:
+        core.pop("market_index_snapshot", None)
     core["slice_type"] = "verdict-core"
     core["source_brief_type"] = filtered.get("brief_type") or "decision-brief"
     return core
@@ -1642,6 +1645,21 @@ def write_sample_verdict_inputs(tmp: Path) -> None:
         {
             "schema_version": "1",
             "brief_type": "decision-brief",
+            "market_index_snapshot": {
+                "status": "success",
+                "indexes": [
+                    {
+                        "symbol": "NASDAQ",
+                        "name": "Nasdaq",
+                        "source": "google_finance",
+                        "status": "success",
+                        "value": 18000.0,
+                        "change_percent": 0.3,
+                        "observed_at": "2026-06-08T00:00:00+00:00",
+                        "market_status": "latest_available",
+                    }
+                ],
+            },
             "errors": [
                 {"symbol_id": "005930", "code": "keep_symbol_error"},
                 {"symbol_id": "035420", "code": "drop_symbol_error"},
@@ -1790,14 +1808,21 @@ def assert_verdict_input_slices(tmp: Path) -> None:
         raise AssertionError(f"market-news slice dropped chart_context: {first_symbol}")
     if len(first_symbol.get("news_summary", [])) != 4:
         raise AssertionError(f"market-news slice dropped news_summary: {first_symbol}")
+    if first_core.get("market_index_snapshot", {}).get("indexes", [{}])[0].get("symbol") != "NASDAQ":
+        raise AssertionError(f"market-news slice dropped market_index_snapshot: {first_core}")
     if first_symbol.get("today_trade_price_context", {}).get("last_fill_price") != 70100:
         raise AssertionError(f"market-news slice dropped same-day trade price context: {first_symbol}")
     if "today_trade_timeline_context" in first_symbol:
         raise AssertionError(f"first-verdict slice kept full same-day timeline: {first_symbol}")
     if "financial_summary" in first_symbol or "account_exposure" in first_symbol or "custom_detail" in first_symbol:
         raise AssertionError(f"market-news slice kept unrelated fields: {first_symbol}")
+    fundamental_payload = compact_spec(tmp, stage="first-verdict", agent_role="analyst-fundamental-risk", task_name="slice-fundamental")
+    fundamental_slices = write_verdict_input_slices(fundamental_payload)
+    fundamental_core = load_json(Path(fundamental_slices["decision_brief"]))
+    if fundamental_core.get("market_index_snapshot", {}).get("indexes", [{}])[0].get("symbol") != "NASDAQ":
+        raise AssertionError(f"fundamental-risk slice dropped market_index_snapshot: {fundamental_core}")
 
-    payload = compact_spec(tmp, stage="second-verdict", agent_role="judge", task_name="slice-test")
+    payload = compact_spec(tmp, stage="second-verdict", agent_role="judge-final", task_name="slice-test")
     slices = write_verdict_input_slices(payload)
     expected_keys = {"decision_brief", "verdict_core", "verdict_first"}
     if set(slices) != expected_keys:
@@ -1813,6 +1838,8 @@ def assert_verdict_input_slices(tmp: Path) -> None:
         if key == "verdict_core" and slice_payload.get("slice_type") != "verdict-core":
             raise AssertionError(f"verdict-core slice missing slice_type: {slice_payload}")
         if key == "verdict_core":
+            if slice_payload.get("market_index_snapshot", {}).get("indexes", [{}])[0].get("symbol") != "NASDAQ":
+                raise AssertionError(f"second-verdict slice dropped market_index_snapshot: {slice_payload}")
             error_codes = [item.get("code") for item in slice_payload.get("errors", []) if isinstance(item, dict)]
             if error_codes != ["keep_symbol_error", "keep_run_error"]:
                 raise AssertionError(f"verdict-core did not filter symbol-scoped errors: {slice_payload}")

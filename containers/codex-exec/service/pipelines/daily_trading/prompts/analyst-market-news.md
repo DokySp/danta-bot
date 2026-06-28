@@ -20,7 +20,7 @@
 - 외국인/기관 순매수
 - 업종 사이클과 경기 민감도
 - 금리와 환율 민감도
-- 시장 지수 대비 상대 강도
+- 제공된 top-level `market_index_snapshot`의 S&P 500, Nasdaq, Dow, KOSPI, KOSDAQ 방향성과 시장 지수 대비 상대 강도
 - 테마 확장성, 이벤트 가능성, 실적 모멘텀
 
 ## `analyst-news-flow` 관점

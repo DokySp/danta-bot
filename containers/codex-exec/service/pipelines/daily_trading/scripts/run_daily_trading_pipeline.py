@@ -496,6 +496,12 @@ class Pipeline:
     def subagent_script(self) -> str:
         return str(script_dir() / "run_subagent.py")
 
+    def market_index_snapshot_script(self) -> Path:
+        configured = os.getenv("DAILY_TRADING_MARKET_INDEX_SNAPSHOT_SCRIPT", "").strip()
+        if configured:
+            return Path(configured)
+        return script_dir().parent.parent / "market_index_snapshot" / "cli.py"
+
     def main_evidence_script(self) -> str:
         return str(script_dir() / "collect_main_evidence.py")
 
@@ -864,6 +870,38 @@ class Pipeline:
 
     def has_etf_or_etn_price_rows(self) -> bool:
         return bool(self.etf_or_etn_symbol_ids())
+
+    def collect_market_index_snapshot(self) -> str:
+        script = self.market_index_snapshot_script()
+        output = self.output_dir / "market-index-snapshot.json"
+        if not script.exists():
+            self.add_stage("market-index-snapshot", "skipped", detail="optional market index snapshot script not found", required=False)
+            return ""
+        result = self.run_cmd(
+            "market-index-snapshot",
+            [
+                sys.executable,
+                str(script),
+                "collect",
+                "--run-id",
+                self.run_id,
+                "--started-at",
+                self.started_at,
+                "--output",
+                str(output),
+            ],
+            required=False,
+        )
+        payload = load_json_if_exists(output)
+        if result.returncode != 0 or not isinstance(payload, dict):
+            self.add_stage("market-index-snapshot", "partial", detail="optional market index snapshot collection failed", required=False, path=self.command_log_path)
+            return ""
+        status = str(payload.get("status") or "")
+        if status == "success":
+            self.add_stage("market-index-snapshot", "success", detail="collected five market indexes", required=False, path=output)
+            return str(output)
+        self.add_stage("market-index-snapshot", "partial", detail=f"optional market index snapshot status={status or 'unknown'}", required=False, path=output)
+        return str(output)
 
     def run_artifact_command(self, stage: str, args: list[str], *, required: bool = True) -> dict[str, Any] | None:
         result = self.run_cmd(stage, [sys.executable, self.artifact_script(), *args], required=required)
@@ -1660,6 +1698,7 @@ class Pipeline:
         self.collect_main_evidence(symbols)
         financial_cache = self.collect_optional_cache("financial", symbols)
         news_cache = self.collect_optional_cache("news", symbols)
+        market_index_snapshot = self.collect_market_index_snapshot()
 
         decision_args = [
             "decision-brief",
@@ -1672,6 +1711,8 @@ class Pipeline:
             decision_args.extend(["--financial-cache-path", financial_cache])
         if news_cache:
             decision_args.extend(["--news-cache-path", news_cache])
+        if market_index_snapshot:
+            decision_args.extend(["--market-index-snapshot-json", market_index_snapshot])
         decision = self.run_artifact_command("decision-brief", decision_args)
         decision_status = str((decision or {}).get("status") or "")
         self.add_stage("decision-brief", "success" if decision_status in {"success", "partial"} else "failed", detail=f"status={decision_status}", path=self.output_dir / "decision-brief.json")
@@ -2336,10 +2377,42 @@ def run_self_test() -> int:
             failures.append(f"second-verdict retry probe failed: attempts={retry_probe.probe_attempts}")
         fake_codex = workspace / "fake-codex"
         fake_codex_script(fake_codex)
+        fake_market_index_snapshot = workspace / "fake-market-index-snapshot.py"
+        fake_market_index_snapshot.write_text(
+            """#!/usr/bin/env python3
+import json
+import sys
+from pathlib import Path
+
+output = Path(sys.argv[sys.argv.index("--output") + 1])
+payload = {
+    "schema_version": "1",
+    "run_id": "pipeline-self-test",
+    "started_at": "2026-06-18T09:00:00+09:00",
+    "generated_at": "2026-06-18T09:00:01+09:00",
+    "status": "success",
+    "indexes": [
+        {"symbol": "SP500", "name": "S&P 500", "source": "google_finance", "status": "success", "value": 5000.0, "change_percent": 0.1, "observed_at": "2026-06-18T00:00:00+00:00", "market_status": "latest_available"},
+        {"symbol": "NASDAQ", "name": "Nasdaq", "source": "google_finance", "status": "success", "value": 18000.0, "change_percent": 0.2, "observed_at": "2026-06-18T00:00:00+00:00", "market_status": "latest_available"},
+        {"symbol": "DOW", "name": "Dow", "source": "google_finance", "status": "success", "value": 39000.0, "change_percent": -0.1, "observed_at": "2026-06-18T00:00:00+00:00", "market_status": "latest_available"},
+        {"symbol": "KOSPI", "name": "KOSPI", "source": "kis_domestic_index", "status": "success", "value": 3000.0, "change_percent": 0.3, "observed_at": "2026-06-18T09:00:00+09:00", "market_status": "장중"},
+        {"symbol": "KOSDAQ", "name": "KOSDAQ", "source": "kis_domestic_index", "status": "success", "value": 900.0, "change_percent": 0.4, "observed_at": "2026-06-18T09:00:00+09:00", "market_status": "장중"},
+    ],
+    "warnings": [],
+    "errors": [],
+}
+output.parent.mkdir(parents=True, exist_ok=True)
+output.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+""",
+            encoding="utf-8",
+        )
         old_codex_bin = os.environ.get("CODEX_BIN")
         old_reuse = os.environ.get("CODEX_SUBAGENT_REUSE_SUCCESS")
+        old_market_index_snapshot = os.environ.get("DAILY_TRADING_MARKET_INDEX_SNAPSHOT_SCRIPT")
         os.environ["CODEX_BIN"] = str(fake_codex)
         os.environ["CODEX_SUBAGENT_REUSE_SUCCESS"] = "0"
+        os.environ["DAILY_TRADING_MARKET_INDEX_SNAPSHOT_SCRIPT"] = str(fake_market_index_snapshot)
         try:
             main_events = workspace / "main-events.jsonl"
             main_events.write_text(
@@ -2371,6 +2444,12 @@ def run_self_test() -> int:
             summary = pipeline.run()
             if summary["status"] != "partial":
                 failures.append(f"real-submit summary should remain partial before submit-order execution: {summary['status']}")
+            run_stage_names = [item.get("stage") for item in load_json(run_dir / "run.json").get("stages", []) if isinstance(item, dict)]
+            if "market-index-snapshot" not in run_stage_names or not (run_dir / "market-index-snapshot.json").exists():
+                failures.append(f"pipeline did not record optional market-index-snapshot stage: {run_stage_names}")
+            decision_payload = load_json(run_dir / "decision-brief.json")
+            if len((decision_payload.get("market_index_snapshot") or {}).get("indexes", [])) != 5:
+                failures.append(f"decision brief did not include five market index snapshot indexes: {decision_payload.get('market_index_snapshot')}")
             order_path_selection = (summary.get("execution") or {}).get("order_path_selection") if isinstance(summary.get("execution"), dict) else {}
             if order_path_selection.get("resolved") != "immediate" or order_path_selection.get("reason") != "auto_regular_session":
                 failures.append(f"pipeline did not resolve auto order path to immediate: {order_path_selection}")
@@ -2670,6 +2749,10 @@ print(json.dumps(execution, ensure_ascii=False))
                 os.environ.pop("CODEX_SUBAGENT_REUSE_SUCCESS", None)
             else:
                 os.environ["CODEX_SUBAGENT_REUSE_SUCCESS"] = old_reuse
+            if old_market_index_snapshot is None:
+                os.environ.pop("DAILY_TRADING_MARKET_INDEX_SNAPSHOT_SCRIPT", None)
+            else:
+                os.environ["DAILY_TRADING_MARKET_INDEX_SNAPSHOT_SCRIPT"] = old_market_index_snapshot
 
     payload = {"status": "passed" if not failures else "failed", "failures": failures}
     print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))

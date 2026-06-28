@@ -235,6 +235,36 @@ def account_summary(account: dict[str, Any]) -> dict[str, Any]:
     return {key: summary.get(key) for key in keys}
 
 
+def compact_market_index_snapshot(path: str | None) -> dict[str, Any]:
+    if not path:
+        return {"status": "missing", "indexes": [], "warnings": ["market_index_snapshot_not_supplied"], "errors": []}
+    payload = load_json(Path(path))
+    indexes: list[dict[str, Any]] = []
+    for item in payload.get("indexes", []):
+        if not isinstance(item, dict):
+            continue
+        indexes.append(
+            {
+                "symbol": item.get("symbol") or "",
+                "name": item.get("name") or "",
+                "source": item.get("source") or "",
+                "status": item.get("status") or "",
+                "value": as_number(item.get("value")),
+                "change_percent": as_number(item.get("change_percent")),
+                "observed_at": item.get("observed_at") or "",
+                "market_status": item.get("market_status") or "",
+            }
+        )
+    return {
+        "schema_version": payload.get("schema_version") or "1",
+        "status": payload.get("status") or "unknown",
+        "generated_at": payload.get("generated_at") or "",
+        "indexes": indexes[:5],
+        "warnings": list(payload.get("warnings") or [])[:5],
+        "errors": list(payload.get("errors") or [])[:5],
+    }
+
+
 def fills_by_symbol(today_fills: Any) -> dict[str, list[dict[str, Any]]]:
     result: dict[str, list[dict[str, Any]]] = {}
     fills = today_fills.get("fills") if isinstance(today_fills, dict) else []
@@ -616,6 +646,8 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
         source_artifacts.append(args.financial_cache_path)
     if args.news_cache_path:
         source_artifacts.append(args.news_cache_path)
+    if args.market_index_snapshot_json:
+        source_artifacts.append(args.market_index_snapshot_json)
 
     financial_cache = load_yaml(Path(args.financial_cache_path)) if args.financial_cache_path else None
     news_cache = load_yaml(Path(args.news_cache_path)) if args.news_cache_path else None
@@ -631,6 +663,7 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
                 "holding": portfolio.get("holding", []),
                 "universe": portfolio.get("universe", []),
             },
+            "market_index_snapshot": compact_market_index_snapshot(args.market_index_snapshot_json),
             "account_exposure_summary": account_summary(account),
         }
     )
@@ -1458,6 +1491,31 @@ symbols:
 ''',
             encoding="utf-8",
         )
+        market_index_snapshot_path = run_dir / "market-index-snapshot.json"
+        write_json(
+            market_index_snapshot_path,
+            {
+                "schema_version": "1",
+                "run_id": "self-test",
+                "started_at": "2026-06-18T09:00:00+09:00",
+                "generated_at": "2026-06-18T09:00:01+09:00",
+                "status": "success",
+                "indexes": [
+                    {
+                        "symbol": "KOSPI",
+                        "name": "KOSPI",
+                        "source": "kis_domestic_index",
+                        "status": "success",
+                        "value": 3000.0,
+                        "change_percent": 0.2,
+                        "observed_at": "2026-06-18T09:00:00+09:00",
+                        "market_status": "장중",
+                    }
+                ],
+                "warnings": [],
+                "errors": [],
+            },
+        )
         try:
             brief = build_decision_brief(
                 argparse.Namespace(
@@ -1471,6 +1529,7 @@ symbols:
                     started_at=None,
                     financial_cache_path=str(financial_cache_path),
                     news_cache_path=str(news_cache_path),
+                    market_index_snapshot_json=str(market_index_snapshot_path),
                 )
             )
             if brief["status"] != "partial" or len(brief["symbols"]) != 2:
@@ -1487,6 +1546,8 @@ symbols:
                 failures.append(f"financial-missing symbol should be marked missing_symbol: {by_symbol['000660']}")
             if by_symbol["005930"].get("news_summary"):
                 failures.append(f"no-news placeholder should not be included: {by_symbol['005930']}")
+            if (brief.get("market_index_snapshot") or {}).get("indexes", [{}])[0].get("symbol") != "KOSPI":
+                failures.append(f"decision brief should include compact market index snapshot: {brief.get('market_index_snapshot')}")
             chart_context = by_symbol["005930"].get("chart_context", {})
             if chart_context.get("daily_summary", {}).get("latest_close") != 70000:
                 failures.append(f"chart summary should include latest close: {by_symbol['005930']}")
@@ -1781,6 +1842,7 @@ def build_parser() -> argparse.ArgumentParser:
     decision.add_argument("--today-fills")
     decision.add_argument("--financial-cache-path", default="")
     decision.add_argument("--news-cache-path", default="")
+    decision.add_argument("--market-index-snapshot-json", default="")
     decision.add_argument("--run-id")
     decision.add_argument("--started-at")
     decision.add_argument("--output", type=Path, default=None)
