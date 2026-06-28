@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import importlib.util
 import json
 import os
 import re
+import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -20,6 +22,15 @@ from zoneinfo import ZoneInfo
 
 KST = ZoneInfo("Asia/Seoul")
 KIS_BASE_URL = "https://openapi.koreainvestment.com:9443"
+ACCOUNT_ASSET_HISTORY_RELATIVE_PATH = Path("memory") / "account-assets" / "account-assets.jsonl"
+ACCOUNT_ASSET_ALLOWLIST = (
+    "tot_asst_amt",
+    "tot_dncl_amt",
+    "evlu_amt_smtl",
+    "pchs_amt_smtl",
+    "evlu_pfls_amt_smtl",
+    "ovrs_stck_evlu_amt1",
+)
 
 ENDPOINTS = {
     "search_stock_info": {
@@ -969,6 +980,147 @@ def build_account_summary(summary: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def account_asset_history_path(output_dir: Path) -> Path:
+    for parent in output_dir.resolve().parents:
+        if parent.name == "reports":
+            return parent.parent / ACCOUNT_ASSET_HISTORY_RELATIVE_PATH
+    return output_dir.resolve().parent / ACCOUNT_ASSET_HISTORY_RELATIVE_PATH
+
+
+def account_asset_summary_from_row(row: dict[str, Any]) -> dict[str, Any]:
+    purchase = parse_int(first_present(row, ("pchs_amt_smtl",)))
+    pnl = parse_int(first_present(row, ("evlu_pfls_amt_smtl",)))
+    return {
+        "source_api": "inquire_balance",
+        "observed_at": row.get("observed_at"),
+        "total_asset_amount": parse_int(first_present(row, ("tot_asst_amt",))),
+        "cash_deposit_amount": parse_int(first_present(row, ("tot_dncl_amt",))),
+        "evaluated_asset_amount": parse_int(first_present(row, ("evlu_amt_smtl",))),
+        "purchase_amount": purchase,
+        "evaluation_pnl_amount": pnl,
+        "evaluation_pnl_rate": (pnl / purchase) if purchase and pnl is not None else None,
+        "overseas_stock_evaluation_amount": parse_int(first_present(row, ("ovrs_stck_evlu_amt1",))),
+    }
+
+
+def account_asset_history_row(snapshot: dict[str, Any]) -> dict[str, Any]:
+    row = {
+        "schema_version": snapshot.get("schema_version"),
+        "run_id": snapshot.get("run_id"),
+        "started_at": snapshot.get("started_at"),
+        "observed_at": snapshot.get("observed_at"),
+        "generated_at": snapshot.get("generated_at"),
+        "status": snapshot.get("status"),
+        "source_api": snapshot.get("source_api"),
+        "execution_environment": snapshot.get("execution_environment"),
+    }
+    for key in ACCOUNT_ASSET_ALLOWLIST:
+        row[key] = snapshot.get(key)
+    return row
+
+
+def append_account_asset_history(history_path: Path, snapshot: dict[str, Any]) -> None:
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = history_path.with_suffix(history_path.suffix + ".lock")
+    with open(lock_path, "a", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            with open(history_path, "a", encoding="utf-8") as history_handle:
+                json.dump(account_asset_history_row(snapshot), history_handle, ensure_ascii=False, sort_keys=True)
+                history_handle.write("\n")
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
+def collect_account_asset_snapshot(
+    *,
+    run_id: str,
+    started_at: str,
+    env_dv: str,
+    app_key: str,
+    app_secret: str,
+    token: str,
+    retries: int,
+) -> dict[str, Any]:
+    observed_at = now_kst_iso()
+    cano, product_code = account_parts(env_dv)
+    body, _headers = call_endpoint(
+        "inquire_balance",
+        balance_params(cano, product_code),
+        app_key,
+        app_secret,
+        token,
+        retries,
+        env_dv=env_dv,
+    )
+    summary = output_summary(body)
+    snapshot: dict[str, Any] = {
+        "schema_version": "1",
+        "run_id": run_id,
+        "started_at": started_at,
+        "generated_at": now_kst_iso(),
+        "observed_at": observed_at,
+        "stage": "account-asset-snapshot",
+        "status": "success",
+        "skipped": False,
+        "skip_reason": "",
+        "source_api": "inquire_balance",
+        "execution_environment": env_dv,
+        "errors": [],
+    }
+    for key in ACCOUNT_ASSET_ALLOWLIST:
+        snapshot[key] = parse_int(first_present(summary, (key,)))
+    snapshot["account_asset_summary"] = account_asset_summary_from_row(snapshot)
+    if snapshot["tot_asst_amt"] is None:
+        snapshot["status"] = "failed"
+        snapshot["errors"] = [
+            safe_error(
+                "missing tot_asst_amt in allowlisted account asset response",
+                code="missing_total_asset_amount",
+                stage="account-asset-snapshot",
+                source="direct_kis.inquire_balance",
+                required=False,
+            )
+        ]
+    return snapshot
+
+
+def skipped_account_asset_snapshot(*, run_id: str, started_at: str, env_dv: str, reason: str) -> dict[str, Any]:
+    return {
+        "schema_version": "1",
+        "run_id": run_id,
+        "started_at": started_at,
+        "generated_at": now_kst_iso(),
+        "observed_at": "",
+        "stage": "account-asset-snapshot",
+        "status": "success",
+        "skipped": True,
+        "skip_reason": reason,
+        "source_api": "inquire_balance",
+        "execution_environment": env_dv,
+        "errors": [],
+        "account_asset_summary": {},
+    }
+
+
+def failed_account_asset_snapshot(*, run_id: str, started_at: str, env_dv: str, error: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": "1",
+        "run_id": run_id,
+        "started_at": started_at,
+        "generated_at": now_kst_iso(),
+        "observed_at": "",
+        "stage": "account-asset-snapshot",
+        "status": "failed",
+        "skipped": False,
+        "skip_reason": "",
+        "source_api": "inquire_balance",
+        "execution_environment": env_dv,
+        "errors": [error],
+        "account_asset_summary": {},
+    }
+
+
 def collect_account_artifact(symbols: list[str], *, run_id: str, started_at: str, env_dv: str, app_key: str, app_secret: str, token: str, retries: int, max_pages: int, request_type: str) -> dict[str, Any]:
     observed_at = now_kst_iso()
     rows, summary, errors = fetch_account_balance(env_dv=env_dv, app_key=app_key, app_secret=app_secret, token=token, retries=retries, max_pages=max_pages)
@@ -1098,11 +1250,13 @@ def build_collection_summary(
     symbols: list[str],
     price_artifact: dict[str, Any],
     account_artifact: dict[str, Any],
+    account_asset_snapshot: dict[str, Any],
     output_dir: Path,
     token_status: str,
     token_expires_at: str,
 ) -> dict[str, Any]:
     children = [price_artifact, account_artifact]
+    account_asset_errors = account_asset_snapshot.get("errors", []) if isinstance(account_asset_snapshot, dict) else []
     return {
         "schema_version": "1",
         "run_id": run_id,
@@ -1118,6 +1272,7 @@ def build_collection_summary(
         "paths": {
             "price_chart": str(output_dir / "price-chart.json"),
             "account_before_order": str(output_dir / "account-before-order.json"),
+            "account_asset_snapshot": str(output_dir / "account-asset-snapshot.json"),
             "collection_summary": str(output_dir / "collection-summary.json"),
         },
         "counts": {
@@ -1126,7 +1281,16 @@ def build_collection_summary(
             "account_symbols": len(account_artifact.get("symbols", [])),
             "price_errors": len(price_artifact.get("errors", [])),
             "account_errors": len(account_artifact.get("errors", [])),
+            "account_asset_errors": len(account_asset_errors),
         },
+        "optional_stages": [
+            {
+                "stage": "account-asset-snapshot",
+                "status": account_asset_snapshot.get("status"),
+                "skipped": bool(account_asset_snapshot.get("skipped")),
+                "errors": account_asset_errors,
+            }
+        ],
         "warnings": account_artifact.get("warnings", []),
         "errors": price_artifact.get("errors", []) + account_artifact.get("errors", []),
         "symbols": [{"symbol_id": symbol} for symbol in symbols],
@@ -1145,8 +1309,15 @@ def command_collect(args: argparse.Namespace) -> int:
         error = safe_error(exc, code="auth_failed", stage="main-evidence-collection", source="direct_kis.auth", required=True)
         price_artifact = failed_price_artifact(symbols, run_id=args.run_id, started_at=started_at, error=error)
         account_artifact = failed_account_artifact(symbols, run_id=args.run_id, started_at=started_at, env_dv=env_dv, request_type=args.request_type, error=error)
+        account_asset_snapshot = failed_account_asset_snapshot(
+            run_id=args.run_id,
+            started_at=started_at,
+            env_dv=env_dv,
+            error=safe_error(exc, code="auth_failed", stage="account-asset-snapshot", source="direct_kis.auth", required=False),
+        )
         write_json(output_dir / "price-chart.json", price_artifact)
         write_json(output_dir / "account-before-order.json", account_artifact)
+        write_json(output_dir / "account-asset-snapshot.json", account_asset_snapshot)
         summary = build_collection_summary(
             run_id=args.run_id,
             started_at=started_at,
@@ -1154,6 +1325,7 @@ def command_collect(args: argparse.Namespace) -> int:
             symbols=symbols,
             price_artifact=price_artifact,
             account_artifact=account_artifact,
+            account_asset_snapshot=account_asset_snapshot,
             output_dir=output_dir,
             token_status="failed",
             token_expires_at="",
@@ -1188,6 +1360,12 @@ def command_collect(args: argparse.Namespace) -> int:
             request_type=args.request_type,
             reason="skip-account option",
         )
+        account_asset_snapshot = skipped_account_asset_snapshot(
+            run_id=args.run_id,
+            started_at=started_at,
+            env_dv=env_dv,
+            reason="skip-account option",
+        )
     else:
         account_artifact = collect_account_artifact(
             symbols,
@@ -1201,7 +1379,33 @@ def command_collect(args: argparse.Namespace) -> int:
             max_pages=args.max_account_pages,
             request_type=args.request_type,
         )
+        try:
+            account_asset_snapshot = collect_account_asset_snapshot(
+                run_id=args.run_id,
+                started_at=started_at,
+                env_dv=env_dv,
+                app_key=app_key,
+                app_secret=app_secret,
+                token=token,
+                retries=args.retries,
+            )
+        except Exception as exc:  # noqa: BLE001 - optional account asset stage is non-blocking
+            account_asset_snapshot = failed_account_asset_snapshot(
+                run_id=args.run_id,
+                started_at=started_at,
+                env_dv=env_dv,
+                error=safe_error(exc, code="account_asset_snapshot_failed", stage="account-asset-snapshot", source="direct_kis.inquire_balance", required=False),
+            )
+        if account_asset_snapshot.get("status") == "success" and not account_asset_snapshot.get("skipped"):
+            try:
+                append_account_asset_history(account_asset_history_path(output_dir), account_asset_snapshot)
+            except Exception as exc:  # noqa: BLE001 - history persistence must not fail required collection
+                account_asset_snapshot["status"] = "partial"
+                account_asset_snapshot.setdefault("errors", []).append(
+                    safe_error(exc, code="account_asset_history_append_failed", stage="account-asset-snapshot", source=str(account_asset_history_path(output_dir)), required=False)
+                )
     write_json(account_path, account_artifact)
+    write_json(output_dir / "account-asset-snapshot.json", account_asset_snapshot)
     children.append(account_artifact)
 
     summary = build_collection_summary(
@@ -1211,6 +1415,7 @@ def command_collect(args: argparse.Namespace) -> int:
         symbols=symbols,
         price_artifact=price_artifact,
         account_artifact=account_artifact,
+        account_asset_snapshot=account_asset_snapshot,
         output_dir=output_dir,
         token_status=token_status,
         token_expires_at=token_expires_at,
@@ -1278,6 +1483,66 @@ def command_self_test(_args: argparse.Namespace) -> int:
     assert sample_account["symbol_id"] == "0183J0"
     assert sample_account["current_live_holding_quantity"] == 3
     assert build_account_summary({"dnca_tot_amt": "1000", "tot_evlu_amt": "2000"})["cash_amount"] == 1000
+    asset_summary = account_asset_summary_from_row(
+        {
+            "tot_asst_amt": "20000000",
+            "tot_dncl_amt": "1000000",
+            "evlu_amt_smtl": "19000000",
+            "pchs_amt_smtl": "18000000",
+            "evlu_pfls_amt_smtl": "1000000",
+            "ovrs_stck_evlu_amt1": "0",
+        }
+    )
+    assert asset_summary["total_asset_amount"] == 20000000
+    assert asset_summary["evaluation_pnl_rate"] == 1000000 / 18000000
+    skipped_asset = skipped_account_asset_snapshot(run_id="self-test", started_at="2026-06-18T09:00:00+09:00", env_dv="real", reason="skip-account option")
+    assert skipped_asset["skipped"] and skipped_asset["status"] == "success"
+    summary = build_collection_summary(
+        run_id="self-test",
+        started_at="2026-06-18T09:00:00+09:00",
+        env_dv="real",
+        symbols=["005930"],
+        price_artifact={"status": "success", "symbols": [{"symbol_id": "005930"}], "errors": []},
+        account_artifact={"status": "success", "symbols": [{"symbol_id": "005930"}], "warnings": [], "errors": []},
+        account_asset_snapshot={
+            "stage": "account-asset-snapshot",
+            "status": "failed",
+            "skipped": False,
+            "errors": [safe_error("optional probe", stage="account-asset-snapshot", required=False)],
+        },
+        output_dir=Path("/tmp/daily-trading-self-test"),
+        token_status="existing_token",
+        token_expires_at="",
+    )
+    assert summary["status"] == "success"
+    assert summary["errors"] == []
+    assert summary["counts"]["account_asset_errors"] == 1
+    assert summary["optional_stages"][0]["stage"] == "account-asset-snapshot"
+    with tempfile.TemporaryDirectory() as tmp_name:
+        history_path = Path(tmp_name) / "memory" / "account-assets" / "account-assets.jsonl"
+        snapshot = {
+            "schema_version": "1",
+            "run_id": "self-test",
+            "started_at": "2026-06-18T09:00:00+09:00",
+            "observed_at": "2026-06-18T09:01:00+09:00",
+            "generated_at": "2026-06-18T09:01:00+09:00",
+            "status": "success",
+            "source_api": "inquire_balance",
+            "execution_environment": "real",
+            "tot_asst_amt": 20000000,
+            "tot_dncl_amt": 1000000,
+            "evlu_amt_smtl": 19000000,
+            "pchs_amt_smtl": 18000000,
+            "evlu_pfls_amt_smtl": 1000000,
+            "ovrs_stck_evlu_amt1": 0,
+            "account_asset_summary": asset_summary,
+            "raw_secret_probe": "must_not_be_written",
+        }
+        append_account_asset_history(history_path, snapshot)
+        row = json.loads(history_path.read_text(encoding="utf-8").strip())
+        assert row["tot_asst_amt"] == 20000000
+        assert "account_asset_summary" not in row
+        assert "raw_secret_probe" not in row
     print("self-test ok")
     return 0
 

@@ -37,7 +37,7 @@ Use `symbol_id`, `symbol_name`, and nested `price.*`; alias-only fields such as 
 
 If time or KIS volume is constrained, prioritize identity plus current-or-last price coverage for every symbol. Chart/NAV gaps may be recorded as missing evidence, but uncalled APIs must not be represented as collected evidence.
 
-Price/chart collection may use quote, ETF/ETN, and daily/weekly/monthly chart APIs plus local calculations derived from those results. It must not call order APIs. The direct main-evidence helper may also collect the sanitized read-only account snapshot defined below, but must keep it in `account-before-order.json` rather than `price-chart.json`.
+Price/chart collection may use quote, ETF/ETN, and daily/weekly/monthly chart APIs plus local calculations derived from those results. It must not call order APIs. The direct main-evidence helper may also collect the sanitized read-only account snapshot defined below, but must keep it in `account-before-order.json` rather than `price-chart.json`. It may additionally collect `account-asset-snapshot.json` as an optional reporting/dashboard snapshot; that snapshot is not verdict or order-gate input.
 
 ## Optional Domain Collectors
 
@@ -73,6 +73,18 @@ Latest `account-before-order.json` is required before order calculation. If miss
 If `account-before-order.json` shows that active-order lookup or order-available lookup was not performed, order preparation and execution must remain blocked until `scripts/execute_orders.py` refreshes the required fields with validated read-only APIs for explicit submit runs.
 
 Current live holdings already include same-day fills. Retain same-day fills as account evidence, but do not subtract them again.
+
+## Optional Account Asset Snapshot
+
+`scripts/collect_main_evidence.py` may write `reports/runs/<run_id>/account-asset-snapshot.json` from read-only `inquire_balance` output for total-asset reporting and dashboard trend charts. This stage is optional and non-blocking:
+
+- failure, missing fields, or history append errors must be recorded under `collection-summary.json.optional_stages` and must not change required price/account collection success
+- `--skip-account` must create only a skipped snapshot and must not call live account APIs or append history
+- `--reuse-existing-artifacts` and `summarize` paths must not recollect or append account asset history
+- only allowlisted fields may be persisted: `tot_asst_amt`, `tot_dncl_amt`, `evlu_amt_smtl`, `pchs_amt_smtl`, `evlu_pfls_amt_smtl`, `ovrs_stck_evlu_amt1`, plus non-sensitive run metadata
+- successful snapshots may be appended to `memory/account-assets/account-assets.jsonl` with a file lock; raw KIS payloads, credentials, account numbers, tokens, and request parameters must not be stored
+
+`account_asset_summary` may appear in `pipeline-summary.json` for reporting/dashboard display. Do not include account asset snapshot fields in `decision-brief.json`, verdict sub-agent specs/prompts, `execution-plan`, order sizing, or order safety gates.
 
 ## Symbol Eligibility
 

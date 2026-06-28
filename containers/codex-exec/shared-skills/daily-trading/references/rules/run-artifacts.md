@@ -18,6 +18,7 @@ reports/
     ├── verdict-first.json
     ├── verdict-second.json
     ├── account-before-order.json
+    ├── account-asset-snapshot.json
     ├── pipeline-summary.json
     ├── telegram-summary.txt
     └── execution.json
@@ -25,7 +26,7 @@ reports/
 
 Create `run.json` when work starts. Write every other artifact when its stage completes, skips, or fails. Domain snapshots are write-once for the stage; retain retries and partial results in `attempts` instead of replacing evidence.
 
-`pipeline-summary.json` is the compact top-level diagnostic source for routine Main-agent responses. It must include `verdict_summary`, `execution`, `account_summary`, `account_display_summary`, `evidence_summary`, `telegram_response_policy`, `token_usage`, artifact paths, `telegram_summary_path`, and `report_path`. `telegram-summary.txt` is the fixed Telegram/user-facing response rendered from `pipeline-summary.json`; use it instead of manually rewriting a response from raw artifacts. After order execution updates `execution.json`, rerun `scripts/run_daily_trading_pipeline.py summarize --workspace-dir <workspace> --output-dir reports/runs/<run_id>` so `pipeline-summary.json`, `telegram-summary.txt`, `reports/YYYY-MM-DD_포트폴리오.md`, and final `run.json` status describe the same final state.
+`pipeline-summary.json` is the compact top-level diagnostic source for routine Main-agent responses. It must include `verdict_summary`, `execution`, `account_summary`, `account_display_summary`, optional `account_asset_summary`, `evidence_summary`, `telegram_response_policy`, `token_usage`, artifact paths, `telegram_summary_path`, and `report_path`. `telegram-summary.txt` is the fixed Telegram/user-facing response rendered from `pipeline-summary.json`; use it instead of manually rewriting a response from raw artifacts. After order execution updates `execution.json`, rerun `scripts/run_daily_trading_pipeline.py summarize --workspace-dir <workspace> --output-dir reports/runs/<run_id>` so `pipeline-summary.json`, `telegram-summary.txt`, `reports/YYYY-MM-DD_포트폴리오.md`, and final `run.json` status describe the same final state.
 
 For Telegram/user-facing account output, use `account_display_summary` as the default source. It intentionally keeps same-day cumulative buy/sell amounts under `today_trade_amounts`; show those only as `당일 거래 누계` when useful, not as the main account state. Evidence output must use `evidence_summary.financial.display_text` and `evidence_summary.news.display_text`, preserving the difference between a missing news cache and a cache file with zero usable articles.
 
@@ -102,8 +103,9 @@ Wrapper JSON includes `token_usage`, `token_usage_event_count`, optional `rate_l
 | `verdict-first.json` | Main | compact first verdict responses, sidecar paths, raw score averages, confidence-adjusted final scores |
 | `verdict-second.json` | Main | single `judge-final` response, sidecar path, validated target quantities, and compact reasons |
 | `account-before-order.json` | Main/helper | sanitized latest account snapshot, active pending/reserved orders, or skipped envelope |
+| `account-asset-snapshot.json` | Main/helper | optional allowlisted total-asset snapshot for reporting/dashboard only; never verdict or order-gate input |
 | `execution.json` | Main | active-order adjustment decisions, quantity math, latest available cash, blocked/submitted/skipped/failed order results |
-| `pipeline-summary.json` | Main/pipeline | compact final status, verdict summary, display-safe account summary, evidence status, execution summary, Telegram response policy, token usage, report path, and artifact paths |
+| `pipeline-summary.json` | Main/pipeline | compact final status, verdict summary, display-safe account summary, optional account asset summary, evidence status, execution summary, Telegram response policy, token usage, report path, and artifact paths |
 | `telegram-summary.txt` | Main/pipeline | fixed Telegram/user-facing response generated only from `pipeline-summary.json` |
 | `reports/YYYY-MM-DD_포트폴리오.md` | Main/pipeline | Korean human-readable portfolio report generated from compact canonical artifacts |
 

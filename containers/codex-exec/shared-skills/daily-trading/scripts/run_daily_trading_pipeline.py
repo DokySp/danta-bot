@@ -1035,6 +1035,29 @@ class Pipeline:
             },
         }
 
+    def build_account_asset_summary(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+        if snapshot.get("skipped") or snapshot.get("status") not in {"success", "partial"}:
+            return {}
+        embedded = snapshot.get("account_asset_summary")
+        if isinstance(embedded, dict) and embedded.get("total_asset_amount") is not None:
+            return embedded
+        total_asset = as_int(snapshot.get("tot_asst_amt"))
+        if total_asset is None:
+            return {}
+        purchase = as_int(snapshot.get("pchs_amt_smtl"))
+        pnl = as_int(snapshot.get("evlu_pfls_amt_smtl"))
+        return {
+            "source_api": snapshot.get("source_api") or "inquire_balance",
+            "observed_at": snapshot.get("observed_at"),
+            "total_asset_amount": total_asset,
+            "cash_deposit_amount": as_int(snapshot.get("tot_dncl_amt")),
+            "evaluated_asset_amount": as_int(snapshot.get("evlu_amt_smtl")),
+            "purchase_amount": purchase,
+            "evaluation_pnl_amount": pnl,
+            "evaluation_pnl_rate": (pnl / purchase) if purchase and pnl is not None else None,
+            "overseas_stock_evaluation_amount": as_int(snapshot.get("ovrs_stck_evlu_amt1")),
+        }
+
     def build_evidence_summary(self, decision_brief: dict[str, Any], stages: list[dict[str, Any]], symbols: list[str]) -> dict[str, Any]:
         stage_by_name = {item.get("stage"): item for item in stages if isinstance(item, dict)}
         decision_symbols = decision_brief.get("symbols") if isinstance(decision_brief.get("symbols"), list) else []
@@ -1424,6 +1447,7 @@ class Pipeline:
         token_summary = load_json_if_exists(self.output_dir / "token-summary.json") or {}
         execution = load_json_if_exists(self.output_dir / "execution.json") or {}
         account = load_json_if_exists(self.output_dir / "account-before-order.json") or {}
+        account_asset_snapshot = load_json_if_exists(self.output_dir / "account-asset-snapshot.json") or {}
         decision_brief = load_json_if_exists(self.output_dir / "decision-brief.json") or {}
         orders = []
         for item in execution.get("orders", []) if isinstance(execution, dict) else []:
@@ -1448,6 +1472,7 @@ class Pipeline:
         symbols = normalize_symbol_ids(portfolio.get("universe"))
         account_summary = account.get("account_summary") if isinstance(account.get("account_summary"), dict) else {}
         account_display_summary = self.build_account_display_summary(account_summary)
+        account_asset_summary = self.build_account_asset_summary(account_asset_snapshot if isinstance(account_asset_snapshot, dict) else {})
         evidence_summary = self.build_evidence_summary(decision_brief, stages, symbols)
         report_path = self.report_path()
         telegram_summary_path = self.output_dir / "telegram-summary.txt"
@@ -1478,6 +1503,7 @@ class Pipeline:
             "verdict_summary": verdict_summary,
             "account_summary": account_summary,
             "account_display_summary": account_display_summary,
+            "account_asset_summary": account_asset_summary,
             "evidence_summary": evidence_summary,
             "execution": {
                 "status": execution.get("status"),
@@ -1517,6 +1543,7 @@ class Pipeline:
                 "check_portfolio": str(self.output_dir / "check-portfolio.json"),
                 "price_chart": str(self.output_dir / "price-chart.json"),
                 "account_before_order": str(self.output_dir / "account-before-order.json"),
+                "account_asset_snapshot": str(self.output_dir / "account-asset-snapshot.json"),
                 "decision_brief": str(self.output_dir / "decision-brief.json"),
                 "verdict_first": str(self.output_dir / "verdict-first.json"),
                 "verdict_second": str(self.output_dir / "verdict-second.json"),
@@ -1843,6 +1870,38 @@ def write_self_test_fixtures(workspace: Path, run_dir: Path) -> Path:
                 {"symbol_id": "005930", "symbol_name": "삼성전자", "current_live_holding_quantity": 0, "current_price": None},
                 {"symbol_id": "000660", "symbol_name": "SK하이닉스", "current_live_holding_quantity": 0, "current_price": 200000},
             ],
+        },
+    )
+    write_json(
+        run_dir / "account-asset-snapshot.json",
+        {
+            "schema_version": "1",
+            "run_id": "pipeline-self-test",
+            "started_at": "2026-06-18T09:00:00+09:00",
+            "generated_at": "2026-06-18T09:00:05+09:00",
+            "observed_at": "2026-06-18T09:00:05+09:00",
+            "stage": "account-asset-snapshot",
+            "status": "success",
+            "skipped": False,
+            "source_api": "inquire_balance",
+            "tot_asst_amt": 20000000,
+            "tot_dncl_amt": 1000000,
+            "evlu_amt_smtl": 19000000,
+            "pchs_amt_smtl": 18000000,
+            "evlu_pfls_amt_smtl": 1000000,
+            "ovrs_stck_evlu_amt1": 0,
+            "account_asset_summary": {
+                "source_api": "inquire_balance",
+                "observed_at": "2026-06-18T09:00:05+09:00",
+                "total_asset_amount": 20000000,
+                "cash_deposit_amount": 1000000,
+                "evaluated_asset_amount": 19000000,
+                "purchase_amount": 18000000,
+                "evaluation_pnl_amount": 1000000,
+                "evaluation_pnl_rate": 1000000 / 18000000,
+                "overseas_stock_evaluation_amount": 0,
+            },
+            "errors": [],
         },
     )
     return portfolio_path
@@ -2289,6 +2348,15 @@ def run_self_test() -> int:
                 failures.append(f"display account summary should not expose same-day totals as main fields: {account_display}")
             if not isinstance(account_display.get("today_trade_amounts"), dict):
                 failures.append(f"display account summary omitted separate same-day trade bucket: {account_display}")
+            account_summary = summary.get("account_summary") if isinstance(summary.get("account_summary"), dict) else {}
+            if account_summary.get("total_evaluation_amount") != 1500000:
+                failures.append(f"account asset snapshot should not overwrite account_summary: {account_summary}")
+            account_asset_summary = summary.get("account_asset_summary") if isinstance(summary.get("account_asset_summary"), dict) else {}
+            if account_asset_summary.get("total_asset_amount") != 20000000:
+                failures.append(f"pipeline summary omitted account_asset_summary: {account_asset_summary}")
+            artifacts = summary.get("artifacts") if isinstance(summary.get("artifacts"), dict) else {}
+            if not str(artifacts.get("account_asset_snapshot", "")).endswith("account-asset-snapshot.json"):
+                failures.append(f"pipeline summary omitted account asset artifact path: {artifacts}")
             evidence_summary = summary.get("evidence_summary") if isinstance(summary.get("evidence_summary"), dict) else {}
             if not isinstance(evidence_summary.get("news"), dict) or "display_text" not in evidence_summary.get("news", {}):
                 failures.append(f"pipeline summary omitted displayable news evidence status: {evidence_summary}")

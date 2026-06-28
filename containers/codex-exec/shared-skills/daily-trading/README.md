@@ -41,7 +41,7 @@ python3 <daily-trading-skill>/scripts/run_daily_trading_pipeline.py run \
 |---:|---|---|---|---|---|
 | 1 | scheduled direct runner 또는 `Main agent` + `scripts/run_daily_trading_pipeline.py` | `$check-portfolio`(요청 시), KIS direct read-only holdings API auto-auth | structured schedule config 또는 사용자 요청, portfolio 설정, `run_id`, `started_at`, `CODEX_MCP_TRADING_ENV` | `run.json`, `check-portfolio.json`, `pipeline-summary.json`, `reports/YYYY-MM-DD_포트폴리오.md` | scheduled direct runner는 Main Codex 없이 pipeline을 실행하고, manual/fallback Main agent는 pipeline을 먼저 실행하고 summary만 우선 읽음 |
 | 2 | `Main agent` | `$check-portfolio` JSON | check-portfolio `universe`, 거래 환경 | 전체 종목 universe | universe 확장을 위해 현재 보유 종목을 별도 재조회하지 않음 |
-| 3 | `Main agent` + Collection sub-agents | `scripts/collect_main_evidence.py` direct KIS 가격·계좌 증거 수집, cache miss/universe mismatch 시 `get` 확인 후 1회 `$collect-financial-information`, `$collect-news-information` 및 재 `get` | 전체 종목 universe, 거래 환경 | `price-chart.json`, `account-before-order.json`, 선택적 `collection-summary.json`, 선택적 full-universe 또는 partial financial/news memory 경로 | 가격·관측시각은 필수, financial/news는 같은 날짜 full-universe cache hit 시 collector를 생략하며, cache miss/universe mismatch면 get→collect→get을 한 번만 수행하고 그래도 미완성이면 partial cache를 사용함 |
+| 3 | `Main agent` + Collection sub-agents | `scripts/collect_main_evidence.py` direct KIS 가격·계좌 증거 수집, cache miss/universe mismatch 시 `get` 확인 후 1회 `$collect-financial-information`, `$collect-news-information` 및 재 `get` | 전체 종목 universe, 거래 환경 | `price-chart.json`, `account-before-order.json`, 선택적 `account-asset-snapshot.json`, 선택적 `collection-summary.json`, 선택적 full-universe 또는 partial financial/news memory 경로 | 가격·관측시각은 필수, `account-asset-snapshot`은 총자산 추이용 optional stage이며 실패해도 필수 price/account evidence를 깨지 않음; financial/news는 같은 날짜 full-universe cache hit 시 collector를 생략하며, cache miss/universe mismatch면 get→collect→get을 한 번만 수행하고 그래도 미완성이면 partial cache를 사용함 |
 | 4 | `Main agent` + `scripts/build_run_artifacts.py` | deterministic 병합/sanitize | `price-chart.json`, `$check-portfolio` JSON, 선택적 `memory/collect-financial-information/financial-YYYY-MM-DD.yaml`, 선택적 `memory/collect-news-information/news-YYYY-MM-DD.yaml` | `decision-brief.json`, 제외 종목 목록 | 식별자와 가격 snapshot이 있으면 재무/뉴스 누락만으로 제외하지 않음; Main agent가 직접 JSON을 조립하지 않고 helper를 호출 |
 | 5 | `first-verdict` sub-agents + `scripts/build_run_artifacts.py` | selected 2 execution personas, deterministic spec/merge into 4 canonical views | launcher-created role-scoped `verdict-core`, `verdict-format.md` | `verdict-first.json`, `verdicts/first-verdict--<agent_role>--<task_name>.md` | `analyst-fundamental-risk`는 `analyst-quality-value`와 `analyst-risk-allocation` view를 독립 산출하고, `analyst-market-news`는 `analyst-momentum-cycle`과 `analyst-news-flow` view를 독립 산출; sub-agent는 compact JSON만 반환하고 companion MD와 score merge는 helper가 생성 |
 | 6 | `second-verdict` sub-agent + `scripts/build_run_artifacts.py` | `judge-final`, deterministic 대상/spec 생성 | launcher-created `verdict-core`, selected-symbol first-verdict slice, `verdict-format.md` | `verdict-second.json`, `verdicts/second-verdict--judge-final--<task_name>.md` | 목표수량은 단일 judge가 제안하고 목표현금은 만들지 않으며, helper/Main agent가 schema·자산·집중도·계좌 gate만 검증; 실패 시 failed task만 최대 2회 retry |
@@ -94,7 +94,8 @@ python3 <daily-trading-skill>/scripts/run_daily_trading_pipeline.py run \
 가격·계좌 증거 수집 허용 범위:
 
 - `Main agent`가 `scripts/collect_main_evidence.py`를 실행해 대상 종목의 direct KIS 현재가와 sanitized 계좌 스냅샷을 수집
-- 결과는 `reports/runs/<run_id>/price-chart.json`, `account-before-order.json`, 선택적 `collection-summary.json`에 저장
+- 결과는 `reports/runs/<run_id>/price-chart.json`, `account-before-order.json`, 선택적 `account-asset-snapshot.json`, 선택적 `collection-summary.json`에 저장
+- `account-asset-snapshot.json`은 MTS 총자산 추이 표시용 optional snapshot이며, allowlist 필드만 저장하고 성공 시 `memory/account-assets/account-assets.jsonl`에 append-only로 누적한다. 이 값은 `decision-brief`, verdict sub-agent, 주문 gate 입력으로 사용하지 않는다.
 - helper는 주문 제출, 예약, 정정, 취소를 수행하지 않으며, active 주문/주문가능 조회가 누락된 경우 실제 주문 단계는 `references/rules/trade-execution.md` gate에 따라 차단한다.
 
 Financial 수집 허용 범위:
@@ -135,6 +136,7 @@ Run 아티팩트는 `reports/runs/<run_id>/` 아래에 둔다.
 - `run.json`
 - `price-chart.json`
 - `collection-summary.json` (optional direct main-evidence helper summary)
+- `account-asset-snapshot.json` (optional total-asset snapshot for reporting/dashboard only)
 - financial memory 경로 `memory/collect-financial-information/financial-YYYY-MM-DD.yaml` (optional best-effort cache path)
 - 뉴스 memory 경로 `memory/collect-news-information/news-YYYY-MM-DD.yaml` (optional best-effort cache path)
 - `decision-brief.json`
