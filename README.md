@@ -150,8 +150,9 @@ containers/
       check-holiday/
       collect-financial-information/
       collect-news-information/
-      daily-trading/
       trading-schedule-toggle/
+    pipelines/
+      daily-trading/
     profiles/
       base/
         compose.yaml

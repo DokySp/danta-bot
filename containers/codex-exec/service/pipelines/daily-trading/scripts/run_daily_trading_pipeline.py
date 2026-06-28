@@ -1632,7 +1632,7 @@ class Pipeline:
                 str(self.output_dir),
                 "--workspace-dir",
                 str(self.workspace_dir),
-                "--skill-dir",
+                "--pipeline-dir",
                 str(script_dir().parent),
                 *(
                     ["--verdict-extra-instructions-file", str(self.verdict_extra_instructions_path)]
@@ -1660,7 +1660,7 @@ class Pipeline:
                 str(portfolio_path),
                 "--workspace-dir",
                 str(self.workspace_dir),
-                "--skill-dir",
+                "--pipeline-dir",
                 str(script_dir().parent),
                 *(
                     ["--verdict-extra-instructions-file", str(self.verdict_extra_instructions_path)]

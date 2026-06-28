@@ -13,8 +13,6 @@ from .daily_trading import (
     append_daily_trading_started_at,
     attach_daily_trading_context,
     codex_run_context_prompt,
-    daily_trading_model_contract_prompt,
-    is_explicit_daily_trading_request,
     mcp_trading_env_prompt,
     new_codex_run_context,
 )
@@ -240,12 +238,10 @@ class CodexRunner:
         return f"<b>Codex usage</b>\n<pre>{html.escape(output)}</pre>"
 
     def _build_prompt(self, prompt: str, context, daily_trading_hint: bool) -> str:
-        daily_trading_prompt = daily_trading_model_contract_prompt() if daily_trading_hint else ""
         return (
             prompt.rstrip()
             + mcp_trading_env_prompt(self.config.mcp_trading_env)
             + codex_run_context_prompt(context)
-            + daily_trading_prompt
             + HTML_PROMPT_SUFFIX
         )
 
@@ -259,7 +255,6 @@ class CodexRunner:
     ) -> str:
         context = new_codex_run_context()
         output_file = self.tmp_dir / f"{context.run_id}.txt"
-        daily_trading_hint = daily_trading_hint or is_explicit_daily_trading_request(prompt)
         full_prompt = self._build_prompt(prompt, context, daily_trading_hint)
         usage_before = self._read_usage_snapshot()
         model_value = model or self.config.model
@@ -434,8 +429,8 @@ class CodexRunner:
     def _daily_trading_artifact_script(self) -> Path | None:
         candidates = [
             self.config.workspace_dir
-            / "containers/codex-exec/shared-skills/daily-trading/scripts/build_run_artifacts.py",
-            Path("/app/skills/daily-trading/scripts/build_run_artifacts.py"),
+            / "containers/codex-exec/service/pipelines/daily-trading/scripts/build_run_artifacts.py",
+            Path("/app/service/pipelines/daily-trading/scripts/build_run_artifacts.py"),
         ]
         for candidate in candidates:
             if candidate.exists():
@@ -445,8 +440,8 @@ class CodexRunner:
     def _daily_trading_telegram_renderer(self) -> Path | None:
         candidates = [
             self.config.workspace_dir
-            / "containers/codex-exec/shared-skills/daily-trading/scripts/render_telegram_summary.py",
-            Path("/app/skills/daily-trading/scripts/render_telegram_summary.py"),
+            / "containers/codex-exec/service/pipelines/daily-trading/scripts/render_telegram_summary.py",
+            Path("/app/service/pipelines/daily-trading/scripts/render_telegram_summary.py"),
         ]
         for candidate in candidates:
             if candidate.exists():

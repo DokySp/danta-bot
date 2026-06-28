@@ -17,6 +17,7 @@ def sync_bundled_skills(config: Config) -> None:
     marker = config.codex_home / ".bundled_skills_initialized"
 
     target_root.mkdir(parents=True, exist_ok=True)
+    remove_stale_daily_trading_skill(target_root)
 
     copied = 0
     replaced = 0
@@ -49,6 +50,14 @@ def remove_existing_skill(path: Path) -> None:
         path.unlink()
         return
     shutil.rmtree(path)
+
+
+def remove_stale_daily_trading_skill(target_root: Path) -> None:
+    target = target_root / "daily-trading"
+    if not (target.exists() or target.is_symlink()):
+        return
+    remove_existing_skill(target)
+    logging.info("removed stale daily-trading Codex skill target=%s", target)
 
 
 def write_skills_marker(config: Config, marker: Path, copied: int, replaced: int, skipped: int) -> None:

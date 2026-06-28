@@ -1,15 +1,15 @@
 # daily-trading
 
-`daily-trading`은 한국 주식·ETF 포트폴리오 전체를 대상으로 수집, 평결, 주문 실행 경계를 정의하는 프롬프트 계약형 스킬이다.
+`daily-trading`은 한국 주식·ETF 포트폴리오 전체를 대상으로 수집, 평결, 주문 실행을 수행하는 Python pipeline package다. Codex skill entrypoint로 노출하지 않는다.
 
 Sub-agent 모델과 effort는 `DAILY_TRADING_SUBAGENT_MODEL_CONFIG` 또는 `containers/codex-exec/profiles/base/config/daily-trading-subagents.yaml`에서 조정하고, `scripts/run_subagent.py`가 해당 값을 `codex exec` 명령에 지정한다.
 
-Scheduled daily-trading jobs with a `daily_trading` block in `schedules.yaml` are executed by the codex-exec Python direct runner, which calls `scripts/run_daily_trading_pipeline.py run` without starting Main Codex. Manual or fallback `daily-trading` execution still starts from Main agent, and Main agent must call `scripts/run_daily_trading_pipeline.py run` first rather than manually orchestrating helpers. Telegram/user-facing 응답은 `pipeline-summary.json`을 직접 말로 재구성하지 않고, `scripts/render_telegram_summary.py`가 `pipeline-summary.json`에서 생성한 `telegram-summary.txt`를 그대로 사용한다. `pipeline-summary.json`은 `verdict_summary`, `account_display_summary`, `evidence_summary`, `telegram_response_policy`, `report_path`, `telegram_summary_path`를 포함하므로 진단이 필요할 때만 읽는다. 명시적으로 승인된 `demo-submit` 또는 `real-submit`에서는 `--submit-orders`를 함께 넘겨 `scripts/execute_orders.py`가 read-only gate 갱신, 기존 pending/reserved 주문 조정 판정, 즉시/예약 주문 제출·정정·취소·차단, 최종 summary 재생성을 수행하게 한다. `--order-path auto`는 KST 기준 `09:00 <= t < 15:30` 평일 실행을 `order_cash`, `15:40 <= t` 또는 `t < 07:30` 실행과 주말 실행을 `order_resv`로 해석하는 기본값이다. 휴장일 판단과 스케줄 활성화는 daily-trading 내부가 아니라 별도 check-holiday 경계에서 처리한다. `--order-path reservation`은 `order_resv`, `--order-path immediate`는 `order_cash` 후보로 명시 고정한다. `--submit-orders` 없이 `execution.requires_main_agent_order_execution=true`가 남아 있으면 그 run은 비제출 gate 요약 상태이며 최종 주문 실행 결과가 아니다. 명시적 지정가 예약 요청에서 사용자별 종목 가격이 없으면 `execution-plan`의 `order_price`를 기본 지정가 후보로 사용하며, 해당 가격이 파이프라인에서 산출됐다는 이유만으로 차단하지 않는다. `scripts/run_subagent.py`, `scripts/build_run_artifacts.py`, `scripts/render_telegram_summary.py`, persona 파일, rule 문서 전문, 중간 JSON은 pipeline 실패 진단 때만 연다. 설치 또는 pipeline/launcher/helper 변경 후에는 `python3 <daily-trading-skill>/scripts/run_daily_trading_pipeline.py self-test`, `python3 <daily-trading-skill>/scripts/run_subagent.py self-test`, `python3 <daily-trading-skill>/scripts/build_run_artifacts.py self-test`, `python3 <daily-trading-skill>/scripts/execute_orders.py self-test`, `python3 <daily-trading-skill>/scripts/render_telegram_summary.py --self-test`로 검증한다.
+Scheduled daily-trading jobs with a `daily_trading` block in `schedules.yaml` are executed by the codex-exec Python direct runner, which calls `scripts/run_daily_trading_pipeline.py run` without starting Main Codex. Telegram/user-facing 응답은 `pipeline-summary.json`을 직접 말로 재구성하지 않고, `scripts/render_telegram_summary.py`가 `pipeline-summary.json`에서 생성한 `telegram-summary.txt`를 그대로 사용한다. `pipeline-summary.json`은 `verdict_summary`, `account_display_summary`, `evidence_summary`, `telegram_response_policy`, `report_path`, `telegram_summary_path`를 포함하므로 진단이 필요할 때만 읽는다. 명시적으로 승인된 `demo-submit` 또는 `real-submit`에서는 `--submit-orders`를 함께 넘겨 `scripts/execute_orders.py`가 read-only gate 갱신, 기존 pending/reserved 주문 조정 판정, 즉시/예약 주문 제출·정정·취소·차단, 최종 summary 재생성을 수행하게 한다. `--order-path auto`는 KST 기준 `09:00 <= t < 15:30` 평일 실행을 `order_cash`, `15:40 <= t` 또는 `t < 07:30` 실행과 주말 실행을 `order_resv`로 해석하는 기본값이다. 휴장일 판단과 스케줄 활성화는 daily-trading 내부가 아니라 별도 check-holiday 경계에서 처리한다. `--order-path reservation`은 `order_resv`, `--order-path immediate`는 `order_cash` 후보로 명시 고정한다. `--submit-orders` 없이 `execution.requires_main_agent_order_execution=true`가 남아 있으면 그 run은 비제출 gate 요약 상태이며 최종 주문 실행 결과가 아니다. 명시적 지정가 예약 요청에서 사용자별 종목 가격이 없으면 `execution-plan`의 `order_price`를 기본 지정가 후보로 사용하며, 해당 가격이 파이프라인에서 산출됐다는 이유만으로 차단하지 않는다. `scripts/run_subagent.py`, `scripts/build_run_artifacts.py`, `scripts/render_telegram_summary.py`, `prompts/*.md`, 중간 JSON은 pipeline 실패 진단 때만 연다. 설치 또는 pipeline/launcher/helper 변경 후에는 `python3 <daily-trading-pipeline>/scripts/run_daily_trading_pipeline.py self-test`, `python3 <daily-trading-pipeline>/scripts/run_subagent.py self-test`, `python3 <daily-trading-pipeline>/scripts/build_run_artifacts.py self-test`, `python3 <daily-trading-pipeline>/scripts/execute_orders.py self-test`, `python3 <daily-trading-pipeline>/scripts/render_telegram_summary.py --self-test`로 검증한다.
 
 Routine command:
 
 ```text
-python3 <daily-trading-skill>/scripts/run_daily_trading_pipeline.py run \
+python3 <daily-trading-pipeline>/scripts/run_daily_trading_pipeline.py run \
   --workspace-dir <workspace> \
   --output-dir reports/runs/<run_id> \
   --run-id <run_id> \
@@ -87,8 +87,8 @@ python3 <daily-trading-skill>/scripts/run_daily_trading_pipeline.py run \
 
 `scripts/execute_orders.py` 주문 실행 허용 범위:
 
-- 명시 승인과 `references/rules/trade-execution.md` gate를 통과한 `order_resv`
-- 명시 승인과 `references/rules/trade-execution.md` gate를 통과한 `order_cash`
+- 명시 승인과 `execute_orders.py` gate를 통과한 `order_resv`
+- 명시 승인과 `execute_orders.py` gate를 통과한 `order_cash`
 - 필수 원주문 식별자가 있는 기존 active pending/reserved 주문의 정정·취소·대체 제출
 
 가격·계좌 증거 수집 허용 범위:
@@ -96,7 +96,7 @@ python3 <daily-trading-skill>/scripts/run_daily_trading_pipeline.py run \
 - `Main agent`가 `scripts/collect_main_evidence.py`를 실행해 대상 종목의 direct KIS 현재가와 sanitized 계좌 스냅샷을 수집
 - 결과는 `reports/runs/<run_id>/price-chart.json`, `account-before-order.json`, 선택적 `account-asset-snapshot.json`, 선택적 `collection-summary.json`에 저장
 - `account-asset-snapshot.json`은 MTS 총자산 추이 표시용 optional snapshot이며, allowlist 필드만 저장하고 성공 시 `memory/account-assets/account-assets.jsonl`에 append-only로 누적한다. 이 값은 `decision-brief`, verdict sub-agent, 주문 gate 입력으로 사용하지 않는다.
-- helper는 주문 제출, 예약, 정정, 취소를 수행하지 않으며, active 주문/주문가능 조회가 누락된 경우 실제 주문 단계는 `references/rules/trade-execution.md` gate에 따라 차단한다.
+- helper는 주문 제출, 예약, 정정, 취소를 수행하지 않으며, active 주문/주문가능 조회가 누락된 경우 실제 주문 단계는 `execute_orders.py` gate에 따라 차단한다.
 
 Financial 수집 허용 범위:
 
@@ -127,7 +127,7 @@ News 수집 허용 범위:
 - 주문 API
 - raw prompt fallback
 
-`Main agent`가 평결 JSON에서 생성하는 companion Markdown은 사람이 각 자산 판단을 확인하기 위한 보조 산출물이다. 파일명은 `references/rules/verdict-format.md`의 safe-name 규칙을 따른다. 이 Markdown은 점수 집계, 목표수량 조정, 주문 후보 계산, 실행 gate의 입력으로 쓰지 않는다.
+평결 JSON에서 생성하는 companion Markdown은 사람이 각 자산 판단을 확인하기 위한 보조 산출물이다. 파일명은 `prompts/verdict-format.md`의 safe-name 규칙을 따른다. 이 Markdown은 점수 집계, 목표수량 조정, 주문 후보 계산, 실행 gate의 입력으로 쓰지 않는다.
 
 ## 아티팩트
 
@@ -166,10 +166,67 @@ Run 아티팩트는 `reports/runs/<run_id>/` 아래에 둔다.
 
 ## 주문 경계
 
-`scripts/execute_orders.py`는 `references/rules/trade-execution.md`의 실행 gate를 적용한다. 별도 최종 리스크 sub-agent와 승인 아티팩트는 사용하지 않는다.
+`scripts/execute_orders.py`는 Python 코드로 구현된 실행 gate를 적용한다. 별도 최종 리스크 sub-agent와 승인 아티팩트는 사용하지 않는다.
 
 `expected_holding_quantity`는 현재 후보 주문 제출 전, 이미 존재하는 미체결·예약 수량만 반영한 예상 보유수량이다. `target_holding_quantity`와 다르다는 이유만으로 후보 불일치나 주문 차단으로 판단하지 않는다.
 
 기존 active pending/reserved 주문이 목표수량, 방향, 잔여수량, 가격, 주문 API, 주문 경로와 맞지 않으면 `scripts/execute_orders.py`는 필수 원주문 식별자가 있을 때 같은 방향/API/경로 주문은 정정하고, 취소가 필요한 대체 주문은 취소 요청이 접수된 뒤 같은 명시 실행 run에서 검증된 대체 주문을 제출한다. 식별자가 없거나 취소/정정/대체 주문 결과가 불확실하면 `execution.json`에 `blocked`로 남긴다.
 
-사용자 또는 schedule이 demo 또는 real 실행을 명시했고 `--submit-orders`가 전달됐으며 `references/rules/trade-execution.md`의 모든 실행 gate를 통과한 경우에만 `scripts/execute_orders.py`가 주문 API를 호출한다.
+사용자 또는 schedule이 demo 또는 real 실행을 명시했고 `--submit-orders`가 전달됐으며 `execute_orders.py`의 모든 실행 gate를 통과한 경우에만 `scripts/execute_orders.py`가 주문 API를 호출한다.
+
+## 유지보수 계약
+
+이 섹션은 사람이 보는 유지보수 계약이다. Runtime에서 이 문장을 직접 읽지 않으며, 실제 동작은 `scripts/` 아래 Python 코드에 구현되어 있다. LLM verdict sub-agent가 runtime에서 읽는 Markdown은 `prompts/` 아래 파일뿐이다.
+
+### 인증과 토큰
+
+- Direct KIS helper는 app key, 계좌 설정, 거래 환경을 runtime 환경변수에서 읽는다.
+- 토큰 발급과 갱신은 shared `kis-token` helper를 사용한다.
+- 인증, credential, token, permission, 계좌 설정 오류는 local trading retry 대상이 아니다. Sanitized error로 중단하거나 주문을 차단한다.
+- 아티팩트, prompt, 보고서, Telegram 응답에는 계좌번호, product code, HTS ID, app key, app secret, access token, raw request header를 노출하지 않는다.
+
+### 수집 경계
+
+- 필수 가격, 차트, 최초 계좌 증거는 `collect_main_evidence.py`가 수집한다.
+- Financial/news domain은 optional best-effort 입력이다. 해당 데이터 부재만으로 verdict 또는 주문 실행을 차단하지 않는다.
+- 같은 날짜 full-universe financial/news cache가 없거나 불완전할 때 cache collection은 pipeline run당 한 번만 시도한다.
+- Collection sub-agent는 account, balance, order, order-available, fill-history, pending-order, reservation, correction, cancellation API를 호출하지 않는다.
+
+### 아티팩트 계약
+
+- `run.json`은 `run_id`, `started_at`, status, stage records를 보존한다.
+- `decision-brief.json`은 compact canonical verdict input이다.
+- `verdict-first.json`은 first-verdict score view 병합 결과다.
+- `verdict-second.json`은 단일 judge target set이다.
+- `execution.json`은 target delta, gate decision, active-order reconciliation, submitted/skipped/blocked order result, sanitized error를 기록한다.
+- `pipeline-summary.json`은 service output을 위한 compact diagnostic source다.
+- `telegram-summary.txt`는 `pipeline-summary.json`에서 렌더링한 고정 user-facing 응답이며, service code는 raw artifact에서 새 summary를 재구성하지 않는다.
+
+### Verdict 계약
+
+- First-verdict는 두 execution persona가 네 canonical view를 산출한다: `analyst-quality-value`, `analyst-risk-allocation`, `analyst-momentum-cycle`, `analyst-news-flow`.
+- Second-verdict는 `judge-final`만 사용한다.
+- Verdict sub-agent는 supplied artifact, 자기 prompt, `prompts/verdict-format.md`만 읽는다.
+- Verdict sub-agent는 KIS, MCP, web, network, account/order API 또는 외부 출처를 호출하지 않는다.
+- Verdict sub-agent는 compact JSON만 반환하고, 파일 쓰기, Markdown sidecar 생성, diff 출력, code fence 출력을 하지 않는다.
+
+### 주문 실행 계약
+
+- `second-verdict`는 target holding quantity를 결정하고, deterministic helper가 이를 order candidate로 변환한다.
+- 실제 order API는 명시적 demo/real authorization 이후 모든 gate를 통과했을 때만 `execute_orders.py`가 호출한다.
+- 지원 대상은 immediate cash order, reservation order, active order reconciliation을 위한 supported correction/cancellation API다.
+- 주문 전 `execute_orders.py`는 active pending/reserved order와 order-available quantity를 포함한 required read-only account gate를 갱신한다.
+- 기존 active order는 symbol, direction, remaining quantity, price, environment, API, order path가 원하는 candidate와 일치할 때만 유지한다. 아니면 required identifier/API support에 따라 정정, 취소/대체, 또는 차단한다.
+- Buy/sell quantity는 최신 order-available 및 sell-available gate에 따라 축소되거나 차단되어야 한다.
+- 불확실한 order result는 blind retry하지 않는다. 먼저 read-only state를 갱신하고, 최신 상태가 주문 미접수를 증명할 때만 재시도한다.
+
+### 보고 계약
+
+- Portfolio report와 Telegram summary는 final artifact에서 생성하며 raw helper output을 수동 재요약하지 않는다.
+- Human-review Markdown sidecar는 정보 제공용이다. Scoring, target, order gate 입력으로 쓰지 않는다.
+- Optional financial/news data 부재는 missing evidence로 보고할 수 있지만, 문구만으로 hard blocker가 되면 안 된다.
+
+### Strategy mapping 계약
+
+- Strategy label은 signal과 reason code 해석을 위한 유지보수 vocabulary다.
+- Runtime scoring과 target calculation은 structured artifact와 Python implementation에 의해 결정되며, 이 문서를 다시 읽어 동작하지 않는다.

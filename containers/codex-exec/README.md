@@ -119,7 +119,7 @@ CODEX_MCP_TRADING_ENV=paper
 Telegram에서 들어온 요청은 gateway가 넘긴 `route`로 다시 보내고, 스케줄 작업처럼 route가 없는 요청은 `TELEGRAM_ROUTE`를 사용합니다.
 Codex가 실행 중일 때는 `TELEGRAM_TYPING_INTERVAL_SECONDS` 간격으로 gateway의 `/sendChatAction`에 `typing`을 보내 Telegram 앱에 입력 중 상태를 유지합니다.
 모든 Codex 실행 직전에 `run_id`와 Asia/Seoul `started_at`을 프롬프트에 주입합니다.
-`$daily-trading`, `$execute-trade`, `daily-*`, `pre-open` 작업과 daily-trading 아티팩트가 생성된 간접 실행은 성공 및 실패 Telegram 메시지에 `작업 시작: YYYY-MM-DD HH:MM:SS KST`를 표시합니다.
+`$execute-trade`, `daily-*`, `pre-open` 작업과 daily-trading 아티팩트가 생성된 간접 실행은 성공 및 실패 Telegram 메시지에 `작업 시작: YYYY-MM-DD HH:MM:SS KST`를 표시합니다.
 
 ## Schedule
 

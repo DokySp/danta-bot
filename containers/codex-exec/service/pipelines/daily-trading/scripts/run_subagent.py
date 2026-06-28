@@ -1547,8 +1547,8 @@ def compact_spec(tmp: Path, *, stage: str, agent_role: str, task_name: str) -> d
     payload["artifact_paths"] = {
         "decision_brief": str(tmp / "reports" / "runs" / "self-test" / "decision-brief.json"),
         "verdict_first": str(tmp / "reports" / "runs" / "self-test" / "verdict-first.json"),
-        "persona": f"references/personas/{agent_role}.md",
-        "verdict_format": "references/rules/verdict-format.md",
+        "persona": f"prompts/{agent_role}.md",
+        "verdict_format": "prompts/verdict-format.md",
     }
     payload["symbol_ids"] = ["005930", {"symbol_id": "000660"}, "005930"]
     return payload
@@ -1726,8 +1726,8 @@ def assert_compact_verdict_prompt(tmp: Path) -> None:
         "Do not write files, create Markdown, emit diffs, or wrap output in code fences.",
         "Read only the listed symbol_ids from artifact files; do not load unrelated symbols, raw cache files, secrets, or unlisted paths.",
         "decision_brief:",
-        "persona: references/personas/analyst-fundamental-risk.md",
-        "verdict_format: references/rules/verdict-format.md",
+        "persona: prompts/analyst-fundamental-risk.md",
+        "verdict_format: prompts/verdict-format.md",
         "symbol_ids: 005930,000660",
         "Return each symbol with a views object keyed by analyst-quality-value, analyst-risk-allocation",
         "Return JSON only",

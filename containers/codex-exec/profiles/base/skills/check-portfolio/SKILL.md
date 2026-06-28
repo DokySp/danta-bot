@@ -16,7 +16,7 @@ Read portfolio symbols from three sources and output a JSON object with separate
 - Remove duplicates inside each list and in `universe`. Ordering has no meaning.
 - Keep `holding` as the deduplicated actual holdings list even when a holding symbol is also present in `specified`.
 - Do not rank, expand, or add symbols unless the user explicitly asks for a separate follow-up action.
-- `$daily-trading` must use this skill's `universe` as the portfolio universe and must not separately re-read live holdings only to expand that universe.
+- The scheduled daily-trading pipeline must use this skill's `universe` as the portfolio universe and must not separately re-read live holdings only to expand that universe.
 
 ## File Locations
 

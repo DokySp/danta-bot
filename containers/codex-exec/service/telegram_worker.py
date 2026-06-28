@@ -64,6 +64,17 @@ class TelegramWorker:
         text = task.text.strip()
         logging.info("handling telegram task message_id=%s text=%r", task.message_id, text)
 
+        if text == "$daily-trading":
+            self.gateway.send_message(
+                (
+                    "<b>$daily-trading은 더 이상 Codex skill entrypoint로 실행되지 않습니다.</b>\n"
+                    "<code>$execute-trade</code> 또는 스케줄의 <code>daily_trading</code> 설정을 사용해주세요."
+                ),
+                task.chat_id,
+                task.route,
+            )
+            return
+
         if is_execute_trade_direct_request(text):
             with TypingIndicator(
                 self.gateway,

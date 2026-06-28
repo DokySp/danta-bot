@@ -57,7 +57,7 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def skill_dir() -> Path:
+def pipeline_dir() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
@@ -646,7 +646,7 @@ def build_first_specs(args: argparse.Namespace) -> dict[str, Any]:
     run_id = args.run_id or decision_brief.get("run_id") or output_dir.name
     started_at = args.started_at or decision_brief.get("started_at") or ""
     workspace_dir = str(Path(args.workspace_dir).resolve())
-    daily_skill_dir = Path(args.skill_dir).resolve()
+    daily_pipeline_dir = Path(args.pipeline_dir).resolve()
     absolute_paths = not args.relative_paths
     extra_instructions = verdict_extra_instructions(
         getattr(args, "verdict_extra_instructions_file", ""),
@@ -665,8 +665,8 @@ def build_first_specs(args: argparse.Namespace) -> dict[str, Any]:
             "output_dir": str(output_dir),
             "artifact_paths": {
                 "decision_brief": artifact_path(args.decision_brief or output_dir / "decision-brief.json", absolute_paths),
-                "persona": artifact_path(daily_skill_dir / "references" / "personas" / f"{role}.md", absolute_paths),
-                "verdict_format": artifact_path(daily_skill_dir / "references" / "rules" / "verdict-format.md", absolute_paths),
+                "persona": artifact_path(daily_pipeline_dir / "prompts" / f"{role}.md", absolute_paths),
+                "verdict_format": artifact_path(daily_pipeline_dir / "prompts" / "verdict-format.md", absolute_paths),
             },
             "symbol_ids": symbol_ids,
         }
@@ -950,7 +950,7 @@ def build_second_spec(args: argparse.Namespace) -> dict[str, Any]:
 
     (output_dir / "second-verdict-symbols.txt").write_text("\n".join(selected) + ("\n" if selected else ""), encoding="utf-8")
 
-    daily_skill_dir = Path(args.skill_dir).resolve()
+    daily_pipeline_dir = Path(args.pipeline_dir).resolve()
     absolute_paths = not args.relative_paths
     extra_instructions = verdict_extra_instructions(
         getattr(args, "verdict_extra_instructions_file", ""),
@@ -967,8 +967,8 @@ def build_second_spec(args: argparse.Namespace) -> dict[str, Any]:
         "artifact_paths": {
             "decision_brief": artifact_path(args.decision_brief or output_dir / "decision-brief.json", absolute_paths),
             "verdict_first": artifact_path(args.verdict_first or output_dir / "verdict-first.json", absolute_paths),
-            "persona": artifact_path(daily_skill_dir / "references" / "personas" / "judge-final.md", absolute_paths),
-            "verdict_format": artifact_path(daily_skill_dir / "references" / "rules" / "verdict-format.md", absolute_paths),
+            "persona": artifact_path(daily_pipeline_dir / "prompts" / "judge-final.md", absolute_paths),
+            "verdict_format": artifact_path(daily_pipeline_dir / "prompts" / "verdict-format.md", absolute_paths),
         },
         "symbol_ids": selected,
     }
@@ -1405,7 +1405,7 @@ symbols:
                     run_id=None,
                     started_at=None,
                     workspace_dir=tmp,
-                    skill_dir=skill_dir(),
+                    pipeline_dir=pipeline_dir(),
                     relative_paths=False,
                     symbol_ids="",
                 )
@@ -1516,7 +1516,7 @@ symbols:
                     run_id=None,
                     started_at=None,
                     workspace_dir=tmp,
-                    skill_dir=skill_dir(),
+                    pipeline_dir=pipeline_dir(),
                     relative_paths=False,
                     min_score=7,
                 )
@@ -1656,7 +1656,7 @@ def build_parser() -> argparse.ArgumentParser:
     first_specs.add_argument("--output-dir", type=Path, required=True)
     first_specs.add_argument("--decision-brief")
     first_specs.add_argument("--workspace-dir", default=".")
-    first_specs.add_argument("--skill-dir", default=str(skill_dir()))
+    first_specs.add_argument("--pipeline-dir", default=str(pipeline_dir()))
     first_specs.add_argument("--symbol-ids", default="")
     first_specs.add_argument("--run-id")
     first_specs.add_argument("--started-at")
@@ -1676,7 +1676,7 @@ def build_parser() -> argparse.ArgumentParser:
     second_spec.add_argument("--decision-brief")
     second_spec.add_argument("--verdict-first")
     second_spec.add_argument("--workspace-dir", default=".")
-    second_spec.add_argument("--skill-dir", default=str(skill_dir()))
+    second_spec.add_argument("--pipeline-dir", default=str(pipeline_dir()))
     second_spec.add_argument("--min-score", type=int, default=7)
     second_spec.add_argument("--run-id")
     second_spec.add_argument("--started-at")
