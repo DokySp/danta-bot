@@ -223,8 +223,8 @@ class DailyTradingDirectRunner:
     def pipeline_script(self) -> Path:
         candidates = [
             self.config.workspace_dir
-            / "containers/codex-exec/service/pipelines/daily-trading/scripts/run_daily_trading_pipeline.py",
-            Path("/app/service/pipelines/daily-trading/scripts/run_daily_trading_pipeline.py"),
+            / "containers/codex-exec/service/pipelines/daily_trading/scripts/run_daily_trading_pipeline.py",
+            Path("/app/service/pipelines/daily_trading/scripts/run_daily_trading_pipeline.py"),
         ]
         for candidate in candidates:
             if candidate.exists():

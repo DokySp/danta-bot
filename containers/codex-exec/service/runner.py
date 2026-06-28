@@ -429,8 +429,8 @@ class CodexRunner:
     def _daily_trading_artifact_script(self) -> Path | None:
         candidates = [
             self.config.workspace_dir
-            / "containers/codex-exec/service/pipelines/daily-trading/scripts/build_run_artifacts.py",
-            Path("/app/service/pipelines/daily-trading/scripts/build_run_artifacts.py"),
+            / "containers/codex-exec/service/pipelines/daily_trading/scripts/build_run_artifacts.py",
+            Path("/app/service/pipelines/daily_trading/scripts/build_run_artifacts.py"),
         ]
         for candidate in candidates:
             if candidate.exists():
@@ -440,8 +440,8 @@ class CodexRunner:
     def _daily_trading_telegram_renderer(self) -> Path | None:
         candidates = [
             self.config.workspace_dir
-            / "containers/codex-exec/service/pipelines/daily-trading/scripts/render_telegram_summary.py",
-            Path("/app/service/pipelines/daily-trading/scripts/render_telegram_summary.py"),
+            / "containers/codex-exec/service/pipelines/daily_trading/scripts/render_telegram_summary.py",
+            Path("/app/service/pipelines/daily_trading/scripts/render_telegram_summary.py"),
         ]
         for candidate in candidates:
             if candidate.exists():
