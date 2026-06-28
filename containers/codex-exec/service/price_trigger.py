@@ -52,6 +52,7 @@ class PriceTrigger:
 class TriggerConfig:
     enabled: bool
     poll_seconds: int
+    active_weekdays: str | None
     active_start_time: time | None
     active_end_time: time | None
     cache_file: Path
@@ -76,6 +77,7 @@ def parse_price_trigger_config(path: Path, state_dir: Path) -> TriggerConfig:
         return TriggerConfig(
             False,
             60,
+            None,
             None,
             None,
             cache_file,
@@ -145,10 +147,12 @@ def parse_price_trigger_config(path: Path, state_dir: Path) -> TriggerConfig:
         raise ValueError("active_start_time and active_end_time must be configured together")
     if active_start_time is not None and active_start_time >= active_end_time:
         raise ValueError("active_start_time must be earlier than active_end_time")
+    active_weekdays = parse_weekday_expr(data.get("active_weekdays"))
 
     return TriggerConfig(
         enabled=data.get("enabled", True) is not False,
         poll_seconds=max(60, int(data.get("poll_seconds", 60))),
+        active_weekdays=active_weekdays,
         active_start_time=active_start_time,
         active_end_time=active_end_time,
         cache_file=cache_file,
@@ -555,14 +559,74 @@ def quoted_yaml_scalar_fields(text: str, field_names: set[str]) -> dict[str, boo
     return result
 
 
+def parse_weekday_expr(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("active_weekdays must use cron weekday string format")
+    text = value.strip()
+    if not text:
+        raise ValueError("active_weekdays must not be empty")
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            raise ValueError("active_weekdays must use cron weekday string format")
+        base, step = (part.split("/", 1) + ["1"])[:2] if "/" in part else (part, "1")
+        if not step.isdigit() or int(step) <= 0:
+            raise ValueError("active_weekdays step must be a positive integer")
+        if base == "*":
+            continue
+        if "-" in base:
+            start_text, end_text = base.split("-", 1)
+            if not start_text.isdigit() or not end_text.isdigit():
+                raise ValueError("active_weekdays must use cron weekday string format")
+            start, end = int(start_text), int(end_text)
+            if start < 0 or end > 7 or start > end:
+                raise ValueError("active_weekdays values must be between 0 and 7")
+            continue
+        if not base.isdigit():
+            raise ValueError("active_weekdays must use cron weekday string format")
+        weekday = int(base)
+        if weekday < 0 or weekday > 7:
+            raise ValueError("active_weekdays values must be between 0 and 7")
+    return text
+
+
 def is_active_time(trigger_config: TriggerConfig, now: datetime) -> bool:
+    current_datetime = now.astimezone(KST)
+    if trigger_config.active_weekdays is not None:
+        cron_weekday = (current_datetime.weekday() + 1) % 7
+        if not weekday_expr_matches(trigger_config.active_weekdays, cron_weekday):
+            return False
+
     start = trigger_config.active_start_time
     end = trigger_config.active_end_time
     if start is None or end is None:
         return True
 
-    current = now.astimezone(KST).time().replace(second=0, microsecond=0)
+    current = current_datetime.time().replace(second=0, microsecond=0)
     return start <= current <= end
+
+
+def weekday_expr_matches(expr: str, value: int) -> bool:
+    for part in expr.split(","):
+        part = part.strip()
+        base, step = (part.split("/", 1) + ["1"])[:2] if "/" in part else (part, "1")
+        step_int = int(step)
+        if base == "*":
+            start, end = 0, 7
+        elif "-" in base:
+            start_text, end_text = base.split("-", 1)
+            start, end = int(start_text), int(end_text)
+        else:
+            start = end = int(base)
+        if value == 0 and start <= 7 <= end and (7 - start) % step_int == 0:
+            return True
+        if value == 0 and start == end == 7:
+            return True
+        if start <= value <= end and (value - start) % step_int == 0:
+            return True
+    return False
 
 
 def read_cache(path: Path) -> dict[str, Any]:
