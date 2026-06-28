@@ -626,6 +626,19 @@ def artifact_path(path: str | Path, absolute: bool) -> str:
     return str(path_obj)
 
 
+def verdict_extra_instructions(path: str | Path | None, stage_key: str) -> list[str]:
+    if not path:
+        return []
+    payload = load_json(Path(path))
+    raw = payload.get("verdict_extra_instructions") if isinstance(payload, dict) else None
+    if not isinstance(raw, dict):
+        return []
+    items = raw.get(stage_key)
+    if not isinstance(items, list):
+        return []
+    return [str(item).strip() for item in items if str(item).strip()]
+
+
 def build_first_specs(args: argparse.Namespace) -> dict[str, Any]:
     output_dir = Path(args.output_dir)
     decision_brief = load_json(Path(args.decision_brief or output_dir / "decision-brief.json"))
@@ -635,26 +648,31 @@ def build_first_specs(args: argparse.Namespace) -> dict[str, Any]:
     workspace_dir = str(Path(args.workspace_dir).resolve())
     daily_skill_dir = Path(args.skill_dir).resolve()
     absolute_paths = not args.relative_paths
+    extra_instructions = verdict_extra_instructions(
+        getattr(args, "verdict_extra_instructions_file", ""),
+        "first_verdict",
+    )
 
     specs = []
     for role in FIRST_VERDICT_SPEC_ROLES:
-        specs.append(
-            {
-                "run_id": run_id,
-                "started_at": started_at,
-                "stage": "first-verdict",
-                "agent_role": role,
-                "task_name": f"first-{role}",
-                "workspace_dir": workspace_dir,
-                "output_dir": str(output_dir),
-                "artifact_paths": {
-                    "decision_brief": artifact_path(args.decision_brief or output_dir / "decision-brief.json", absolute_paths),
-                    "persona": artifact_path(daily_skill_dir / "references" / "personas" / f"{role}.md", absolute_paths),
-                    "verdict_format": artifact_path(daily_skill_dir / "references" / "rules" / "verdict-format.md", absolute_paths),
-                },
-                "symbol_ids": symbol_ids,
-            }
-        )
+        spec = {
+            "run_id": run_id,
+            "started_at": started_at,
+            "stage": "first-verdict",
+            "agent_role": role,
+            "task_name": f"first-{role}",
+            "workspace_dir": workspace_dir,
+            "output_dir": str(output_dir),
+            "artifact_paths": {
+                "decision_brief": artifact_path(args.decision_brief or output_dir / "decision-brief.json", absolute_paths),
+                "persona": artifact_path(daily_skill_dir / "references" / "personas" / f"{role}.md", absolute_paths),
+                "verdict_format": artifact_path(daily_skill_dir / "references" / "rules" / "verdict-format.md", absolute_paths),
+            },
+            "symbol_ids": symbol_ids,
+        }
+        if extra_instructions:
+            spec["extra_instructions"] = extra_instructions
+        specs.append(spec)
     payload = {"specs": specs}
     write_json(Path(args.output), payload)
     return payload
@@ -934,6 +952,10 @@ def build_second_spec(args: argparse.Namespace) -> dict[str, Any]:
 
     daily_skill_dir = Path(args.skill_dir).resolve()
     absolute_paths = not args.relative_paths
+    extra_instructions = verdict_extra_instructions(
+        getattr(args, "verdict_extra_instructions_file", ""),
+        "second_verdict",
+    )
     payload = {
         "run_id": args.run_id or decision_brief.get("run_id") or output_dir.name,
         "started_at": args.started_at or decision_brief.get("started_at") or "",
@@ -950,6 +972,8 @@ def build_second_spec(args: argparse.Namespace) -> dict[str, Any]:
         },
         "symbol_ids": selected,
     }
+    if extra_instructions:
+        payload["extra_instructions"] = extra_instructions
     write_json(Path(args.output), payload)
     return payload
 
@@ -1637,6 +1661,7 @@ def build_parser() -> argparse.ArgumentParser:
     first_specs.add_argument("--run-id")
     first_specs.add_argument("--started-at")
     first_specs.add_argument("--relative-paths", action="store_true")
+    first_specs.add_argument("--verdict-extra-instructions-file", default="")
     first_specs.add_argument("--output", type=Path, default=None)
 
     merge_first = subparsers.add_parser("merge-first", help="Merge first-verdict wrappers into verdict-first.json.")
@@ -1656,6 +1681,7 @@ def build_parser() -> argparse.ArgumentParser:
     second_spec.add_argument("--run-id")
     second_spec.add_argument("--started-at")
     second_spec.add_argument("--relative-paths", action="store_true")
+    second_spec.add_argument("--verdict-extra-instructions-file", default="")
     second_spec.add_argument("--output", type=Path, default=None)
 
     execution = subparsers.add_parser("execution-plan", help="Build non-submitting execution.json plan.")

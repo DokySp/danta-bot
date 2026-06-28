@@ -9,6 +9,7 @@ to a local command log, and prints only a compact summary pointer.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -95,6 +96,10 @@ def write_json(path: Path, payload: Any) -> None:
 def load_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def load_json_if_exists(path: Path) -> Any | None:
@@ -391,6 +396,9 @@ class Pipeline:
         self.command_log_path = self.output_dir / "pipeline-command-log.json"
         self.summary_path = self.output_dir / "pipeline-summary.json"
         self.run_path = self.output_dir / "run.json"
+        self.verdict_extra_instructions_path = self.resolve_optional_path(
+            getattr(args, "verdict_extra_instructions_file", "")
+        )
         self.order_path_requested = str(getattr(args, "order_path", ORDER_PATH_AUTO) or ORDER_PATH_AUTO)
         try:
             self.order_path, self.order_path_reason = resolve_order_path(self.order_path_requested, self.started_at)
@@ -403,6 +411,20 @@ class Pipeline:
                 raise
         self.logs: list[dict[str, Any]] = []
         self.stages: list[dict[str, Any]] = []
+
+    def resolve_optional_path(self, value: str) -> Path | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        return resolve_workspace_path(self.workspace_dir, text)
+
+    def daily_trading_config_summary(self) -> dict[str, Any]:
+        summary: dict[str, Any] = {}
+        if self.verdict_extra_instructions_path is not None:
+            summary["verdict_extra_instructions_path"] = str(self.verdict_extra_instructions_path)
+            if self.verdict_extra_instructions_path.exists():
+                summary["verdict_extra_instructions_sha256"] = file_sha256(self.verdict_extra_instructions_path)
+        return summary
 
     def add_stage(self, name: str, status: str, *, detail: str = "", required: bool = True, path: Path | None = None) -> None:
         self.stages.append(safe_stage(name, status, detail=detail, required=required, path=path))
@@ -434,6 +456,7 @@ class Pipeline:
                     "resolved": self.order_path,
                     "reason": self.order_path_reason,
                 },
+                "daily_trading_config": self.daily_trading_config_summary(),
                 "stages": self.stages,
             },
         )
@@ -1438,6 +1461,7 @@ class Pipeline:
             "command_log_path": str(self.command_log_path),
             "report_path": str(report_path),
             "telegram_summary_path": str(telegram_summary_path),
+            "daily_trading_config": self.daily_trading_config_summary(),
             "stages": stages,
             "portfolio_counts": {
                 "recommanded": len(normalize_symbol_ids(portfolio.get("recommanded"))),
@@ -1583,6 +1607,11 @@ class Pipeline:
                 str(self.workspace_dir),
                 "--skill-dir",
                 str(script_dir().parent),
+                *(
+                    ["--verdict-extra-instructions-file", str(self.verdict_extra_instructions_path)]
+                    if self.verdict_extra_instructions_path
+                    else []
+                ),
             ],
         )
         self.add_stage("first-specs", "success", detail="built first-verdict specs", path=self.output_dir / "first-verdict-specs.json")
@@ -1606,6 +1635,11 @@ class Pipeline:
                 str(self.workspace_dir),
                 "--skill-dir",
                 str(script_dir().parent),
+                *(
+                    ["--verdict-extra-instructions-file", str(self.verdict_extra_instructions_path)]
+                    if self.verdict_extra_instructions_path
+                    else []
+                ),
             ],
         )
         self.add_stage("second-spec", "success", detail="built second-verdict spec", path=self.output_dir / "second-verdict-spec.json")
@@ -2536,6 +2570,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--news-cache-path", default="")
     run.add_argument("--main-events", default="", help="Optional Codex JSONL events path for Main-agent token accounting.")
     run.add_argument("--submit-orders", action="store_true", help="For explicit demo-submit/real-submit runs, execute immediate or reservation orders through execute_orders.py.")
+    run.add_argument("--verdict-extra-instructions-file", default="", help="Optional JSON file with first_verdict/second_verdict supplemental instructions.")
     run.add_argument(
         "--order-path",
         choices=[ORDER_PATH_AUTO, "reservation", "immediate"],
@@ -2556,6 +2591,7 @@ def build_parser() -> argparse.ArgumentParser:
     summarize.add_argument("--request-type", default="analysis", choices=["analysis", "prepare", "demo-submit", "real-submit"])
     summarize.add_argument("--order-path", choices=[ORDER_PATH_AUTO, "reservation", "immediate"], default=ORDER_PATH_AUTO)
     summarize.add_argument("--portfolio-json", default="")
+    summarize.add_argument("--verdict-extra-instructions-file", default="")
 
     subparsers.add_parser("self-test", help="Run an offline pipeline smoke test with a fake codex binary.")
     return parser

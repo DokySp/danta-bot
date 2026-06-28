@@ -9,6 +9,7 @@ import yaml
 
 from .config import Config
 from .daily_trading import error_message_with_run_context, is_daily_trading_schedule
+from .daily_trading_direct import DailyTradingDirectRunner, format_direct_runner_error
 from .errors import UserFacingError
 from .runner import CodexRunner
 from .telegram_gateway import TelegramGateway, TypingIndicator
@@ -71,6 +72,7 @@ class Scheduler:
     def __init__(self, config: Config, runner: CodexRunner, gateway: TelegramGateway) -> None:
         self.config = config
         self.runner = runner
+        self.daily_trading_direct_runner = DailyTradingDirectRunner(config, runner)
         self.gateway = gateway
         self.stop_event = threading.Event()
         self.last_run_keys: set[tuple[str, str]] = set()
@@ -101,7 +103,8 @@ class Scheduler:
                 continue
             cron = str(item.get("cron", "")).strip()
             message = str(item.get("message", "")).strip()
-            if not cron or not message:
+            daily_trading_config = item.get("daily_trading")
+            if not cron or (not message and daily_trading_config is None):
                 continue
             key = (job_id, minute_key)
             if key in self.last_run_keys:
@@ -119,6 +122,7 @@ class Scheduler:
                         item.get("route"),
                         model,
                         reasoning_effort,
+                        daily_trading_config,
                     ),
                     name=f"schedule-{job_id}",
                     daemon=True,
@@ -133,6 +137,7 @@ class Scheduler:
         route: Any,
         model: str | None,
         reasoning_effort: str | None,
+        daily_trading_config: Any,
     ) -> None:
         logging.info(
             "running scheduled job id=%s model=%s reasoning_effort=%s",
@@ -149,12 +154,15 @@ class Scheduler:
                 route_text,
                 self.config.telegram_typing_interval_seconds,
             ):
-                output = self.runner.run_once(
-                    message,
-                    daily_trading_hint=is_daily_trading_schedule(job_id),
-                    model=model,
-                    reasoning_effort=reasoning_effort,
-                )
+                if daily_trading_config is not None:
+                    output = self.daily_trading_direct_runner.run(daily_trading_config)
+                else:
+                    output = self.runner.run_once(
+                        message,
+                        daily_trading_hint=is_daily_trading_schedule(job_id),
+                        model=model,
+                        reasoning_effort=reasoning_effort,
+                    )
             self.gateway.send_message(output, chat_id_text, route_text)
         except Exception as exc:  # noqa: BLE001 - report schedule failures to Telegram
             if isinstance(exc, UserFacingError):
@@ -165,6 +173,8 @@ class Scheduler:
                 f"<b>알 수 없는 에러가 발생했습니다.</b>\n<code>{html.escape(job_id)}</code>\n"
                 f"<pre>{html.escape(str(exc))}</pre>"
             )
+            if daily_trading_config is not None:
+                fallback = format_direct_runner_error(job_id, exc)
             message = error_message_with_run_context(exc, fallback)
             self.gateway.send_message(
                 message,

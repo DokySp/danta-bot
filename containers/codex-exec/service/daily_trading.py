@@ -10,10 +10,12 @@ KST = ZoneInfo("Asia/Seoul")
 
 DAILY_TRADING_STAGE_MODEL_CONTRACT = (
     "\n\n[daily-trading stage model contract]\n"
-    "- Routine daily-trading execution must start with the pipeline, not manual helper/launcher orchestration: "
+    "- Scheduled daily-trading jobs with a `daily_trading` block in schedules.yaml are executed by the codex-exec "
+    "Python direct runner instead of Main Codex. Manual or fallback daily-trading execution must start with the "
+    "pipeline, not manual helper/launcher orchestration: "
     "`python3 /app/skills/daily-trading/scripts/run_daily_trading_pipeline.py run "
     "--workspace-dir /workspace --output-dir reports/runs/<run_id> --run-id <run_id> "
-    "--started-at <started_at> --env <acct|paper> --request-type <analysis|prepare|demo-submit|real-submit> [--submit-orders] [--order-path <reservation|immediate>]`. "
+    "--started-at <started_at> --env <acct|paper> --request-type <analysis|prepare|demo-submit|real-submit> [--submit-orders] [--order-path <auto|reservation|immediate>]`. "
     "Use CODEX_MCP_TRADING_ENV to choose acct/paper unless the explicit request requires a narrower mode.\n"
     "- After the pipeline returns, use `reports/runs/<run_id>/telegram-summary.txt` as the Telegram/user-facing "
     "response when it exists. It is rendered deterministically from `pipeline-summary.json`. Open `pipeline-command-log.json`, raw wrappers, `decision-brief.json`, "

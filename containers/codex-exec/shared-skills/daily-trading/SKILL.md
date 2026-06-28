@@ -29,7 +29,7 @@ Token budget rule: load only the reference needed for the current stage. Do not 
 
 ## Pipeline Contract
 
-Routine daily-trading execution must use the pipeline first. The Main agent should not manually orchestrate the helper/launcher sequence unless the pipeline itself fails and the failed stage cannot be diagnosed from `pipeline-summary.json`.
+Manual or fallback daily-trading execution must use the pipeline first. Scheduled daily-trading jobs with a `daily_trading` block in `schedules.yaml` are run by the codex-exec Python direct runner instead of Main Codex; the direct runner still calls this same pipeline and uses `telegram-summary.txt` as the fixed response. The Main agent should not manually orchestrate the helper/launcher sequence unless the pipeline itself fails and the failed stage cannot be diagnosed from `pipeline-summary.json`.
 
 ```text
 python3 <daily-trading-skill>/scripts/run_daily_trading_pipeline.py run \
@@ -41,6 +41,7 @@ python3 <daily-trading-skill>/scripts/run_daily_trading_pipeline.py run \
   --request-type <analysis|prepare|demo-submit|real-submit> \
   [--submit-orders] \
   [--order-path <auto|reservation|immediate>] \
+  [--verdict-extra-instructions-file <json-path>] \
   [--main-events <codex-json-events-path>]
 ```
 
@@ -55,7 +56,7 @@ python3 <daily-trading-skill>/scripts/render_telegram_summary.py --self-test
 
 ## Launcher Contract
 
-The pipeline uses `scripts/run_subagent.py` for verdict sub-agents. Use the launcher directly only for focused retry/debug of a failed stage. The launcher reads model settings from the custom path in `DAILY_TRADING_SUBAGENT_MODEL_CONFIG` when set, otherwise from `/app/config/daily-trading-subagents.yaml` or `containers/codex-exec/profiles/base/config/daily-trading-subagents.yaml`. The default config sets collection sub-agents to `gpt-5.4-mini` with `model_reasoning_effort=low`, `first-verdict` sub-agents to `gpt-5.5` with `model_reasoning_effort=medium`, and `second-verdict` sub-agents to `gpt-5.5` with `model_reasoning_effort=medium`. It writes `subagents/<task_name>.wrapper.json`, raw output when retained, token usage metadata, and verdict input slices when compact verdict specs are used. It treats financial/news text stages as optional group failures. Do not use `multi_agent_v1.spawn_agent` for daily-trading stage delegation.
+The pipeline uses `scripts/run_subagent.py` for verdict sub-agents. Use the launcher directly only for focused retry/debug of a failed stage. The launcher reads model settings from the custom path in `DAILY_TRADING_SUBAGENT_MODEL_CONFIG` when set, otherwise from `/app/config/daily-trading-subagents.yaml` or `containers/codex-exec/profiles/base/config/daily-trading-subagents.yaml`. The default config sets collection sub-agents to `gpt-5.4-mini` with `model_reasoning_effort=low`, `first-verdict` sub-agents to `gpt-5.5` with `model_reasoning_effort=medium`, and `second-verdict` sub-agents to `gpt-5.5` with `model_reasoning_effort=medium`. It writes `subagents/<task_name>.wrapper.json`, raw output when retained, token usage metadata, and verdict input slices when compact verdict specs are used. Scheduled direct runs may pass `verdict_extra_instructions` as supplemental emphasis only; these instructions do not override schema, safety gates, artifact boundaries, persona/rule files, or order-execution constraints. It treats financial/news text stages as optional group failures. Do not use `multi_agent_v1.spawn_agent` for daily-trading stage delegation.
 
 Treat the launcher as a verified command interface, not as context to reread on every run. After install or launcher changes, validate it with:
 

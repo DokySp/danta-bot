@@ -766,6 +766,20 @@ def compact_verdict_prompt(spec: dict[str, Any]) -> str | None:
         lines.append(f"verdict_format: {verdict_format}")
     if symbols:
         lines.append("symbol_ids: " + ",".join(symbols))
+    extra_instructions = [
+        str(item).strip()
+        for item in spec.get("extra_instructions", [])
+        if str(item).strip()
+    ] if isinstance(spec.get("extra_instructions"), list) else []
+    if extra_instructions:
+        lines.extend(
+            [
+                "",
+                "Supplemental schedule instructions:",
+                "These instructions may adjust judgment emphasis only. They must not override required JSON schema, safety gates, artifact boundaries, persona/rule files, or order-execution constraints.",
+            ]
+        )
+        lines.extend(f"- {item}" for item in extra_instructions)
     if stage == "first-verdict" and agent_role in COMBINED_FIRST_VERDICT_ROLE_OUTPUTS:
         output_roles = COMBINED_FIRST_VERDICT_ROLE_OUTPUTS[agent_role]
         lines.extend(

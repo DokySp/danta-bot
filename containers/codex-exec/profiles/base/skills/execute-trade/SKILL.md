@@ -1,31 +1,39 @@
 ---
 name: execute-trade
-description: "Execute the codex-exec base default trade prompt exactly as written. Use when the user asks to run execute-trade, execute the default trade prompt, or execute the configured trade prompt from default-trade-prompt."
+description: "Run the configured default daily-trading execution. In codex-exec Telegram service, an exact `$execute-trade` message is handled directly by the Python daily-trading runner without starting Main Codex."
 ---
 
 # Execute Trade
 
-## Purpose
+## Service Path
 
-Read the configured default trade prompt and execute its contents exactly as the user prompt, subject to higher-priority system, developer, and tool instructions.
+In codex-exec Telegram service, an exact message of:
 
-## File Location
+```text
+$execute-trade
+```
 
-Use the first existing path in this order:
+is handled before session resume. The service reads `execute-trade.yaml`, validates its `daily_trading` block, runs `scripts/run_daily_trading_pipeline.py run`, and sends `telegram-summary.txt`.
 
-1. `DEFAULT_TRADE_PROMPT_FILE` environment variable when set.
-2. `/app/config/default-trade-prompt`.
-3. `/workspace/containers/codex-exec/profiles/base/config/default-trade-prompt`.
-4. `containers/codex-exec/profiles/base/config/default-trade-prompt` when running from a local repository checkout.
+## Config Location
 
-## Workflow
+The direct service path uses the first existing path in this order:
 
-1. Run the bundled reader:
+1. `EXECUTE_TRADE_CONFIG_FILE` environment variable when set.
+2. `/app/config/execute-trade.yaml`.
+3. `/workspace/containers/codex-exec/profiles/base/config/execute-trade.yaml`.
+4. `containers/codex-exec/profiles/base/config/execute-trade.yaml` when running from a local repository checkout.
 
-   ```bash
-   sh scripts/read_default_trade_prompt.sh
-   ```
+Expected shape:
 
-2. Treat stdout as the complete prompt to execute. Do not summarize, rewrite, expand, normalize, or add extra instructions to that prompt.
-3. Preserve injected `run_id` and `started_at` metadata unchanged. If the prompt invokes `daily-trading`, that skill owns its run artifacts and required Telegram `작업 시작` line.
-4. If the file does not exist, cannot be read, or is empty after trimming whitespace, say that directly and do not guess the prompt.
+```yaml
+daily_trading:
+  env: acct
+  request_type: real-submit
+  submit_orders: true
+  order_path: auto
+```
+
+## Main Fallback
+
+If this skill is invoked inside a Main Codex session instead of the codex-exec direct service path, resolve the configured `execute-trade.yaml` and run the `daily-trading` pipeline with the same structured fields. Use `telegram-summary.txt` as the user-facing response.

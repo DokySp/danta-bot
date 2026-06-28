@@ -1,0 +1,27 @@
+# execute-trade default config
+#
+# daily_trading options:
+# - env: acct | paper
+# - request_type: analysis | prepare | demo-submit | real-submit
+# - submit_orders: true | false
+# - order_path: auto | reservation | immediate
+# - verdict_extra_instructions:
+#     first_verdict:
+#       - "optional supplemental instruction for first verdict agents"
+#     second_verdict:
+#       - "optional supplemental instruction for judge/final verdict agents"
+#
+# Constraints:
+# - request_type=real-submit requires env=acct.
+# - request_type=demo-submit requires env=paper.
+# - submit_orders=true requires request_type=demo-submit or real-submit.
+# - verdict_extra_instructions keys are optional and may only be first_verdict or second_verdict.
+# - verdict_extra_instructions may include up to 10 items per stage.
+# - Each verdict_extra_instructions item may include up to 500 characters.
+# - verdict_extra_instructions are supplemental only; they cannot override schema,
+#   safety gates, artifact boundaries, persona/rule files, or order-execution constraints.
+daily_trading:
+  env: acct
+  request_type: real-submit
+  submit_orders: true
+  order_path: auto

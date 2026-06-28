@@ -8,6 +8,11 @@ from typing import Any
 
 from .config import Config
 from .daily_trading import error_message_with_run_context
+from .daily_trading_direct import (
+    DailyTradingDirectRunner,
+    is_execute_trade_direct_request,
+    load_execute_trade_config,
+)
 from .errors import UserFacingError
 from .holding_history import parse_show_holding_history_command, render_holding_history
 from .runner import CodexRunner
@@ -30,6 +35,7 @@ class TelegramWorker:
         self.config = config
         self.state = state
         self.runner = runner
+        self.daily_trading_direct_runner = DailyTradingDirectRunner(config, runner)
         self.gateway = gateway
         self.queue: queue.Queue[TelegramTask] = queue.Queue()
         self.thread = threading.Thread(target=self._work, name="telegram-worker", daemon=True)
@@ -57,6 +63,17 @@ class TelegramWorker:
     def _handle(self, task: TelegramTask) -> None:
         text = task.text.strip()
         logging.info("handling telegram task message_id=%s text=%r", task.message_id, text)
+
+        if is_execute_trade_direct_request(text):
+            with TypingIndicator(
+                self.gateway,
+                task.chat_id,
+                task.route,
+                self.config.telegram_typing_interval_seconds,
+            ):
+                output = self.daily_trading_direct_runner.run(load_execute_trade_config(self.config))
+            self.gateway.send_message(output, task.chat_id, task.route)
+            return
 
         holding_history_days = parse_show_holding_history_command(text)
         if holding_history_days is not None:

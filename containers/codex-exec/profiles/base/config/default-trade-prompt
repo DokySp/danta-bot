@@ -1,2 +1,0 @@
-$check-portfolio로 recommanded, specified, holding, universe JSON을 확인하고, check-portfolio의 universe를 $daily-trading 대상으로 사용해줘. 
-$daily-trading 스킬로 실전(acct) 거래를 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.

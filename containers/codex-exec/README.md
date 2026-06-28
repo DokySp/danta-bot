@@ -73,7 +73,7 @@ env_file:
 
 프로필 Compose는 `./config`를 `/app/config`로 writable bind mount합니다. 따라서 호스트의
 `containers/codex-exec/profiles/<name>/config/schedules.yaml`, `portfolio.txt`,
-`touch-points.yaml`, `default-trade-prompt`를 수정하면 컨테이너 안의 `/app/config`에도 즉시 보이고, 다음 Codex 실행이나
+`touch-points.yaml`, `execute-trade.yaml`을 수정하면 컨테이너 안의 `/app/config`에도 즉시 보이고, 다음 Codex 실행이나
 스케줄러 tick부터 새 내용이 사용됩니다. `codex-exec.env`처럼 프로세스 환경변수로 주입되는 값은
 컨테이너 시작 시점에만 읽히므로 변경 후 Compose 재생성이 필요합니다. 컨테이너 안의 Codex 스킬이
 config를 수정하려면 호스트 config 파일과 디렉터리가 컨테이너 실행 UID 1000에 쓰기 가능해야 합니다.
@@ -137,9 +137,13 @@ schedules:
       오늘 장 시작 전 점검을 수행해줘.
 ```
 
-스케줄 작업은 채팅 기본 세션과 독립된 one-off Codex 실행으로 처리됩니다.
-스케줄 항목의 `model`과 `model_reasoning_effort`는 선택 사항입니다. 생략하면 `CODEX_MODEL`과
-`CODEX_REASONING_EFFORT` 전역 값을 사용하고, 지정하면 해당 스케줄 실행에만 적용됩니다.
+스케줄 작업은 채팅 기본 세션과 독립된 one-off Codex 실행으로 처리됩니다. 단, 항목에
+`daily_trading` 블록이 있으면 Main Codex를 띄우지 않고 codex-exec Python direct runner가
+`run_daily_trading_pipeline.py run`을 직접 실행한 뒤 `telegram-summary.txt`를 전송합니다.
+일반 스케줄 항목의 `model`과 `model_reasoning_effort`는 선택 사항입니다. 생략하면 `CODEX_MODEL`과
+`CODEX_REASONING_EFFORT` 전역 값을 사용하고, 지정하면 해당 스케줄의 Main Codex 실행에만 적용됩니다.
+`daily_trading` direct runner 항목은 Main Codex를 실행하지 않으므로 이 두 값 대신
+`daily-trading-subagents.yaml`의 sub-agent 모델 설정을 따릅니다.
 스케줄러는 매 tick마다 `SCHEDULE_FILE`을 다시 읽습니다. `$trading-schedule-toggle` 스킬은
 `/app/config/schedules.yaml`의 `daily-{number}` 항목만 on/off로 수정하며, 수정 결과는 컨테이너
 재시작 없이 다음 scheduler tick부터 반영됩니다.
