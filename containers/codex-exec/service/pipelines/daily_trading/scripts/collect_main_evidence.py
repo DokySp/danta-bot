@@ -66,6 +66,11 @@ ENDPOINTS = {
         "tr_id_real": "TTTC8434R",
         "tr_id_demo": "VTTC8434R",
     },
+    "inquire_daily_ccld": {
+        "path": "/uapi/domestic-stock/v1/trading/inquire-daily-ccld",
+        "tr_id_real": "TTTC8001R",
+        "tr_id_demo": "VTTC8001R",
+    },
 }
 
 SENSITIVE_KEYS = {
@@ -564,7 +569,7 @@ def base_headers(app_key: str, app_secret: str, token: str, tr_id: str) -> dict[
 def call_endpoint(endpoint_name: str, params: dict[str, str], app_key: str, app_secret: str, token: str, retries: int, *, env_dv: str = "real", tr_cont: str = "") -> tuple[dict[str, Any], dict[str, str]]:
     endpoint = ENDPOINTS[endpoint_name]
     tr_id = endpoint.get("tr_id")
-    if endpoint_name == "inquire_balance":
+    if endpoint_name in {"inquire_balance", "inquire_daily_ccld"}:
         tr_id = endpoint["tr_id_demo"] if env_dv == "demo" else endpoint["tr_id_real"]
     headers = base_headers(app_key, app_secret, token, str(tr_id))
     if tr_cont:
@@ -980,6 +985,149 @@ def build_account_summary(summary: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def normalize_fill(row: dict[str, Any], *, env_dv: str, observed_at: str) -> dict[str, Any]:
+    symbol = normalize_symbol_key(first_present(row, ("pdno", "PDNO", "shtn_pdno", "SHTN_PDNO", "prdt_no", "PRDT_NO")))
+    side = str(first_present(row, ("sll_buy_dvsn_cd", "SLL_BUY_DVSN_CD", "sll_buy_dvsn_name", "SLL_BUY_DVSN_NAME")) or "").strip()
+    side_text = side.lower()
+    if side in {"01"} or "매도" in side_text or side_text in {"sell", "sll"}:
+        direction = "sell"
+    elif side in {"02"} or "매수" in side_text or side_text in {"buy"}:
+        direction = "buy"
+    else:
+        direction = ""
+    filled_quantity = parse_int(first_present(row, ("tot_ccld_qty", "TOT_CCLD_QTY", "ccld_qty", "CCLD_QTY", "ord_qty", "ORD_QTY"))) or 0
+    filled_price = parse_int(first_present(row, ("avg_prvs", "AVG_PRVS", "avg_ccld_prc", "AVG_CCLD_PRC", "ccld_unpr", "CCLD_UNPR", "ord_unpr", "ORD_UNPR"))) or 0
+    filled_amount = parse_int(first_present(row, ("tot_ccld_amt", "TOT_CCLD_AMT", "ccld_amt", "CCLD_AMT"))) or (filled_quantity * filled_price if filled_quantity and filled_price else 0)
+    filled_at = str(first_present(row, ("ord_tmd", "ORD_TMD", "ccld_dtime", "CCLD_DTIME", "ccld_tmd", "CCLD_TMD")) or "").strip()
+    order_date = str(first_present(row, ("ord_dt", "ORD_DT", "ord_date", "ORD_DATE")) or "").strip()
+    if order_date and filled_at and len(filled_at) == 6 and filled_at.isdigit():
+        filled_at = f"{order_date[0:4]}-{order_date[4:6]}-{order_date[6:8]}T{filled_at[0:2]}:{filled_at[2:4]}:{filled_at[4:6]}+09:00"
+    return {
+        "symbol_id": symbol,
+        "symbol_name": text_first(row, ("prdt_name", "PRDT_NAME", "prdt_abrv_name", "PRDT_ABRV_NAME", "hts_kor_isnm", "HTS_KOR_ISNM")) or symbol,
+        "direction": direction,
+        "filled_at": filled_at,
+        "filled_quantity": filled_quantity,
+        "filled_price": filled_price,
+        "filled_amount": filled_amount,
+        "order_id": str(first_present(row, ("odno", "ODNO", "ord_no", "ORD_NO")) or "").strip(),
+        "order_date": order_date,
+        "execution_environment": env_dv,
+        "observed_at": observed_at,
+    }
+
+
+def collect_today_fills_artifact(
+    symbols: list[str],
+    *,
+    run_id: str,
+    started_at: str,
+    env_dv: str,
+    app_key: str,
+    app_secret: str,
+    token: str,
+    retries: int,
+) -> dict[str, Any]:
+    cano, product = account_parts(env_dv)
+    day = datetime.fromisoformat(started_at).astimezone(KST).strftime("%Y%m%d") if started_at else datetime.now(KST).strftime("%Y%m%d")
+    raw_rows: list[dict[str, Any]] = []
+    ctx_fk100 = ""
+    ctx_nk100 = ""
+    tr_cont = ""
+    for _page in range(20):
+        body, response_headers = call_endpoint(
+            "inquire_daily_ccld",
+            {
+                "CANO": cano,
+                "ACNT_PRDT_CD": product,
+                "INQR_STRT_DT": day,
+                "INQR_END_DT": day,
+                "SLL_BUY_DVSN_CD": "00",
+                "INQR_DVSN": "00",
+                "PDNO": "",
+                "CCLD_DVSN": "01",
+                "ORD_GNO_BRNO": "",
+                "ODNO": "",
+                "INQR_DVSN_3": "00",
+                "INQR_DVSN_1": "",
+                "CTX_AREA_FK100": ctx_fk100,
+                "CTX_AREA_NK100": ctx_nk100,
+            },
+            app_key,
+            app_secret,
+            token,
+            retries,
+            env_dv=env_dv,
+            tr_cont=tr_cont,
+        )
+        raw_rows.extend(output_rows_from_body(body, "output1"))
+        ctx_fk100, ctx_nk100 = continuation_context(body)
+        next_tr_cont = response_headers.get("tr_cont", "").strip()
+        if next_tr_cont not in {"F", "M"}:
+            break
+        tr_cont = "N"
+        time.sleep(0.2)
+    wanted = {normalize_symbol_key(symbol) for symbol in symbols}
+    observed_at = now_kst_iso()
+    fills = [
+        fill
+        for fill in (normalize_fill(row, env_dv=env_dv, observed_at=observed_at) for row in raw_rows)
+        if fill.get("symbol_id") in wanted and fill.get("direction") in {"buy", "sell"} and fill.get("filled_quantity", 0) > 0
+    ]
+    fills.sort(key=lambda item: (str(item.get("filled_at") or ""), str(item.get("order_id") or "")))
+    return {
+        "schema_version": "1",
+        "run_id": run_id,
+        "started_at": started_at,
+        "generated_at": now_kst_iso(),
+        "stage": "today-fills",
+        "status": "success",
+        "skipped": False,
+        "skip_reason": "",
+        "execution_environment": env_dv,
+        "source_api": "direct_kis.inquire_daily_ccld",
+        "symbols": [{"symbol_id": symbol} for symbol in symbols],
+        "fills": fills,
+        "errors": [],
+    }
+
+
+def skipped_today_fills_artifact(symbols: list[str], *, run_id: str, started_at: str, env_dv: str, reason: str) -> dict[str, Any]:
+    return {
+        "schema_version": "1",
+        "run_id": run_id,
+        "started_at": started_at,
+        "generated_at": now_kst_iso(),
+        "stage": "today-fills",
+        "status": "success",
+        "skipped": True,
+        "skip_reason": reason,
+        "execution_environment": env_dv,
+        "source_api": "direct_kis.inquire_daily_ccld",
+        "symbols": [{"symbol_id": symbol} for symbol in symbols],
+        "fills": [],
+        "errors": [],
+    }
+
+
+def failed_today_fills_artifact(symbols: list[str], *, run_id: str, started_at: str, env_dv: str, error: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": "1",
+        "run_id": run_id,
+        "started_at": started_at,
+        "generated_at": now_kst_iso(),
+        "stage": "today-fills",
+        "status": "partial",
+        "skipped": False,
+        "skip_reason": "",
+        "execution_environment": env_dv,
+        "source_api": "direct_kis.inquire_daily_ccld",
+        "symbols": [{"symbol_id": symbol} for symbol in symbols],
+        "fills": [],
+        "errors": [error],
+    }
+
+
 def account_asset_history_path(output_dir: Path) -> Path:
     for parent in output_dir.resolve().parents:
         if parent.name == "reports":
@@ -1251,6 +1399,7 @@ def build_collection_summary(
     price_artifact: dict[str, Any],
     account_artifact: dict[str, Any],
     account_asset_snapshot: dict[str, Any],
+    today_fills_artifact: dict[str, Any],
     output_dir: Path,
     token_status: str,
     token_expires_at: str,
@@ -1273,15 +1422,18 @@ def build_collection_summary(
             "price_chart": str(output_dir / "price-chart.json"),
             "account_before_order": str(output_dir / "account-before-order.json"),
             "account_asset_snapshot": str(output_dir / "account-asset-snapshot.json"),
+            "today_fills": str(output_dir / "today-fills.json"),
             "collection_summary": str(output_dir / "collection-summary.json"),
         },
         "counts": {
             "input_symbols": len(symbols),
             "price_symbols": len(price_artifact.get("symbols", [])),
             "account_symbols": len(account_artifact.get("symbols", [])),
+            "today_fill_count": len(today_fills_artifact.get("fills", [])),
             "price_errors": len(price_artifact.get("errors", [])),
             "account_errors": len(account_artifact.get("errors", [])),
             "account_asset_errors": len(account_asset_errors),
+            "today_fills_errors": len(today_fills_artifact.get("errors", [])),
         },
         "optional_stages": [
             {
@@ -1289,6 +1441,12 @@ def build_collection_summary(
                 "status": account_asset_snapshot.get("status"),
                 "skipped": bool(account_asset_snapshot.get("skipped")),
                 "errors": account_asset_errors,
+            },
+            {
+                "stage": "today-fills",
+                "status": today_fills_artifact.get("status"),
+                "skipped": bool(today_fills_artifact.get("skipped")),
+                "errors": today_fills_artifact.get("errors", []) if isinstance(today_fills_artifact.get("errors"), list) else [],
             }
         ],
         "warnings": account_artifact.get("warnings", []),
@@ -1315,9 +1473,17 @@ def command_collect(args: argparse.Namespace) -> int:
             env_dv=env_dv,
             error=safe_error(exc, code="auth_failed", stage="account-asset-snapshot", source="direct_kis.auth", required=False),
         )
+        today_fills_artifact = failed_today_fills_artifact(
+            symbols,
+            run_id=args.run_id,
+            started_at=started_at,
+            env_dv=env_dv,
+            error=safe_error(exc, code="auth_failed", stage="today-fills", source="direct_kis.auth", required=False),
+        )
         write_json(output_dir / "price-chart.json", price_artifact)
         write_json(output_dir / "account-before-order.json", account_artifact)
         write_json(output_dir / "account-asset-snapshot.json", account_asset_snapshot)
+        write_json(output_dir / "today-fills.json", today_fills_artifact)
         summary = build_collection_summary(
             run_id=args.run_id,
             started_at=started_at,
@@ -1326,6 +1492,7 @@ def command_collect(args: argparse.Namespace) -> int:
             price_artifact=price_artifact,
             account_artifact=account_artifact,
             account_asset_snapshot=account_asset_snapshot,
+            today_fills_artifact=today_fills_artifact,
             output_dir=output_dir,
             token_status="failed",
             token_expires_at="",
@@ -1361,6 +1528,13 @@ def command_collect(args: argparse.Namespace) -> int:
             reason="skip-account option",
         )
         account_asset_snapshot = skipped_account_asset_snapshot(
+            run_id=args.run_id,
+            started_at=started_at,
+            env_dv=env_dv,
+            reason="skip-account option",
+        )
+        today_fills_artifact = skipped_today_fills_artifact(
+            symbols,
             run_id=args.run_id,
             started_at=started_at,
             env_dv=env_dv,
@@ -1404,8 +1578,28 @@ def command_collect(args: argparse.Namespace) -> int:
                 account_asset_snapshot.setdefault("errors", []).append(
                     safe_error(exc, code="account_asset_history_append_failed", stage="account-asset-snapshot", source=str(account_asset_history_path(output_dir)), required=False)
                 )
+        try:
+            today_fills_artifact = collect_today_fills_artifact(
+                symbols,
+                run_id=args.run_id,
+                started_at=started_at,
+                env_dv=env_dv,
+                app_key=app_key,
+                app_secret=app_secret,
+                token=token,
+                retries=args.retries,
+            )
+        except Exception as exc:  # noqa: BLE001 - fill timeline is useful but non-blocking
+            today_fills_artifact = failed_today_fills_artifact(
+                symbols,
+                run_id=args.run_id,
+                started_at=started_at,
+                env_dv=env_dv,
+                error=safe_error(exc, code="today_fills_failed", stage="today-fills", source="direct_kis.inquire_daily_ccld", required=False),
+            )
     write_json(account_path, account_artifact)
     write_json(output_dir / "account-asset-snapshot.json", account_asset_snapshot)
+    write_json(output_dir / "today-fills.json", today_fills_artifact)
     children.append(account_artifact)
 
     summary = build_collection_summary(
@@ -1416,6 +1610,7 @@ def command_collect(args: argparse.Namespace) -> int:
         price_artifact=price_artifact,
         account_artifact=account_artifact,
         account_asset_snapshot=account_asset_snapshot,
+        today_fills_artifact=today_fills_artifact,
         output_dir=output_dir,
         token_status=token_status,
         token_expires_at=token_expires_at,
@@ -1483,6 +1678,24 @@ def command_self_test(_args: argparse.Namespace) -> int:
     assert sample_account["symbol_id"] == "0183J0"
     assert sample_account["current_live_holding_quantity"] == 3
     assert build_account_summary({"dnca_tot_amt": "1000", "tot_evlu_amt": "2000"})["cash_amount"] == 1000
+    fill = normalize_fill(
+        {
+            "pdno": "005930",
+            "prdt_name": "Samsung Electronics",
+            "sll_buy_dvsn_cd": "02",
+            "tot_ccld_qty": "3",
+            "avg_prvs": "70100",
+            "ord_dt": "20260618",
+            "ord_tmd": "094200",
+            "odno": "1",
+        },
+        env_dv="real",
+        observed_at="2026-06-18T09:43:00+09:00",
+    )
+    assert fill["symbol_id"] == "005930"
+    assert fill["direction"] == "buy"
+    assert fill["filled_price"] == 70100
+    assert fill["filled_at"] == "2026-06-18T09:42:00+09:00"
     asset_summary = account_asset_summary_from_row(
         {
             "tot_asst_amt": "20000000",
@@ -1510,6 +1723,13 @@ def command_self_test(_args: argparse.Namespace) -> int:
             "skipped": False,
             "errors": [safe_error("optional probe", stage="account-asset-snapshot", required=False)],
         },
+        today_fills_artifact={
+            "stage": "today-fills",
+            "status": "success",
+            "skipped": False,
+            "fills": [fill],
+            "errors": [],
+        },
         output_dir=Path("/tmp/daily-trading-self-test"),
         token_status="existing_token",
         token_expires_at="",
@@ -1517,7 +1737,9 @@ def command_self_test(_args: argparse.Namespace) -> int:
     assert summary["status"] == "success"
     assert summary["errors"] == []
     assert summary["counts"]["account_asset_errors"] == 1
+    assert summary["counts"]["today_fill_count"] == 1
     assert summary["optional_stages"][0]["stage"] == "account-asset-snapshot"
+    assert summary["optional_stages"][1]["stage"] == "today-fills"
     with tempfile.TemporaryDirectory() as tmp_name:
         history_path = Path(tmp_name) / "memory" / "account-assets" / "account-assets.jsonl"
         snapshot = {

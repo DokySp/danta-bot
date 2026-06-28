@@ -235,6 +235,83 @@ def account_summary(account: dict[str, Any]) -> dict[str, Any]:
     return {key: summary.get(key) for key in keys}
 
 
+def fills_by_symbol(today_fills: Any) -> dict[str, list[dict[str, Any]]]:
+    result: dict[str, list[dict[str, Any]]] = {}
+    fills = today_fills.get("fills") if isinstance(today_fills, dict) else []
+    if not isinstance(fills, list):
+        return result
+    for item in fills:
+        if not isinstance(item, dict):
+            continue
+        symbol_id = symbol_key(item)
+        direction = str(item.get("direction") or "").lower()
+        quantity = as_int(item.get("filled_quantity"))
+        if not symbol_id or direction not in {"buy", "sell"} or quantity <= 0:
+            continue
+        compact = {
+            "filled_at": str(item.get("filled_at") or ""),
+            "direction": direction,
+            "quantity": quantity,
+            "price": as_int(item.get("filled_price")),
+            "amount": as_int(item.get("filled_amount")),
+            "order_id": str(item.get("order_id") or ""),
+        }
+        result.setdefault(symbol_id, []).append(compact)
+    for rows in result.values():
+        rows.sort(key=lambda row: (str(row.get("filled_at") or ""), str(row.get("order_id") or "")))
+    return result
+
+
+def weighted_average_price(fills: list[dict[str, Any]], direction: str) -> float | None:
+    qty = sum(as_int(item.get("quantity")) for item in fills if item.get("direction") == direction and as_int(item.get("price")) > 0)
+    if qty <= 0:
+        return None
+    amount = sum(as_int(item.get("quantity")) * as_int(item.get("price")) for item in fills if item.get("direction") == direction and as_int(item.get("price")) > 0)
+    return round(amount / qty, 2)
+
+
+def today_trade_context(fills: list[dict[str, Any]], current_price: Any) -> dict[str, Any]:
+    if not fills:
+        return {
+            "has_same_day_trade": False,
+            "fills": [],
+        }
+    buy_qty = sum(as_int(item.get("quantity")) for item in fills if item.get("direction") == "buy")
+    sell_qty = sum(as_int(item.get("quantity")) for item in fills if item.get("direction") == "sell")
+    buy_fills = [item for item in fills if item.get("direction") == "buy"]
+    sell_fills = [item for item in fills if item.get("direction") == "sell"]
+    last = fills[-1]
+    first_direction = str(fills[0].get("direction") or "")
+    last_direction = str(last.get("direction") or "")
+    price = as_number(current_price)
+    last_price = as_number(last.get("price"))
+    move_since_last = None
+    if price is not None and last_price not in (None, 0):
+        move_since_last = round(((float(price) - float(last_price)) / float(last_price)) * 100, 2)
+    return {
+        "has_same_day_trade": True,
+        "fill_count": len(fills),
+        "buy_quantity": buy_qty,
+        "sell_quantity": sell_qty,
+        "buy_fill_count": len(buy_fills),
+        "sell_fill_count": len(sell_fills),
+        "net_quantity": buy_qty - sell_qty,
+        "first_direction": first_direction,
+        "last_direction": last_direction,
+        "last_buy_fill": buy_fills[-1] if buy_fills else {},
+        "last_sell_fill": sell_fills[-1] if sell_fills else {},
+        "last_fill_at": last.get("filled_at") or "",
+        "last_fill_price": as_int(last.get("price")),
+        "average_buy_price": weighted_average_price(fills, "buy"),
+        "average_sell_price": weighted_average_price(fills, "sell"),
+        "current_or_last_price": price,
+        "move_since_last_fill_pct": move_since_last,
+        "has_intraday_reversal": bool(buy_qty > 0 and sell_qty > 0),
+        "fills": fills[:20],
+        "policy": "Use same-day fill timeline as trade-history context; do not treat it as proof that the current command caused those fills.",
+    }
+
+
 def shorten(value: Any, limit: int = 160) -> str:
     text = str(value or "").strip()
     if len(text) <= limit:
@@ -525,11 +602,16 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
     portfolio = read_json_arg(args.portfolio_json)
     price_chart = load_json(Path(args.price_chart or output_dir / "price-chart.json"))
     account = load_json(Path(args.account_before_order or output_dir / "account-before-order.json"))
+    today_fills_path = Path(args.today_fills or output_dir / "today-fills.json")
+    today_fills = load_json(today_fills_path) if today_fills_path.exists() else {}
+    fills_by_id = fills_by_symbol(today_fills)
     run_id = args.run_id or price_chart.get("run_id") or account.get("run_id") or output_dir.name
     started_at = args.started_at or price_chart.get("started_at") or account.get("started_at") or ""
 
     account_by_symbol = indexed_symbols(account.get("symbols"))
     source_artifacts = ["price-chart.json", "account-before-order.json", "check-portfolio JSON"]
+    if today_fills_path.exists():
+        source_artifacts.append(str(today_fills_path))
     if args.financial_cache_path:
         source_artifacts.append(args.financial_cache_path)
     if args.news_cache_path:
@@ -578,6 +660,7 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
             required_missing.append("price.current_or_last/observed_at")
         financial_summary = financial_summary_for(financial_cache, symbol_id, args.financial_cache_path)
         etf_summary = etf_summary_for(financial_cache, symbol_id, args.financial_cache_path) if str(item.get("product_type") or "").lower() in {"etf", "etn"} else {}
+        same_day_context = today_trade_context(fills_by_id.get(symbol_id, []), price.get("current_or_last"))
         symbol = {
             "symbol_id": symbol_id,
             "symbol_name": item.get("symbol_name") or (account_item or {}).get("symbol_name") or symbol_id,
@@ -599,6 +682,8 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
             "etf_summary": etf_summary,
             "news_summary": news_summary_for(news_cache, symbol_id, args.news_cache_path),
             "account_exposure": compact_account_exposure(account_item),
+            "today_trade_price_context": {key: value for key, value in same_day_context.items() if key != "fills"},
+            "today_trade_timeline_context": same_day_context,
             "required_missing": required_missing,
             "warnings": list(item.get("warnings") or []),
             "errors": errors,
@@ -1301,6 +1386,47 @@ def run_self_test() -> int:
                 ],
             },
         )
+        write_json(
+            run_dir / "today-fills.json",
+            {
+                "schema_version": "1",
+                "stage": "today-fills",
+                "status": "success",
+                "fills": [
+                    {
+                        "symbol_id": "005930",
+                        "symbol_name": "삼성전자",
+                        "direction": "buy",
+                        "filled_at": "2026-06-18T09:31:00+09:00",
+                        "filled_quantity": 1,
+                        "filled_price": 70100,
+                        "filled_amount": 70100,
+                        "order_id": "fill-1",
+                    },
+                    {
+                        "symbol_id": "005930",
+                        "symbol_name": "삼성전자",
+                        "direction": "buy",
+                        "filled_at": "2026-06-18T10:20:00+09:00",
+                        "filled_quantity": 1,
+                        "filled_price": 70300,
+                        "filled_amount": 70300,
+                        "order_id": "fill-3",
+                    },
+                    {
+                        "symbol_id": "005930",
+                        "symbol_name": "삼성전자",
+                        "direction": "sell",
+                        "filled_at": "2026-06-18T10:10:00+09:00",
+                        "filled_quantity": 1,
+                        "filled_price": 70200,
+                        "filled_amount": 70200,
+                        "order_id": "fill-2",
+                    },
+                ],
+                "errors": [],
+            },
+        )
         financial_cache_path = tmp / "memory" / "collect-financial-information" / "financial-2026-06-18.yaml"
         financial_cache_path.parent.mkdir(parents=True, exist_ok=True)
         financial_cache_path.write_text(
@@ -1340,6 +1466,7 @@ symbols:
                     portfolio_json=str(tmp / "portfolio.json"),
                     price_chart=None,
                     account_before_order=None,
+                    today_fills=None,
                     run_id=None,
                     started_at=None,
                     financial_cache_path=str(financial_cache_path),
@@ -1397,6 +1524,11 @@ symbols:
                 failures.append(f"trade flow summary should be preserved: {by_symbol['005930']}")
             if by_symbol["005930"].get("investor_flow_summary", {}).get("foreign_net_buy_quantity") != 1000:
                 failures.append(f"investor flow summary should be preserved: {by_symbol['005930']}")
+            trade_context = by_symbol["005930"].get("today_trade_timeline_context", {})
+            if trade_context.get("last_direction") != "buy" or trade_context.get("has_intraday_reversal") is not True:
+                failures.append(f"same-day trade timeline should be summarized: {by_symbol['005930']}")
+            if by_symbol["005930"].get("today_trade_price_context", {}).get("move_since_last_fill_pct") != -0.43:
+                failures.append(f"same-day trade price context should include current-vs-fill move: {by_symbol['005930']}")
             first_specs = build_first_specs(
                 argparse.Namespace(
                     output_dir=run_dir,
@@ -1646,6 +1778,7 @@ def build_parser() -> argparse.ArgumentParser:
     decision.add_argument("--portfolio-json", required=True, help="Path to check-portfolio JSON, or '-' for stdin.")
     decision.add_argument("--price-chart")
     decision.add_argument("--account-before-order")
+    decision.add_argument("--today-fills")
     decision.add_argument("--financial-cache-path", default="")
     decision.add_argument("--news-cache-path", default="")
     decision.add_argument("--run-id")

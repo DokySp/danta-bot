@@ -1058,6 +1058,34 @@ class Pipeline:
             "overseas_stock_evaluation_amount": as_int(snapshot.get("ovrs_stck_evlu_amt1")),
         }
 
+    def build_today_trade_summary(self, decision_brief: dict[str, Any]) -> dict[str, Any]:
+        symbols = decision_brief.get("symbols") if isinstance(decision_brief.get("symbols"), list) else []
+        traded: list[dict[str, Any]] = []
+        for item in symbols:
+            if not isinstance(item, dict):
+                continue
+            context = item.get("today_trade_timeline_context") if isinstance(item.get("today_trade_timeline_context"), dict) else {}
+            if not context.get("has_same_day_trade"):
+                continue
+            traded.append(
+                {
+                    "symbol_id": item.get("symbol_id"),
+                    "symbol_name": item.get("symbol_name"),
+                    "fill_count": context.get("fill_count"),
+                    "net_quantity": context.get("net_quantity"),
+                    "last_direction": context.get("last_direction"),
+                    "last_fill_at": context.get("last_fill_at"),
+                    "last_fill_price": context.get("last_fill_price"),
+                    "move_since_last_fill_pct": context.get("move_since_last_fill_pct"),
+                    "has_intraday_reversal": bool(context.get("has_intraday_reversal")),
+                }
+            )
+        return {
+            "symbol_count_with_fills": len(traded),
+            "symbols": traded[:10],
+            "display_policy": "Show as same-day trade timeline context, not as trades newly caused by this command.",
+        }
+
     def build_evidence_summary(self, decision_brief: dict[str, Any], stages: list[dict[str, Any]], symbols: list[str]) -> dict[str, Any]:
         stage_by_name = {item.get("stage"): item for item in stages if isinstance(item, dict)}
         decision_symbols = decision_brief.get("symbols") if isinstance(decision_brief.get("symbols"), list) else []
@@ -1201,6 +1229,7 @@ class Pipeline:
         )
         if active_order_lookup_performed is not True and not order_reservation_check:
             order_reservation_check = "미조회"
+        today_trade_summary = summary.get("today_trade_summary") if isinstance(summary.get("today_trade_summary"), dict) else {}
 
         lines = [
             f"# 포트폴리오 평결문 - {report_date_from(self.started_at)}",
@@ -1254,6 +1283,28 @@ class Pipeline:
             )
         if excluded_count == 0:
             lines.append("| - | - | 없음 | - |")
+
+        today_rows = today_trade_summary.get("symbols") if isinstance(today_trade_summary.get("symbols"), list) else []
+        lines.extend(
+            [
+                "",
+                "## 2-1. 당일 거래 타임라인 요약",
+                f"- 당일 체결 타임라인 확인 종목 수: {as_int(today_trade_summary.get('symbol_count_with_fills'))}",
+                "- 누계 금액은 이번 명령 발생 거래로 해석하지 않고, 체결 타임라인은 당일 거래 맥락으로만 사용",
+                "| 종목식별자 | 종목명 | 마지막 방향 | 마지막 체결시각 | 마지막 체결가 | 순수량 | 반대거래 발생 |",
+                "|---|---|---|---|---:|---:|---|",
+            ]
+        )
+        if today_rows:
+            for item in today_rows[:10]:
+                if isinstance(item, dict):
+                    lines.append(
+                        f"| {md_cell(item.get('symbol_id'))} | {md_cell(item.get('symbol_name'))} | {md_cell(item.get('last_direction'))} | "
+                        f"{md_cell(item.get('last_fill_at'))} | {as_int(item.get('last_fill_price'))} | {as_int(item.get('net_quantity'))} | "
+                        f"{'yes' if item.get('has_intraday_reversal') else 'no'} |"
+                    )
+        else:
+            lines.append("| - | - | - | - | 0 | 0 | no |")
 
         price_only_count = 0
         for item in decision_brief.get("symbols", []) if isinstance(decision_brief, dict) else []:
@@ -1473,6 +1524,7 @@ class Pipeline:
         account_summary = account.get("account_summary") if isinstance(account.get("account_summary"), dict) else {}
         account_display_summary = self.build_account_display_summary(account_summary)
         account_asset_summary = self.build_account_asset_summary(account_asset_snapshot if isinstance(account_asset_snapshot, dict) else {})
+        today_trade_summary = self.build_today_trade_summary(decision_brief if isinstance(decision_brief, dict) else {})
         evidence_summary = self.build_evidence_summary(decision_brief, stages, symbols)
         report_path = self.report_path()
         telegram_summary_path = self.output_dir / "telegram-summary.txt"
@@ -1504,6 +1556,7 @@ class Pipeline:
             "account_summary": account_summary,
             "account_display_summary": account_display_summary,
             "account_asset_summary": account_asset_summary,
+            "today_trade_summary": today_trade_summary,
             "evidence_summary": evidence_summary,
             "execution": {
                 "status": execution.get("status"),
@@ -1544,6 +1597,7 @@ class Pipeline:
                 "price_chart": str(self.output_dir / "price-chart.json"),
                 "account_before_order": str(self.output_dir / "account-before-order.json"),
                 "account_asset_snapshot": str(self.output_dir / "account-asset-snapshot.json"),
+                "today_fills": str(self.output_dir / "today-fills.json"),
                 "decision_brief": str(self.output_dir / "decision-brief.json"),
                 "verdict_first": str(self.output_dir / "verdict-first.json"),
                 "verdict_second": str(self.output_dir / "verdict-second.json"),

@@ -60,12 +60,14 @@ COMBINED_FIRST_VERDICT_ROLE_OUTPUTS = {
 FIRST_VERDICT_VIEW_INPUT_FIELDS = {
     "analyst-quality-value": {
         "price",
+        "today_trade_price_context",
         "financial_summary",
         "etf_summary",
         "news_summary",
     },
     "analyst-risk-allocation": {
         "price",
+        "today_trade_price_context",
         "account_exposure",
         "orderbook_summary",
         "trade_flow_summary",
@@ -74,6 +76,7 @@ FIRST_VERDICT_VIEW_INPUT_FIELDS = {
     },
     "analyst-momentum-cycle": {
         "price",
+        "today_trade_price_context",
         "price_chart_signals",
         "chart_context",
         "orderbook_summary",
@@ -82,6 +85,7 @@ FIRST_VERDICT_VIEW_INPUT_FIELDS = {
     },
     "analyst-news-flow": {
         "price",
+        "today_trade_price_context",
         "news_summary",
     },
 }
@@ -788,6 +792,7 @@ def compact_verdict_prompt(spec: dict[str, Any]) -> str | None:
                 f"For this combined first-verdict task, return two independent view results for every symbol: {', '.join(output_roles)}.",
                 "Use a separate pass for each view and evaluate that view only from its own rubric and supplied evidence.",
                 "Do not let either view's score, confidence, reason_code, or one_line_reason depend on the other view's conclusion.",
+                "Use today_trade_price_context to avoid same-day churn: compare last fill price/direction with current_or_last price before strengthening buy/sell opinions.",
                 f"Return each symbol with a views object keyed by {', '.join(output_roles)}; each view must contain score, confidence, reason_code, one_line_reason, and missing_data.",
             ]
         )
@@ -801,6 +806,7 @@ def compact_verdict_prompt(spec: dict[str, Any]) -> str | None:
                 "If a symbol's first-verdict score is missing, unavailable, or unusable, treat it as neutral 5 and continue.",
                 "First-verdict scores are judgment inputs, not hard buy/sell gates.",
                 "Use recent_trade_context to avoid churn: a recent opposite-direction submitted trade defaults to hold unless thesis break, risk-limit breach, or order/fill-state correction is explicit.",
+                "Use today_trade_timeline_context to avoid same-day churn: an opposite-direction target after today's fills requires explicit thesis break, risk-limit breach, or order/fill-state correction evidence.",
                 "Treat long_term_thesis_intact as a sell/reduce suppression signal, not as add permission; increase only when add_allowed evidence is also present.",
             ]
         )
@@ -1665,6 +1671,21 @@ def write_sample_verdict_inputs(tmp: Path) -> None:
                         "pending_and_reserved_buy_quantity": 2,
                         "pending_and_reserved_sell_quantity": 1,
                     },
+                    "today_trade_price_context": {
+                        "has_same_day_trade": True,
+                        "last_direction": "buy",
+                        "last_fill_price": 70100,
+                        "current_or_last_price": 70000,
+                        "move_since_last_fill_pct": -0.14,
+                    },
+                    "today_trade_timeline_context": {
+                        "has_same_day_trade": True,
+                        "last_direction": "buy",
+                        "net_quantity": 3,
+                        "fills": [
+                            {"filled_at": "2026-06-08T09:31:00+09:00", "direction": "buy", "quantity": 3, "price": 70100}
+                        ],
+                    },
                     "orderbook_summary": {"bid_depth": 100},
                     "trade_flow_summary": {"tick_count": 3},
                     "investor_flow_summary": {"foreign_net_buy_quantity": 1000},
@@ -1730,6 +1751,7 @@ def assert_compact_verdict_prompt(tmp: Path) -> None:
         "verdict_format: prompts/verdict-format.md",
         "symbol_ids: 005930,000660",
         "Return each symbol with a views object keyed by analyst-quality-value, analyst-risk-allocation",
+        "Use today_trade_price_context to avoid same-day churn:",
         "Return JSON only",
     ]
     missing = [part for part in required_parts if part not in prompt]
@@ -1748,6 +1770,7 @@ def assert_compact_verdict_prompt(tmp: Path) -> None:
         "If a symbol's first-verdict score is missing, unavailable, or unusable, treat it as neutral 5 and continue.",
         "First-verdict scores are judgment inputs, not hard buy/sell gates.",
         "Use recent_trade_context to avoid churn:",
+        "Use today_trade_timeline_context to avoid same-day churn:",
         "Treat long_term_thesis_intact as a sell/reduce suppression signal",
     ]
     missing = [part for part in second_required_parts if part not in second_prompt]
@@ -1767,6 +1790,10 @@ def assert_verdict_input_slices(tmp: Path) -> None:
         raise AssertionError(f"market-news slice dropped chart_context: {first_symbol}")
     if len(first_symbol.get("news_summary", [])) != 4:
         raise AssertionError(f"market-news slice dropped news_summary: {first_symbol}")
+    if first_symbol.get("today_trade_price_context", {}).get("last_fill_price") != 70100:
+        raise AssertionError(f"market-news slice dropped same-day trade price context: {first_symbol}")
+    if "today_trade_timeline_context" in first_symbol:
+        raise AssertionError(f"first-verdict slice kept full same-day timeline: {first_symbol}")
     if "financial_summary" in first_symbol or "account_exposure" in first_symbol or "custom_detail" in first_symbol:
         raise AssertionError(f"market-news slice kept unrelated fields: {first_symbol}")
 
@@ -1800,6 +1827,8 @@ def assert_verdict_input_slices(tmp: Path) -> None:
                 raise AssertionError(f"verdict-core truncated warnings: {first_symbol}")
             if first_symbol.get("custom_detail") != {"keep": True}:
                 raise AssertionError(f"second-verdict verdict-core dropped custom detail: {first_symbol}")
+            if first_symbol.get("today_trade_timeline_context", {}).get("fills", [{}])[0].get("price") != 70100:
+                raise AssertionError(f"second-verdict verdict-core dropped same-day fill timeline: {first_symbol}")
             holding_context = first_symbol.get("holding_quantity_context", {})
             if holding_context.get("expected_holding_quantity") != 11:
                 raise AssertionError(f"verdict-core did not add expected holding context: {first_symbol}")

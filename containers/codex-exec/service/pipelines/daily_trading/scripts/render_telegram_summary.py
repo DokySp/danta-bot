@@ -80,6 +80,7 @@ def render(summary: dict[str, Any]) -> str:
     evidence = summary.get("evidence_summary") if isinstance(summary.get("evidence_summary"), dict) else {}
     financial = evidence.get("financial") if isinstance(evidence.get("financial"), dict) else {}
     news = evidence.get("news") if isinstance(evidence.get("news"), dict) else {}
+    today_timeline = summary.get("today_trade_summary") if isinstance(summary.get("today_trade_summary"), dict) else {}
     execution = summary.get("execution") if isinstance(summary.get("execution"), dict) else {}
     verdict = summary.get("verdict_summary") if isinstance(summary.get("verdict_summary"), dict) else {}
     tokens = summary.get("token_usage") if isinstance(summary.get("token_usage"), dict) else {}
@@ -113,6 +114,16 @@ def render(summary: dict[str, Any]) -> str:
                 f"- 매도: {money(today.get('today_sell_amount'))}",
             ]
         )
+    timeline_symbols = today_timeline.get("symbols") if isinstance(today_timeline.get("symbols"), list) else []
+    if timeline_symbols:
+        lines.extend(["", "당일 거래 타임라인"])
+        for item in timeline_symbols[:3]:
+            if isinstance(item, dict):
+                lines.append(
+                    f"- {text(item.get('symbol_id'))} {text(item.get('symbol_name'))}: "
+                    f"마지막 {text(item.get('last_direction'))} {money(item.get('last_fill_price'))}, "
+                    f"순수량 {as_int(item.get('net_quantity'))}"
+                )
     lines.extend(
         [
             "",
