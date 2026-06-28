@@ -70,10 +70,11 @@ class Candle:
 
 
 def default_config_path() -> Path:
-    configured = os.getenv("PRICE_TRIGGER_FILE", "").strip()
+    default = "/app/config/touch-points.yaml"
+    configured = os.getenv("TOUCH_POINT_CONFIG_FILE", "").strip()
     if configured:
         return Path(configured)
-    return Path("/app/config/touch-points.yaml")
+    return Path(default)
 
 
 def load_triggers(path: Path) -> dict[str, Trigger]:

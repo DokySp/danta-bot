@@ -14,7 +14,7 @@ Render the alert points produced by `touch-points.yaml` on top of the matching i
 Use the first available price-trigger config path:
 
 1. `--config` when passed to `scripts/render_touch_point.py`.
-2. `PRICE_TRIGGER_FILE` when set.
+2. `TOUCH_POINT_CONFIG_FILE` when set.
 3. `/app/config/touch-points.yaml`.
 
 Use the first available codex-exec price-trigger touch log:

@@ -150,7 +150,7 @@ schedules:
 
 ## Price Triggers
 
-`PRICE_TRIGGER_FILE`은 기본적으로 `/app/config/touch-points.yaml`입니다. base 프로필은 KIS
+`TOUCH_POINT_CONFIG_FILE`은 기본적으로 `/app/config/touch-points.yaml`입니다. base 프로필은 KIS
 국내업종 현재지수 API(`/uapi/domestic-stock/v1/quotations/inquire-index-price`,
 `tr_id=FHPUP02100000`)의 KOSPI(`FID_COND_MRKT_DIV_CODE=U`, `FID_INPUT_ISCD=0001`)만 감시하며,
 각 case의 기준값 대비 설정된 임계치에 닿으면 터치 이벤트를 기록하고, `send_telegram`이 켜진 case만
