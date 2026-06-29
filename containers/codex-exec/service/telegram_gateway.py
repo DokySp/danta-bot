@@ -2,6 +2,7 @@ import base64
 import json
 import logging
 import threading
+import time
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -32,20 +33,30 @@ class TelegramGateway:
             payload["route"] = outbound_route
 
         body = json.dumps(payload).encode("utf-8")
-        request = Request(
-            self.config.telegram_gateway_url,
-            data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urlopen(request, timeout=20) as response:
-                response.read()
-        except HTTPError as exc:
-            raw = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"telegram-gateway failed: HTTP {exc.code}: {raw}") from exc
-        except URLError as exc:
-            raise RuntimeError(f"telegram-gateway failed: {exc}") from exc
+        for attempt in range(2):
+            request = Request(
+                self.config.telegram_gateway_url,
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urlopen(request, timeout=20) as response:
+                    response.read()
+                return
+            except HTTPError as exc:
+                raw = exc.read().decode("utf-8", errors="replace")
+                if attempt == 0:
+                    logging.warning("telegram-gateway sendMessage failed; retrying once: HTTP %s: %s", exc.code, raw)
+                    time.sleep(1.0)
+                    continue
+                raise RuntimeError(f"telegram-gateway failed: HTTP {exc.code}: {raw}") from exc
+            except URLError as exc:
+                if attempt == 0:
+                    logging.warning("telegram-gateway sendMessage failed; retrying once: %s", exc)
+                    time.sleep(1.0)
+                    continue
+                raise RuntimeError(f"telegram-gateway failed: {exc}") from exc
 
     def send_photo(
         self,
@@ -86,20 +97,34 @@ class TelegramGateway:
         if outbound_route:
             payload["route"] = outbound_route
         body = json.dumps(payload).encode("utf-8")
-        request = Request(
-            self._gateway_url(endpoint),
-            data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urlopen(request, timeout=30) as response:
-                response.read()
-        except HTTPError as exc:
-            raw = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"telegram-gateway file send failed: HTTP {exc.code}: {raw}") from exc
-        except URLError as exc:
-            raise RuntimeError(f"telegram-gateway file send failed: {exc}") from exc
+        for attempt in range(2):
+            request = Request(
+                self._gateway_url(endpoint),
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urlopen(request, timeout=30) as response:
+                    response.read()
+                return
+            except HTTPError as exc:
+                raw = exc.read().decode("utf-8", errors="replace")
+                if attempt == 0:
+                    logging.warning(
+                        "telegram-gateway file send failed; retrying once: HTTP %s: %s",
+                        exc.code,
+                        raw,
+                    )
+                    time.sleep(1.0)
+                    continue
+                raise RuntimeError(f"telegram-gateway file send failed: HTTP {exc.code}: {raw}") from exc
+            except URLError as exc:
+                if attempt == 0:
+                    logging.warning("telegram-gateway file send failed; retrying once: %s", exc)
+                    time.sleep(1.0)
+                    continue
+                raise RuntimeError(f"telegram-gateway file send failed: {exc}") from exc
 
     def send_chat_action(
         self,
