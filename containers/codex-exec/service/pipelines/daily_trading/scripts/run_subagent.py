@@ -106,6 +106,10 @@ FIRST_VERDICT_ALWAYS_SYMBOL_FIELDS = {
 }
 MAX_BLANK_LINES = 1
 RAW_RETENTION_VALUES = {"always", "failed", "never"}
+EVENT_RETENTION_VALUES = {"always", "anomaly", "failed", "never"}
+DEFAULT_EVENT_TOKEN_THRESHOLD = 1_000_000
+MAX_USAGE_EVENT_SUMMARY_ITEMS = 50
+MAX_REPEATED_TOOL_FINGERPRINTS = 20
 TOKEN_USAGE_FIELDS = (
     "input_tokens",
     "cached_input_tokens",
@@ -254,6 +258,17 @@ def add_token_usage(total: dict[str, int], usage: dict[str, int]) -> None:
         total[field] = int(total.get(field, 0)) + int(usage.get(field, 0))
 
 
+def token_threshold_from_env(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(0, value)
+
+
 def token_count_payload(item: Any) -> dict[str, Any] | None:
     if not isinstance(item, dict):
         return None
@@ -274,6 +289,195 @@ def turn_completed_usage(item: Any) -> dict[str, Any] | None:
         return None
     usage = item.get("usage")
     return usage if isinstance(usage, dict) else None
+
+
+def event_label(item: dict[str, Any]) -> str:
+    item_type = str(item.get("type") or "unknown")
+    payload = item.get("payload")
+    if isinstance(payload, dict):
+        payload_type = payload.get("type")
+        if payload_type:
+            return f"{item_type}:{payload_type}"
+    return item_type
+
+
+def iter_dict_values(value: Any) -> Any:
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from iter_dict_values(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from iter_dict_values(child)
+
+
+def compact_for_fingerprint(value: Any) -> str:
+    if isinstance(value, list):
+        text = shlex.join(str(item) for item in value)
+    elif isinstance(value, dict):
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    else:
+        text = str(value or "")
+    return re.sub(r"\s+", " ", text).strip()[:500]
+
+
+def tool_command_text(item: dict[str, Any]) -> str:
+    for key in ("command", "cmd", "argv", "args", "arguments", "input"):
+        if key in item:
+            text = compact_for_fingerprint(item.get(key))
+            if text:
+                return text
+    for key in ("tool_name", "name", "function"):
+        if key in item:
+            text = compact_for_fingerprint(item.get(key))
+            if text:
+                return text
+    return ""
+
+
+def tool_result_text(item: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for key in ("content", "output", "result", "stdout", "stderr", "message"):
+        value = item.get(key)
+        if isinstance(value, str):
+            parts.append(value)
+        elif value is not None and key in {"content", "output", "result"}:
+            parts.append(compact_for_fingerprint(value))
+    return "\n".join(parts)
+
+
+def looks_like_tool_call(item: dict[str, Any]) -> bool:
+    item_type = str(item.get("type") or "").lower()
+    if "function_call_output" in item_type:
+        return False
+    if "tool" in item_type and "call" in item_type:
+        return True
+    if "function_call" in item_type:
+        return True
+    if item.get("tool_name") and any(key in item for key in ("command", "cmd", "args", "arguments", "input")):
+        return True
+    return False
+
+
+def looks_like_tool_result(item: dict[str, Any]) -> bool:
+    item_type = str(item.get("type") or "").lower()
+    if "tool" in item_type and any(word in item_type for word in ("result", "output", "complete")):
+        return True
+    if "function_call_output" in item_type:
+        return True
+    if item.get("tool_name") and any(key in item for key in ("content", "output", "result", "stdout", "stderr")):
+        return True
+    return False
+
+
+def tool_kind(item: dict[str, Any]) -> str:
+    for key in ("tool_name", "name", "function"):
+        value = item.get(key)
+        if isinstance(value, dict):
+            value = value.get("name")
+        text = str(value or "").strip()
+        if text:
+            return text[:80]
+    return str(item.get("type") or "unknown")[:80]
+
+
+def fingerprint_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:16]
+
+
+def summarize_codex_event_stream(stdout: str, token_usage: dict[str, int]) -> dict[str, Any]:
+    event_type_counts: dict[str, int] = {}
+    tool_call_counts: dict[str, int] = {}
+    repeated_fingerprints: dict[str, dict[str, Any]] = {}
+    usage_events: list[dict[str, Any]] = []
+    json_event_count = 0
+    parse_error_count = 0
+    max_event_bytes = 0
+    tool_call_count = 0
+    tool_result_count = 0
+    total_tool_result_bytes = 0
+    max_tool_result_bytes = 0
+
+    for raw_line in stdout.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        line_bytes = len(raw_line.encode("utf-8", errors="replace"))
+        max_event_bytes = max(max_event_bytes, line_bytes)
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            parse_error_count += 1
+            continue
+        if not isinstance(item, dict):
+            continue
+        json_event_count += 1
+        label = event_label(item)
+        event_type_counts[label] = event_type_counts.get(label, 0) + 1
+
+        payload = token_count_payload(item)
+        if payload is not None:
+            info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+            usage = token_usage_from(info.get("last_token_usage"))
+            if len(usage_events) < MAX_USAGE_EVENT_SUMMARY_ITEMS:
+                usage_events.append({"kind": "token_count", **usage})
+        completed_usage = turn_completed_usage(item)
+        if completed_usage is not None:
+            usage = token_usage_from(completed_usage)
+            if len(usage_events) < MAX_USAGE_EVENT_SUMMARY_ITEMS:
+                usage_events.append({"kind": "turn.completed", **usage})
+
+        for candidate in iter_dict_values(item):
+            if looks_like_tool_call(candidate):
+                tool_call_count += 1
+                kind = tool_kind(candidate)
+                tool_call_counts[kind] = tool_call_counts.get(kind, 0) + 1
+                command = tool_command_text(candidate)
+                if command:
+                    digest = fingerprint_text(f"{kind}\n{command}")
+                    entry = repeated_fingerprints.setdefault(
+                        digest,
+                        {"fingerprint": digest, "kind": kind, "count": 0},
+                    )
+                    entry["count"] += 1
+            if looks_like_tool_result(candidate):
+                tool_result_count += 1
+                result_text = tool_result_text(candidate)
+                result_bytes = len(result_text.encode("utf-8", errors="replace"))
+                total_tool_result_bytes += result_bytes
+                max_tool_result_bytes = max(max_tool_result_bytes, result_bytes)
+
+    token_threshold = token_threshold_from_env("CODEX_SUBAGENT_EVENT_TOKEN_THRESHOLD", DEFAULT_EVENT_TOKEN_THRESHOLD)
+    anomaly_detected = (
+        int(token_usage.get("total_tokens", 0)) >= token_threshold
+        or int(token_usage.get("input_tokens", 0)) >= token_threshold
+    )
+    repeated = [
+        item
+        for item in sorted(
+            repeated_fingerprints.values(),
+            key=lambda entry: (-int(entry.get("count", 0)), str(entry.get("kind", "")), str(entry.get("fingerprint", ""))),
+        )
+        if int(item.get("count", 0)) > 1
+    ][:MAX_REPEATED_TOOL_FINGERPRINTS]
+    return {
+        "stdout_bytes": len(stdout.encode("utf-8", errors="replace")),
+        "json_event_count": json_event_count,
+        "parse_error_count": parse_error_count,
+        "event_type_counts": event_type_counts,
+        "max_event_bytes": max_event_bytes,
+        "usage_event_count": len(usage_events),
+        "usage_event_count_truncated": json_event_count > len(usage_events) >= MAX_USAGE_EVENT_SUMMARY_ITEMS,
+        "usage_events": usage_events,
+        "tool_call_count": tool_call_count,
+        "tool_call_counts": tool_call_counts,
+        "tool_result_count": tool_result_count,
+        "tool_result_bytes": total_tool_result_bytes,
+        "max_tool_result_bytes": max_tool_result_bytes,
+        "repeated_tool_fingerprints": repeated,
+        "anomaly_detected": anomaly_detected,
+        "anomaly_token_threshold": token_threshold,
+    }
 
 
 def parse_codex_json_events(stdout: str) -> dict[str, Any]:
@@ -389,6 +593,13 @@ def raw_retention_mode() -> str:
     mode = os.getenv("CODEX_SUBAGENT_RAW_RETENTION", "always").strip().lower()
     if mode not in RAW_RETENTION_VALUES:
         return "always"
+    return mode
+
+
+def event_retention_mode() -> str:
+    mode = os.getenv("CODEX_SUBAGENT_EVENT_RETENTION", "anomaly").strip().lower()
+    if mode not in EVENT_RETENTION_VALUES:
+        return "anomaly"
     return mode
 
 
@@ -1105,6 +1316,42 @@ def wrapper_paths(spec: dict[str, Any]) -> tuple[Path, Path]:
     return subagent_dir / f"{task_name}.wrapper.json", subagent_dir / f"{task_name}.raw.txt"
 
 
+def event_log_paths(spec: dict[str, Any]) -> tuple[Path, Path]:
+    output_dir = Path(str(spec["output_dir"]))
+    task_name = safe_name(str(spec["task_name"]))
+    subagent_dir = output_dir / "subagents"
+    return subagent_dir / f"{task_name}.events.jsonl", subagent_dir / f"{task_name}.stderr.txt"
+
+
+def write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def prune_path(path: Path) -> bool:
+    try:
+        if path.exists():
+            path.unlink()
+            return True
+    except OSError:
+        return False
+    return False
+
+
+def event_log_retention_decision(mode: str, status: str, diagnostics: dict[str, Any]) -> tuple[bool, str]:
+    if mode == "always":
+        return True, "always"
+    if mode == "never":
+        return False, "never"
+    if status != "success":
+        return True, "failure"
+    if mode == "failed":
+        return False, "success"
+    if diagnostics.get("anomaly_detected"):
+        return True, "anomaly"
+    return False, "no_anomaly"
+
+
 def file_sha256(path: Path) -> str | None:
     try:
         with path.open("rb") as handle:
@@ -1182,6 +1429,7 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
         return reused
     model, effort = launcher_model_effort(str(spec["stage"]), str(spec["agent_role"]))
     wrapper_path, raw_output_path = wrapper_paths(spec)
+    event_log_path, stderr_path = event_log_paths(spec)
     raw_output_path.parent.mkdir(parents=True, exist_ok=True)
     slice_paths = write_verdict_input_slices(spec)
     prompt_spec = spec_with_verdict_slices(spec, slice_paths)
@@ -1232,7 +1480,11 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 - wrapper records sub-agent failures
         errors.append({"code": "exec_failed", "message": str(exc)})
 
+    write_text(event_log_path, stdout)
+    write_text(stderr_path, stderr)
     event_summary = parse_codex_json_events(stdout)
+    event_diagnostics = summarize_codex_event_stream(stdout, event_summary["token_usage"])
+    event_diagnostics["stderr_bytes"] = len(stderr.encode("utf-8", errors="replace"))
     if raw_output_path.exists():
         raw_output = raw_output_path.read_text(encoding="utf-8", errors="replace")
     else:
@@ -1276,6 +1528,15 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
     if raw_output_path.exists() and (retention == "never" or (retention == "failed" and status == "success")):
         raw_output_path.unlink()
         raw_output_retained = False
+    event_retention = event_retention_mode()
+    event_log_retained, event_retention_reason = event_log_retention_decision(event_retention, status, event_diagnostics)
+    stderr_retained = event_log_retained
+    if not event_log_retained:
+        prune_path(event_log_path)
+        prune_path(stderr_path)
+    elif stderr == "":
+        stderr_retained = False
+        prune_path(stderr_path)
     wrapper = {
         "schema_version": "1",
         "run_id": str(spec["run_id"]),
@@ -1291,6 +1552,13 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
         "raw_output_path": str(raw_output_path),
         "raw_output_retained": raw_output_retained,
         "raw_retention": retention,
+        "event_log_path": str(event_log_path),
+        "event_log_retained": event_log_retained,
+        "event_retention": event_retention,
+        "event_retention_reason": event_retention_reason,
+        "stderr_path": str(stderr_path),
+        "stderr_retained": stderr_retained,
+        "event_diagnostics": event_diagnostics,
         "parsed_json": parsed_json,
         "parsed_text": parsed_text,
         "errors": errors,
@@ -1511,25 +1779,34 @@ else:
             payload = {"ok": True, "argv": sys.argv[1:]}
     output_path.write_text(json.dumps(payload), encoding="utf-8")
 if "--json" in sys.argv:
-    print(json.dumps({
-        "type": "event_msg",
-        "payload": {
-            "type": "token_count",
-            "info": {
-                "last_token_usage": {
-                    "input_tokens": 100,
-                    "cached_input_tokens": 40,
-                    "output_tokens": 20,
-                    "reasoning_output_tokens": 5,
-                    "total_tokens": 120
+    if os.environ.get("FAKE_CODEX_DIAGNOSTIC_EVENTS") == "1":
+        print(json.dumps({"type": "event_msg", "payload": {"type": "tool_call", "tool_name": "shell", "command": ["cat", "artifact.json"]}}))
+        print(json.dumps({"type": "event_msg", "payload": {"type": "tool_result", "tool_name": "shell", "content": "x" * 2048}}))
+        print(json.dumps({"type": "event_msg", "payload": {"type": "tool_call", "tool_name": "shell", "command": ["cat", "artifact.json"]}}))
+        print(json.dumps({"type": "event_msg", "payload": {"type": "tool_result", "tool_name": "shell", "content": "y" * 1024}}))
+        print(json.dumps({"type": "token_count", "info": {"last_token_usage": {"input_tokens": 7, "cached_input_tokens": 3, "output_tokens": 2, "reasoning_output_tokens": 1, "total_tokens": 9}}}))
+        print(json.dumps({"type": "turn.completed", "usage": {"input_tokens": 11, "cached_input_tokens": 5, "output_tokens": 4, "reasoning_output_tokens": 2, "total_tokens": 15}}))
+        print("diagnostic stderr", file=sys.stderr)
+    else:
+        print(json.dumps({
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "last_token_usage": {
+                        "input_tokens": 100,
+                        "cached_input_tokens": 40,
+                        "output_tokens": 20,
+                        "reasoning_output_tokens": 5,
+                        "total_tokens": 120
+                    }
                 }
+            },
+            "rate_limits": {
+                "primary": {"used_percent": 1.0},
+                "secondary": {"used_percent": 2.0}
             }
-        },
-        "rate_limits": {
-            "primary": {"used_percent": 1.0},
-            "secondary": {"used_percent": 2.0}
-        }
-    }))
+        }))
 sys.exit(int(os.environ.get("FAKE_CODEX_EXIT", "0")))
 """,
         encoding="utf-8",
@@ -1902,6 +2179,38 @@ def assert_argv(argv_log: Path, *, model: str, effort: str) -> None:
         raise AssertionError(f"expected effort {expected_effort}, argv={shlex.join(argv)}")
 
 
+def assert_event_diagnostics_wrapper(wrapper: dict[str, Any]) -> None:
+    event_path = Path(str(wrapper.get("event_log_path") or ""))
+    stderr_path = Path(str(wrapper.get("stderr_path") or ""))
+    diagnostics = wrapper.get("event_diagnostics")
+    if not isinstance(diagnostics, dict):
+        raise AssertionError(f"wrapper missing event diagnostics: {wrapper}")
+    if not wrapper.get("event_log_retained") or not event_path.exists():
+        raise AssertionError(f"event log was not retained: {wrapper}")
+    if not wrapper.get("stderr_retained") or not stderr_path.exists():
+        raise AssertionError(f"stderr log was not retained: {wrapper}")
+    if diagnostics.get("event_type_counts", {}).get("event_msg:tool_call") != 2:
+        raise AssertionError(f"tool call event count missing: {diagnostics}")
+    if diagnostics.get("event_type_counts", {}).get("event_msg:tool_result") != 2:
+        raise AssertionError(f"tool result event count missing: {diagnostics}")
+    if diagnostics.get("event_type_counts", {}).get("turn.completed") != 1:
+        raise AssertionError(f"turn.completed event count missing: {diagnostics}")
+    if diagnostics.get("event_type_counts", {}).get("token_count") != 1:
+        raise AssertionError(f"legacy token_count event count missing: {diagnostics}")
+    if diagnostics.get("tool_call_count") != 2 or diagnostics.get("tool_result_count") != 2:
+        raise AssertionError(f"tool summary count mismatch: {diagnostics}")
+    if int(diagnostics.get("max_tool_result_bytes", 0)) < 2048:
+        raise AssertionError(f"max tool result bytes missing: {diagnostics}")
+    repeated = diagnostics.get("repeated_tool_fingerprints")
+    if not isinstance(repeated, list) or not repeated or repeated[0].get("count") != 2:
+        raise AssertionError(f"repeated command fingerprint missing: {diagnostics}")
+    usage_events = diagnostics.get("usage_events")
+    if not isinstance(usage_events, list) or [item.get("kind") for item in usage_events] != ["token_count", "turn.completed"]:
+        raise AssertionError(f"usage event sequence missing: {diagnostics}")
+    if wrapper.get("token_usage", {}).get("total_tokens") != 24:
+        raise AssertionError(f"mixed usage events were not accumulated as current semantics: {wrapper}")
+
+
 def run_self_test() -> int:
     failures: list[str] = []
     with tempfile.TemporaryDirectory() as tmp_name:
@@ -2098,6 +2407,55 @@ def run_self_test() -> int:
                     assert_argv(argv_log, model=model, effort=effort)
                 except AssertionError as exc:
                     failures.append(str(exc))
+
+            old_event_retention = os.environ.get("CODEX_SUBAGENT_EVENT_RETENTION")
+            os.environ["CODEX_SUBAGENT_EVENT_RETENTION"] = "always"
+            os.environ["FAKE_CODEX_DIAGNOSTIC_EVENTS"] = "1"
+            try:
+                diagnostic_wrapper = run_one(
+                    compact_spec(
+                        tmp,
+                        stage="first-verdict",
+                        agent_role="analyst-market-news",
+                        task_name="event-diagnostics",
+                    )
+                )
+                try:
+                    assert_event_diagnostics_wrapper(diagnostic_wrapper)
+                except AssertionError as exc:
+                    failures.append(str(exc))
+            finally:
+                os.environ.pop("FAKE_CODEX_DIAGNOSTIC_EVENTS", None)
+                if old_event_retention is None:
+                    os.environ.pop("CODEX_SUBAGENT_EVENT_RETENTION", None)
+                else:
+                    os.environ["CODEX_SUBAGENT_EVENT_RETENTION"] = old_event_retention
+
+            saved_event_retention = os.environ.pop("CODEX_SUBAGENT_EVENT_RETENTION", None)
+            try:
+                default_retention_wrapper = run_one(
+                    compact_spec(
+                        tmp,
+                        stage="first-verdict",
+                        agent_role="analyst-market-news",
+                        task_name="event-default-retention",
+                    )
+                )
+            finally:
+                if saved_event_retention is not None:
+                    os.environ["CODEX_SUBAGENT_EVENT_RETENTION"] = saved_event_retention
+            if default_retention_wrapper.get("event_retention") != "anomaly":
+                failures.append(f"default event retention mode was not anomaly: {default_retention_wrapper}")
+            if default_retention_wrapper.get("event_retention_reason") != "no_anomaly":
+                failures.append(f"default anomaly event retention reason was not no_anomaly: {default_retention_wrapper}")
+            if default_retention_wrapper.get("event_log_retained") is not False:
+                failures.append(f"default anomaly event retention did not prune normal event log: {default_retention_wrapper}")
+            if default_retention_wrapper.get("stderr_retained") is not False:
+                failures.append(f"default anomaly event retention did not mark stderr pruned: {default_retention_wrapper}")
+            if Path(default_retention_wrapper["event_log_path"]).exists():
+                failures.append("default anomaly event retention left normal event log on disk")
+            if Path(default_retention_wrapper["stderr_path"]).exists():
+                failures.append("default anomaly event retention left normal stderr log on disk")
 
             custom_model_config = tmp / "daily-trading-subagents.yaml"
             custom_model_config.write_text(
