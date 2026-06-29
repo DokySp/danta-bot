@@ -6,20 +6,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .config import Config
-from .daily_trading import error_message_with_run_context
-from .daily_trading_direct import (
+from ..codex.runner import CodexRunner
+from ..config import Config
+from ..errors import UserFacingError
+from ..state import StateStore
+from ..trading.daily_trading import error_message_with_run_context
+from ..trading.daily_trading_direct import (
     DailyTradingDirectRunner,
     is_execute_trade_direct_request,
     load_execute_trade_config,
 )
-from .errors import UserFacingError
-from .holding_history import parse_show_holding_history_command, render_holding_history
-from .runner import CodexRunner
-from .state import StateStore
-from .telegram_commands.core import parse_telegram_command
-from .telegram_commands.dispatcher import handle_telegram_command
-from .telegram_gateway import TelegramGateway, TypingIndicator
+from ..trading.holding_history import parse_show_holding_history_command, render_holding_history
+from .commands.core import parse_telegram_command
+from .commands.dispatcher import handle_telegram_command
+from .gateway import TelegramGateway, TypingIndicator
 
 
 @dataclass(frozen=True)

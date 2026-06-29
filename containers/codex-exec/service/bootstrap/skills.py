@@ -1,7 +1,7 @@
 from typing import Any
 
-from .config import Config
-from .pipelines.skill_sync import sync as skill_sync
+from ..config import Config
+from .skill_sync import sync as skill_sync
 
 
 def load_skill_sync_module() -> Any:

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from .errors import UserFacingError
+from ..errors import UserFacingError
 
 KST = ZoneInfo("Asia/Seoul")
 

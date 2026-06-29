@@ -3,9 +3,9 @@ import logging
 import threading
 from typing import Any
 
-from .config import Config
-from .pipelines.price_monitoring import monitor as price_monitoring
-from .telegram_gateway import TelegramGateway, TypingIndicator
+from ..config import Config
+from ..pipelines.price_monitoring import monitor as price_monitoring
+from ..telegram.gateway import TelegramGateway, TypingIndicator
 
 
 def load_price_monitoring_module() -> Any:

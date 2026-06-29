@@ -1,6 +1,6 @@
 from typing import Any
 
-from ..portfolio_commands import PortfolioCommandError, add_portfolio_ticker, remove_portfolio_ticker
+from ...trading.portfolio_commands import PortfolioCommandError, add_portfolio_ticker, remove_portfolio_ticker
 
 
 def handle_add_portfolio_ticker(worker: Any, task: Any, args: str) -> None:

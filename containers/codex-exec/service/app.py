@@ -7,12 +7,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from .config import Config
-from .price_trigger import PriceTriggerWatcher
-from .runner import CodexRunner
-from .scheduler import Scheduler
+from .codex.runner import CodexRunner
+from .scheduler.scheduler import Scheduler
 from .state import StateStore
-from .telegram_gateway import TelegramGateway
-from .telegram_worker import TelegramTask, TelegramWorker
+from .telegram.gateway import TelegramGateway
+from .telegram.worker import TelegramTask, TelegramWorker
+from .touch_points.watcher import PriceTriggerWatcher
 
 
 class App:

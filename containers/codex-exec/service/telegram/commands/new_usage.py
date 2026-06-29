@@ -1,7 +1,7 @@
 import logging
 from typing import Any
 
-from ..telegram_gateway import TypingIndicator
+from ..gateway import TypingIndicator
 
 
 def handle_new(worker: Any, task: Any, args: str) -> None:

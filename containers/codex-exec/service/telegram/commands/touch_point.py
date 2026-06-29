@@ -1,13 +1,13 @@
 from pathlib import Path
 from typing import Any
 
-from ..telegram_gateway import TypingIndicator
-from ..touch_point import (
+from ...touch_points.touch_point import (
     TouchPointCommandError,
     parse_show_touch_point_args,
     render_touch_point,
     touch_point_caption,
 )
+from ..gateway import TypingIndicator
 
 
 def handle_show_touch_point(worker: Any, task: Any, args: str) -> None:

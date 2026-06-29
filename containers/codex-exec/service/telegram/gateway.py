@@ -8,7 +8,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from .config import Config
+from ..config import Config
 
 
 class TelegramGateway:

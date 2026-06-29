@@ -1,6 +1,6 @@
 from typing import Any
 
-from ..schedule_commands import ScheduleCommandError, toggle_daily_schedules
+from ...scheduler.commands import ScheduleCommandError, toggle_daily_schedules
 
 
 def handle_schedule_on(worker: Any, task: Any, args: str) -> None:
