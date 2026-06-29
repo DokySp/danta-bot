@@ -1,17 +1,13 @@
 FROM python:3.12-slim
 
-ARG APP_VERSION
 ARG CODEX_EXEC_PROFILE=base
 ARG IMAGE_TITLE=codex-exec
-RUN test -n "$APP_VERSION" || (echo "APP_VERSION build arg is required" >&2; exit 1)
 ARG CODEX_VERSION=latest
 ARG TARGETARCH
 
 LABEL org.opencontainers.image.title="${IMAGE_TITLE}"
-LABEL org.opencontainers.image.version="${APP_VERSION}"
 LABEL org.opencontainers.image.description="Codex exec HTTP and scheduler worker"
 
-ENV APP_VERSION=${APP_VERSION}
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV CODEX_HOME=/codex-home
@@ -59,6 +55,10 @@ RUN groupadd --gid 1000 app \
   && mkdir -p /app/config /app/codex-config.d /codex-home /state /workspace /tmp/codex-exec /tmp/npm-cache \
   && chown -R app:app /app /codex-home /state /workspace /tmp/codex-exec /tmp/npm-cache
 
+ARG APP_VERSION
+RUN test -n "$APP_VERSION" || (echo "APP_VERSION build arg is required" >&2; exit 1)
+LABEL org.opencontainers.image.version="${APP_VERSION}"
+ENV APP_VERSION=${APP_VERSION}
 ENV npm_config_cache=/tmp/npm-cache
 
 COPY --chown=app:app codex-exec/codex_exec.py /app/codex_exec.py
