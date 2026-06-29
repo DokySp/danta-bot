@@ -170,7 +170,7 @@ If no valid score exists, exclude that symbol from `second-verdict` and trading.
 
 ## `second-verdict`
 
-Input set = eligible symbols with decimal `final_first_score >= 7` plus every eligible `holding` symbol from `$check-portfolio`. Only `judge-final` compares that set at portfolio level. If its required output is missing or unusable, retry only the failed `judge-final` task at most two times.
+Input set = eligible symbols with decimal `final_first_score >= 6` plus every eligible `holding` symbol from `$check-portfolio`. Only `judge-final` compares that set at portfolio level. If its required output is missing or unusable, retry only the failed `judge-final` task at most two times.
 
 Return JSON:
 
@@ -202,15 +202,15 @@ Rules:
 - `reason_code` and `one_line_reason` must describe the same reduce/hold/increase direction implied by `target_holding_quantity`.
 - Every second-verdict symbol receives a target quantity, including reduce-to-zero holdings.
 - Consider relative attractiveness, duplicate exposure, current weight, price/chart conditions, and the supplied selected-symbol first-verdict results.
-- Treat `final_first_score` as the unrounded confidence-adjusted first-verdict score: `5` is neutral, below `5` is a sell/reduce opinion, and above `5` is a buy/increase opinion.
+- Treat `final_first_score` as the unrounded confidence-adjusted first-verdict score: `>= 6` is a buy/increase candidate, `<= 4` is a reduce/exit candidate, and `5` is neutral.
 - When referring to per-analyst scores in `agent_scores`, use `confidence_adjusted_score` as the score. `score` and `confidence` are supporting inputs explaining that adjusted score.
 - If a symbol's first-verdict score is missing, unavailable, or unusable, treat its score as neutral `5` instead of failing the judgment.
 - First-verdict scores are judgment inputs, not hard buy/sell gates.
 - For holding symbols, distinguish `long_term_thesis_intact` from `add_allowed`: intact thesis suppresses unnecessary sell/reduce decisions, but it is not by itself permission to increase target quantity.
 - Judge long-term thesis from supplied evidence only: core investment rationale, material news/disclosure risk, quality/value deterioration, whether a price shock indicates structural damage or short-term volatility, and portfolio weight/concentration.
-- Increase target quantity only when add conditions are also satisfied: quality/value advantage, acceptable risk/allocation, weight/concentration room, recent trade direction, and no supplied material adverse news/disclosure.
+- Increase target quantity only when add conditions are also satisfied: quality/value advantage, acceptable risk/allocation, weight/concentration room, explicit reassessment of any same-day/recent trade context, and no supplied material adverse news/disclosure.
 - Do not take profit solely because a position is up or the current day is sharply positive when thesis remains intact. If overextension, overweight, and a clearly better alternative are all present, prefer partial reduction over full exit.
-- If `recent_trade_context` shows an opposite-direction submitted trade for the same symbol in the last one or two runs, default to holding the target. Allow the opposite trade only with explicit evidence of thesis break, risk-limit breach, or order/fill-state correction, and encode that reason in `reason_code`.
+- Do not use same-day fills or `recent_trade_context` as a default hold/block reason. Same-direction additional trades and opposite-direction target changes are allowed only after explicitly reassessing price movement, `final_first_score`, risk, order/fill state, and thesis evidence; encode that reassessment in `reason_code` and `one_line_reason`.
 - No fixed cash ratio or fixed investment ratio.
 - The judge cannot add symbols outside the supplied set.
 - Do not return long `cash_rationale`, `duplicate_exposure_limits`, `price_chart_view`, `rationale`, `risks`, or prose arrays.
@@ -222,7 +222,7 @@ Validation by Main agent:
 - Validate target holdings against total assets and the latest available account/order gate using immutable price snapshot valuations.
 - If targets exceed assets, reduce only buy-side quantities in reverse relative-attractiveness order. Do not increase sell targets.
 - If targets are below assets, leave the remainder as residual cash. Do not create, report, or optimize toward a target cash value.
-- Preserve total-asset/cash, duplicate exposure, high-price concentration, active order, same-day repeat, and market open gates.
+- Preserve total-asset/cash, duplicate exposure, high-price concentration, active order, order validity, and market open gates.
 - Apply latest account constraints after target validation.
 
 ## Allowed Values

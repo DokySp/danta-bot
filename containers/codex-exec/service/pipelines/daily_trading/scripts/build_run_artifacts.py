@@ -1718,7 +1718,7 @@ symbols:
                     workspace_dir=tmp,
                     pipeline_dir=pipeline_dir(),
                     relative_paths=False,
-                    min_score=7,
+                    min_score=6,
                 )
             )
             if second_spec["symbol_ids"] != ["005930"]:
@@ -1740,11 +1740,11 @@ symbols:
                     workspace_dir=tmp,
                     pipeline_dir=pipeline_dir(),
                     relative_paths=False,
-                    min_score=7,
+                    min_score=6,
                 )
             )
-            if threshold_69_spec["symbol_ids"] != ["005930"]:
-                failures.append(f"6.9 score should not select new symbol: {threshold_69_spec}")
+            if threshold_69_spec["symbol_ids"] != ["000660", "005930"]:
+                failures.append(f"6.9 score should select new symbol and holding: {threshold_69_spec}")
             for item in threshold_verdict_first.get("symbols", []):
                 if item.get("symbol_id") == "000660":
                     item["final_first_score"] = 7.0
@@ -1761,7 +1761,7 @@ symbols:
                     workspace_dir=tmp,
                     pipeline_dir=pipeline_dir(),
                     relative_paths=False,
-                    min_score=7,
+                    min_score=6,
                 )
             )
             if threshold_70_spec["symbol_ids"] != ["000660", "005930"]:
@@ -1922,7 +1922,7 @@ def build_parser() -> argparse.ArgumentParser:
     second_spec.add_argument("--verdict-first")
     second_spec.add_argument("--workspace-dir", default=".")
     second_spec.add_argument("--pipeline-dir", default=str(pipeline_dir()))
-    second_spec.add_argument("--min-score", type=int, default=7)
+    second_spec.add_argument("--min-score", type=int, default=6)
     second_spec.add_argument("--run-id")
     second_spec.add_argument("--started-at")
     second_spec.add_argument("--relative-paths", action="store_true")

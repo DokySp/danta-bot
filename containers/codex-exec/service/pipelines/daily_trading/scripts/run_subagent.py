@@ -821,7 +821,7 @@ def recent_submitted_trade_context(output_dir: Path, symbol_id: str, run_limit: 
     return {
         "recent_submitted_trades": trades,
         "inspected_run_ids": inspected_runs,
-        "policy": "If a recent submitted trade is opposite to the new target direction, default to hold unless thesis break, risk-limit breach, or order/fill-state correction is explicit.",
+        "policy": "Use recent submitted trades as reassessment input, not a default hold/block reason; same-direction additional trades and opposite-direction target changes are allowed after explicitly reassessing price movement, final_first_score, risk, order/fill state, and thesis evidence.",
     }
 
 
@@ -1015,12 +1015,12 @@ def compact_verdict_prompt(spec: dict[str, Any]) -> str | None:
             [
                 "",
                 "For second-verdict, use the lossless selected-symbol first-verdict slice from verdict_first.",
-                "Interpret final_first_score as the unrounded confidence-adjusted first-verdict score: 5 is neutral, below 5 is a sell/reduce opinion, and above 5 is a buy/increase opinion.",
+                "Interpret final_first_score as the unrounded confidence-adjusted first-verdict score: >= 6 is a buy/increase candidate, <= 4 is a reduce/exit candidate, and 5 is neutral.",
                 "When referring to per-analyst scores in agent_scores, use confidence_adjusted_score as the score; score and confidence are supporting inputs explaining that adjusted score.",
                 "If a symbol's first-verdict score is missing, unavailable, or unusable, treat it as neutral 5 and continue.",
                 "First-verdict scores are judgment inputs, not hard buy/sell gates.",
-                "Use recent_trade_context to avoid churn: a recent opposite-direction submitted trade defaults to hold unless thesis break, risk-limit breach, or order/fill-state correction is explicit.",
-                "Use today_trade_timeline_context to avoid same-day churn: an opposite-direction target after today's fills requires explicit thesis break, risk-limit breach, or order/fill-state correction evidence.",
+                "Use recent_trade_context as reassessment input, not a default hold/block reason: same-direction additional trades and opposite-direction target changes are allowed after explicitly reassessing price movement, final_first_score, risk, order/fill state, and thesis evidence.",
+                "Use today_trade_timeline_context as reassessment input, not a same-day churn block: same-direction additional trades and opposite-direction target changes are allowed after explicitly reassessing price movement, final_first_score, risk, order/fill state, and thesis evidence.",
                 "Treat long_term_thesis_intact as a sell/reduce suppression signal, not as add permission; increase only when add_allowed evidence is also present.",
             ]
         )
@@ -2060,12 +2060,12 @@ def assert_compact_verdict_prompt(tmp: Path) -> None:
         "stage: second-verdict",
         "verdict_first:",
         "For second-verdict, use the lossless selected-symbol first-verdict slice from verdict_first.",
-        "Interpret final_first_score as the unrounded confidence-adjusted first-verdict score: 5 is neutral, below 5 is a sell/reduce opinion, and above 5 is a buy/increase opinion.",
+        "Interpret final_first_score as the unrounded confidence-adjusted first-verdict score: >= 6 is a buy/increase candidate, <= 4 is a reduce/exit candidate, and 5 is neutral.",
         "When referring to per-analyst scores in agent_scores, use confidence_adjusted_score as the score;",
         "If a symbol's first-verdict score is missing, unavailable, or unusable, treat it as neutral 5 and continue.",
         "First-verdict scores are judgment inputs, not hard buy/sell gates.",
-        "Use recent_trade_context to avoid churn:",
-        "Use today_trade_timeline_context to avoid same-day churn:",
+        "Use recent_trade_context as reassessment input, not a default hold/block reason:",
+        "Use today_trade_timeline_context as reassessment input, not a same-day churn block:",
         "Treat long_term_thesis_intact as a sell/reduce suppression signal",
     ]
     missing = [part for part in second_required_parts if part not in second_prompt]
