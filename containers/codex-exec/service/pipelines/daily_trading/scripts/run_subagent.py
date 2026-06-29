@@ -1015,7 +1015,7 @@ def compact_verdict_prompt(spec: dict[str, Any]) -> str | None:
             [
                 "",
                 "For second-verdict, use the lossless selected-symbol first-verdict slice from verdict_first.",
-                "Interpret final_first_score as the confidence-adjusted first-verdict score: 5 is neutral, below 5 is a sell/reduce opinion, and above 5 is a buy/increase opinion.",
+                "Interpret final_first_score as the unrounded confidence-adjusted first-verdict score: 5 is neutral, below 5 is a sell/reduce opinion, and above 5 is a buy/increase opinion.",
                 "When referring to per-analyst scores in agent_scores, use confidence_adjusted_score as the score; score and confidence are supporting inputs explaining that adjusted score.",
                 "If a symbol's first-verdict score is missing, unavailable, or unusable, treat it as neutral 5 and continue.",
                 "First-verdict scores are judgment inputs, not hard buy/sell gates.",
@@ -2060,7 +2060,7 @@ def assert_compact_verdict_prompt(tmp: Path) -> None:
         "stage: second-verdict",
         "verdict_first:",
         "For second-verdict, use the lossless selected-symbol first-verdict slice from verdict_first.",
-        "Interpret final_first_score as the confidence-adjusted first-verdict score: 5 is neutral, below 5 is a sell/reduce opinion, and above 5 is a buy/increase opinion.",
+        "Interpret final_first_score as the unrounded confidence-adjusted first-verdict score: 5 is neutral, below 5 is a sell/reduce opinion, and above 5 is a buy/increase opinion.",
         "When referring to per-analyst scores in agent_scores, use confidence_adjusted_score as the score;",
         "If a symbol's first-verdict score is missing, unavailable, or unusable, treat it as neutral 5 and continue.",
         "First-verdict scores are judgment inputs, not hard buy/sell gates.",

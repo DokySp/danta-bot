@@ -161,15 +161,16 @@ confidence_weight = confidence / 10
 confidence_adjusted_score = 5 + ((score - 5) * confidence_weight)
 mean_score = sum(valid scores) / count(valid scores)
 mean_confidence_adjusted_score = sum(valid confidence_adjusted_scores) / count(valid confidence_adjusted_scores)
-final_first_score = round_half_up(mean_confidence_adjusted_score)
+final_first_score = mean_confidence_adjusted_score
 ```
 
 `confidence_adjusted_score` pulls low-confidence scores toward neutral `5`; `confidence=0` becomes `5`, and `confidence=10` preserves the original `score`.
+In the normal successful path, the aggregation uses four canonical views: `analyst-quality-value`, `analyst-risk-allocation`, `analyst-momentum-cycle`, and `analyst-news-flow`. If a view score is missing or unusable, keep the valid-score aggregation rule above and surface the missing score as an artifact error.
 If no valid score exists, exclude that symbol from `second-verdict` and trading.
 
 ## `second-verdict`
 
-Input set = eligible symbols with `final_first_score >= 7` plus every eligible `holding` symbol from `$check-portfolio`. Only `judge-final` compares that set at portfolio level. If its required output is missing or unusable, retry only the failed `judge-final` task at most two times.
+Input set = eligible symbols with decimal `final_first_score >= 7` plus every eligible `holding` symbol from `$check-portfolio`. Only `judge-final` compares that set at portfolio level. If its required output is missing or unusable, retry only the failed `judge-final` task at most two times.
 
 Return JSON:
 
@@ -201,7 +202,7 @@ Rules:
 - `reason_code` and `one_line_reason` must describe the same reduce/hold/increase direction implied by `target_holding_quantity`.
 - Every second-verdict symbol receives a target quantity, including reduce-to-zero holdings.
 - Consider relative attractiveness, duplicate exposure, current weight, price/chart conditions, and the supplied selected-symbol first-verdict results.
-- Treat `final_first_score` as the confidence-adjusted first-verdict score: `5` is neutral, below `5` is a sell/reduce opinion, and above `5` is a buy/increase opinion.
+- Treat `final_first_score` as the unrounded confidence-adjusted first-verdict score: `5` is neutral, below `5` is a sell/reduce opinion, and above `5` is a buy/increase opinion.
 - When referring to per-analyst scores in `agent_scores`, use `confidence_adjusted_score` as the score. `score` and `confidence` are supporting inputs explaining that adjusted score.
 - If a symbol's first-verdict score is missing, unavailable, or unusable, treat its score as neutral `5` instead of failing the judgment.
 - First-verdict scores are judgment inputs, not hard buy/sell gates.

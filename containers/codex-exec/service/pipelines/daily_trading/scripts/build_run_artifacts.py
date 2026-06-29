@@ -148,10 +148,6 @@ def clamp_score(value: Any, default: int = 5) -> int:
     return max(0, min(10, as_int(value, default)))
 
 
-def round_half_up(value: float) -> int:
-    return int(math.floor(value + 0.5))
-
-
 def normalize_symbol_ids(raw: Any) -> list[str]:
     values = raw
     if isinstance(raw, dict):
@@ -822,6 +818,16 @@ def confidence_adjusted_score(score: int, confidence: int) -> float:
     return 5 + ((score - 5) * (confidence / 10))
 
 
+def finite_number(value: Any) -> float | None:
+    number = as_number(value)
+    if isinstance(number, bool) or number is None:
+        return None
+    number = float(number)
+    if not math.isfinite(number):
+        return None
+    return number
+
+
 def first_sidecar_path(output_dir: Path, role: str, task_name: str) -> Path:
     return output_dir / "verdicts" / f"first-verdict--{safe_name(role)}--{safe_name(task_name)}.md"
 
@@ -1042,7 +1048,7 @@ def build_verdict_first(args: argparse.Namespace) -> dict[str, Any]:
                 "agent_scores": scores,
                 "mean_score": mean_score,
                 "mean_confidence_adjusted_score": mean_adjusted,
-                "final_first_score": round_half_up(mean_adjusted),
+                "final_first_score": mean_adjusted,
             }
         )
     artifact["status"] = "partial" if artifact["errors"] else "success"
@@ -1060,7 +1066,8 @@ def build_second_spec(args: argparse.Namespace) -> dict[str, Any]:
     selected: list[str] = []
     for item in verdict_first.get("symbols", []):
         symbol_id = symbol_key(item)
-        if symbol_id in eligible and as_int(item.get("final_first_score")) >= args.min_score:
+        final_first_score = finite_number(item.get("final_first_score"))
+        if symbol_id in eligible and final_first_score is not None and final_first_score >= args.min_score:
             selected.append(symbol_id)
     for symbol_id in normalize_symbol_ids(portfolio.get("holding", [])):
         if symbol_id in eligible and symbol_id not in selected:
@@ -1666,7 +1673,7 @@ symbols:
                     symbol_ids="",
                 )
             )
-            if verdict_first["symbols"][0]["final_first_score"] != 6:
+            if verdict_first["symbols"][0]["final_first_score"] != 5.75:
                 failures.append(f"unexpected first verdict score: {verdict_first}")
             news_scores = [
                 item
@@ -1716,6 +1723,49 @@ symbols:
             )
             if second_spec["symbol_ids"] != ["005930"]:
                 failures.append(f"unexpected second spec symbols: {second_spec}")
+            threshold_verdict_first = load_json(run_dir / "verdict-first.json")
+            for item in threshold_verdict_first.get("symbols", []):
+                if item.get("symbol_id") == "000660":
+                    item["final_first_score"] = 6.9
+            write_json(run_dir / "verdict-first-threshold-6.9.json", threshold_verdict_first)
+            threshold_69_spec = build_second_spec(
+                argparse.Namespace(
+                    output_dir=run_dir,
+                    output=run_dir / "second-verdict-spec-threshold-6.9.json",
+                    decision_brief=str(run_dir / "decision-brief.json"),
+                    verdict_first=str(run_dir / "verdict-first-threshold-6.9.json"),
+                    portfolio_json=str(tmp / "portfolio.json"),
+                    run_id=None,
+                    started_at=None,
+                    workspace_dir=tmp,
+                    pipeline_dir=pipeline_dir(),
+                    relative_paths=False,
+                    min_score=7,
+                )
+            )
+            if threshold_69_spec["symbol_ids"] != ["005930"]:
+                failures.append(f"6.9 score should not select new symbol: {threshold_69_spec}")
+            for item in threshold_verdict_first.get("symbols", []):
+                if item.get("symbol_id") == "000660":
+                    item["final_first_score"] = 7.0
+            write_json(run_dir / "verdict-first-threshold-7.0.json", threshold_verdict_first)
+            threshold_70_spec = build_second_spec(
+                argparse.Namespace(
+                    output_dir=run_dir,
+                    output=run_dir / "second-verdict-spec-threshold-7.0.json",
+                    decision_brief=str(run_dir / "decision-brief.json"),
+                    verdict_first=str(run_dir / "verdict-first-threshold-7.0.json"),
+                    portfolio_json=str(tmp / "portfolio.json"),
+                    run_id=None,
+                    started_at=None,
+                    workspace_dir=tmp,
+                    pipeline_dir=pipeline_dir(),
+                    relative_paths=False,
+                    min_score=7,
+                )
+            )
+            if threshold_70_spec["symbol_ids"] != ["000660", "005930"]:
+                failures.append(f"7.0 score should select new symbol and holding: {threshold_70_spec}")
             write_json(
                 run_dir / "verdict-second.json",
                 {

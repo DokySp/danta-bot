@@ -16,9 +16,9 @@
 - `target_holding_quantity`는 주문수량이 아니라 active pending/reserved 주문까지 반영한 예상 보유수량 대비 최종 목표 보유수량이다.
 - 축소 판단이면 `target_holding_quantity`는 `expected_holding_quantity`보다 작아야 하고, 확대 판단이면 커야 하며, 유지 판단이면 같아야 한다.
 - `reason_code`와 `one_line_reason`은 `target_holding_quantity`가 만드는 방향(축소/유지/확대)과 일치해야 한다.
-- `final_first_score`는 확신도 보정 1차 평결 점수다. 7점 이상은 신규 매수/비중 확대의 강한 후보, 3점 이하는 축소/청산의 강한 후보로 우선 참고한다.
+- `final_first_score`는 반올림하지 않은 확신도 보정 1차 평결 평균 점수다. `>= 7`은 신규 매수/비중 확대의 강한 후보, `<= 3`은 축소/청산의 강한 후보로 우선 참고한다.
 - selected-symbol first-verdict에서 `agent_scores`의 점수 판단을 말할 때는 각 analyst의 `confidence_adjusted_score`를 뜻한다. `score`와 `confidence`는 보정점수의 근거로만 함께 본다.
-- 4~6점 구간은 5점을 중립축으로 해석하되, 포트폴리오 비중, 중복 노출, active order, 급격한 가격/수급 변화 등을 함께 고려해 목표수량을 정한다.
+- 3 초과 7 미만 구간은 5점을 중립축으로 해석하되, 포트폴리오 비중, 중복 노출, active order, 급격한 가격/수급 변화 등을 함께 고려해 목표수량을 정한다.
 - 특정 종목의 1차 평결 점수가 없거나 사용할 수 없으면 실패하지 말고 중립 5점으로 간주한다.
 - 1차 평결 점수는 판단 재료이며, 기계적인 매수/매도 하드 룰로 적용하지 않는다.
 - 장기 투자 thesis가 유지되는 보유 종목은 단기 가격 하락, 일시적 수급 악화, 소폭 평가손실만으로 축소하지 않는다.
