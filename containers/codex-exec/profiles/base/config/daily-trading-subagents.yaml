@@ -2,7 +2,7 @@ collection:
   model: gpt-5.4-mini
   model_reasoning_effort: low
 first_verdict:
-  model: gpt-5.4
+  model: gpt-5.5
   model_reasoning_effort: medium
 second_verdict:
   model: gpt-5.5
