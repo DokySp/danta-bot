@@ -157,14 +157,15 @@ Rules:
 Aggregation by Main agent:
 
 ```text
-confidence_weight = confidence / 10
+effective_confidence = clamp(((confidence - 4) / 4) * 10, 0, 10)
+confidence_weight = effective_confidence / 10
 confidence_adjusted_score = 5 + ((score - 5) * confidence_weight)
 mean_score = sum(valid scores) / count(valid scores)
 mean_confidence_adjusted_score = sum(valid confidence_adjusted_scores) / count(valid confidence_adjusted_scores)
 final_first_score = mean_confidence_adjusted_score
 ```
 
-`confidence_adjusted_score` pulls low-confidence scores toward neutral `5`; `confidence=0` becomes `5`, and `confidence=10` preserves the original `score`.
+`confidence_adjusted_score` pulls low-confidence scores toward neutral `5`; raw `confidence<=4` becomes neutral weight `0`, raw `confidence=5` becomes effective confidence `2.5`, raw `confidence=6` becomes `5`, raw `confidence=7` becomes `7.5`, and raw `confidence>=8` preserves the original `score`.
 In the normal successful path, the aggregation uses four canonical views: `analyst-quality-value`, `analyst-risk-allocation`, `analyst-momentum-cycle`, and `analyst-news-flow`. If a view score is missing or unusable, keep the valid-score aggregation rule above and surface the missing score as an artifact error.
 If no valid score exists, exclude that symbol from `second-verdict` and trading.
 

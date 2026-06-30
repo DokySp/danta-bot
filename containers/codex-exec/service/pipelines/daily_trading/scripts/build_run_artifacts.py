@@ -167,6 +167,10 @@ def clamp_score(value: Any, default: int = 5) -> int:
     return max(0, min(10, as_int(value, default)))
 
 
+def effective_confidence_score(confidence: int) -> float:
+    return max(0.0, min(10.0, ((confidence - 4) / 4) * 10))
+
+
 def normalize_symbol_ids(raw: Any) -> list[str]:
     values = raw
     if isinstance(raw, dict):
@@ -834,7 +838,8 @@ def normalize_verdict_payload(payload: Any, stage: str) -> dict[str, Any] | None
 
 
 def confidence_adjusted_score(score: int, confidence: int) -> float:
-    return 5 + ((score - 5) * (confidence / 10))
+    effective_confidence = effective_confidence_score(confidence)
+    return 5 + ((score - 5) * (effective_confidence / 10))
 
 
 def finite_number(value: Any) -> float | None:
@@ -1031,6 +1036,7 @@ def build_verdict_first(args: argparse.Namespace) -> dict[str, Any]:
                         "source_agent_role": role,
                         "score": score,
                         "confidence": confidence,
+                        "effective_confidence": effective_confidence_score(confidence),
                         "confidence_adjusted_score": confidence_adjusted_score(score, confidence),
                         "reason_code": safe_name(str(score_item.get("reason_code") or "hold_neutral")).lower(),
                         "one_line_reason": score_item.get("one_line_reason") or "",
@@ -1706,7 +1712,7 @@ symbols:
                     symbol_ids="",
                 )
             )
-            if verdict_first["symbols"][0]["final_first_score"] != 5.75:
+            if verdict_first["symbols"][0]["final_first_score"] != 5.375:
                 failures.append(f"unexpected first verdict score: {verdict_first}")
             news_scores = [
                 item
@@ -1715,6 +1721,8 @@ symbols:
             ]
             if not news_scores or news_scores[0].get("score") != 5 or news_scores[0].get("confidence") != 5:
                 failures.append(f"news-flow without news should be neutral 5/5: {verdict_first}")
+            if not news_scores or news_scores[0].get("effective_confidence") != 2.5:
+                failures.append(f"confidence 5 should rescale to effective confidence 2.5: {verdict_first}")
             market_news_sidecar = (
                 run_dir
                 / "verdicts"

@@ -194,6 +194,15 @@ def as_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def as_float(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def non_negative_int_value(value: Any) -> int | None:
     if isinstance(value, bool):
         return None
@@ -1393,18 +1402,38 @@ class Pipeline:
                 f"- 핵심 누락 또는 오류: {decision.get('error_count', 0)}건",
                 "",
                 "## 4. `first-verdict` 독립 평결",
-                "| 종목식별자 | 종목명 | 원점수 평균(0-10) | 확신도 보정 최종점수(0-10) | 유효 응답 수 | 핵심 근거 | 핵심 리스크 |",
-                "|---|---|---:|---:|---:|---|---|",
+                "| 종목식별자 | 종목명 | 원점수 평균(0-10) | 평균 보정 신뢰도(0-10) | 확신도 보정 최종점수(0-10) | 유효 응답 수 | role별 점수/신뢰도/보정신뢰도/보정점수 | 핵심 근거 | 핵심 리스크 |",
+                "|---|---|---:|---:|---:|---:|---|---|---|",
             ]
         )
         for item in verdict_first.get("symbols", []) if isinstance(verdict_first, dict) else []:
             if not isinstance(item, dict):
                 continue
             agent_scores = item.get("agent_scores") if isinstance(item.get("agent_scores"), list) else []
+            effective_values = [
+                as_float(score.get("effective_confidence"))
+                for score in agent_scores
+                if isinstance(score, dict) and as_float(score.get("effective_confidence")) is not None
+            ]
+            mean_effective = (
+                round(sum(value for value in effective_values if value is not None) / len(effective_values), 4)
+                if effective_values
+                else ""
+            )
+            role_details = []
+            for score in agent_scores:
+                if not isinstance(score, dict):
+                    continue
+                role_details.append(
+                    f"{score.get('agent_role', '')}: "
+                    f"{score.get('score', '')}/{score.get('confidence', '')}/"
+                    f"{score.get('effective_confidence', '')}/{score.get('confidence_adjusted_score', '')}"
+                )
             reasons = [str(score.get("one_line_reason", "")) for score in agent_scores if isinstance(score, dict) and score.get("one_line_reason")]
             lines.append(
                 f"| {md_cell(item.get('symbol_id'))} | {md_cell(item.get('symbol_name'))} | {item.get('mean_score', '')} | "
-                f"{item.get('mean_confidence_adjusted_score', '')} | {len(agent_scores)} | {md_cell('; '.join(reasons[:2]))} | - |"
+                f"{mean_effective} | {item.get('mean_confidence_adjusted_score', '')} | {len(agent_scores)} | "
+                f"{md_cell('; '.join(role_details))} | {md_cell('; '.join(reasons[:2]))} | - |"
             )
 
         lines.extend(
@@ -2595,6 +2624,12 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
                 report_text = report_path.read_text(encoding="utf-8")
                 if "## 4. `first-verdict` 독립 평결" not in report_text or "## 5. `second-verdict` 포트폴리오 평결" not in report_text:
                     failures.append(f"portfolio report omitted verdict sections: {report_path}")
+                if "평균 보정 신뢰도(0-10)" not in report_text or "role별 점수/신뢰도/보정신뢰도/보정점수" not in report_text:
+                    failures.append("portfolio report omitted first-verdict effective confidence columns")
+                if "| 8.125 | 7.25 | 4 |" not in report_text:
+                    failures.append("portfolio report omitted first-verdict effective confidence values")
+                if "analyst-quality-value: 8/8/10.0/8.0" not in report_text or "analyst-news-flow: 5/5/2.5/5.0" not in report_text:
+                    failures.append("portfolio report omitted role-level effective confidence details")
                 if "주문 전 기존 미체결/예약 주문 조회: no" not in report_text or "주문 전 기존 미체결/예약 주문: 미조회" not in report_text:
                     failures.append("portfolio report did not preserve active-order gate lookup state")
                 if "주문 전 기존 미체결/예약 주문 미조회" not in report_text:
