@@ -68,11 +68,11 @@ def order_line(item: dict[str, Any]) -> str:
 def verdict_line(item: dict[str, Any]) -> str:
     symbol = text(f"{item.get('symbol_id', '')} {item.get('symbol_name', '')}".strip())
     current_qty = as_int(item.get("current_live_holding_quantity"))
-    target_qty = as_int(item.get("target_holding_quantity"))
+    final_qty = as_int(item.get("final_holding_quantity"))
     reason = text(item.get("one_line_reason") or item.get("reason_code") or "-")
     order_result = text(item.get("order_result") or "")
     order_suffix = f", 주문={order_result}" if order_result else ""
-    return f"- {symbol}: {current_qty}주 -> {target_qty}주 ({reason}{order_suffix})"
+    return f"- {symbol}: {current_qty}주 -> {final_qty}주 ({reason}{order_suffix})"
 
 
 def render(summary: dict[str, Any]) -> str:
@@ -91,7 +91,7 @@ def render(summary: dict[str, Any]) -> str:
     changed = [
         item
         for item in verdict_symbols
-        if as_int(item.get("current_live_holding_quantity")) != as_int(item.get("target_holding_quantity"))
+        if as_int(item.get("current_live_holding_quantity")) != as_int(item.get("final_holding_quantity"))
         or item.get("order_result") in {"submitted", "blocked", "failed"}
     ]
     lines = [
@@ -148,7 +148,7 @@ def render(summary: dict[str, Any]) -> str:
     for item in changed[:5]:
         lines.append(verdict_line(item))
     if not changed:
-        lines.append("- 목표수량 변경 또는 제출 주문 없음")
+        lines.append("- 최종수량 변경 또는 제출 주문 없음")
     if len(changed) > 5:
         lines.append(f"- 외 {len(changed) - 5}건")
     errors = execution.get("errors") if isinstance(execution.get("errors"), list) else []
@@ -202,7 +202,7 @@ def self_test() -> int:
             ],
         },
         "verdict_summary": {
-            "symbols": [{"symbol_id": "005930", "symbol_name": "삼성전자", "current_live_holding_quantity": 0, "target_holding_quantity": 1, "one_line_reason": "테스트"}]
+            "symbols": [{"symbol_id": "005930", "symbol_name": "삼성전자", "current_live_holding_quantity": 0, "final_holding_quantity": 1, "one_line_reason": "테스트"}]
         },
         "token_usage": {"total": {"total_tokens": 123}},
     }

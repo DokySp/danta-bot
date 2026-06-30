@@ -76,6 +76,25 @@ def as_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def non_negative_int_value(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, float):
+        return int(value) if value.is_integer() and value >= 0 else None
+    if isinstance(value, str):
+        text = value.strip().replace(",", "")
+        if not text:
+            return None
+        try:
+            parsed = int(text)
+        except ValueError:
+            return None
+        return parsed if parsed >= 0 else None
+    return None
+
+
 def as_price(value: Any) -> int:
     return as_int(value)
 
@@ -475,10 +494,10 @@ def normalize_execution_order_prices(execution: dict[str, Any]) -> None:
         if not isinstance(item, dict):
             continue
         side = str(item.get("direction") or "")
-        target = as_int(item.get("target_holding_quantity"))
+        final_quantity = as_int(item.get("final_holding_quantity"))
         expected = as_int(item.get("expected_holding_quantity"), as_int(item.get("current_live_holding_quantity")))
         if side not in {"buy", "sell"}:
-            delta = target - expected
+            delta = final_quantity - expected
             side = "buy" if delta > 0 else "sell" if delta < 0 else ""
         normalized = normalize_limit_price(item.get("order_price"), side)
         original = as_price(item.get("order_price"))
@@ -962,8 +981,27 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
         active_item = active_qty.get(symbol, {"buy": 0, "sell": 0})
         current = as_int(account_item.get("current_live_holding_quantity"), as_int(order.get("current_live_holding_quantity")))
         expected = current + active_item["buy"] - active_item["sell"]
-        target = max(0, as_int(order.get("target_holding_quantity")))
-        delta = target - expected
+        final_quantity = non_negative_int_value(order.get("final_holding_quantity"))
+        if final_quantity is None:
+            order.update(
+                {
+                    "symbol_id": symbol,
+                    "direction": "none",
+                    "current_live_holding_quantity": current,
+                    "pending_and_reserved_buy_quantity": active_item["buy"],
+                    "pending_and_reserved_sell_quantity": active_item["sell"],
+                    "expected_holding_quantity": expected,
+                    "additional_required_quantity": 0,
+                    "validated_order_quantity": 0,
+                    "result": "blocked",
+                    "reason": "invalid_final_holding_quantity",
+                    "attempts": order.get("attempts") if isinstance(order.get("attempts"), list) else [],
+                }
+            )
+            order["attempts"].append(attempt("schema", "blocked", "final_holding_quantity must be a non-negative integer", "invalid_final_holding_quantity"))
+            blocked += 1
+            continue
+        delta = final_quantity - expected
         side = "buy" if delta > 0 else "sell" if delta < 0 else "none"
         order.update(
             {
@@ -994,7 +1032,7 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
                 "to": price,
                 "reason": "krx_tick_size",
             }
-        desired_delta = target - current
+        desired_delta = final_quantity - current
         desired_side = "buy" if desired_delta > 0 else "sell" if desired_delta < 0 else ""
         desired_qty = abs(desired_delta)
         if matching_active:
@@ -1025,7 +1063,7 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
                 order["additional_required_quantity"] = 0
                 order["validated_order_quantity"] = 0
                 order["order_or_reservation_id"] = kept.get("order_id", "")
-                order_adjustments.append(adjustment_row(kept, action="keep", reason="matches_target_delta", result="skipped"))
+                order_adjustments.append(adjustment_row(kept, action="keep", reason="matches_final_delta", result="skipped"))
                 continue
 
             conflict = matching_active[0]
@@ -1166,7 +1204,7 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
                         order["requested_additional_required_quantity"] = desired_order.get("requested_additional_required_quantity")
                         order["quantity_adjustment"] = desired_order.get("quantity_adjustment")
                     order["order_or_reservation_id"] = reduced_kept.get("order_id", "")
-                    order_adjustments.append(adjustment_row(reduced_kept, action="keep", reason="matches_reduced_target_delta", result="skipped"))
+                    order_adjustments.append(adjustment_row(reduced_kept, action="keep", reason="matches_reduced_final_delta", result="skipped"))
                     continue
             try:
                 request_id, action, message = adjust_active_order(
@@ -1259,7 +1297,7 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
 
         if side == "none":
             order["result"] = "skipped"
-            order["reason"] = "target_equals_expected_holding_quantity"
+            order["reason"] = "final_equals_expected_holding_quantity"
             continue
 
         if qty <= 0 or price <= 0:
@@ -1403,8 +1441,8 @@ def self_test() -> int:
             "required_main_agent_actions": ["refresh_active_order_lookup", "refresh_order_available_lookup", "continue_order_execution"],
             "errors": [{"code": "order_submission_blocked"}],
             "orders": [
-                {"symbol_id": "005930", "symbol_name": "삼성전자", "target_holding_quantity": 6, "order_price": 70000, "direction": "sell", "result": "blocked"},
-                {"symbol_id": "000270", "symbol_name": "기아", "target_holding_quantity": 20, "order_price": 100000, "direction": "buy", "result": "blocked"},
+                {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 6, "order_price": 70000, "direction": "sell", "result": "blocked"},
+                {"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 20, "order_price": 100000, "direction": "buy", "result": "blocked"},
             ],
         }
         write_json(root / "account-before-order.json", account)
@@ -1421,6 +1459,14 @@ def self_test() -> int:
         account_after = load_json(root / "account-before-order.json")
         if account_after.get("active_order_lookup_performed") is not True or account_after.get("order_available_lookup_performed") is not True:
             failures.append("account gates not refreshed")
+        write_json(root / "execution.json", {**execution, "orders": [{"symbol_id": "005930", "symbol_name": "삼성전자", "order_price": 70000, "direction": "sell", "result": "blocked"}]})
+        invalid_final_payload = execute(argparse.Namespace(output_dir=str(root), execution_json="", account_before_order="", env="real", submit=False, offline=True, retries=0, reservation_start_date="", reservation_end_date=""))
+        invalid_final_order = invalid_final_payload["orders"][0]
+        if invalid_final_order.get("reason") != "invalid_final_holding_quantity":
+            failures.append(f"missing final_holding_quantity was not blocked as invalid: {invalid_final_order}")
+        if invalid_final_order.get("validated_order_quantity") != 0 or invalid_final_order.get("additional_required_quantity") != 0:
+            failures.append(f"missing final_holding_quantity was converted into an order quantity: {invalid_final_order}")
+        write_json(root / "execution.json", execution)
 
         reservation = normalize_reservation(
             {
@@ -1546,7 +1592,7 @@ def self_test() -> int:
                 "requires_main_agent_order_execution": True,
                 "required_main_agent_actions": ["continue_order_execution"],
                 "errors": [],
-                "orders": [{"symbol_id": "000660", "symbol_name": "SK하이닉스", "target_holding_quantity": 2, "order_price": 150000, "direction": "buy", "result": "blocked"}],
+                "orders": [{"symbol_id": "000660", "symbol_name": "SK하이닉스", "final_holding_quantity": 2, "order_price": 150000, "direction": "buy", "result": "blocked"}],
             },
         )
         mismatch_payload = execute(argparse.Namespace(output_dir=str(root), execution_json="", account_before_order="", env="real", submit=False, offline=True, retries=0, reservation_start_date="", reservation_end_date=""))
@@ -1564,7 +1610,7 @@ def self_test() -> int:
                 "requires_main_agent_order_execution": True,
                 "required_main_agent_actions": ["continue_order_execution"],
                 "errors": [],
-                "orders": [{"symbol_id": "005930", "symbol_name": "삼성전자", "target_holding_quantity": 6, "order_price": 70000, "direction": "sell", "result": "blocked"}],
+                "orders": [{"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 6, "order_price": 70000, "direction": "sell", "result": "blocked"}],
             },
         )
         missing_field_payload = execute(argparse.Namespace(output_dir=str(root), execution_json="", account_before_order="", env="real", submit=False, offline=True, retries=0, reservation_start_date="", reservation_end_date=""))
@@ -1582,7 +1628,7 @@ def self_test() -> int:
                 "requires_main_agent_order_execution": True,
                 "required_main_agent_actions": ["continue_order_execution"],
                 "errors": [],
-                "orders": [{"symbol_id": "000270", "symbol_name": "기아", "target_holding_quantity": 20, "order_price": 100000, "order_path": "immediate", "direction": "buy", "result": "blocked"}],
+                "orders": [{"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 20, "order_price": 100000, "order_path": "immediate", "direction": "buy", "result": "blocked"}],
             },
         )
         immediate_payload = execute(argparse.Namespace(output_dir=str(root), execution_json="", account_before_order="", env="real", submit=False, offline=True, retries=0, reservation_start_date="", reservation_end_date=""))
@@ -1605,7 +1651,7 @@ def self_test() -> int:
                 "requires_main_agent_order_execution": True,
                 "required_main_agent_actions": ["continue_order_execution"],
                 "errors": [],
-                "orders": [{"symbol_id": "000270", "symbol_name": "기아", "target_holding_quantity": 20, "order_price": 100000, "order_path": "immediate", "direction": "buy", "result": "blocked"}],
+                "orders": [{"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 20, "order_price": 100000, "order_path": "immediate", "direction": "buy", "result": "blocked"}],
             },
         )
         multiple_payload = execute(argparse.Namespace(output_dir=str(root), execution_json="", account_before_order="", env="real", submit=False, offline=True, retries=0, reservation_start_date="", reservation_end_date=""))
@@ -1623,9 +1669,9 @@ def self_test() -> int:
         }
         reduction_execution = {
             "orders": [
-                {"symbol_id": "000270", "symbol_name": "기아", "target_holding_quantity": 12, "order_price": 100000, "order_path": "immediate"},
-                {"symbol_id": "005930", "symbol_name": "삼성전자", "target_holding_quantity": 4, "order_price": 70000, "order_path": "immediate"},
-                {"symbol_id": "000810", "symbol_name": "삼성화재", "target_holding_quantity": 3, "order_price": 400000, "order_path": "immediate"},
+                {"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 12, "order_price": 100000, "order_path": "immediate"},
+                {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 4, "order_price": 70000, "order_path": "immediate"},
+                {"symbol_id": "000810", "symbol_name": "삼성화재", "final_holding_quantity": 3, "order_price": 400000, "order_path": "immediate"},
             ]
         }
         reconcile(
@@ -1653,7 +1699,7 @@ def self_test() -> int:
 
         order_available_cash_execution = {
             "orders": [
-                {"symbol_id": "000660", "symbol_name": "SK하이닉스", "target_holding_quantity": 1, "order_price": 2_955_000, "order_path": "immediate"}
+                {"symbol_id": "000660", "symbol_name": "SK하이닉스", "final_holding_quantity": 1, "order_price": 2_955_000, "order_path": "immediate"}
             ]
         }
         reconcile(
@@ -1673,8 +1719,8 @@ def self_test() -> int:
 
         order_available_multi_execution = {
             "orders": [
-                {"symbol_id": "000660", "symbol_name": "SK하이닉스", "target_holding_quantity": 1, "order_price": 2_000_000, "order_path": "immediate"},
-                {"symbol_id": "005930", "symbol_name": "삼성전자", "target_holding_quantity": 10, "order_price": 100_000, "order_path": "immediate"},
+                {"symbol_id": "000660", "symbol_name": "SK하이닉스", "final_holding_quantity": 1, "order_price": 2_000_000, "order_path": "immediate"},
+                {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 10, "order_price": 100_000, "order_path": "immediate"},
             ]
         }
         reconcile(
@@ -1704,7 +1750,7 @@ def self_test() -> int:
 
         missing_max_buy_amt_execution = {
             "orders": [
-                {"symbol_id": "000270", "symbol_name": "기아", "target_holding_quantity": 3, "order_price": 100_000, "order_path": "immediate"}
+                {"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 3, "order_price": 100_000, "order_path": "immediate"}
             ]
         }
         reconcile(
@@ -1724,8 +1770,8 @@ def self_test() -> int:
 
         mixed_max_buy_amt_execution = {
             "orders": [
-                {"symbol_id": "000270", "symbol_name": "기아", "target_holding_quantity": 1, "order_price": 100_000, "order_path": "immediate"},
-                {"symbol_id": "005930", "symbol_name": "삼성전자", "target_holding_quantity": 1, "order_price": 70_000, "order_path": "immediate"},
+                {"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 1, "order_price": 100_000, "order_path": "immediate"},
+                {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 1, "order_price": 70_000, "order_path": "immediate"},
             ]
         }
         reconcile(
@@ -1751,7 +1797,7 @@ def self_test() -> int:
 
         zero_max_buy_amt_execution = {
             "orders": [
-                {"symbol_id": "000270", "symbol_name": "기아", "target_holding_quantity": 1, "order_price": 100_000, "order_path": "immediate"}
+                {"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 1, "order_price": 100_000, "order_path": "immediate"}
             ]
         }
         reconcile(
@@ -1769,8 +1815,8 @@ def self_test() -> int:
 
         zero_capacity_execution = {
             "orders": [
-                {"symbol_id": "000270", "symbol_name": "기아", "target_holding_quantity": 2, "order_price": 100000, "order_path": "immediate"},
-                {"symbol_id": "005930", "symbol_name": "삼성전자", "target_holding_quantity": 0, "order_price": 70000, "order_path": "immediate"},
+                {"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 2, "order_price": 100000, "order_path": "immediate"},
+                {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 0, "order_price": 70000, "order_path": "immediate"},
             ]
         }
         reconcile(
@@ -1790,7 +1836,7 @@ def self_test() -> int:
 
         active_additional_execution = {
             "orders": [
-                {"symbol_id": "000270", "symbol_name": "기아", "target_holding_quantity": 5, "order_price": 100000, "order_path": "immediate"}
+                {"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 5, "order_price": 100000, "order_path": "immediate"}
             ]
         }
         original_adjust_active_order = globals()["adjust_active_order"]
@@ -1854,7 +1900,7 @@ def self_test() -> int:
 
         invalid_additional_execution = {
             "orders": [
-                {"symbol_id": "000270", "symbol_name": "기아", "target_holding_quantity": 3, "order_price": 0, "order_path": "immediate"}
+                {"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 3, "order_price": 0, "order_path": "immediate"}
             ]
         }
         invalid_additional_submissions: list[dict[str, Any]] = []
@@ -1899,7 +1945,7 @@ def self_test() -> int:
 
         replacement_execution = {
             "orders": [
-                {"symbol_id": "005930", "symbol_name": "삼성전자", "target_holding_quantity": 5, "order_price": 70000, "order_path": "immediate"}
+                {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 5, "order_price": 70000, "order_path": "immediate"}
             ]
         }
         replacement_submissions: list[dict[str, Any]] = []
@@ -1958,7 +2004,7 @@ def self_test() -> int:
 
         invalid_replacement_execution = {
             "orders": [
-                {"symbol_id": "005930", "symbol_name": "삼성전자", "target_holding_quantity": 5, "order_price": 0, "order_path": "immediate"}
+                {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 5, "order_price": 0, "order_path": "immediate"}
             ]
         }
         invalid_replacement_adjustments: list[tuple[str, dict[str, Any], dict[str, Any] | None]] = []
@@ -2010,7 +2056,7 @@ def self_test() -> int:
 
         uncertain_replacement_execution = {
             "orders": [
-                {"symbol_id": "005930", "symbol_name": "삼성전자", "target_holding_quantity": 5, "order_price": 70000, "order_path": "immediate"}
+                {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 5, "order_price": 70000, "order_path": "immediate"}
             ]
         }
 
@@ -2053,7 +2099,7 @@ def self_test() -> int:
 
         failed_replacement_execution = {
             "orders": [
-                {"symbol_id": "005930", "symbol_name": "삼성전자", "target_holding_quantity": 5, "order_price": 70000, "order_path": "immediate"}
+                {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 5, "order_price": 70000, "order_path": "immediate"}
             ]
         }
 

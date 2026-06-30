@@ -45,13 +45,13 @@ Main-generated `second-verdict` sidecar content:
 - Header exactly:
 
   ```markdown
-  | 종목 | 목표수량 | 상대매력도 | 판단코드 | 의견(판단) |
+  | 종목 | 최종수량 | 상대매력도 | 판단코드 | 의견(판단) |
   |---|---:|---:|---|---|
   ```
 
 - One row for every supplied second-verdict asset.
 - `종목` includes symbol id and name.
-- `목표수량` is the non-negative integer target.
+- `최종수량` is the non-negative integer final holding quantity.
 - `상대매력도` is the integer rank from `relative_attractiveness_rank`.
 - `판단코드` is `reason_code`.
 - `의견(판단)` is `one_line_reason`.
@@ -59,7 +59,7 @@ Main-generated `second-verdict` sidecar content:
 
 The sidecar is never machine input. JSON captured by the launcher is authoritative. Missing, malformed, or inconsistent sidecars are warnings only.
 
-`decision-brief.json` is the canonical verdict input. It should contain compact price/chart, optional top-level market_index_snapshot, optional financial/news summaries, account exposure, eligibility, evidence mode, and errors. Absence of optional market_index_snapshot or financial/news data is context only; it must not lower score, lower confidence, exclude a symbol, remove a target, or block orders by itself.
+`decision-brief.json` is the canonical verdict input. It should contain compact price/chart, optional top-level market_index_snapshot, optional financial/news summaries, account exposure, eligibility, evidence mode, and errors. Absence of optional market_index_snapshot or financial/news data is context only; it must not lower score, lower confidence, exclude a symbol, remove a final holding quantity, or block orders by itself.
 
 Verdict sub-agents receive launcher-created `verdict-inputs/` slices containing only the listed `symbol_ids`. `first-verdict` reads a role-scoped `verdict-core` slice derived from `decision-brief.json` and filtered to the execution agent's output view input profiles. `second-verdict` reads `verdict-core` plus a selected-symbol slice derived from `verdict-first.json`. Raw prompt fallback is forbidden for verdict stages. Verdict sub-agents may use read-only local shell commands such as `cat` and `jq` only for explicitly listed artifact/persona/rule files. Do not load unrelated symbols, raw memory caches, optional source files, secrets, or unlisted paths.
 
@@ -182,12 +182,12 @@ Return JSON:
   "human_markdown_path": "reports/runs/<run_id>/verdicts/second-verdict--<agent_role>--<task_name>.md",
   "symbols": [
     {
-      "symbol_id": "",
-      "symbol_name": "",
-      "target_holding_quantity": 0,
+      "symbol_id": "005930",
+      "symbol_name": "삼성전자",
+      "final_holding_quantity": 8,
       "relative_attractiveness_rank": 1,
-      "reason_code": "hold_target",
-      "one_line_reason": ""
+      "reason_code": "hold_final_quantity",
+      "one_line_reason": "expected_holding_quantity 8주를 유지한다."
     }
   ],
   "errors": []
@@ -196,34 +196,35 @@ Return JSON:
 
 Rules:
 
-- `target_holding_quantity` is a non-negative integer final target holding quantity, not an order quantity; order delta is calculated against expected holdings after active pending/reserved orders.
-- Use each symbol's `holding_quantity_context.expected_holding_quantity` as the explicit baseline for that target.
-- A reduce rationale must set `target_holding_quantity` below `expected_holding_quantity`; an increase rationale must set it above; a hold rationale must set it equal.
-- `reason_code` and `one_line_reason` must describe the same reduce/hold/increase direction implied by `target_holding_quantity`.
-- Every second-verdict symbol receives a target quantity, including reduce-to-zero holdings.
+- `final_holding_quantity` is a non-negative integer final holding quantity after this decision, not an order quantity and not an additional buy/sell quantity.
+- Use each symbol's `holding_quantity_context.expected_holding_quantity` as the explicit baseline for `final_holding_quantity`.
+- A reduce rationale must set `final_holding_quantity` below `expected_holding_quantity`; an increase rationale must set it above; a hold rationale must set it equal.
+- "No additional buy", "no extra exposure", or "추가 확대 없음" is a hold rationale: set `final_holding_quantity` equal to `expected_holding_quantity`, not `0`.
+- `reason_code` and `one_line_reason` must describe the same reduce/hold/increase direction implied by `final_holding_quantity`.
+- Every second-verdict symbol receives a final holding quantity, including valid reduce-to-zero holdings when the rationale explicitly says reduce/exit/sell.
 - Consider relative attractiveness, duplicate exposure, current weight, price/chart conditions, and the supplied selected-symbol first-verdict results.
 - Treat `final_first_score` as the unrounded confidence-adjusted first-verdict score: `>= 6` is a buy/increase candidate, `<= 4` is a reduce/exit candidate, and `5` is neutral.
 - When referring to per-analyst scores in `agent_scores`, use `confidence_adjusted_score` as the score. `score` and `confidence` are supporting inputs explaining that adjusted score.
 - If a symbol's first-verdict score is missing, unavailable, or unusable, treat its score as neutral `5` instead of failing the judgment.
 - First-verdict scores are judgment inputs, not hard buy/sell gates.
-- For holding symbols, distinguish `long_term_thesis_intact` from `add_allowed`: intact thesis suppresses unnecessary sell/reduce decisions, but it is not by itself permission to increase target quantity.
+- For holding symbols, distinguish `long_term_thesis_intact` from `add_allowed`: intact thesis suppresses unnecessary sell/reduce decisions, but it is not by itself permission to increase final holding quantity.
 - Judge long-term thesis from supplied evidence only: core investment rationale, material news/disclosure risk, quality/value deterioration, whether a price shock indicates structural damage or short-term volatility, and portfolio weight/concentration.
-- Increase target quantity only when add conditions are also satisfied: quality/value advantage, acceptable risk/allocation, weight/concentration room, explicit reassessment of any same-day/recent trade context, and no supplied material adverse news/disclosure.
+- Increase final holding quantity only when add conditions are also satisfied: quality/value advantage, acceptable risk/allocation, weight/concentration room, explicit reassessment of any same-day/recent trade context, and no supplied material adverse news/disclosure.
 - Do not take profit solely because a position is up or the current day is sharply positive when thesis remains intact. If overextension, overweight, and a clearly better alternative are all present, prefer partial reduction over full exit.
-- Do not use same-day fills or `recent_trade_context` as a default hold/block reason. Same-direction additional trades and opposite-direction target changes are allowed only after explicitly reassessing price movement, `final_first_score`, risk, order/fill state, and thesis evidence; encode that reassessment in `reason_code` and `one_line_reason`.
+- Do not use same-day fills or `recent_trade_context` as a default hold/block reason. Same-direction additional trades and opposite-direction final holding changes are allowed only after explicitly reassessing price movement, `final_first_score`, risk, order/fill state, and thesis evidence; encode that reassessment in `reason_code` and `one_line_reason`.
 - No fixed cash ratio or fixed investment ratio.
 - The judge cannot add symbols outside the supplied set.
 - Do not return long `cash_rationale`, `duplicate_exposure_limits`, `price_chart_view`, `rationale`, `risks`, or prose arrays.
 
 Validation by Main agent:
 
-- Use the single valid `judge-final` target quantities as the canonical `verdict-second.json` target.
-- If the valid judge result is missing for a symbol, set no final target and exclude it from orders.
-- Validate target holdings against total assets and the latest available account/order gate using immutable price snapshot valuations.
-- If targets exceed assets, reduce only buy-side quantities in reverse relative-attractiveness order. Do not increase sell targets.
-- If targets are below assets, leave the remainder as residual cash. Do not create, report, or optimize toward a target cash value.
+- Use the single valid `judge-final` final holding quantities as the canonical `verdict-second.json` `final_holding_quantity` values.
+- If the valid judge result is missing for a symbol, set no final holding quantity and exclude it from orders.
+- Validate final holdings against total assets and the latest available account/order gate using immutable price snapshot valuations.
+- If final holdings exceed assets, reduce only buy-side quantities in reverse relative-attractiveness order. Do not increase sell-side final quantities.
+- If final holdings are below assets, leave the remainder as residual cash. Do not create, report, or optimize toward a cash target value.
 - Preserve total-asset/cash, duplicate exposure, high-price concentration, active order, order validity, and market open gates.
-- Apply latest account constraints after target validation.
+- Apply latest account constraints after final holding validation.
 
 ## Allowed Values
 

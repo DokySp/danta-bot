@@ -107,6 +107,25 @@ def as_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def non_negative_int_value(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, float):
+        return int(value) if value.is_integer() and value >= 0 else None
+    if isinstance(value, str):
+        text = value.strip().replace(",", "")
+        if not text:
+            return None
+        try:
+            parsed = int(text)
+        except ValueError:
+            return None
+        return parsed if parsed >= 0 else None
+    return None
+
+
 def as_number(value: Any) -> int | float | None:
     if isinstance(value, bool) or value is None:
         return None
@@ -874,13 +893,13 @@ def write_combined_first_sidecar(
 
 def write_second_sidecar(path: Path, symbols: list[dict[str, Any]]) -> None:
     lines = [
-        "| 종목 | 목표수량 | 상대매력도 | 판단코드 | 의견(판단) |",
+        "| 종목 | 최종수량 | 상대매력도 | 판단코드 | 의견(판단) |",
         "|---|---:|---:|---|---|",
     ]
     for item in symbols:
         symbol_name = f"{item.get('symbol_id', '')} {item.get('symbol_name', '')}".strip()
         lines.append(
-            f"| {symbol_name} | {as_int(item.get('target_holding_quantity'))} | {as_int(item.get('relative_attractiveness_rank'))} | {item.get('reason_code', '')} | {item.get('one_line_reason', '')} |"
+            f"| {symbol_name} | {as_int(item.get('final_holding_quantity'))} | {as_int(item.get('relative_attractiveness_rank'))} | {item.get('reason_code', '')} | {item.get('one_line_reason', '')} |"
         )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -1150,6 +1169,7 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
 
     gate_missing = account.get("active_order_lookup_performed") is not True or account.get("order_available_lookup_performed") is not True
     blocked_any = False
+    invalid_final_quantity = False
     refreshable_gate_blocked = False
     for item in verdict_second.get("symbols", []):
         if not isinstance(item, dict):
@@ -1162,8 +1182,20 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
         buy_qty = active_item.get("buy", 0)
         sell_qty = active_item.get("sell", 0)
         expected_qty = current_qty + buy_qty - sell_qty
-        target_qty = max(0, as_int(item.get("target_holding_quantity")))
-        delta = target_qty - expected_qty
+        final_qty = non_negative_int_value(item.get("final_holding_quantity"))
+        if final_qty is None:
+            artifact["errors"].append(
+                {
+                    "stage": "execution",
+                    "source": "build_run_artifacts",
+                    "code": "invalid_final_holding_quantity",
+                    "message": f"{symbol_id}: final_holding_quantity must be a non-negative integer",
+                    "required": True,
+                }
+            )
+            invalid_final_quantity = True
+            continue
+        delta = final_qty - expected_qty
         order_price = (
             as_number(account_item.get("current_price"))
             or as_number((brief_item.get("price") or {}).get("current_or_last"))
@@ -1177,7 +1209,7 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
             direction = "none"
 
         result = "skipped"
-        reason = "target_equals_expected_holding_quantity"
+        reason = "final_equals_expected_holding_quantity"
         if direction != "none":
             if args.request_type in {"demo-submit", "real-submit", "prepare"} and gate_missing:
                 result = "blocked"
@@ -1204,7 +1236,7 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
                 "pending_and_reserved_buy_quantity": buy_qty,
                 "pending_and_reserved_sell_quantity": sell_qty,
                 "expected_holding_quantity": expected_qty,
-                "target_holding_quantity": target_qty,
+                "final_holding_quantity": final_qty,
                 "additional_required_quantity": delta,
                 "validated_order_quantity": abs(delta),
                 "order_price": order_price,
@@ -1227,8 +1259,9 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
             ]
         elif not blocked_any:
             artifact["required_main_agent_actions"] = ["continue_order_execution"]
-    if blocked_any:
+    if invalid_final_quantity or blocked_any:
         artifact["status"] = "partial"
+    if blocked_any:
         artifact["errors"].append(
             {
                 "stage": "execution",
@@ -1775,7 +1808,7 @@ symbols:
                         {
                             "symbol_id": "005930",
                             "symbol_name": "삼성전자",
-                            "target_holding_quantity": 2,
+                            "final_holding_quantity": 2,
                             "relative_attractiveness_rank": 1,
                             "reason_code": "add",
                             "one_line_reason": "test",
@@ -1799,6 +1832,38 @@ symbols:
                 failures.append(f"unexpected execution plan: {execution}")
             if execution["orders"][0].get("order_path") != "reservation" or execution["orders"][0].get("order_api") != "order_resv":
                 failures.append(f"execution plan did not emit reservation order path/API: {execution['orders'][0]}")
+            write_json(
+                run_dir / "verdict-second-invalid-final.json",
+                {
+                    "run_id": "daily-trading-test",
+                    "started_at": "2026-06-18 09:00:00 KST",
+                    "symbols": [
+                        {
+                            "symbol_id": "005930",
+                            "symbol_name": "삼성전자",
+                            "relative_attractiveness_rank": 1,
+                            "reason_code": "hold",
+                            "one_line_reason": "missing final quantity",
+                        }
+                    ],
+                },
+            )
+            invalid_execution = build_execution_plan(
+                argparse.Namespace(
+                    output_dir=run_dir,
+                    output=run_dir / "execution-invalid-final.json",
+                    verdict_second=str(run_dir / "verdict-second-invalid-final.json"),
+                    account_before_order=str(run_dir / "account-before-order.json"),
+                    decision_brief=str(run_dir / "decision-brief.json"),
+                    run_id=None,
+                    started_at=None,
+                    request_type="real-submit",
+                )
+            )
+            if invalid_execution.get("orders"):
+                failures.append(f"missing final_holding_quantity was converted into an order: {invalid_execution}")
+            if not any(item.get("code") == "invalid_final_holding_quantity" for item in invalid_execution.get("errors", [])):
+                failures.append(f"missing final_holding_quantity did not produce execution error: {invalid_execution}")
             account_missing_gates = load_json(run_dir / "account-before-order.json")
             account_missing_gates.pop("active_order_lookup_performed", None)
             account_missing_gates.pop("order_available_lookup_performed", None)

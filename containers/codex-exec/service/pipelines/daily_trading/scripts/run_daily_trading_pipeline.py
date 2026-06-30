@@ -194,6 +194,25 @@ def as_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def non_negative_int_value(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, float):
+        return int(value) if value.is_integer() and value >= 0 else None
+    if isinstance(value, str):
+        text = value.strip().replace(",", "")
+        if not text:
+            return None
+        try:
+            parsed = int(text)
+        except ValueError:
+            return None
+        return parsed if parsed >= 0 else None
+    return None
+
+
 def format_number(value: Any) -> str:
     try:
         return f"{int(value):,}"
@@ -996,17 +1015,30 @@ class Pipeline:
     def write_verdict_second(self, wrapper: dict[str, Any]) -> None:
         parsed = wrapper.get("parsed_json") if isinstance(wrapper.get("parsed_json"), dict) else {}
         symbols: list[dict[str, Any]] = []
+        errors = wrapper.get("errors") if isinstance(wrapper.get("errors"), list) else []
         for item in parsed.get("symbols", []):
             if not isinstance(item, dict):
                 continue
             symbol_id = symbol_key(item)
             if not symbol_id:
                 continue
+            final_quantity = non_negative_int_value(item.get("final_holding_quantity"))
+            if final_quantity is None:
+                errors.append(
+                    {
+                        "stage": "verdict-second",
+                        "source": "pipeline",
+                        "code": "invalid_final_holding_quantity",
+                        "message": f"{symbol_id}: final_holding_quantity must be a non-negative integer",
+                        "required": True,
+                    }
+                )
+                continue
             symbols.append(
                 {
                     "symbol_id": symbol_id,
                     "symbol_name": item.get("symbol_name") or symbol_id,
-                    "target_holding_quantity": max(0, as_int(item.get("target_holding_quantity"))),
+                    "final_holding_quantity": final_quantity,
                     "relative_attractiveness_rank": as_int(item.get("relative_attractiveness_rank")),
                     "reason_code": safe_name(str(item.get("reason_code") or "hold_neutral")).lower(),
                     "one_line_reason": str(item.get("one_line_reason") or "")[:300],
@@ -1021,7 +1053,7 @@ class Pipeline:
             "status": "success" if symbols else "partial",
             "skipped": False,
             "skip_reason": "",
-            "errors": wrapper.get("errors") if isinstance(wrapper.get("errors"), list) else [],
+            "errors": errors,
             "symbols": symbols,
         }
         write_json(self.output_dir / "verdict-second.json", artifact)
@@ -1030,13 +1062,13 @@ class Pipeline:
     def write_second_sidecar(self, role: str, task_name: str, symbols: list[dict[str, Any]]) -> None:
         path = self.output_dir / "verdicts" / f"second-verdict--{safe_name(role)}--{safe_name(task_name)}.md"
         lines = [
-            "| 종목 | 목표수량 | 상대매력도 | 판단코드 | 의견(판단) |",
+            "| 종목 | 최종수량 | 상대매력도 | 판단코드 | 의견(판단) |",
             "|---|---:|---:|---|---|",
         ]
         for item in symbols:
             symbol_name = f"{item.get('symbol_id', '')} {item.get('symbol_name', '')}".strip()
             lines.append(
-                f"| {symbol_name} | {as_int(item.get('target_holding_quantity'))} | {as_int(item.get('relative_attractiveness_rank'))} | {item.get('reason_code', '')} | {item.get('one_line_reason', '')} |"
+                f"| {symbol_name} | {as_int(item.get('final_holding_quantity'))} | {as_int(item.get('relative_attractiveness_rank'))} | {item.get('reason_code', '')} | {item.get('one_line_reason', '')} |"
             )
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -1210,14 +1242,16 @@ class Pipeline:
             account_item = account_by_symbol.get(symbol_id, {})
             execution_item = execution_by_symbol.get(symbol_id, {})
             current_qty = as_int(account_item.get("current_live_holding_quantity"))
-            target_qty = as_int(item.get("target_holding_quantity"))
-            delta = target_qty - current_qty
+            final_qty = non_negative_int_value(item.get("final_holding_quantity"))
+            if final_qty is None:
+                continue
+            delta = final_qty - current_qty
             rows.append(
                 {
                     "symbol_id": symbol_id,
                     "symbol_name": item.get("symbol_name") or account_item.get("symbol_name") or symbol_id,
                     "current_live_holding_quantity": current_qty,
-                    "target_holding_quantity": target_qty,
+                    "final_holding_quantity": final_qty,
                     "delta_quantity": delta,
                     "relative_attractiveness_rank": as_int(item.get("relative_attractiveness_rank")),
                     "reason_code": item.get("reason_code") or "",
@@ -1377,18 +1411,18 @@ class Pipeline:
             [
                 "",
                 "## 5. `second-verdict` 포트폴리오 평결",
-                "- 최종 포트폴리오 판단: `judge-final` 목표수량 결과 사용",
-                "- 잔여 현금 처리: 목표현금을 별도 판단값으로 만들지 않고 목표수량 충족 후 남는 금액으로만 기록",
+                "- 최종 포트폴리오 판단: `judge-final` 최종 보유수량 결과 사용",
+                "- 잔여 현금 처리: 목표현금을 별도 판단값으로 만들지 않고 최종 보유수량 충족 후 남는 금액으로만 기록",
                 f"- Main agent 검증 결과: {execution.get('status', '')}",
                 "",
-                "| 종목식별자 | 종목명 | 현재 보유수량 | 목표 보유수량 | 상대매력도 | 판단 코드 | 한 줄 판단 |",
+                "| 종목식별자 | 종목명 | 현재 보유수량 | 최종 보유수량 | 상대매력도 | 판단 코드 | 한 줄 판단 |",
                 "|---|---|---:|---:|---:|---|---|",
             ]
         )
         for item in verdict.get("symbols", []) if isinstance(verdict.get("symbols"), list) else []:
             lines.append(
                 f"| {md_cell(item.get('symbol_id'))} | {md_cell(item.get('symbol_name'))} | {as_int(item.get('current_live_holding_quantity'))} | "
-                f"{as_int(item.get('target_holding_quantity'))} | {as_int(item.get('relative_attractiveness_rank'))} | "
+                f"{as_int(item.get('final_holding_quantity'))} | {as_int(item.get('relative_attractiveness_rank'))} | "
                 f"{md_cell(item.get('reason_code'))} | {md_cell(item.get('one_line_reason'))} |"
             )
 
@@ -1444,7 +1478,7 @@ class Pipeline:
             [
                 "",
                 "## 8. 최종 주문 목록",
-                "| 종목식별자 | 종목명 | 방향 | 현재 실시간 보유수량 | 미체결·예약 매수 | 미체결·예약 매도 | 예상 보유수량 | 목표 보유수량 | 요청수량 | 검증수량 | 추가 필요수량 | 수량조정 | 결과 |",
+                "| 종목식별자 | 종목명 | 방향 | 현재 실시간 보유수량 | 미체결·예약 매수 | 미체결·예약 매도 | 예상 보유수량 | 최종 보유수량 | 요청수량 | 검증수량 | 추가 필요수량 | 수량조정 | 결과 |",
                 "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|",
             ]
         )
@@ -1460,7 +1494,7 @@ class Pipeline:
                 f"| {md_cell(item.get('symbol_id'))} | {md_cell(item.get('symbol_name'))} | {md_cell(item.get('direction'))} | "
                 f"{as_int(item.get('current_live_holding_quantity'))} | {as_int(item.get('pending_and_reserved_buy_quantity'))} | "
                 f"{as_int(item.get('pending_and_reserved_sell_quantity'))} | {as_int(item.get('expected_holding_quantity'))} | "
-                f"{as_int(item.get('target_holding_quantity'))} | {requested_qty} | {as_int(item.get('validated_order_quantity'))} | "
+                f"{as_int(item.get('final_holding_quantity'))} | {requested_qty} | {as_int(item.get('validated_order_quantity'))} | "
                 f"{as_int(item.get('additional_required_quantity'))} | {md_cell(adjustment_text or '-')} | {md_cell(item.get('result'))} |"
             )
 
@@ -1503,7 +1537,7 @@ class Pipeline:
                 "",
                 "## 11. 메모",
                 "- 당일 체결수량은 현재 보유수량에 이미 반영된 값으로 보고 다시 차감하지 않음",
-                "- `second-verdict`는 단일 `judge-final` 목표수량을 사용하며 deterministic helper와 `execute_orders.py`가 총자산/주문가능금액/집중도/active 주문/same-day/account-order gate를 검증함",
+                "- `second-verdict`는 단일 `judge-final` 최종 보유수량을 사용하며 deterministic helper와 `execute_orders.py`가 총자산/주문가능금액/집중도/active 주문/same-day/account-order gate를 검증함",
                 "- 투자 권유가 아니라 의사결정 보조 분석입니다.",
             ]
         )
@@ -1628,7 +1662,7 @@ class Pipeline:
                 "today_trade_amount_policy": "Show today_buy_amount/today_sell_amount only under a separate 당일 거래 누계 label when relevant; never present them as newly caused by this command unless execution.json confirms submitted orders.",
                 "gate_label": "주문 전 기존 미체결/예약 주문",
                 "evidence_policy": "Report evidence_summary.financial.display_text and evidence_summary.news.display_text, distinguishing missing cache from cache_exists_zero_usable_articles.",
-                "verdict_policy": "Mention judge-final/second-verdict outcome and submitted or target-changed symbols, including target quantity and one_line_reason when available.",
+                "verdict_policy": "Mention judge-final/second-verdict outcome and submitted or final-quantity-changed symbols, including final holding quantity and one_line_reason when available.",
             },
             "artifacts": {
                 "check_portfolio": str(self.output_dir / "check-portfolio.json"),
@@ -1831,7 +1865,7 @@ for index, symbol in enumerate(symbols, start=1):
         rows.append({
             "symbol_id": symbol,
             "symbol_name": symbol,
-            "target_holding_quantity": 1 if symbol == "005930" else 0,
+            "final_holding_quantity": 1 if symbol == "005930" else 0,
             "relative_attractiveness_rank": index,
             "reason_code": "hold_neutral",
             "one_line_reason": "self-test"
@@ -2342,7 +2376,7 @@ def run_self_test() -> int:
                             {
                                 "symbol_id": "005930",
                                 "symbol_name": "삼성전자",
-                                "target_holding_quantity": 1,
+                                "final_holding_quantity": 1,
                                 "relative_attractiveness_rank": 1,
                                 "reason_code": "hold_neutral",
                                 "one_line_reason": "retry self-test",
@@ -2375,6 +2409,54 @@ def run_self_test() -> int:
         retry_probe.run_second_verdict()
         if retry_probe.probe_attempts != 3 or not (retry_dir / "verdict-second.json").exists():
             failures.append(f"second-verdict retry probe failed: attempts={retry_probe.probe_attempts}")
+        retry_verdict = load_json_if_exists(retry_dir / "verdict-second.json") or {}
+        retry_symbol = (retry_verdict.get("symbols") or [{}])[0]
+        if retry_symbol.get("final_holding_quantity") != 1:
+            failures.append(f"final_holding_quantity was not preserved in verdict-second.json: {retry_symbol}")
+        invalid_dir = workspace / "reports" / "runs" / "invalid-final-probe"
+        invalid_dir.mkdir(parents=True, exist_ok=True)
+        invalid_pipeline = Pipeline(
+            argparse.Namespace(
+                command="run",
+                workspace_dir=str(workspace),
+                output_dir=str(invalid_dir),
+                run_id="invalid-final-probe",
+                started_at="2026-06-18T09:00:00+09:00",
+                env="acct",
+                request_type="analysis",
+                portfolio_json=str(portfolio_path),
+                financial_cache_path="",
+                news_cache_path="",
+                main_events="",
+                date="2026-06-18",
+                reuse_existing_artifacts=True,
+                skip_account=False,
+                max_workers=3,
+            )
+        )
+        invalid_pipeline.write_verdict_second(
+            {
+                "stage": "second-verdict",
+                "parsed_json": {
+                    "stage": "second-verdict",
+                    "symbols": [
+                        {
+                            "symbol_id": "005930",
+                            "symbol_name": "삼성전자",
+                            "relative_attractiveness_rank": 1,
+                            "reason_code": "hold_neutral",
+                            "one_line_reason": "invalid self-test",
+                        }
+                    ],
+                },
+                "errors": [],
+            }
+        )
+        invalid_verdict = load_json_if_exists(invalid_dir / "verdict-second.json") or {}
+        if invalid_verdict.get("symbols"):
+            failures.append(f"missing final_holding_quantity was converted into a symbol: {invalid_verdict}")
+        if not any(item.get("code") == "invalid_final_holding_quantity" for item in invalid_verdict.get("errors", [])):
+            failures.append(f"missing final_holding_quantity did not produce an error: {invalid_verdict}")
         fake_codex = workspace / "fake-codex"
         fake_codex_script(fake_codex)
         fake_market_index_snapshot = workspace / "fake-market-index-snapshot.py"

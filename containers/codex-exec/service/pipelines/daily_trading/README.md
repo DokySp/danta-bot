@@ -29,7 +29,7 @@ python3 <daily-trading-pipeline>/scripts/run_daily_trading_pipeline.py run \
 |---|---|
 | 메인 실행 주체 | `Main agent` |
 | 1차 독립 종목 평결 단계 | `first-verdict` |
-| 2차 포트폴리오 목표수량 평결 단계 | `second-verdict` |
+| 2차 포트폴리오 최종 보유수량 평결 단계 | `second-verdict` |
 | canonical 평결 입력 | `decision-brief.json` |
 | sub-agent 평결 입력 | launcher-created selected-symbol slices; first-verdict는 output view profile 기반 role-scoped slice |
 
@@ -44,7 +44,7 @@ python3 <daily-trading-pipeline>/scripts/run_daily_trading_pipeline.py run \
 | 3 | `Main agent` + Collection sub-agents | `scripts/collect_main_evidence.py` direct KIS 가격·계좌 증거 수집, cache miss/universe mismatch 시 `get` 확인 후 1회 `$collect-financial-information`, `$collect-news-information` 및 재 `get`, `market_index_snapshot` deterministic 지수 수집 | 전체 종목 universe, 거래 환경 | `price-chart.json`, `account-before-order.json`, 선택적 `account-asset-snapshot.json`, 선택적 `collection-summary.json`, 선택적 full-universe 또는 partial financial/news memory 경로, 선택적 `market-index-snapshot.json` | 가격·관측시각은 필수, `account-asset-snapshot`은 총자산 추이용 optional stage이며 실패해도 필수 price/account evidence를 깨지 않음; financial/news는 같은 날짜 full-universe cache hit 시 collector를 생략하며, cache miss/universe mismatch면 get→collect→get을 한 번만 수행하고 그래도 미완성이면 partial cache를 사용함; market index snapshot 실패는 non-blocking |
 | 4 | `Main agent` + `scripts/build_run_artifacts.py` | deterministic 병합/sanitize | `price-chart.json`, `$check-portfolio` JSON, 선택적 `memory/collect-financial-information/financial-YYYY-MM-DD.yaml`, 선택적 `memory/collect-news-information/news-YYYY-MM-DD.yaml`, 선택적 `market-index-snapshot.json` | `decision-brief.json`, 제외 종목 목록 | 식별자와 가격 snapshot이 있으면 재무/뉴스/market index snapshot 누락만으로 제외하지 않음; Main agent가 직접 JSON을 조립하지 않고 helper를 호출 |
 | 5 | `first-verdict` sub-agents + `scripts/build_run_artifacts.py` | selected 2 execution personas, deterministic spec/merge into 4 canonical views | launcher-created role-scoped `verdict-core`, `verdict-format.md` | `verdict-first.json`, `verdicts/first-verdict--<agent_role>--<task_name>.md` | `analyst-fundamental-risk`는 `analyst-quality-value`와 `analyst-risk-allocation` view를 독립 산출하고, `analyst-market-news`는 `analyst-momentum-cycle`과 `analyst-news-flow` view를 독립 산출; sub-agent는 compact JSON만 반환하고 companion MD와 score merge는 helper가 생성 |
-| 6 | `second-verdict` sub-agent + `scripts/build_run_artifacts.py` | `judge-final`, deterministic 대상/spec 생성 | launcher-created `verdict-core`, selected-symbol first-verdict slice, `verdict-format.md` | `verdict-second.json`, `verdicts/second-verdict--judge-final--<task_name>.md` | 목표수량은 단일 judge가 제안하고 목표현금은 만들지 않으며, helper/Main agent가 schema·자산·집중도·계좌 gate만 검증; 실패 시 failed task만 최대 2회 retry |
+| 6 | `second-verdict` sub-agent + `scripts/build_run_artifacts.py` | `judge-final`, deterministic 대상/spec 생성 | launcher-created `verdict-core`, selected-symbol first-verdict slice, `verdict-format.md` | `verdict-second.json`, `verdicts/second-verdict--judge-final--<task_name>.md` | 최종 보유수량은 단일 judge가 제안하고 목표현금은 만들지 않으며, helper/Main agent가 schema·자산·집중도·계좌 gate만 검증; 실패 시 failed task만 최대 2회 retry |
 | 7 | `scripts/build_run_artifacts.py` + `scripts/execute_orders.py` | deterministic 주문 계산, KIS read-only pending/reserved/주문가능 조회, KIS `order_cash`/`order_resv`/정정취소 API | `verdict-second.json`, 최신 계좌 상태, 명시적 demo/real 실행 요청 | `account-before-order.json`, `execution.json`, `order-execution-log.json` | helper가 비제출 주문 수학/gate 요약을 먼저 만들고, 명시 실행 요청에서 `--submit-orders`가 있으면 `execute_orders.py`가 최신 계좌 gate를 갱신한 뒤 즉시/예약 주문을 제출·정정·취소하거나 명확히 차단한다. 명시적 지정가 예약 요청에서는 `execution-plan`의 `order_price`를 기본 지정가 후보로 인정한다 |
 | 8 | `scripts/run_daily_trading_pipeline.py summarize` + `scripts/render_telegram_summary.py` | report template, Telegram fixed template, run artifact update | 최종 `execution.json`, `run.json`, `verdict-second.json`, `pipeline-summary.json` | 최종 `pipeline-summary.json`, `telegram-summary.txt`, `reports/YYYY-MM-DD_포트폴리오.md`, 최종 `run.json` | partial/failed artifact를 삭제하지 않음; Telegram 응답은 `telegram-summary.txt`를 그대로 사용 |
 
@@ -71,7 +71,7 @@ python3 <daily-trading-pipeline>/scripts/run_daily_trading_pipeline.py run \
 | `collect-financial-information` | KIS quotation/financial/estimate API 기반 재무 YAML 캐시 경로 | `gpt-5.4-mini` | `low` |
 | `collect-news-information` | KIS 뉴스 YAML 캐시 경로/요약 | `gpt-5.4-mini` | `low` |
 | selected 2 first-verdict execution personas | `first-verdict` 독립 종목 점수 (`analyst-fundamental-risk`와 `analyst-market-news`가 각각 두 view 산출) | `gpt-5.5` | `medium` |
-| `judge-final` | `second-verdict` 포트폴리오 목표수량 | `gpt-5.5` | `medium` |
+| `judge-final` | `second-verdict` 포트폴리오 최종 보유수량 | `gpt-5.5` | `medium` |
 
 ## API 권한
 
@@ -127,7 +127,7 @@ News 수집 허용 범위:
 - 주문 API
 - raw prompt fallback
 
-평결 JSON에서 생성하는 companion Markdown은 사람이 각 자산 판단을 확인하기 위한 보조 산출물이다. 파일명은 `prompts/verdict-format.md`의 safe-name 규칙을 따른다. 이 Markdown은 점수 집계, 목표수량 조정, 주문 후보 계산, 실행 gate의 입력으로 쓰지 않는다.
+평결 JSON에서 생성하는 companion Markdown은 사람이 각 자산 판단을 확인하기 위한 보조 산출물이다. 파일명은 `prompts/verdict-format.md`의 safe-name 규칙을 따른다. 이 Markdown은 점수 집계, 최종 보유수량 조정, 주문 후보 계산, 실행 gate의 입력으로 쓰지 않는다.
 
 ## 아티팩트
 
@@ -162,15 +162,15 @@ Run 아티팩트는 `reports/runs/<run_id>/` 아래에 둔다.
 
 `first-verdict`는 canonical score 관점 4개(`analyst-quality-value`, `analyst-risk-allocation`, `analyst-momentum-cycle`, `analyst-news-flow`)를 유지하되 실행 sub-agent는 2개다. `analyst-fundamental-risk`가 `analyst-quality-value`와 `analyst-risk-allocation` view를 서로 독립적으로 산출하고, `analyst-market-news`가 `analyst-momentum-cycle`과 `analyst-news-flow` view를 서로 독립적으로 산출한다. `analyst-news-flow`는 usable 뉴스/공시 요약이 없으면 중립 `5`를 반환한다. Main agent가 가격, 보유, 뉴스, active 주문 상태의 안정성을 증명할 수 있는 unchanged symbol만 직전 유효 run의 verdict row를 병합할 수 있다. 증명할 수 없으면 재평가하고, sell/stop-loss 후보, 당일 체결, 가격 급변, 신규 뉴스, active 주문, score boundary 근처 종목은 반드시 재평가한다. Launcher 자동 wrapper 재사용은 같은 spec fingerprint에 한정된다.
 
-종목이 eligible이고 가격 관측값과 목표수량, 계좌 제약, 주문 API/경로를 통과하면 재무/뉴스 누락·partial·failed·no-data는 `order_cash`/`order_resv` demo/real 제출을 단독으로 차단하지 않는다.
+종목이 eligible이고 가격 관측값과 최종 보유수량, 계좌 제약, 주문 API/경로를 통과하면 재무/뉴스 누락·partial·failed·no-data는 `order_cash`/`order_resv` demo/real 제출을 단독으로 차단하지 않는다.
 
 ## 주문 경계
 
 `scripts/execute_orders.py`는 Python 코드로 구현된 실행 gate를 적용한다. 별도 최종 리스크 sub-agent와 승인 아티팩트는 사용하지 않는다.
 
-`expected_holding_quantity`는 현재 후보 주문 제출 전, 이미 존재하는 미체결·예약 수량만 반영한 예상 보유수량이다. `target_holding_quantity`와 다르다는 이유만으로 후보 불일치나 주문 차단으로 판단하지 않는다.
+`expected_holding_quantity`는 현재 후보 주문 제출 전, 이미 존재하는 미체결·예약 수량만 반영한 예상 보유수량이다. `final_holding_quantity`와 다르다는 이유만으로 후보 불일치나 주문 차단으로 판단하지 않는다.
 
-기존 active pending/reserved 주문이 목표수량, 방향, 잔여수량, 가격, 주문 API, 주문 경로와 맞지 않으면 `scripts/execute_orders.py`는 필수 원주문 식별자가 있을 때 같은 방향/API/경로 주문은 정정하고, 취소가 필요한 대체 주문은 취소 요청이 접수된 뒤 같은 명시 실행 run에서 검증된 대체 주문을 제출한다. 식별자가 없거나 취소/정정/대체 주문 결과가 불확실하면 `execution.json`에 `blocked`로 남긴다.
+기존 active pending/reserved 주문이 최종 보유수량, 방향, 잔여수량, 가격, 주문 API, 주문 경로와 맞지 않으면 `scripts/execute_orders.py`는 필수 원주문 식별자가 있을 때 같은 방향/API/경로 주문은 정정하고, 취소가 필요한 대체 주문은 취소 요청이 접수된 뒤 같은 명시 실행 run에서 검증된 대체 주문을 제출한다. 식별자가 없거나 취소/정정/대체 주문 결과가 불확실하면 `execution.json`에 `blocked`로 남긴다.
 
 사용자 또는 schedule이 demo 또는 real 실행을 명시했고 `--submit-orders`가 전달됐으며 `execute_orders.py`의 모든 실행 gate를 통과한 경우에만 `scripts/execute_orders.py`가 주문 API를 호출한다.
 
@@ -198,8 +198,8 @@ Run 아티팩트는 `reports/runs/<run_id>/` 아래에 둔다.
 - `run.json`은 `run_id`, `started_at`, status, stage records를 보존한다.
 - `decision-brief.json`은 compact canonical verdict input이다.
 - `verdict-first.json`은 first-verdict score view 병합 결과다.
-- `verdict-second.json`은 단일 judge target set이다.
-- `execution.json`은 target delta, gate decision, active-order reconciliation, submitted/skipped/blocked order result, sanitized error를 기록한다.
+- `verdict-second.json`은 단일 judge final holding set이다.
+- `execution.json`은 final holding delta, gate decision, active-order reconciliation, submitted/skipped/blocked order result, sanitized error를 기록한다.
 - `pipeline-summary.json`은 service output을 위한 compact diagnostic source다.
 - `telegram-summary.txt`는 `pipeline-summary.json`에서 렌더링한 고정 user-facing 응답이며, service code는 raw artifact에서 새 summary를 재구성하지 않는다.
 - `subagents/<task>.raw.txt`는 `codex exec -o`가 쓴 최종 sub-agent output이다.
@@ -216,7 +216,7 @@ Run 아티팩트는 `reports/runs/<run_id>/` 아래에 둔다.
 
 ### 주문 실행 계약
 
-- `second-verdict`는 target holding quantity를 결정하고, deterministic helper가 이를 order candidate로 변환한다.
+- `second-verdict`는 final holding quantity를 결정하고, deterministic helper가 이를 order candidate로 변환한다.
 - 실제 order API는 명시적 demo/real authorization 이후 모든 gate를 통과했을 때만 `execute_orders.py`가 호출한다.
 - 지원 대상은 immediate cash order, reservation order, active order reconciliation을 위한 supported correction/cancellation API다.
 - 주문 전 `execute_orders.py`는 active pending/reserved order와 order-available quantity를 포함한 required read-only account gate를 갱신한다.
@@ -227,10 +227,10 @@ Run 아티팩트는 `reports/runs/<run_id>/` 아래에 둔다.
 ### 보고 계약
 
 - Portfolio report와 Telegram summary는 final artifact에서 생성하며 raw helper output을 수동 재요약하지 않는다.
-- Human-review Markdown sidecar는 정보 제공용이다. Scoring, target, order gate 입력으로 쓰지 않는다.
+- Human-review Markdown sidecar는 정보 제공용이다. Scoring, final holding quantity, order gate 입력으로 쓰지 않는다.
 - Optional financial/news data 부재는 missing evidence로 보고할 수 있지만, 문구만으로 hard blocker가 되면 안 된다.
 
 ### Strategy mapping 계약
 
 - Strategy label은 signal과 reason code 해석을 위한 유지보수 vocabulary다.
-- Runtime scoring과 target calculation은 structured artifact와 Python implementation에 의해 결정되며, 이 문서를 다시 읽어 동작하지 않는다.
+- Runtime scoring과 final holding calculation은 structured artifact와 Python implementation에 의해 결정되며, 이 문서를 다시 읽어 동작하지 않는다.

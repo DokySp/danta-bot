@@ -719,6 +719,27 @@ def int_or_zero(raw: Any) -> int:
     return 0
 
 
+def non_negative_int_value(raw: Any) -> int | None:
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw if raw >= 0 else None
+    if isinstance(raw, float):
+        if raw.is_integer() and raw >= 0:
+            return int(raw)
+        return None
+    if isinstance(raw, str):
+        text = raw.strip().replace(",", "")
+        if not text:
+            return None
+        try:
+            value = int(text)
+        except ValueError:
+            return None
+        return value if value >= 0 else None
+    return None
+
+
 def first_present_int_value(*values: Any) -> int:
     for value in values:
         if value is not None:
@@ -758,7 +779,7 @@ def build_holding_quantity_context(symbol: dict[str, Any]) -> dict[str, Any]:
         "pending_and_reserved_buy_quantity": pending_buy,
         "pending_and_reserved_sell_quantity": pending_sell,
         "expected_holding_quantity": expected,
-        "target_holding_quantity_semantics": "final total holding quantity after active pending/reserved orders; not order quantity",
+        "final_holding_quantity_semantics": "final total holding quantity after active pending/reserved orders; not order quantity",
         "direction_examples": {
             "maintain": expected,
             "increase_by_1": expected + 1,
@@ -811,7 +832,7 @@ def recent_submitted_trade_context(output_dir: Path, symbol_id: str, run_limit: 
                     "submitted_quantity": int_or_zero(order.get("validated_order_quantity")),
                     "current_live_holding_quantity": int_or_zero(order.get("current_live_holding_quantity")),
                     "expected_holding_quantity": int_or_zero(order.get("expected_holding_quantity")),
-                    "target_holding_quantity": int_or_zero(order.get("target_holding_quantity")),
+                    "final_holding_quantity": int_or_zero(order.get("final_holding_quantity")),
                     "additional_required_quantity": int_or_zero(order.get("additional_required_quantity")),
                     "order_path": order.get("order_path") or "",
                     "order_api": order.get("order_api") or "",
@@ -821,7 +842,7 @@ def recent_submitted_trade_context(output_dir: Path, symbol_id: str, run_limit: 
     return {
         "recent_submitted_trades": trades,
         "inspected_run_ids": inspected_runs,
-        "policy": "Use recent submitted trades as reassessment input, not a default hold/block reason; same-direction additional trades and opposite-direction target changes are allowed after explicitly reassessing price movement, final_first_score, risk, order/fill state, and thesis evidence.",
+        "policy": "Use recent submitted trades as reassessment input, not a default hold/block reason; same-direction additional trades and opposite-direction final holding changes are allowed after explicitly reassessing price movement, final_first_score, risk, order/fill state, and thesis evidence.",
     }
 
 
@@ -1019,8 +1040,10 @@ def compact_verdict_prompt(spec: dict[str, Any]) -> str | None:
                 "When referring to per-analyst scores in agent_scores, use confidence_adjusted_score as the score; score and confidence are supporting inputs explaining that adjusted score.",
                 "If a symbol's first-verdict score is missing, unavailable, or unusable, treat it as neutral 5 and continue.",
                 "First-verdict scores are judgment inputs, not hard buy/sell gates.",
-                "Use recent_trade_context as reassessment input, not a default hold/block reason: same-direction additional trades and opposite-direction target changes are allowed after explicitly reassessing price movement, final_first_score, risk, order/fill state, and thesis evidence.",
-                "Use today_trade_timeline_context as reassessment input, not a same-day churn block: same-direction additional trades and opposite-direction target changes are allowed after explicitly reassessing price movement, final_first_score, risk, order/fill state, and thesis evidence.",
+                "Return final_holding_quantity as the final total holding quantity after this decision, not an order quantity or additional buy/sell quantity.",
+                "No additional buy, no extra exposure, or 추가 확대 없음 means final_holding_quantity equals holding_quantity_context.expected_holding_quantity, not 0.",
+                "Use recent_trade_context as reassessment input, not a default hold/block reason: same-direction additional trades and opposite-direction final holding changes are allowed after explicitly reassessing price movement, final_first_score, risk, order/fill state, and thesis evidence.",
+                "Use today_trade_timeline_context as reassessment input, not a same-day churn block: same-direction additional trades and opposite-direction final holding changes are allowed after explicitly reassessing price movement, final_first_score, risk, order/fill state, and thesis evidence.",
                 "Treat long_term_thesis_intact as a sell/reduce suppression signal, not as add permission; increase only when add_allowed evidence is also present.",
             ]
         )
@@ -1030,7 +1053,7 @@ def compact_verdict_prompt(spec: dict[str, Any]) -> str | None:
             "",
             "Return JSON only in the required compact verdict format. human_markdown_path is informational; the Main agent creates that sidecar from JSON.",
             "Use short reason_code and one_line_reason fields instead of long rationale, risk, evidence, or prose arrays.",
-            "Optional financial/news absence is context only and must not lower score, target, or eligibility by itself.",
+            "Optional financial/news absence is context only and must not lower score, final holding quantity, or eligibility by itself.",
         ]
     )
     return compact_prompt("\n".join(lines))
@@ -1298,7 +1321,22 @@ def compact_verdict_payload_errors(payload: Any, stage: str, agent_role: str = "
                             }
                         )
         if stage == "second-verdict":
-            for field in ("target_holding_quantity", "relative_attractiveness_rank"):
+            final_value = non_negative_int_value(symbol.get("final_holding_quantity")) if "final_holding_quantity" in symbol else None
+            if "final_holding_quantity" not in symbol:
+                errors.append(
+                    {
+                        "code": "invalid_compact_verdict_schema",
+                        "message": f"symbols[{index}] missing final_holding_quantity",
+                    }
+                )
+            if "final_holding_quantity" in symbol and final_value is None:
+                errors.append(
+                    {
+                        "code": "invalid_compact_verdict_schema",
+                        "message": f"symbols[{index}].final_holding_quantity must be a non-negative integer",
+                    }
+                )
+            for field in ("relative_attractiveness_rank",):
                 if field not in symbol:
                     errors.append(
                         {
@@ -1767,7 +1805,7 @@ else:
                         "reason_code": "hold_neutral",
                         "one_line_reason": "self-test",
                         **(
-                            {"target_holding_quantity": 0, "relative_attractiveness_rank": 1}
+                            {"final_holding_quantity": 1, "relative_attractiveness_rank": 1}
                             if stage == "second-verdict"
                             else first_payload
                         ),
@@ -1891,7 +1929,7 @@ def write_sample_verdict_inputs(tmp: Path) -> None:
                     "validated_order_quantity": 1,
                     "current_live_holding_quantity": 12,
                     "expected_holding_quantity": 12,
-                    "target_holding_quantity": 11,
+                    "final_holding_quantity": 11,
                     "additional_required_quantity": -1,
                     "order_path": "immediate",
                     "order_api": "order_cash",
@@ -2067,6 +2105,8 @@ def assert_compact_verdict_prompt(tmp: Path) -> None:
         "Use recent_trade_context as reassessment input, not a default hold/block reason:",
         "Use today_trade_timeline_context as reassessment input, not a same-day churn block:",
         "Treat long_term_thesis_intact as a sell/reduce suppression signal",
+        "final_holding_quantity",
+        "No additional buy",
     ]
     missing = [part for part in second_required_parts if part not in second_prompt]
     if missing:
@@ -2137,7 +2177,7 @@ def assert_verdict_input_slices(tmp: Path) -> None:
             if holding_context.get("expected_holding_quantity") != 11:
                 raise AssertionError(f"verdict-core did not add expected holding context: {first_symbol}")
             if holding_context.get("direction_examples", {}).get("reduce_by_1") != 10:
-                raise AssertionError(f"verdict-core did not add target direction examples: {first_symbol}")
+                raise AssertionError(f"verdict-core did not add final holding direction examples: {first_symbol}")
             if "recent_trade_context" not in first_symbol:
                 raise AssertionError(f"verdict-core did not add recent trade context: {first_symbol}")
             recent_trades = first_symbol.get("recent_trade_context", {}).get("recent_submitted_trades", [])
@@ -2349,6 +2389,60 @@ def run_self_test() -> int:
                 )
                 if not any(error.get("code") == "invalid_compact_verdict_schema" for error in invalid_second_errors):
                     raise AssertionError(f"invalid compact second-verdict schema was accepted: {invalid_second_errors}")
+                final_quantity_errors = compact_verdict_payload_errors(
+                    {
+                        "stage": "second-verdict",
+                        "symbols": [
+                            {
+                                "symbol_id": "005930",
+                                "symbol_name": "삼성전자",
+                                "reason_code": "hold_neutral",
+                                "one_line_reason": "유지한다.",
+                                "final_holding_quantity": 8,
+                                "relative_attractiveness_rank": 1,
+                            }
+                        ],
+                    },
+                    "second-verdict",
+                )
+                if final_quantity_errors:
+                    raise AssertionError(f"final_holding_quantity second-verdict schema was rejected: {final_quantity_errors}")
+                invalid_final_quantity_errors = compact_verdict_payload_errors(
+                    {
+                        "stage": "second-verdict",
+                        "symbols": [
+                            {
+                                "symbol_id": "005930",
+                                "symbol_name": "삼성전자",
+                                "reason_code": "hold_neutral",
+                                "one_line_reason": "유지한다.",
+                                "final_holding_quantity": None,
+                                "relative_attractiveness_rank": 1,
+                            }
+                        ],
+                    },
+                    "second-verdict",
+                )
+                if not any("final_holding_quantity must be a non-negative integer" in str(error.get("message")) for error in invalid_final_quantity_errors):
+                    raise AssertionError(f"invalid final_holding_quantity was not rejected: {invalid_final_quantity_errors}")
+                reduce_to_zero_errors = compact_verdict_payload_errors(
+                    {
+                        "stage": "second-verdict",
+                        "symbols": [
+                            {
+                                "symbol_id": "005930",
+                                "symbol_name": "삼성전자",
+                                "reason_code": "exit_position",
+                                "one_line_reason": "명시적으로 청산한다.",
+                                "final_holding_quantity": 0,
+                                "relative_attractiveness_rank": 1,
+                            }
+                        ],
+                    },
+                    "second-verdict",
+                )
+                if reduce_to_zero_errors:
+                    raise AssertionError(f"reduce-to-zero final_holding_quantity schema was rejected: {reduce_to_zero_errors}")
                 alias_payload = normalize_compact_verdict_payload(
                     {
                         "stage": "first-verdict",
