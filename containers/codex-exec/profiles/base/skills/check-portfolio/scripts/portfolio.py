@@ -4,10 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import importlib.util
 import json
 import os
 import re
+import sys
+import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -113,6 +117,85 @@ def write_json(path: Path, payload: Any) -> None:
     tmp.replace(path)
 
 
+def retry_delays(retries: int) -> list[int]:
+    return [30] * max(0, retries)
+
+
+def attempt_log_path() -> Path:
+    configured = os.environ.get("CHECK_PORTFOLIO_ATTEMPT_LOG_FILE", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    today = datetime.now(KST).strftime("%Y%m%d")
+    return memory_root(find_repo_root()) / "check-portfolio" / f"kis-request-attempts-{today}.jsonl"
+
+
+def safe_exception_message(exc: Exception) -> str:
+    if isinstance(exc, HTTPError):
+        reason = str(getattr(exc, "reason", "") or "").strip()
+        return f"HTTP Error {exc.code}" + (f": {reason}" if reason else "")
+    if isinstance(exc, URLError):
+        reason = getattr(exc, "reason", "")
+        if isinstance(reason, OSError):
+            return f"{reason.__class__.__name__}: {reason.strerror or reason.errno or 'url error'}"
+        return f"{exc.__class__.__name__}: {reason.__class__.__name__ or 'url error'}"
+    if isinstance(exc, TimeoutError):
+        return "TimeoutError"
+    if isinstance(exc, OSError):
+        return f"{exc.__class__.__name__}: {exc.strerror or exc.errno or 'os error'}"
+    return exc.__class__.__name__
+
+
+def request_failure_event(
+    *,
+    path: str,
+    attempt: int,
+    max_attempts: int,
+    will_retry: bool,
+    next_delay_seconds: int | None,
+    exc: Exception,
+) -> dict[str, Any]:
+    return {
+        "timestamp": datetime.now(KST).isoformat(),
+        "api": "direct_kis.inquire_balance" if path == BALANCE_PATH else "direct_kis.request",
+        "path": path,
+        "attempt": attempt,
+        "max_attempts": max_attempts,
+        "will_retry": will_retry,
+        "next_delay_seconds": next_delay_seconds,
+        "exception_class": exc.__class__.__name__,
+        "http_status": exc.code if isinstance(exc, HTTPError) else None,
+        "error": safe_exception_message(exc),
+    }
+
+
+def kis_response_failure_event(*, path: str, message: str, code: str = "") -> dict[str, Any]:
+    return {
+        "timestamp": datetime.now(KST).isoformat(),
+        "api": "direct_kis.inquire_balance" if path == BALANCE_PATH else "direct_kis.request",
+        "path": path,
+        "attempt": None,
+        "max_attempts": None,
+        "will_retry": False,
+        "next_delay_seconds": None,
+        "exception_class": "KisResponseError",
+        "http_status": None,
+        "kis_code": code,
+        "error": message[:200],
+    }
+
+
+def append_attempt_log(event: dict[str, Any]) -> None:
+    line = json.dumps(event, ensure_ascii=False, sort_keys=True)
+    print(f"check-portfolio KIS request failure: {line}", file=sys.stderr)
+    path = attempt_log_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+    except OSError as exc:
+        print(f"check-portfolio attempt log write failed: {safe_exception_message(exc)}", file=sys.stderr)
+
+
 def request_json(
     method: str,
     path: str,
@@ -146,19 +229,43 @@ def retry_json(
     params: dict[str, str] | None = None,
     retries: int = 3,
 ) -> tuple[dict[str, Any], dict[str, str]]:
-    delays = [1, 2, 4, 8, 16, 30, 30, 30, 30, 30]
+    delays = retry_delays(retries)
     last_error: Exception | None = None
-    for attempt in range(retries + 1):
+    max_attempts = retries + 1
+    for attempt_index in range(max_attempts):
         try:
             return request_json(method, path, headers=headers, payload=payload, params=params)
         except HTTPError as exc:
             last_error = exc
             if exc.code in {400, 401, 403, 404}:
+                append_attempt_log(
+                    request_failure_event(
+                        path=path,
+                        attempt=attempt_index + 1,
+                        max_attempts=max_attempts,
+                        will_retry=False,
+                        next_delay_seconds=None,
+                        exc=exc,
+                    )
+                )
                 raise
         except (TimeoutError, URLError, OSError) as exc:
             last_error = exc
-        if attempt < retries:
-            time.sleep(delays[min(attempt, len(delays) - 1)])
+        will_retry = attempt_index < retries
+        next_delay = delays[attempt_index] if will_retry and attempt_index < len(delays) else None
+        if last_error is not None:
+            append_attempt_log(
+                request_failure_event(
+                    path=path,
+                    attempt=attempt_index + 1,
+                    max_attempts=max_attempts,
+                    will_retry=will_retry,
+                    next_delay_seconds=next_delay,
+                    exc=last_error,
+                )
+            )
+        if will_retry and next_delay is not None:
+            time.sleep(next_delay)
     raise RuntimeError(f"KIS request failed after retries: {last_error}")
 
 
@@ -340,6 +447,7 @@ def fetch_holding_symbols(retries: int) -> list[str]:
         rt_cd = str(body.get("rt_cd", "0"))
         if rt_cd not in {"0", ""}:
             message = str(body.get("msg1") or body.get("msg_cd") or "KIS balance request failed")
+            append_attempt_log(kis_response_failure_event(path=BALANCE_PATH, message=message, code=str(body.get("msg_cd") or "")))
             raise RuntimeError(message)
         for row in output_rows(body):
             symbol = normalize_holding_symbol(row)
@@ -397,6 +505,54 @@ def command_self_test(_args: argparse.Namespace) -> int:
     assert normalize_trading_env("paper") == "demo"
     assert balance_tr_id("demo") == "VTTC8434R"
     assert balance_tr_id("real") == "TTTC8434R"
+    assert retry_delays(0) == []
+    assert retry_delays(3) == [30, 30, 30]
+    http_error = HTTPError("https://example.test/?CANO=12345678", 500, "Internal Server Error", hdrs=None, fp=None)
+    event = request_failure_event(path=BALANCE_PATH, attempt=1, max_attempts=4, will_retry=True, next_delay_seconds=30, exc=http_error)
+    rendered = json.dumps(event, ensure_ascii=False)
+    assert event["http_status"] == 500
+    assert event["next_delay_seconds"] == 30
+    for forbidden in ("12345678", "Authorization", "Bearer", "appsecret", "APP_SECRET", "CANO", "ACNT_PRDT_CD", "raw_response"):
+        assert forbidden not in rendered
+    response_event = kis_response_failure_event(path=BALANCE_PATH, message="EGW00000: sanitized response failure", code="EGW00000")
+    response_rendered = json.dumps(response_event, ensure_ascii=False)
+    assert "raw_response" not in response_rendered
+    assert "EGW00000" in response_rendered
+    original_request_json = globals()["request_json"]
+    original_sleep = time.sleep
+    old_attempt_log_file = os.environ.get("CHECK_PORTFOLIO_ATTEMPT_LOG_FILE")
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            attempt_log = Path(tmpdir) / "attempts.jsonl"
+            os.environ["CHECK_PORTFOLIO_ATTEMPT_LOG_FILE"] = str(attempt_log)
+            calls: list[int] = []
+            sleeps: list[int] = []
+
+            def failing_request_json(*_args: Any, **_kwargs: Any) -> tuple[dict[str, Any], dict[str, str]]:
+                calls.append(1)
+                raise TimeoutError()
+
+            globals()["request_json"] = failing_request_json
+            time.sleep = lambda seconds: sleeps.append(seconds)  # type: ignore[assignment]
+            try:
+                with contextlib.redirect_stdout(io.StringIO()) as stdout:
+                    retry_json("GET", BALANCE_PATH, headers={}, retries=2)
+                raise AssertionError("retry_json should fail after retries")
+            except RuntimeError as exc:
+                assert "KIS request failed after retries" in str(exc)
+            assert stdout.getvalue() == ""
+            assert len(calls) == 3
+            assert sleeps == [30, 30]
+            lines = attempt_log.read_text(encoding="utf-8").splitlines()
+            assert len(lines) == 3
+            assert json.loads(lines[-1])["will_retry"] is False
+    finally:
+        globals()["request_json"] = original_request_json
+        time.sleep = original_sleep  # type: ignore[assignment]
+        if old_attempt_log_file is None:
+            os.environ.pop("CHECK_PORTFOLIO_ATTEMPT_LOG_FILE", None)
+        else:
+            os.environ["CHECK_PORTFOLIO_ATTEMPT_LOG_FILE"] = old_attempt_log_file
     print("self-test ok")
     return 0
 
