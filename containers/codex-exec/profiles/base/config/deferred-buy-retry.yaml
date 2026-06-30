@@ -1,0 +1,5 @@
+deferred_buy_retry:
+  enabled: true
+  delay_seconds: 180
+  expires_after_seconds: 300
+  slippage_bps: 100

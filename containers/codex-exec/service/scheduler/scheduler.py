@@ -10,6 +10,7 @@ from ..errors import UserFacingError
 from ..telegram.gateway import TelegramGateway, TypingIndicator
 from ..trading.daily_trading import error_message_with_run_context, is_daily_trading_schedule
 from ..trading.daily_trading_direct import DailyTradingDirectRunner, format_direct_runner_error
+from ..pipelines.deferred_buy_retry.pipeline import run_due_deferred_buy_retries
 from .config import parse_yaml_schedule
 from .cron import cron_matches
 
@@ -40,6 +41,7 @@ class Scheduler:
 
     def _tick(self) -> None:
         now = datetime.now()
+        run_due_deferred_buy_retries(self.config, self.gateway)
         minute_key = now.strftime("%Y%m%d%H%M")
         for item in parse_yaml_schedule(self.config.schedule_file):
             job_id = str(item.get("id", "")).strip()
@@ -101,7 +103,7 @@ class Scheduler:
                 self.config.telegram_typing_interval_seconds,
             ):
                 if daily_trading_config is not None:
-                    output = self.daily_trading_direct_runner.run(daily_trading_config)
+                    output = self.daily_trading_direct_runner.run(daily_trading_config, chat_id_text, route_text)
                 else:
                     output = self.runner.run_once(
                         message,

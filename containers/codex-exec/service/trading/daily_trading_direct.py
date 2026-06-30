@@ -10,6 +10,7 @@ from ..codex.events import parse_codex_json_events
 from ..codex.runner import CodexRunner
 from ..codex.usage import append_token_usage_summary, read_usage_snapshot
 from ..config import Config
+from ..pipelines.deferred_buy_retry.pipeline import enqueue_deferred_buy_retries, load_deferred_buy_retry_config
 from ..pipelines.daily_trading.holding_history import append_holding_history_from_run
 from ..pipelines.daily_trading.launcher import (
     build_daily_trading_command,
@@ -31,7 +32,7 @@ class DailyTradingDirectRunner:
         self.config = config
         self.codex_runner = codex_runner
 
-    def run(self, raw_config: Any) -> str:
+    def run(self, raw_config: Any, chat_id: str | None = None, route: str | None = None) -> str:
         context = new_codex_run_context()
         run_dir = self.config.workspace_dir / "reports" / "runs" / context.run_id
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -63,6 +64,20 @@ class DailyTradingDirectRunner:
             raise exc
         self.append_holding_history(context)
         output = self.read_telegram_summary(run_dir)
+        retry_config = load_deferred_buy_retry_config(self.config)
+        retry_paths = []
+        if retry_config.enabled:
+            retry_paths = enqueue_deferred_buy_retries(
+                workspace_dir=self.config.workspace_dir,
+                source_run_dir=run_dir,
+                chat_id=chat_id,
+                route=route,
+                delay_seconds=retry_config.delay_seconds,
+                expires_after_seconds=retry_config.expires_after_seconds,
+                slippage_bps=retry_config.slippage_bps,
+            )
+        if retry_paths:
+            output = f"{output}\n\n후속 매수 재시도: {len(retry_paths)}건 예약됨"
         output = append_daily_trading_started_at(output, context)
         usage_after = read_usage_snapshot(self.config)
         return append_token_usage_summary(

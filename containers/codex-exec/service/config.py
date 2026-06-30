@@ -65,6 +65,7 @@ class Config:
     workspace_dir: Path
     schedule_file: Path
     price_trigger_file: Path
+    deferred_buy_retry_config_file: Path
     telegram_gateway_url: str
     telegram_route: str | None
     mcp_trading_env: str
@@ -94,6 +95,10 @@ class Config:
             price_trigger_file=env_path(
                 "TOUCH_POINT_CONFIG_FILE",
                 "/app/config/touch-points.yaml",
+            ),
+            deferred_buy_retry_config_file=env_path(
+                "DEFERRED_BUY_RETRY_CONFIG_FILE",
+                "/app/config/deferred-buy-retry.yaml",
             ),
             telegram_gateway_url=os.getenv(
                 "TELEGRAM_GATEWAY_URL",
