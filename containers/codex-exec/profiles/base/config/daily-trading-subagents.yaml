@@ -1,9 +1,9 @@
 collection:
   model: gpt-5.4-mini
   model_reasoning_effort: low
-first_verdict:
+analyst_review:
   model: gpt-5.5
   model_reasoning_effort: medium
-second_verdict:
+judge_review:
   model: gpt-5.5
   model_reasoning_effort: medium

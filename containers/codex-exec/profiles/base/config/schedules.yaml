@@ -24,11 +24,11 @@ schedules:
       request_type: real-submit
       submit_orders: true
       order_path: reservation
-      verdict_extra_instructions:
-        first_verdict:
+      review_extra_instructions:
+        analyst_review:
           - "예약 거래에서는 장중 가격·호가·수급 정보는 이미 관측된 정적 근거로 보고 과도하게 추격 반영하지 않는다."
           - "회사 재무 정보, 신규 뉴스·공시·이벤트성 재료와 다음 장 갭 리스크의 비중을 상대적으로 높여 판단한다."
-        second_verdict:
+        judge_review:
           - "예약 거래에서는 다음 장 갭 리스크를 목표수량 판단에 명시적으로 반영한다."
     # 이전 Main Codex message:
     # $check-portfolio로 recommended, specified, holding, universe JSON을 확인하고, check-portfolio의 universe를 $daily-trading 대상으로 사용해줘.
@@ -82,8 +82,8 @@ schedules:
       request_type: real-submit
       submit_orders: true
       order_path: immediate
-      verdict_extra_instructions:
-        second_verdict:
+      review_extra_instructions:
+        judge_review:
           - "이번 거래가 오늘의 마지막 거래임을 참고하여 불필요한 신규 리스크 확대를 피하고 보유/현금 균형을 점검한다."
     # 이전 Main Codex message:
     # $check-portfolio로 recommended, specified, holding, universe JSON을 확인하고, check-portfolio의 universe를 $daily-trading 대상으로 사용해줘.
@@ -97,11 +97,11 @@ schedules:
       request_type: real-submit
       submit_orders: true
       order_path: reservation
-      verdict_extra_instructions:
-        first_verdict:
+      review_extra_instructions:
+        analyst_review:
           - "예약 거래에서는 장중 가격·호가·수급 정보는 이미 관측된 정적 근거로 보고 과도하게 추격 반영하지 않는다."
           - "회사 재무 정보, 신규 뉴스·공시·이벤트성 재료와 다음 장 갭 리스크의 비중을 상대적으로 높여 판단한다."
-        second_verdict:
+        judge_review:
           - "예약 거래에서는 다음 장 갭 리스크를 목표수량 판단에 명시적으로 반영한다."
     # 이전 Main Codex message:
     # $check-portfolio로 recommended, specified, holding, universe JSON을 확인하고, check-portfolio의 universe를 $daily-trading 대상으로 사용해줘.

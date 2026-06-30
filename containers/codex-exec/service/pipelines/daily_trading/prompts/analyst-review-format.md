@@ -1,29 +1,22 @@
-# Verdict Format
+# Review Format
 
 ## Shared Rules
 
-Verdict agents use only supplied immutable artifacts, persona text, and this format. They may use read-only local shell commands such as `cat` and `jq` only for explicitly listed artifact/persona/rule files. They must not call KIS, MCP, web, network, account/order APIs, or external data sources; read unrelated files; recollect; write files; or write canonical artifacts.
+Review agents use only supplied immutable artifacts, persona text, and this format. They may use read-only local shell commands such as `cat` and `jq` only for explicitly listed artifact/persona/rule files. They must not call KIS, MCP, web, network, account/order APIs, or external data sources; read unrelated files; recollect; write files; or write canonical artifacts.
 
-Verdict agents return compact JSON only. They must not emit Markdown, diffs, code fences, long prose, raw artifact excerpts, or raw source payloads. `human_markdown_path` is informational only; the Main agent creates one human-review Markdown sidecar from parsed JSON:
+Review agents return compact JSON only. They must not emit Markdown, diffs, code fences, long prose, raw artifact excerpts, or raw source payloads. `human_markdown_path` is informational only; the Main agent creates one human-review Markdown sidecar from parsed JSON:
 
 ```text
-reports/runs/<run_id>/verdicts/<stage>--<agent_role>--<task_name>.md
+reports/runs/<run_id>/reviews/<stage>--<agent_role>--<task_name>.md
 ```
 
-`<stage>` is `first-verdict` or `second-verdict`. Sanitize `agent_role` and `task_name` by replacing every character except ASCII letters, digits, `_`, `-`, and `.` with `-`. Do not add timestamps, symbol names, persona names, spaces, slashes, or suffixes.
+`<stage>` is `analyst-review` or `judge-review`. Sanitize `agent_role` and `task_name` by replacing every character except ASCII letters, digits, `_`, `-`, and `.` with `-`. Do not add timestamps, symbol names, persona names, spaces, slashes, or suffixes.
 
-Main-generated `first-verdict` sidecar content:
+Main-generated `analyst-review` sidecar content:
 
 - Korean prose.
 - Exactly one per-symbol Markdown table.
-- For single-view legacy output, header exactly:
-
-  ```markdown
-  | 종목 | 점수 | confidence(확신도) | 의견(판단) |
-  |---|---:|---:|---|
-  ```
-
-- For combined execution output, header exactly:
+- Header exactly:
 
   ```markdown
   | 관점 | 종목 | 점수 | confidence(확신도) | 의견(판단) |
@@ -38,7 +31,7 @@ Main-generated `first-verdict` sidecar content:
 - `의견(판단)` is concise and cites only supplied evidence.
 - No extra per-symbol sections or sensitive values.
 
-Main-generated `second-verdict` sidecar content:
+Main-generated `judge-review` sidecar content:
 
 - Korean prose.
 - Exactly one per-symbol Markdown table.
@@ -49,7 +42,7 @@ Main-generated `second-verdict` sidecar content:
   |---|---:|---:|---|---|
   ```
 
-- One row for every supplied second-verdict asset.
+- One row for every supplied judge-review asset.
 - `종목` includes symbol id and name.
 - `최종수량` is the non-negative integer final holding quantity.
 - `상대매력도` is the integer rank from `relative_attractiveness_rank`.
@@ -59,20 +52,20 @@ Main-generated `second-verdict` sidecar content:
 
 The sidecar is never machine input. JSON captured by the launcher is authoritative. Missing, malformed, or inconsistent sidecars are warnings only.
 
-`decision-brief.json` is the canonical verdict input. It should contain compact price/chart, optional top-level market_index_snapshot, optional financial/news summaries, account exposure, eligibility, evidence mode, and errors. Absence of optional market_index_snapshot or financial/news data is context only; it must not lower score, lower confidence, exclude a symbol, remove a final holding quantity, or block orders by itself.
+`decision-brief.json` is the canonical review input. It should contain compact price/chart, optional top-level market_index_snapshot, optional financial/news summaries, account exposure, eligibility, evidence mode, and errors. Absence of optional market_index_snapshot or financial/news data is context only; it must not lower score, lower confidence, exclude a symbol, remove a final holding quantity, or block orders by itself.
 
-Verdict sub-agents receive launcher-created `verdict-inputs/` slices containing only the listed `symbol_ids`. `first-verdict` reads a role-scoped `verdict-core` slice derived from `decision-brief.json` and filtered to the execution agent's output view input profiles. `second-verdict` reads `verdict-core` plus a selected-symbol slice derived from `verdict-first.json`. Raw prompt fallback is forbidden for verdict stages. Verdict sub-agents may use read-only local shell commands such as `cat` and `jq` only for explicitly listed artifact/persona/rule files. Do not load unrelated symbols, raw memory caches, optional source files, secrets, or unlisted paths.
+Review sub-agents receive launcher-created `review-inputs/` slices containing only the listed `symbol_ids`. `analyst-review` reads a role-scoped `review-core` slice derived from `decision-brief.json` and filtered to the execution agent's output view input profiles. `judge-review` reads `review-core` plus a selected-symbol slice derived from `analyst-review.json`. Raw prompt fallback is forbidden for review stages. Review sub-agents may use read-only local shell commands such as `cat` and `jq` only for explicitly listed artifact/persona/rule files. Do not load unrelated symbols, raw memory caches, optional source files, secrets, or unlisted paths.
 
-## `first-verdict`
+## `analyst-review`
 
-Selected first-verdict execution personas produce four canonical independent scores for every eligible symbol. `analyst-fundamental-risk` runs once and must return two independent views: `analyst-quality-value` and `analyst-risk-allocation`. `analyst-market-news` runs once and must return two independent views: `analyst-momentum-cycle` and `analyst-news-flow`.
+Selected analyst-review execution personas produce four canonical independent scores for every eligible symbol. `analyst-quality-risk` runs once and must return two independent views: `analyst-quality-value` and `analyst-risk-allocation`. `analyst-momentum-news` runs once and must return two independent views: `analyst-momentum-cycle` and `analyst-news-flow`.
 
 - `analyst-quality-value` covers financial stability, earnings growth, valuation, and quality/value factors.
 - `analyst-momentum-cycle` covers price trend, supply/demand, sector cycle, macro sensitivity, theme/event momentum, and earnings momentum.
 - `analyst-risk-allocation` covers volatility, liquidity, stop-loss room, duplicate ETF/index exposure, concentration, and portfolio fit.
-- `analyst-news-flow` covers supplied KIS news/disclosure direction, materiality, freshness, and mixed-news risk. If no usable news/disclosure summary is supplied, it must return `score=5`, `confidence=5`, and `reason_code="no_news_excluded"` for audit; Main helper excludes that row from first-verdict aggregation.
+- `analyst-news-flow` covers supplied KIS news/disclosure direction, materiality, freshness, and mixed-news risk. If no usable news/disclosure summary is supplied, it must return `score=5`, `confidence=5`, and `reason_code="no_news_excluded"` for audit; Main helper excludes that row from analyst-review aggregation.
 
-When `agent_role` is `analyst-fundamental-risk` or `analyst-market-news`, return each symbol with a `views` object instead of top-level `score` and `confidence`:
+When `agent_role` is `analyst-quality-risk` or `analyst-momentum-news`, return each symbol with a `views` object instead of top-level `score` and `confidence`:
 
 ```json
 {
@@ -97,7 +90,7 @@ When `agent_role` is `analyst-fundamental-risk` or `analyst-market-news`, return
 }
 ```
 
-For `analyst-market-news`, use the same shape with `views.analyst-momentum-cycle` and `views.analyst-news-flow`.
+For `analyst-momentum-news`, use the same shape with `views.analyst-momentum-cycle` and `views.analyst-news-flow`.
 
 The two views in each combined execution agent must be evaluated independently. Do not copy one view's score, confidence, reason_code, or one_line_reason into the other view.
 
@@ -117,8 +110,8 @@ Return JSON:
 {
   "agent_id": "",
   "persona": "",
-  "stage": "first-verdict",
-  "human_markdown_path": "reports/runs/<run_id>/verdicts/first-verdict--<agent_role>--<task_name>.md",
+  "stage": "analyst-review",
+  "human_markdown_path": "reports/runs/<run_id>/reviews/analyst-review--<agent_role>--<task_name>.md",
   "symbols": [
     {
       "symbol_id": "",
@@ -151,7 +144,7 @@ Rules:
 - `reason_code` is a short snake_case label. `one_line_reason` is one concise Korean sentence citing only supplied evidence when useful.
 - Do not return long `evidence`, `risks`, `rationale`, or prose arrays.
 - One symbol's data cannot support another symbol.
-- Agents cannot see other verdict outputs.
+- Agents cannot see other review outputs.
 - `human_markdown_path` is informational.
 
 Aggregation by Main agent:
@@ -167,11 +160,11 @@ final_first_score = mean_confidence_adjusted_score
 
 `confidence_adjusted_score` pulls low-confidence scores toward neutral `5`; raw `confidence<=4` becomes neutral weight `0`, raw `confidence=5` becomes effective confidence `2.5`, raw `confidence=6` becomes `5`, raw `confidence=7` becomes `7.5`, and raw `confidence>=8` preserves the original `score`.
 In the normal successful path, the aggregation uses four canonical views: `analyst-quality-value`, `analyst-risk-allocation`, `analyst-momentum-cycle`, and `analyst-news-flow`. If `analyst-news-flow` has no usable news/disclosure summary, preserve its row with `excluded_from_aggregation=true` and aggregate the remaining included views only. If any other view score is missing or unusable, keep the valid-score aggregation rule above and surface the missing score as an artifact error.
-If no valid score exists, exclude that symbol from `second-verdict` and trading.
+If no valid score exists, exclude that symbol from `judge-review` and trading.
 
-## `second-verdict`
+## `judge-review`
 
-Input set = eligible symbols with decimal `final_first_score >= 6` plus every eligible `holding` symbol from `$check-portfolio`. Only `judge-final` compares that set at portfolio level. If its required output is missing or unusable, retry only the failed `judge-final` task at most two times.
+Input set = eligible symbols with decimal `final_first_score >= 6` plus every eligible `holding` symbol from `$check-portfolio`. Only `judge` compares that set at portfolio level. If its required output is missing or unusable, retry only the failed `judge` task at most two times.
 
 Return JSON:
 
@@ -179,8 +172,8 @@ Return JSON:
 {
   "agent_id": "",
   "persona": "final",
-  "stage": "second-verdict",
-  "human_markdown_path": "reports/runs/<run_id>/verdicts/second-verdict--<agent_role>--<task_name>.md",
+  "stage": "judge-review",
+  "human_markdown_path": "reports/runs/<run_id>/reviews/judge-review--<agent_role>--<task_name>.md",
   "symbols": [
     {
       "symbol_id": "005930",
@@ -202,12 +195,12 @@ Rules:
 - A reduce rationale must set `final_holding_quantity` below `expected_holding_quantity`; an increase rationale must set it above; a hold rationale must set it equal.
 - "No additional buy", "no extra exposure", or "추가 확대 없음" is a hold rationale: set `final_holding_quantity` equal to `expected_holding_quantity`, not `0`.
 - `reason_code` and `one_line_reason` must describe the same reduce/hold/increase direction implied by `final_holding_quantity`.
-- Every second-verdict symbol receives a final holding quantity, including valid reduce-to-zero holdings when the rationale explicitly says reduce/exit/sell.
-- Consider relative attractiveness, duplicate exposure, current weight, price/chart conditions, and the supplied selected-symbol first-verdict results.
-- Treat `final_first_score` as the unrounded confidence-adjusted first-verdict score: `>= 6` is a buy/increase candidate, `<= 4` is a reduce/exit candidate, and `5` is neutral.
+- Every judge-review symbol receives a final holding quantity, including valid reduce-to-zero holdings when the rationale explicitly says reduce/exit/sell.
+- Consider relative attractiveness, duplicate exposure, current weight, price/chart conditions, and the supplied selected-symbol analyst-review results.
+- Treat `final_first_score` as the unrounded confidence-adjusted analyst-review score: `>= 6` is a buy/increase candidate, `<= 4` is a reduce/exit candidate, and `5` is neutral.
 - When referring to per-analyst scores in `agent_scores`, use `confidence_adjusted_score` as the score. `score` and `confidence` are supporting inputs explaining that adjusted score.
-- If a symbol's first-verdict score is missing, unavailable, or unusable, treat its score as neutral `5` instead of failing the judgment.
-- First-verdict scores are judgment inputs, not hard buy/sell gates.
+- If a symbol's analyst-review score is missing, unavailable, or unusable, treat its score as neutral `5` instead of failing the judgment.
+- `analyst-review` scores are judgment inputs, not hard buy/sell gates.
 - For holding symbols, distinguish `long_term_thesis_intact` from `add_allowed`: intact thesis suppresses unnecessary sell/reduce decisions, but it is not by itself permission to increase final holding quantity.
 - Judge long-term thesis from supplied evidence only: core investment rationale, material news/disclosure risk, quality/value deterioration, whether a price shock indicates structural damage or short-term volatility, and portfolio weight/concentration.
 - Increase final holding quantity only when add conditions are also satisfied: quality/value advantage, acceptable risk/allocation, weight/concentration room, explicit reassessment of any same-day/recent trade context, and no supplied material adverse news/disclosure.
@@ -219,7 +212,7 @@ Rules:
 
 Validation by Main agent:
 
-- Use the single valid `judge-final` final holding quantities as the canonical `verdict-second.json` `final_holding_quantity` values.
+- Use the single valid `judge` final holding quantities as the canonical `judge-review.json` `final_holding_quantity` values.
 - If the valid judge result is missing for a symbol, set no final holding quantity and exclude it from orders.
 - Validate final holdings against total assets and the latest available account/order gate using immutable price snapshot valuations.
 - If final holdings exceed assets, reduce only buy-side quantities in reverse relative-attractiveness order. Do not increase sell-side final quantities.
@@ -233,6 +226,6 @@ Validation by Main agent:
 |---|---|
 | artifact status | `success`, `partial`, `failed` |
 | score/confidence | integer `0` to `10` |
-| eligibility | `eligible_for_verdict=true/false` |
+| eligibility | `eligible_for_review=true/false` |
 | order direction | `buy`, `sell`, `none` |
 | execution result | `submitted`, `skipped`, `blocked`, `failed` |

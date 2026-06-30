@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build deterministic daily-trading run artifacts.
 
-This helper keeps data shaping, spec generation, verdict merging, execution
+This helper keeps data shaping, spec generation, review merging, execution
 planning, and token accounting out of the Main agent prompt path.
 """
 
@@ -18,22 +18,22 @@ from pathlib import Path
 from typing import Any
 
 
-FIRST_VERDICT_ROLES = (
+ANALYST_REVIEW_ROLES = (
     "analyst-quality-value",
     "analyst-momentum-cycle",
     "analyst-risk-allocation",
     "analyst-news-flow",
 )
-FIRST_VERDICT_SPEC_ROLES = (
-    "analyst-fundamental-risk",
-    "analyst-market-news",
+ANALYST_REVIEW_SPEC_ROLES = (
+    "analyst-quality-risk",
+    "analyst-momentum-news",
 )
-COMBINED_FIRST_VERDICT_ROLES = {
-    "analyst-fundamental-risk": (
+COMBINED_ANALYST_REVIEW_ROLES = {
+    "analyst-quality-risk": (
         "analyst-quality-value",
         "analyst-risk-allocation",
     ),
-    "analyst-market-news": (
+    "analyst-momentum-news": (
         "analyst-momentum-cycle",
         "analyst-news-flow",
     ),
@@ -707,7 +707,7 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
         required_missing = list(item.get("required_missing") or [])
         errors = list(item.get("errors") or [])
         usable_price = price.get("current_or_last") is not None and bool(price.get("observed_at"))
-        eligible = bool(item.get("eligible_for_verdict", True)) and usable_price and not required_missing
+        eligible = bool(item.get("eligible_for_review", True)) and usable_price and not required_missing
         if not usable_price and "price.current_or_last/observed_at" not in required_missing:
             required_missing.append("price.current_or_last/observed_at")
         financial_summary = financial_summary_for(financial_cache, symbol_id, args.financial_cache_path)
@@ -717,7 +717,7 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
             "symbol_id": symbol_id,
             "symbol_name": item.get("symbol_name") or (account_item or {}).get("symbol_name") or symbol_id,
             "product_type": item.get("product_type") or "stock",
-            "eligible_for_verdict": eligible,
+            "eligible_for_review": eligible,
             "evidence_mode": "full" if financial_summary["cache_status"] == "supplied" else "price_only",
             "exclusion_reasons": [] if eligible else required_missing,
             "price": {
@@ -742,7 +742,7 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
         }
         artifact["symbols"].append(symbol)
 
-    if artifact["errors"] or any(not item.get("eligible_for_verdict") for item in artifact["symbols"]):
+    if artifact["errors"] or any(not item.get("eligible_for_review") for item in artifact["symbols"]):
         artifact["status"] = "partial"
     write_json(Path(args.output), artifact)
     return artifact
@@ -752,7 +752,7 @@ def eligible_symbol_ids(decision_brief: dict[str, Any]) -> list[str]:
     return [
         symbol_key(item)
         for item in decision_brief.get("symbols", [])
-        if isinstance(item, dict) and item.get("eligible_for_verdict") and symbol_key(item)
+        if isinstance(item, dict) and item.get("eligible_for_review") and symbol_key(item)
     ]
 
 
@@ -763,11 +763,11 @@ def artifact_path(path: str | Path, absolute: bool) -> str:
     return str(path_obj)
 
 
-def verdict_extra_instructions(path: str | Path | None, stage_key: str) -> list[str]:
+def review_extra_instructions(path: str | Path | None, stage_key: str) -> list[str]:
     if not path:
         return []
     payload = load_json(Path(path))
-    raw = payload.get("verdict_extra_instructions") if isinstance(payload, dict) else None
+    raw = payload.get("review_extra_instructions") if isinstance(payload, dict) else None
     if not isinstance(raw, dict):
         return []
     items = raw.get(stage_key)
@@ -785,17 +785,17 @@ def build_first_specs(args: argparse.Namespace) -> dict[str, Any]:
     workspace_dir = str(Path(args.workspace_dir).resolve())
     daily_pipeline_dir = Path(args.pipeline_dir).resolve()
     absolute_paths = not args.relative_paths
-    extra_instructions = verdict_extra_instructions(
-        getattr(args, "verdict_extra_instructions_file", ""),
-        "first_verdict",
+    extra_instructions = review_extra_instructions(
+        getattr(args, "review_extra_instructions_file", ""),
+        "analyst_review",
     )
 
     specs = []
-    for role in FIRST_VERDICT_SPEC_ROLES:
+    for role in ANALYST_REVIEW_SPEC_ROLES:
         spec = {
             "run_id": run_id,
             "started_at": started_at,
-            "stage": "first-verdict",
+            "stage": "analyst-review",
             "agent_role": role,
             "task_name": f"first-{role}",
             "workspace_dir": workspace_dir,
@@ -803,7 +803,7 @@ def build_first_specs(args: argparse.Namespace) -> dict[str, Any]:
             "artifact_paths": {
                 "decision_brief": artifact_path(args.decision_brief or output_dir / "decision-brief.json", absolute_paths),
                 "persona": artifact_path(daily_pipeline_dir / "prompts" / f"{role}.md", absolute_paths),
-                "verdict_format": artifact_path(daily_pipeline_dir / "prompts" / "verdict-format.md", absolute_paths),
+                "review_format": artifact_path(daily_pipeline_dir / "prompts" / "analyst-review-format.md", absolute_paths),
             },
             "symbol_ids": symbol_ids,
         }
@@ -815,16 +815,11 @@ def build_first_specs(args: argparse.Namespace) -> dict[str, Any]:
     return payload
 
 
-def normalize_verdict_payload(payload: Any, stage: str) -> dict[str, Any] | None:
+def normalize_review_payload(payload: Any, stage: str) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         return None
     normalized = dict(payload)
-    if not isinstance(normalized.get("symbols"), list):
-        for key in ("verdicts", "results", "items"):
-            if isinstance(normalized.get(key), list):
-                normalized["symbols"] = normalized[key]
-                break
-    if stage == "first-verdict" and isinstance(normalized.get("symbols"), list):
+    if stage == "analyst-review" and isinstance(normalized.get("symbols"), list):
         symbols = []
         for item in normalized["symbols"]:
             if not isinstance(item, dict):
@@ -853,11 +848,11 @@ def finite_number(value: Any) -> float | None:
 
 
 def first_sidecar_path(output_dir: Path, role: str, task_name: str) -> Path:
-    return output_dir / "verdicts" / f"first-verdict--{safe_name(role)}--{safe_name(task_name)}.md"
+    return output_dir / "reviews" / f"analyst-review--{safe_name(role)}--{safe_name(task_name)}.md"
 
 
 def second_sidecar_path(output_dir: Path, role: str, task_name: str) -> Path:
-    return output_dir / "verdicts" / f"second-verdict--{safe_name(role)}--{safe_name(task_name)}.md"
+    return output_dir / "reviews" / f"judge-review--{safe_name(role)}--{safe_name(task_name)}.md"
 
 
 def write_first_sidecar(path: Path, symbols: list[dict[str, Any]]) -> None:
@@ -916,7 +911,7 @@ def load_success_first_wrappers(subagent_dir: Path) -> tuple[dict[str, dict[str,
     errors: list[dict[str, Any]] = []
     for wrapper_path in sorted(subagent_dir.glob("*.wrapper.json")):
         wrapper = load_json(wrapper_path)
-        if wrapper.get("stage") != "first-verdict":
+        if wrapper.get("stage") != "analyst-review":
             continue
         role = str(wrapper.get("agent_role") or "")
         if wrapper.get("status") != "success":
@@ -925,13 +920,13 @@ def load_success_first_wrappers(subagent_dir: Path) -> tuple[dict[str, dict[str,
         previous = by_role.get(role)
         if previous is None or str(wrapper.get("ended_at", "")) >= str(previous.get("ended_at", "")):
             by_role[role] = wrapper
-    for role in FIRST_VERDICT_SPEC_ROLES:
+    for role in ANALYST_REVIEW_SPEC_ROLES:
         if role in by_role:
             continue
         for source in failures_by_role.get(role, []):
             errors.append(
                 {
-                    "stage": "first-verdict",
+                    "stage": "analyst-review",
                     "source": source,
                     "code": "wrapper_failed",
                     "message": f"{role} wrapper has no successful replacement",
@@ -954,7 +949,7 @@ def view_payload(item: dict[str, Any], role: str) -> dict[str, Any] | None:
 
 
 def expanded_first_scores(role: str, item: dict[str, Any]) -> list[dict[str, Any]]:
-    expanded_roles = COMBINED_FIRST_VERDICT_ROLES.get(role)
+    expanded_roles = COMBINED_ANALYST_REVIEW_ROLES.get(role)
     if not expanded_roles:
         score = dict(item)
         score["agent_role"] = role
@@ -995,7 +990,7 @@ def mark_news_flow_excluded_without_news(score_item: dict[str, Any], brief_symbo
     return normalized
 
 
-def build_verdict_first(args: argparse.Namespace) -> dict[str, Any]:
+def build_analyst_review(args: argparse.Namespace) -> dict[str, Any]:
     output_dir = Path(args.output_dir)
     decision_brief = load_json(Path(args.decision_brief or output_dir / "decision-brief.json"))
     symbols_by_id = indexed_symbols(decision_brief.get("symbols"))
@@ -1004,11 +999,11 @@ def build_verdict_first(args: argparse.Namespace) -> dict[str, Any]:
 
     agent_scores: dict[str, list[dict[str, Any]]] = {symbol_id: [] for symbol_id in symbol_ids}
     for role, wrapper in wrappers_by_role.items():
-        payload = normalize_verdict_payload(wrapper.get("parsed_json"), "first-verdict")
+        payload = normalize_review_payload(wrapper.get("parsed_json"), "analyst-review")
         if payload is None:
             errors.append(
                 {
-                    "stage": "first-verdict",
+                    "stage": "analyst-review",
                     "source": wrapper.get("task_name") or role,
                     "code": "missing_parsed_json",
                     "message": "successful wrapper has no parsed_json object",
@@ -1018,7 +1013,7 @@ def build_verdict_first(args: argparse.Namespace) -> dict[str, Any]:
             continue
         symbols = [item for item in payload.get("symbols", []) if isinstance(item, dict)]
         sidecar = first_sidecar_path(output_dir, role, str(wrapper.get("task_name") or role))
-        if role in COMBINED_FIRST_VERDICT_ROLES:
+        if role in COMBINED_ANALYST_REVIEW_ROLES:
             write_combined_first_sidecar(sidecar, role, symbols, symbols_by_id)
         else:
             write_first_sidecar(sidecar, symbols)
@@ -1047,16 +1042,16 @@ def build_verdict_first(args: argparse.Namespace) -> dict[str, Any]:
                     }
                 )
 
-    artifact = common_envelope(decision_brief.get("run_id") or output_dir.name, decision_brief.get("started_at") or "", "verdict-first")
+    artifact = common_envelope(decision_brief.get("run_id") or output_dir.name, decision_brief.get("started_at") or "", "analyst-review")
     artifact["errors"] = errors
     for symbol_id in symbol_ids:
         scores = agent_scores.get(symbol_id, [])
         seen_roles = {str(item.get("agent_role") or "") for item in scores}
-        missing_roles = [role for role in FIRST_VERDICT_ROLES if role not in seen_roles]
+        missing_roles = [role for role in ANALYST_REVIEW_ROLES if role not in seen_roles]
         for role in missing_roles:
             artifact["errors"].append(
                 {
-                    "stage": "first-verdict",
+                    "stage": "analyst-review",
                     "symbol_id": symbol_id,
                     "source": "merge-first",
                     "code": "missing_agent_score",
@@ -1091,12 +1086,12 @@ def build_verdict_first(args: argparse.Namespace) -> dict[str, Any]:
 def build_second_spec(args: argparse.Namespace) -> dict[str, Any]:
     output_dir = Path(args.output_dir)
     decision_brief = load_json(Path(args.decision_brief or output_dir / "decision-brief.json"))
-    verdict_first = load_json(Path(args.verdict_first or output_dir / "verdict-first.json"))
+    analyst_review = load_json(Path(args.analyst_review or output_dir / "analyst-review.json"))
     portfolio = read_json_arg(args.portfolio_json)
     eligible = set(eligible_symbol_ids(decision_brief))
 
     selected: list[str] = []
-    for item in verdict_first.get("symbols", []):
+    for item in analyst_review.get("symbols", []):
         symbol_id = symbol_key(item)
         final_first_score = finite_number(item.get("final_first_score"))
         if symbol_id in eligible and final_first_score is not None and final_first_score >= args.min_score:
@@ -1105,27 +1100,27 @@ def build_second_spec(args: argparse.Namespace) -> dict[str, Any]:
         if symbol_id in eligible and symbol_id not in selected:
             selected.append(symbol_id)
 
-    (output_dir / "second-verdict-symbols.txt").write_text("\n".join(selected) + ("\n" if selected else ""), encoding="utf-8")
+    (output_dir / "judge-review-symbols.txt").write_text("\n".join(selected) + ("\n" if selected else ""), encoding="utf-8")
 
     daily_pipeline_dir = Path(args.pipeline_dir).resolve()
     absolute_paths = not args.relative_paths
-    extra_instructions = verdict_extra_instructions(
-        getattr(args, "verdict_extra_instructions_file", ""),
-        "second_verdict",
+    extra_instructions = review_extra_instructions(
+        getattr(args, "review_extra_instructions_file", ""),
+        "judge_review",
     )
     payload = {
         "run_id": args.run_id or decision_brief.get("run_id") or output_dir.name,
         "started_at": args.started_at or decision_brief.get("started_at") or "",
-        "stage": "second-verdict",
-        "agent_role": "judge-final",
-        "task_name": "second-judge-final",
+        "stage": "judge-review",
+        "agent_role": "judge",
+        "task_name": "second-judge",
         "workspace_dir": str(Path(args.workspace_dir).resolve()),
         "output_dir": str(output_dir),
         "artifact_paths": {
             "decision_brief": artifact_path(args.decision_brief or output_dir / "decision-brief.json", absolute_paths),
-            "verdict_first": artifact_path(args.verdict_first or output_dir / "verdict-first.json", absolute_paths),
-            "persona": artifact_path(daily_pipeline_dir / "prompts" / "judge-final.md", absolute_paths),
-            "verdict_format": artifact_path(daily_pipeline_dir / "prompts" / "verdict-format.md", absolute_paths),
+            "analyst_review": artifact_path(args.analyst_review or output_dir / "analyst-review.json", absolute_paths),
+            "persona": artifact_path(daily_pipeline_dir / "prompts" / "judge.md", absolute_paths),
+            "review_format": artifact_path(daily_pipeline_dir / "prompts" / "analyst-review-format.md", absolute_paths),
         },
         "symbol_ids": selected,
     }
@@ -1152,7 +1147,7 @@ def active_quantities(account: dict[str, Any]) -> dict[str, dict[str, int]]:
 
 def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
     output_dir = Path(args.output_dir)
-    verdict_second = load_json(Path(args.verdict_second or output_dir / "verdict-second.json"))
+    judge_review = load_json(Path(args.judge_review or output_dir / "judge-review.json"))
     account = load_json(Path(args.account_before_order or output_dir / "account-before-order.json"))
     decision_brief_path = Path(args.decision_brief) if args.decision_brief else output_dir / "decision-brief.json"
     decision_brief = load_json(decision_brief_path)
@@ -1164,8 +1159,8 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError(f"unsupported order_path: {order_path}")
     order_api = "order_cash" if order_path == "immediate" else "order_resv"
 
-    run_id = args.run_id or verdict_second.get("run_id") or account.get("run_id") or output_dir.name
-    started_at = args.started_at or verdict_second.get("started_at") or account.get("started_at") or ""
+    run_id = args.run_id or judge_review.get("run_id") or account.get("run_id") or output_dir.name
+    started_at = args.started_at or judge_review.get("started_at") or account.get("started_at") or ""
     artifact = common_envelope(run_id, started_at, "execution")
     artifact.update(
         {
@@ -1184,7 +1179,7 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
     blocked_any = False
     invalid_final_quantity = False
     refreshable_gate_blocked = False
-    for item in verdict_second.get("symbols", []):
+    for item in judge_review.get("symbols", []):
         if not isinstance(item, dict):
             continue
         symbol_id = symbol_key(item)
@@ -1426,7 +1421,7 @@ def run_self_test() -> int:
                         "symbol_id": "005930",
                         "symbol_name": "삼성전자",
                         "product_type": "stock",
-                        "eligible_for_verdict": True,
+                        "eligible_for_review": True,
                         "price": {"current_or_last": 70000, "observed_at": "2026-06-18T09:00:00+09:00", "snapshot_mode": "live"},
                         "local_signals": [
                             {"name": "day_change_pct", "value": 1.2},
@@ -1448,7 +1443,7 @@ def run_self_test() -> int:
                         "symbol_id": "000660",
                         "symbol_name": "SK하이닉스",
                         "product_type": "stock",
-                        "eligible_for_verdict": True,
+                        "eligible_for_review": True,
                         "price": {"current_or_last": 200000, "observed_at": "2026-06-18T09:00:00+09:00", "snapshot_mode": "live"},
                         "local_signals": [],
                         "required_missing": [],
@@ -1646,7 +1641,7 @@ symbols:
             first_specs = build_first_specs(
                 argparse.Namespace(
                     output_dir=run_dir,
-                    output=run_dir / "first-verdict-specs.json",
+                    output=run_dir / "analyst-review-specs.json",
                     decision_brief=str(run_dir / "decision-brief.json"),
                     run_id=None,
                     started_at=None,
@@ -1659,7 +1654,7 @@ symbols:
             if len(first_specs["specs"]) != 2 or not Path(first_specs["specs"][0]["artifact_paths"]["persona"]).is_absolute():
                 failures.append(f"unexpected first specs: {first_specs}")
             subagent_dir = run_dir / "subagents"
-            for role in FIRST_VERDICT_SPEC_ROLES:
+            for role in ANALYST_REVIEW_SPEC_ROLES:
                 parsed_symbols = [
                     {
                         "symbol_id": "005930",
@@ -1678,8 +1673,8 @@ symbols:
                         "one_line_reason": "test",
                     },
                 ]
-                if role in COMBINED_FIRST_VERDICT_ROLES:
-                    view_roles = COMBINED_FIRST_VERDICT_ROLES[role]
+                if role in COMBINED_ANALYST_REVIEW_ROLES:
+                    view_roles = COMBINED_ANALYST_REVIEW_ROLES[role]
                     parsed_symbols = [
                         {
                             "symbol_id": item["symbol_id"],
@@ -1700,30 +1695,30 @@ symbols:
                 write_json(
                     subagent_dir / f"first-{role}.wrapper.json",
                     {
-                        "stage": "first-verdict",
+                        "stage": "analyst-review",
                         "agent_role": role,
                         "task_name": f"first-{role}",
                         "status": "success",
                         "ended_at": "2026-06-18T00:00:00+00:00",
                         "parsed_json": {
-                            "stage": "first-verdict",
+                            "stage": "analyst-review",
                             "symbols": parsed_symbols,
                         },
                     },
                 )
-            verdict_first = build_verdict_first(
+            analyst_review = build_analyst_review(
                 argparse.Namespace(
                     output_dir=run_dir,
-                    output=run_dir / "verdict-first.json",
+                    output=run_dir / "analyst-review.json",
                     decision_brief=str(run_dir / "decision-brief.json"),
                     symbol_ids="",
                 )
             )
-            if verdict_first["symbols"][0]["final_first_score"] != 5.5:
-                failures.append(f"unexpected first verdict score: {verdict_first}")
+            if analyst_review["symbols"][0]["final_first_score"] != 5.5:
+                failures.append(f"unexpected first review score: {analyst_review}")
             news_scores = [
                 item
-                for item in verdict_first["symbols"][0].get("agent_scores", [])
+                for item in analyst_review["symbols"][0].get("agent_scores", [])
                 if item.get("agent_role") == "analyst-news-flow"
             ]
             if (
@@ -1733,39 +1728,39 @@ symbols:
                 or news_scores[0].get("reason_code") != "no_news_excluded"
                 or news_scores[0].get("excluded_from_aggregation") is not True
             ):
-                failures.append(f"news-flow without news should be marked excluded from aggregation: {verdict_first}")
-            if verdict_first["symbols"][0].get("aggregation_score_count") != 3:
-                failures.append(f"no-news news-flow should be excluded from aggregation count: {verdict_first}")
+                failures.append(f"news-flow without news should be marked excluded from aggregation: {analyst_review}")
+            if analyst_review["symbols"][0].get("aggregation_score_count") != 3:
+                failures.append(f"no-news news-flow should be excluded from aggregation count: {analyst_review}")
             market_news_sidecar = (
                 run_dir
-                / "verdicts"
-                / "first-verdict--analyst-market-news--first-analyst-market-news.md"
+                / "reviews"
+                / "analyst-review--analyst-momentum-news--first-analyst-momentum-news.md"
             )
             market_news_text = market_news_sidecar.read_text(encoding="utf-8")
             if "| analyst-news-flow | 005930 삼성전자 | 5 | 5 | 뉴스 정보가 없어 평균에서 제외 |" not in market_news_text:
                 failures.append(f"news-flow sidecar should reflect average exclusion: {market_news_text}")
-            missing_wrapper_path = subagent_dir / "first-analyst-fundamental-risk.wrapper.json"
+            missing_wrapper_path = subagent_dir / "first-analyst-quality-risk.wrapper.json"
             missing_wrapper = load_json(missing_wrapper_path)
             missing_wrapper["parsed_json"]["symbols"][1]["views"].pop("analyst-risk-allocation")
             write_json(missing_wrapper_path, missing_wrapper)
-            missing_verdict_first = build_verdict_first(
+            missing_analyst_review = build_analyst_review(
                 argparse.Namespace(
                     output_dir=run_dir,
-                    output=run_dir / "verdict-first-missing.json",
+                    output=run_dir / "analyst-review-missing.json",
                     decision_brief=str(run_dir / "decision-brief.json"),
                     symbol_ids="",
                 )
             )
-            if missing_verdict_first["status"] != "partial" or not any(
-                error.get("code") == "missing_agent_score" for error in missing_verdict_first["errors"]
+            if missing_analyst_review["status"] != "partial" or not any(
+                error.get("code") == "missing_agent_score" for error in missing_analyst_review["errors"]
             ):
-                failures.append(f"missing persona score did not produce partial verdict: {missing_verdict_first}")
+                failures.append(f"missing persona score did not produce partial review: {missing_analyst_review}")
             second_spec = build_second_spec(
                 argparse.Namespace(
                     output_dir=run_dir,
-                    output=run_dir / "second-verdict-spec.json",
+                    output=run_dir / "judge-review-spec.json",
                     decision_brief=str(run_dir / "decision-brief.json"),
-                    verdict_first=str(run_dir / "verdict-first.json"),
+                    analyst_review=str(run_dir / "analyst-review.json"),
                     portfolio_json=str(tmp / "portfolio.json"),
                     run_id=None,
                     started_at=None,
@@ -1777,17 +1772,17 @@ symbols:
             )
             if second_spec["symbol_ids"] != ["005930"]:
                 failures.append(f"unexpected second spec symbols: {second_spec}")
-            threshold_verdict_first = load_json(run_dir / "verdict-first.json")
-            for item in threshold_verdict_first.get("symbols", []):
+            threshold_analyst_review = load_json(run_dir / "analyst-review.json")
+            for item in threshold_analyst_review.get("symbols", []):
                 if item.get("symbol_id") == "000660":
                     item["final_first_score"] = 6.9
-            write_json(run_dir / "verdict-first-threshold-6.9.json", threshold_verdict_first)
+            write_json(run_dir / "analyst-review-threshold-6.9.json", threshold_analyst_review)
             threshold_69_spec = build_second_spec(
                 argparse.Namespace(
                     output_dir=run_dir,
-                    output=run_dir / "second-verdict-spec-threshold-6.9.json",
+                    output=run_dir / "judge-review-spec-threshold-6.9.json",
                     decision_brief=str(run_dir / "decision-brief.json"),
-                    verdict_first=str(run_dir / "verdict-first-threshold-6.9.json"),
+                    analyst_review=str(run_dir / "analyst-review-threshold-6.9.json"),
                     portfolio_json=str(tmp / "portfolio.json"),
                     run_id=None,
                     started_at=None,
@@ -1799,16 +1794,16 @@ symbols:
             )
             if threshold_69_spec["symbol_ids"] != ["000660", "005930"]:
                 failures.append(f"6.9 score should select new symbol and holding: {threshold_69_spec}")
-            for item in threshold_verdict_first.get("symbols", []):
+            for item in threshold_analyst_review.get("symbols", []):
                 if item.get("symbol_id") == "000660":
                     item["final_first_score"] = 7.0
-            write_json(run_dir / "verdict-first-threshold-7.0.json", threshold_verdict_first)
+            write_json(run_dir / "analyst-review-threshold-7.0.json", threshold_analyst_review)
             threshold_70_spec = build_second_spec(
                 argparse.Namespace(
                     output_dir=run_dir,
-                    output=run_dir / "second-verdict-spec-threshold-7.0.json",
+                    output=run_dir / "judge-review-spec-threshold-7.0.json",
                     decision_brief=str(run_dir / "decision-brief.json"),
-                    verdict_first=str(run_dir / "verdict-first-threshold-7.0.json"),
+                    analyst_review=str(run_dir / "analyst-review-threshold-7.0.json"),
                     portfolio_json=str(tmp / "portfolio.json"),
                     run_id=None,
                     started_at=None,
@@ -1821,7 +1816,7 @@ symbols:
             if threshold_70_spec["symbol_ids"] != ["000660", "005930"]:
                 failures.append(f"7.0 score should select new symbol and holding: {threshold_70_spec}")
             write_json(
-                run_dir / "verdict-second.json",
+                run_dir / "judge-review.json",
                 {
                     "run_id": "daily-trading-test",
                     "started_at": "2026-06-18 09:00:00 KST",
@@ -1841,7 +1836,7 @@ symbols:
                 argparse.Namespace(
                     output_dir=run_dir,
                     output=run_dir / "execution.json",
-                    verdict_second=str(run_dir / "verdict-second.json"),
+                    judge_review=str(run_dir / "judge-review.json"),
                     account_before_order=str(run_dir / "account-before-order.json"),
                     decision_brief=str(run_dir / "decision-brief.json"),
                     run_id=None,
@@ -1854,7 +1849,7 @@ symbols:
             if execution["orders"][0].get("order_path") != "reservation" or execution["orders"][0].get("order_api") != "order_resv":
                 failures.append(f"execution plan did not emit reservation order path/API: {execution['orders'][0]}")
             write_json(
-                run_dir / "verdict-second-invalid-final.json",
+                run_dir / "judge-review-invalid-final.json",
                 {
                     "run_id": "daily-trading-test",
                     "started_at": "2026-06-18 09:00:00 KST",
@@ -1873,7 +1868,7 @@ symbols:
                 argparse.Namespace(
                     output_dir=run_dir,
                     output=run_dir / "execution-invalid-final.json",
-                    verdict_second=str(run_dir / "verdict-second-invalid-final.json"),
+                    judge_review=str(run_dir / "judge-review-invalid-final.json"),
                     account_before_order=str(run_dir / "account-before-order.json"),
                     decision_brief=str(run_dir / "decision-brief.json"),
                     run_id=None,
@@ -1893,7 +1888,7 @@ symbols:
                 argparse.Namespace(
                     output_dir=run_dir,
                     output=run_dir / "execution-missing-gates.json",
-                    verdict_second=str(run_dir / "verdict-second.json"),
+                    judge_review=str(run_dir / "judge-review.json"),
                     account_before_order=str(run_dir / "account-before-order-missing-gates.json"),
                     decision_brief=str(run_dir / "decision-brief.json"),
                     run_id=None,
@@ -1915,7 +1910,7 @@ symbols:
                 argparse.Namespace(
                     output_dir=run_dir,
                     output=run_dir / "execution-ready.json",
-                    verdict_second=str(run_dir / "verdict-second.json"),
+                    judge_review=str(run_dir / "judge-review.json"),
                     account_before_order=str(run_dir / "account-before-order-ready.json"),
                     decision_brief=str(run_dir / "decision-brief.json"),
                     run_id=None,
@@ -1932,7 +1927,7 @@ symbols:
                 argparse.Namespace(
                     output_dir=run_dir,
                     output=run_dir / "execution-default-brief.json",
-                    verdict_second=str(run_dir / "verdict-second.json"),
+                    judge_review=str(run_dir / "judge-review.json"),
                     account_before_order=str(run_dir / "account-before-order-default-brief.json"),
                     decision_brief="",
                     run_id=None,
@@ -1983,7 +1978,7 @@ def build_parser() -> argparse.ArgumentParser:
     decision.add_argument("--started-at")
     decision.add_argument("--output", type=Path, default=None)
 
-    first_specs = subparsers.add_parser("first-specs", help="Build first-verdict-specs.json.")
+    first_specs = subparsers.add_parser("first-specs", help="Build analyst-review-specs.json.")
     first_specs.add_argument("--output-dir", type=Path, required=True)
     first_specs.add_argument("--decision-brief")
     first_specs.add_argument("--workspace-dir", default=".")
@@ -1992,32 +1987,32 @@ def build_parser() -> argparse.ArgumentParser:
     first_specs.add_argument("--run-id")
     first_specs.add_argument("--started-at")
     first_specs.add_argument("--relative-paths", action="store_true")
-    first_specs.add_argument("--verdict-extra-instructions-file", default="")
+    first_specs.add_argument("--review-extra-instructions-file", default="")
     first_specs.add_argument("--output", type=Path, default=None)
 
-    merge_first = subparsers.add_parser("merge-first", help="Merge first-verdict wrappers into verdict-first.json.")
+    merge_first = subparsers.add_parser("merge-first", help="Merge analyst-review wrappers into analyst-review.json.")
     merge_first.add_argument("--output-dir", type=Path, required=True)
     merge_first.add_argument("--decision-brief")
     merge_first.add_argument("--symbol-ids", default="")
     merge_first.add_argument("--output", type=Path, default=None)
 
-    second_spec = subparsers.add_parser("second-spec", help="Build second-verdict symbols and spec.")
+    second_spec = subparsers.add_parser("second-spec", help="Build judge-review symbols and spec.")
     second_spec.add_argument("--output-dir", type=Path, required=True)
     second_spec.add_argument("--portfolio-json", required=True)
     second_spec.add_argument("--decision-brief")
-    second_spec.add_argument("--verdict-first")
+    second_spec.add_argument("--analyst-review")
     second_spec.add_argument("--workspace-dir", default=".")
     second_spec.add_argument("--pipeline-dir", default=str(pipeline_dir()))
     second_spec.add_argument("--min-score", type=int, default=6)
     second_spec.add_argument("--run-id")
     second_spec.add_argument("--started-at")
     second_spec.add_argument("--relative-paths", action="store_true")
-    second_spec.add_argument("--verdict-extra-instructions-file", default="")
+    second_spec.add_argument("--review-extra-instructions-file", default="")
     second_spec.add_argument("--output", type=Path, default=None)
 
     execution = subparsers.add_parser("execution-plan", help="Build non-submitting execution.json plan.")
     execution.add_argument("--output-dir", type=Path, required=True)
-    execution.add_argument("--verdict-second")
+    execution.add_argument("--judge-review")
     execution.add_argument("--account-before-order")
     execution.add_argument("--decision-brief", help="Path to decision-brief.json. Defaults to <output-dir>/decision-brief.json.")
     execution.add_argument("--request-type", choices=["analysis", "prepare", "demo-submit", "real-submit"], default="analysis")
@@ -2044,17 +2039,17 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "first-specs":
         if args.output is None:
-            args.output = args.output_dir / "first-verdict-specs.json"
+            args.output = args.output_dir / "analyst-review-specs.json"
         print(json.dumps(build_first_specs(args), ensure_ascii=False, indent=2, sort_keys=True))
         return 0
     if args.command == "merge-first":
         if args.output is None:
-            args.output = args.output_dir / "verdict-first.json"
-        print(json.dumps(build_verdict_first(args), ensure_ascii=False, indent=2, sort_keys=True))
+            args.output = args.output_dir / "analyst-review.json"
+        print(json.dumps(build_analyst_review(args), ensure_ascii=False, indent=2, sort_keys=True))
         return 0
     if args.command == "second-spec":
         if args.output is None:
-            args.output = args.output_dir / "second-verdict-spec.json"
+            args.output = args.output_dir / "judge-review-spec.json"
         print(json.dumps(build_second_spec(args), ensure_ascii=False, indent=2, sort_keys=True))
         return 0
     if args.command == "execution-plan":

@@ -65,7 +65,7 @@ def order_line(item: dict[str, Any]) -> str:
     return f"- {symbol}: {direction} {quantity_text}, {result} ({reason}{adjustment_suffix}){suffix}"
 
 
-def verdict_line(item: dict[str, Any]) -> str:
+def review_line(item: dict[str, Any]) -> str:
     symbol = text(f"{item.get('symbol_id', '')} {item.get('symbol_name', '')}".strip())
     current_qty = as_int(item.get("current_live_holding_quantity"))
     final_qty = as_int(item.get("final_holding_quantity"))
@@ -82,15 +82,15 @@ def render(summary: dict[str, Any]) -> str:
     news = evidence.get("news") if isinstance(evidence.get("news"), dict) else {}
     today_timeline = summary.get("today_trade_summary") if isinstance(summary.get("today_trade_summary"), dict) else {}
     execution = summary.get("execution") if isinstance(summary.get("execution"), dict) else {}
-    verdict = summary.get("verdict_summary") if isinstance(summary.get("verdict_summary"), dict) else {}
+    review = summary.get("review_summary") if isinstance(summary.get("review_summary"), dict) else {}
     tokens = summary.get("token_usage") if isinstance(summary.get("token_usage"), dict) else {}
     total_tokens = ((tokens.get("total") or {}).get("total_tokens")) if isinstance(tokens.get("total"), dict) else 0
     orders = [item for item in execution.get("orders", []) if isinstance(item, dict)]
     submitted_or_blocked = [item for item in orders if item.get("result") in {"submitted", "blocked", "failed"}]
-    verdict_symbols = [item for item in verdict.get("symbols", []) if isinstance(item, dict)]
+    review_symbols = [item for item in review.get("symbols", []) if isinstance(item, dict)]
     changed = [
         item
-        for item in verdict_symbols
+        for item in review_symbols
         if as_int(item.get("current_live_holding_quantity")) != as_int(item.get("final_holding_quantity"))
         or item.get("order_result") in {"submitted", "blocked", "failed"}
     ]
@@ -146,7 +146,7 @@ def render(summary: dict[str, Any]) -> str:
         lines.append(f"- 외 {len(submitted_or_blocked) - 5}건")
     lines.extend(["", "평결"])
     for item in changed[:5]:
-        lines.append(verdict_line(item))
+        lines.append(review_line(item))
     if not changed:
         lines.append("- 최종수량 변경 또는 제출 주문 없음")
     if len(changed) > 5:
@@ -201,7 +201,7 @@ def self_test() -> int:
                 }
             ],
         },
-        "verdict_summary": {
+        "review_summary": {
             "symbols": [{"symbol_id": "005930", "symbol_name": "삼성전자", "current_live_holding_quantity": 0, "final_holding_quantity": 1, "one_line_reason": "테스트"}]
         },
         "token_usage": {"total": {"total_tokens": 123}},

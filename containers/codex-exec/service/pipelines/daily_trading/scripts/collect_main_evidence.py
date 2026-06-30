@@ -542,7 +542,7 @@ def build_price_row(
             "observed_at": observed_at,
             "snapshot_mode": "live",
         },
-        "eligible_for_verdict": not required_missing and not any(error.get("required") for error in errors),
+        "eligible_for_review": not required_missing and not any(error.get("required") for error in errors),
         "required_missing": required_missing,
         "local_signals": [signal for signal in signals if signal is not None],
         "charts": charts,
@@ -723,7 +723,7 @@ def collect_extended_market_evidence(
                 env_dv=env_dv,
                 end_at=end_at,
             )
-        except Exception as exc:  # noqa: BLE001 - preserve price-based verdict eligibility
+        except Exception as exc:  # noqa: BLE001 - preserve price-based review eligibility
             errors.append(safe_error(exc, code=f"{key}_chart_failed", stage="price-chart", symbol_id=symbol, source="direct_kis.inquire_daily_itemchartprice", required=False))
 
     for source, code, collector in (
@@ -817,8 +817,8 @@ def collect_price_chart(symbols: list[str], *, run_id: str, started_at: str, env
         artifact_errors.extend(symbol_errors)
 
     status = "success"
-    if any(not row["eligible_for_verdict"] for row in rows):
-        status = "partial" if any(row["eligible_for_verdict"] for row in rows) else "failed"
+    if any(not row["eligible_for_review"] for row in rows):
+        status = "partial" if any(row["eligible_for_review"] for row in rows) else "failed"
     return {
         "schema_version": "1",
         "run_id": run_id,
@@ -846,7 +846,7 @@ def failed_price_artifact(symbols: list[str], *, run_id: str, started_at: str, e
                 "symbol_name": symbol,
                 "product_type": "unresolved",
                 "price": {"current_or_last": None, "observed_at": "", "snapshot_mode": ""},
-                "eligible_for_verdict": False,
+                "eligible_for_review": False,
                 "required_missing": ["symbol_name", "price.current_or_last", "price.observed_at"],
                 "local_signals": [],
                 "sources": [],
@@ -1661,7 +1661,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
     assert row["orderbook_summary"]["best_bid"] == 18590
     assert row["orderbook_summary"]["expected_price"] == 18595
     assert row["investor_flow_summary"]["foreign_net_buy_quantity"] == 1000
-    assert row["eligible_for_verdict"]
+    assert row["eligible_for_review"]
     sample_account = normalize_holding(
         {
             "pdno": "0183J0",

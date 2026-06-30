@@ -30,9 +30,9 @@ TOKEN_USAGE_FIELDS = (
     "reasoning_output_tokens",
     "total_tokens",
 )
-FIRST_VERDICT_ROLES = (
-    "analyst-fundamental-risk",
-    "analyst-market-news",
+ANALYST_REVIEW_ROLES = (
+    "analyst-quality-risk",
+    "analyst-momentum-news",
 )
 COMMAND_OUTPUT_LIMIT = 2000
 ORDER_PATH_AUTO = "auto"
@@ -424,8 +424,8 @@ class Pipeline:
         self.command_log_path = self.output_dir / "pipeline-command-log.json"
         self.summary_path = self.output_dir / "pipeline-summary.json"
         self.run_path = self.output_dir / "run.json"
-        self.verdict_extra_instructions_path = self.resolve_optional_path(
-            getattr(args, "verdict_extra_instructions_file", "")
+        self.review_extra_instructions_path = self.resolve_optional_path(
+            getattr(args, "review_extra_instructions_file", "")
         )
         self.order_path_requested = str(getattr(args, "order_path", ORDER_PATH_AUTO) or ORDER_PATH_AUTO)
         try:
@@ -448,10 +448,10 @@ class Pipeline:
 
     def daily_trading_config_summary(self) -> dict[str, Any]:
         summary: dict[str, Any] = {}
-        if self.verdict_extra_instructions_path is not None:
-            summary["verdict_extra_instructions_path"] = str(self.verdict_extra_instructions_path)
-            if self.verdict_extra_instructions_path.exists():
-                summary["verdict_extra_instructions_sha256"] = file_sha256(self.verdict_extra_instructions_path)
+        if self.review_extra_instructions_path is not None:
+            summary["review_extra_instructions_path"] = str(self.review_extra_instructions_path)
+            if self.review_extra_instructions_path.exists():
+                summary["review_extra_instructions_sha256"] = file_sha256(self.review_extra_instructions_path)
         return summary
 
     def add_stage(self, name: str, status: str, *, detail: str = "", required: bool = True, path: Path | None = None) -> None:
@@ -943,10 +943,10 @@ class Pipeline:
         except json.JSONDecodeError:
             return None
 
-    def run_first_verdicts(self) -> None:
-        specs_path = self.output_dir / "first-verdict-specs.json"
+    def run_analyst_reviews(self) -> None:
+        specs_path = self.output_dir / "analyst-review-specs.json"
         result = self.run_cmd(
-            "first-verdict",
+            "analyst-review",
             [sys.executable, self.subagent_script(), "run-group", "--spec", str(specs_path), "--max-workers", str(self.args.max_workers)],
         )
         try:
@@ -954,23 +954,23 @@ class Pipeline:
         except json.JSONDecodeError:
             payload = {}
         if result.returncode == 0 and payload.get("status") == "success":
-            self.add_stage("first-verdict", "success", detail="all first-verdict wrappers succeeded", path=self.output_dir / "subagents")
+            self.add_stage("analyst-review", "success", detail="all analyst-review wrappers succeeded", path=self.output_dir / "subagents")
             return
-        self.add_stage("first-verdict", "failed", detail="required first-verdict wrapper failed", path=self.command_log_path)
-        raise RuntimeError("first-verdict failed")
+        self.add_stage("analyst-review", "failed", detail="required analyst-review wrapper failed", path=self.command_log_path)
+        raise RuntimeError("analyst-review failed")
 
-    def run_second_verdict(self) -> None:
-        spec_path = self.output_dir / "second-verdict-spec.json"
+    def run_judge_review(self) -> None:
+        spec_path = self.output_dir / "judge-review-spec.json"
         spec = load_json(spec_path)
         if not normalize_symbol_ids(spec.get("symbol_ids")):
             write_json(
-                self.output_dir / "verdict-second.json",
+                self.output_dir / "judge-review.json",
                 {
                     "schema_version": "1",
                     "run_id": self.run_id,
                     "started_at": self.started_at,
                     "generated_at": now_iso(),
-                    "stage": "verdict-second",
+                    "stage": "judge-review",
                     "status": "success",
                     "skipped": True,
                     "skip_reason": "no selected symbols",
@@ -978,23 +978,23 @@ class Pipeline:
                     "symbols": [],
                 },
             )
-            self.add_stage("second-verdict", "skipped", detail="no selected symbols", required=False, path=self.output_dir / "verdict-second.json")
+            self.add_stage("judge-review", "skipped", detail="no selected symbols", required=False, path=self.output_dir / "judge-review.json")
             return
-        last_detail = "required second-verdict wrapper failed"
+        last_detail = "required judge-review wrapper failed"
         for attempt in range(1, 4):
-            result = self.run_cmd("second-verdict", [sys.executable, self.subagent_script(), "run-one", "--spec", str(spec_path)])
+            result = self.run_cmd("judge-review", [sys.executable, self.subagent_script(), "run-one", "--spec", str(spec_path)])
             try:
                 wrapper = json.loads(result.stdout)
             except json.JSONDecodeError:
                 wrapper = {}
             if result.returncode == 0 and wrapper.get("status") == "success":
-                self.write_verdict_second(wrapper)
-                detail = "second-verdict wrapper merged" if attempt == 1 else f"second-verdict wrapper merged after retry {attempt - 1}"
-                self.add_stage("second-verdict", "success", detail=detail, path=self.output_dir / "verdict-second.json")
+                self.write_judge_review(wrapper)
+                detail = "judge-review wrapper merged" if attempt == 1 else f"judge-review wrapper merged after retry {attempt - 1}"
+                self.add_stage("judge-review", "success", detail=detail, path=self.output_dir / "judge-review.json")
                 return
-            last_detail = f"required second-verdict wrapper failed on attempt {attempt}"
-        self.add_stage("second-verdict", "failed", detail=last_detail, path=self.command_log_path)
-        raise RuntimeError("second-verdict failed")
+            last_detail = f"required judge-review wrapper failed on attempt {attempt}"
+        self.add_stage("judge-review", "failed", detail=last_detail, path=self.command_log_path)
+        raise RuntimeError("judge-review failed")
 
     def run_order_execution(self) -> dict[str, Any]:
         result = self.run_cmd(
@@ -1021,7 +1021,7 @@ class Pipeline:
             raise RuntimeError("order-execution failed")
         return execution
 
-    def write_verdict_second(self, wrapper: dict[str, Any]) -> None:
+    def write_judge_review(self, wrapper: dict[str, Any]) -> None:
         parsed = wrapper.get("parsed_json") if isinstance(wrapper.get("parsed_json"), dict) else {}
         symbols: list[dict[str, Any]] = []
         errors = wrapper.get("errors") if isinstance(wrapper.get("errors"), list) else []
@@ -1035,7 +1035,7 @@ class Pipeline:
             if final_quantity is None:
                 errors.append(
                     {
-                        "stage": "verdict-second",
+                        "stage": "judge-review",
                         "source": "pipeline",
                         "code": "invalid_final_holding_quantity",
                         "message": f"{symbol_id}: final_holding_quantity must be a non-negative integer",
@@ -1058,18 +1058,18 @@ class Pipeline:
             "run_id": self.run_id,
             "started_at": self.started_at,
             "generated_at": now_iso(),
-            "stage": "verdict-second",
+            "stage": "judge-review",
             "status": "success" if symbols else "partial",
             "skipped": False,
             "skip_reason": "",
             "errors": errors,
             "symbols": symbols,
         }
-        write_json(self.output_dir / "verdict-second.json", artifact)
-        self.write_second_sidecar(str(wrapper.get("agent_role") or "judge-final"), str(wrapper.get("task_name") or "second-judge-final"), symbols)
+        write_json(self.output_dir / "judge-review.json", artifact)
+        self.write_second_sidecar(str(wrapper.get("agent_role") or "judge"), str(wrapper.get("task_name") or "second-judge"), symbols)
 
     def write_second_sidecar(self, role: str, task_name: str, symbols: list[dict[str, Any]]) -> None:
-        path = self.output_dir / "verdicts" / f"second-verdict--{safe_name(role)}--{safe_name(task_name)}.md"
+        path = self.output_dir / "reviews" / f"judge-review--{safe_name(role)}--{safe_name(task_name)}.md"
         lines = [
             "| 종목 | 최종수량 | 상대매력도 | 판단코드 | 의견(판단) |",
             "|---|---:|---:|---|---|",
@@ -1237,12 +1237,12 @@ class Pipeline:
         self.run_id = str(run.get("run_id") or self.run_id)
         self.started_at = str(run.get("started_at") or self.started_at)
 
-    def build_verdict_summary(self, account: dict[str, Any], execution: dict[str, Any]) -> dict[str, Any]:
-        verdict_second = load_json_if_exists(self.output_dir / "verdict-second.json") or {}
+    def build_review_summary(self, account: dict[str, Any], execution: dict[str, Any]) -> dict[str, Any]:
+        judge_review = load_json_if_exists(self.output_dir / "judge-review.json") or {}
         account_by_symbol = {symbol_key(item): item for item in account.get("symbols", []) if isinstance(item, dict)}
         execution_by_symbol = {symbol_key(item): item for item in execution.get("orders", []) if isinstance(item, dict)}
         rows: list[dict[str, Any]] = []
-        for item in verdict_second.get("symbols", []) if isinstance(verdict_second, dict) else []:
+        for item in judge_review.get("symbols", []) if isinstance(judge_review, dict) else []:
             if not isinstance(item, dict):
                 continue
             symbol_id = symbol_key(item)
@@ -1275,7 +1275,7 @@ class Pipeline:
             )
         submitted = [item for item in rows if item.get("order_result") == "submitted"]
         return {
-            "status": verdict_second.get("status"),
+            "status": judge_review.get("status"),
             "symbol_count": len(rows),
             "submitted_order_count": len(submitted),
             "symbols": rows,
@@ -1285,11 +1285,11 @@ class Pipeline:
         path = self.report_path()
         account = summary.get("account_summary") if isinstance(summary.get("account_summary"), dict) else {}
         execution = summary.get("execution") if isinstance(summary.get("execution"), dict) else {}
-        verdict = summary.get("verdict_summary") if isinstance(summary.get("verdict_summary"), dict) else {}
+        review = summary.get("review_summary") if isinstance(summary.get("review_summary"), dict) else {}
         decision = summary.get("decision_brief") if isinstance(summary.get("decision_brief"), dict) else {}
         token_total = (((summary.get("token_usage") or {}).get("total") or {}).get("total_tokens")) if isinstance(summary.get("token_usage"), dict) else 0
         decision_brief = load_json_if_exists(self.output_dir / "decision-brief.json") or {}
-        verdict_first = load_json_if_exists(self.output_dir / "verdict-first.json") or {}
+        analyst_review = load_json_if_exists(self.output_dir / "analyst-review.json") or {}
         execution_full = load_json_if_exists(self.output_dir / "execution.json") or {}
         account_full = load_json_if_exists(self.output_dir / "account-before-order.json") or {}
         price_chart = load_json_if_exists(self.output_dir / "price-chart.json") or {}
@@ -1354,7 +1354,7 @@ class Pipeline:
         )
         excluded_count = 0
         for item in decision_brief.get("symbols", []) if isinstance(decision_brief, dict) else []:
-            if not isinstance(item, dict) or item.get("eligible_for_verdict", True):
+            if not isinstance(item, dict) or item.get("eligible_for_review", True):
                 continue
             excluded_count += 1
             lines.append(
@@ -1396,17 +1396,17 @@ class Pipeline:
                 "",
                 "## 3. `decision-brief.json` 요약",
                 f"- `decision-brief.json` 생성 여부: {'yes' if decision else 'no'}",
-                f"- 포함된 eligible 종목 수: {sum(1 for item in decision_brief.get('symbols', []) if isinstance(item, dict) and item.get('eligible_for_verdict', False)) if isinstance(decision_brief, dict) else 0}",
+                f"- 포함된 eligible 종목 수: {sum(1 for item in decision_brief.get('symbols', []) if isinstance(item, dict) and item.get('eligible_for_review', False)) if isinstance(decision_brief, dict) else 0}",
                 f"- price-only eligible 종목 수: {price_only_count}",
                 "- 제외된 raw payload / 기사 원문 / 민감정보: yes",
                 f"- 핵심 누락 또는 오류: {decision.get('error_count', 0)}건",
                 "",
-                "## 4. `first-verdict` 독립 평결",
+                "## 4. `analyst-review` 독립 평결",
                 "| 종목식별자 | 종목명 | 원점수 평균(0-10) | 평균 보정 신뢰도(0-10) | 확신도 보정 최종점수(0-10) | 유효 응답 수 | role별 점수/신뢰도/보정신뢰도/보정점수 | 핵심 근거 | 핵심 리스크 |",
                 "|---|---|---:|---:|---:|---:|---|---|---|",
             ]
         )
-        for item in verdict_first.get("symbols", []) if isinstance(verdict_first, dict) else []:
+        for item in analyst_review.get("symbols", []) if isinstance(analyst_review, dict) else []:
             if not isinstance(item, dict):
                 continue
             agent_scores = item.get("agent_scores") if isinstance(item.get("agent_scores"), list) else []
@@ -1447,8 +1447,8 @@ class Pipeline:
         lines.extend(
             [
                 "",
-                "## 5. `second-verdict` 포트폴리오 평결",
-                "- 최종 포트폴리오 판단: `judge-final` 최종 보유수량 결과 사용",
+                "## 5. `judge-review` 포트폴리오 평결",
+                "- 최종 포트폴리오 판단: `judge` 최종 보유수량 결과 사용",
                 "- 잔여 현금 처리: 목표현금을 별도 판단값으로 만들지 않고 최종 보유수량 충족 후 남는 금액으로만 기록",
                 f"- Main agent 검증 결과: {execution.get('status', '')}",
                 "",
@@ -1456,7 +1456,7 @@ class Pipeline:
                 "|---|---|---:|---:|---:|---|---|",
             ]
         )
-        for item in verdict.get("symbols", []) if isinstance(verdict.get("symbols"), list) else []:
+        for item in review.get("symbols", []) if isinstance(review.get("symbols"), list) else []:
             lines.append(
                 f"| {md_cell(item.get('symbol_id'))} | {md_cell(item.get('symbol_name'))} | {as_int(item.get('current_live_holding_quantity'))} | "
                 f"{as_int(item.get('final_holding_quantity'))} | {as_int(item.get('relative_attractiveness_rank'))} | "
@@ -1568,13 +1568,13 @@ class Pipeline:
                 f"- 보존된 partial / failed 아티팩트: {sum(1 for item in stages if isinstance(item, dict) and item.get('status') in {'partial', 'failed'})}",
                 f"- pipeline-summary.json: {summary.get('summary_path', '')}",
                 f"- decision-brief.json: {(summary.get('artifacts') or {}).get('decision_brief', '')}",
-                f"- verdict-second.json: {(summary.get('artifacts') or {}).get('verdict_second', '')}",
+                f"- judge-review.json: {(summary.get('artifacts') or {}).get('judge_review', '')}",
                 f"- execution.json: {(summary.get('artifacts') or {}).get('execution', '')}",
                 f"- 총 사용 토큰: {format_number(token_total)}",
                 "",
                 "## 11. 메모",
                 "- 당일 체결수량은 현재 보유수량에 이미 반영된 값으로 보고 다시 차감하지 않음",
-                "- `second-verdict`는 단일 `judge-final` 최종 보유수량을 사용하며 deterministic helper와 `execute_orders.py`가 총자산/주문가능금액/집중도/active 주문/same-day/account-order gate를 검증함",
+                "- `judge-review`는 단일 `judge` 최종 보유수량을 사용하며 deterministic helper와 `execute_orders.py`가 총자산/주문가능금액/집중도/active 주문/same-day/account-order gate를 검증함",
                 "- 투자 권유가 아니라 의사결정 보조 분석입니다.",
             ]
         )
@@ -1628,7 +1628,7 @@ class Pipeline:
             )
         stages = self.load_summary_stages()
         self.stages = stages
-        verdict_summary = self.build_verdict_summary(account, execution)
+        review_summary = self.build_review_summary(account, execution)
         symbols = normalize_symbol_ids(portfolio.get("universe"))
         account_summary = account.get("account_summary") if isinstance(account.get("account_summary"), dict) else {}
         account_display_summary = self.build_account_display_summary(account_summary)
@@ -1661,7 +1661,7 @@ class Pipeline:
                 "symbol_count": len(decision_brief.get("symbols", [])) if isinstance(decision_brief.get("symbols"), list) else 0,
                 "error_count": len(decision_brief.get("errors", [])) if isinstance(decision_brief.get("errors"), list) else 0,
             },
-            "verdict_summary": verdict_summary,
+            "review_summary": review_summary,
             "account_summary": account_summary,
             "account_display_summary": account_display_summary,
             "account_asset_summary": account_asset_summary,
@@ -1699,7 +1699,7 @@ class Pipeline:
                 "today_trade_amount_policy": "Show today_buy_amount/today_sell_amount only under a separate 당일 거래 누계 label when relevant; never present them as newly caused by this command unless execution.json confirms submitted orders.",
                 "gate_label": "주문 전 기존 미체결/예약 주문",
                 "evidence_policy": "Report evidence_summary.financial.display_text and evidence_summary.news.display_text, distinguishing missing cache from cache_exists_zero_usable_articles.",
-                "verdict_policy": "Mention judge-final/second-verdict outcome and submitted or final-quantity-changed symbols, including final holding quantity and one_line_reason when available.",
+                "review_policy": "Mention judge/judge-review outcome and submitted or final-quantity-changed symbols, including final holding quantity and one_line_reason when available.",
             },
             "artifacts": {
                 "check_portfolio": str(self.output_dir / "check-portfolio.json"),
@@ -1708,8 +1708,8 @@ class Pipeline:
                 "account_asset_snapshot": str(self.output_dir / "account-asset-snapshot.json"),
                 "today_fills": str(self.output_dir / "today-fills.json"),
                 "decision_brief": str(self.output_dir / "decision-brief.json"),
-                "verdict_first": str(self.output_dir / "verdict-first.json"),
-                "verdict_second": str(self.output_dir / "verdict-second.json"),
+                "analyst_review": str(self.output_dir / "analyst-review.json"),
+                "judge_review": str(self.output_dir / "judge-review.json"),
                 "execution": str(self.output_dir / "execution.json"),
                 "token_summary": str(self.output_dir / "token-summary.json"),
                 "portfolio_report": str(report_path),
@@ -1736,8 +1736,8 @@ class Pipeline:
             self.run_path,
             self.output_dir / "check-portfolio.json",
             self.output_dir / "decision-brief.json",
-            self.output_dir / "verdict-first.json",
-            self.output_dir / "verdict-second.json",
+            self.output_dir / "analyst-review.json",
+            self.output_dir / "judge-review.json",
             self.output_dir / "account-before-order.json",
             self.output_dir / "execution.json",
         ]
@@ -1801,18 +1801,18 @@ class Pipeline:
                 "--pipeline-dir",
                 str(script_dir().parent),
                 *(
-                    ["--verdict-extra-instructions-file", str(self.verdict_extra_instructions_path)]
-                    if self.verdict_extra_instructions_path
+                    ["--review-extra-instructions-file", str(self.review_extra_instructions_path)]
+                    if self.review_extra_instructions_path
                     else []
                 ),
             ],
         )
-        self.add_stage("first-specs", "success", detail="built first-verdict specs", path=self.output_dir / "first-verdict-specs.json")
-        self.run_first_verdicts()
+        self.add_stage("first-specs", "success", detail="built analyst-review specs", path=self.output_dir / "analyst-review-specs.json")
+        self.run_analyst_reviews()
 
         first = self.run_artifact_command("merge-first", ["merge-first", "--output-dir", str(self.output_dir)])
         first_status = str((first or {}).get("status") or "")
-        self.add_stage("merge-first", "success" if first_status == "success" else "failed", detail=f"status={first_status}", path=self.output_dir / "verdict-first.json")
+        self.add_stage("merge-first", "success" if first_status == "success" else "failed", detail=f"status={first_status}", path=self.output_dir / "analyst-review.json")
         if first_status != "success":
             raise RuntimeError("merge-first failed")
 
@@ -1829,14 +1829,14 @@ class Pipeline:
                 "--pipeline-dir",
                 str(script_dir().parent),
                 *(
-                    ["--verdict-extra-instructions-file", str(self.verdict_extra_instructions_path)]
-                    if self.verdict_extra_instructions_path
+                    ["--review-extra-instructions-file", str(self.review_extra_instructions_path)]
+                    if self.review_extra_instructions_path
                     else []
                 ),
             ],
         )
-        self.add_stage("second-spec", "success", detail="built second-verdict spec", path=self.output_dir / "second-verdict-spec.json")
-        self.run_second_verdict()
+        self.add_stage("second-spec", "success", detail="built judge-review spec", path=self.output_dir / "judge-review-spec.json")
+        self.run_judge_review()
 
         execution = self.run_artifact_command(
             "execution-plan",
@@ -1889,7 +1889,7 @@ if output_path is None:
     sys.exit(2)
 
 prompt = sys.argv[-1] if sys.argv else ""
-stage = "second-verdict" if "stage: second-verdict" in prompt else "first-verdict"
+stage = "judge-review" if "stage: judge-review" in prompt else "analyst-review"
 agent_role = ""
 role_match = re.search(r"agent_role:\\s*([^\\n]+)", prompt)
 if role_match:
@@ -1898,7 +1898,7 @@ match = re.search(r"symbol_ids:\\s*([^\\n]+)", prompt)
 symbols = [item.strip() for item in (match.group(1).split(",") if match else ["005930"]) if item.strip()]
 rows = []
 for index, symbol in enumerate(symbols, start=1):
-    if stage == "second-verdict":
+    if stage == "judge-review":
         rows.append({
             "symbol_id": symbol,
             "symbol_name": symbol,
@@ -1909,7 +1909,7 @@ for index, symbol in enumerate(symbols, start=1):
         })
     else:
         row = {"symbol_id": symbol, "symbol_name": symbol}
-        if agent_role == "analyst-fundamental-risk":
+        if agent_role == "analyst-quality-risk":
             row["views"] = {
                 "analyst-quality-value": {
                     "score": 8 if symbol == "005930" else 5,
@@ -1926,7 +1926,7 @@ for index, symbol in enumerate(symbols, start=1):
                     "missing_data": []
                 }
             }
-        elif agent_role == "analyst-market-news":
+        elif agent_role == "analyst-momentum-news":
             row["views"] = {
                 "analyst-momentum-cycle": {
                     "score": 8 if symbol == "005930" else 5,
@@ -2002,7 +2002,7 @@ def write_self_test_fixtures(workspace: Path, run_dir: Path) -> Path:
                     "symbol_id": "005930",
                     "symbol_name": "삼성전자",
                     "product_type": "stock",
-                    "eligible_for_verdict": True,
+                    "eligible_for_review": True,
                     "price": {"current_or_last": 70000, "observed_at": "2026-06-18T09:00:00+09:00", "snapshot_mode": "live"},
                     "local_signals": [],
                     "required_missing": [],
@@ -2012,7 +2012,7 @@ def write_self_test_fixtures(workspace: Path, run_dir: Path) -> Path:
                     "symbol_id": "000660",
                     "symbol_name": "SK하이닉스",
                     "product_type": "stock",
-                    "eligible_for_verdict": True,
+                    "eligible_for_review": True,
                     "price": {"current_or_last": 200000, "observed_at": "2026-06-18T09:00:00+09:00", "snapshot_mode": "live"},
                     "local_signals": [],
                     "required_missing": [],
@@ -2384,11 +2384,11 @@ def run_self_test() -> int:
         retry_dir = workspace / "reports" / "runs" / "retry-probe"
         retry_dir.mkdir(parents=True, exist_ok=True)
         write_json(
-            retry_dir / "second-verdict-spec.json",
+            retry_dir / "judge-review-spec.json",
             {
                 "run_id": "retry-probe",
                 "started_at": "2026-06-18T09:00:00+09:00",
-                "stage": "second-verdict",
+                "stage": "judge-review",
                 "symbol_ids": ["005930"],
             },
         )
@@ -2404,11 +2404,11 @@ def run_self_test() -> int:
                     return subprocess.CompletedProcess(cmd, 1, stdout='{"status":"failed"}', stderr="")
                 wrapper = {
                     "status": "success",
-                    "stage": "second-verdict",
-                    "agent_role": "judge-final",
-                    "task_name": "judge-final",
+                    "stage": "judge-review",
+                    "agent_role": "judge",
+                    "task_name": "judge",
                     "parsed_json": {
-                        "stage": "second-verdict",
+                        "stage": "judge-review",
                         "symbols": [
                             {
                                 "symbol_id": "005930",
@@ -2443,13 +2443,13 @@ def run_self_test() -> int:
                 max_workers=3,
             )
         )
-        retry_probe.run_second_verdict()
-        if retry_probe.probe_attempts != 3 or not (retry_dir / "verdict-second.json").exists():
-            failures.append(f"second-verdict retry probe failed: attempts={retry_probe.probe_attempts}")
-        retry_verdict = load_json_if_exists(retry_dir / "verdict-second.json") or {}
-        retry_symbol = (retry_verdict.get("symbols") or [{}])[0]
+        retry_probe.run_judge_review()
+        if retry_probe.probe_attempts != 3 or not (retry_dir / "judge-review.json").exists():
+            failures.append(f"judge-review retry probe failed: attempts={retry_probe.probe_attempts}")
+        retry_review = load_json_if_exists(retry_dir / "judge-review.json") or {}
+        retry_symbol = (retry_review.get("symbols") or [{}])[0]
         if retry_symbol.get("final_holding_quantity") != 1:
-            failures.append(f"final_holding_quantity was not preserved in verdict-second.json: {retry_symbol}")
+            failures.append(f"final_holding_quantity was not preserved in judge-review.json: {retry_symbol}")
         invalid_dir = workspace / "reports" / "runs" / "invalid-final-probe"
         invalid_dir.mkdir(parents=True, exist_ok=True)
         invalid_pipeline = Pipeline(
@@ -2471,11 +2471,11 @@ def run_self_test() -> int:
                 max_workers=3,
             )
         )
-        invalid_pipeline.write_verdict_second(
+        invalid_pipeline.write_judge_review(
             {
-                "stage": "second-verdict",
+                "stage": "judge-review",
                 "parsed_json": {
-                    "stage": "second-verdict",
+                    "stage": "judge-review",
                     "symbols": [
                         {
                             "symbol_id": "005930",
@@ -2489,11 +2489,11 @@ def run_self_test() -> int:
                 "errors": [],
             }
         )
-        invalid_verdict = load_json_if_exists(invalid_dir / "verdict-second.json") or {}
-        if invalid_verdict.get("symbols"):
-            failures.append(f"missing final_holding_quantity was converted into a symbol: {invalid_verdict}")
-        if not any(item.get("code") == "invalid_final_holding_quantity" for item in invalid_verdict.get("errors", [])):
-            failures.append(f"missing final_holding_quantity did not produce an error: {invalid_verdict}")
+        invalid_review = load_json_if_exists(invalid_dir / "judge-review.json") or {}
+        if invalid_review.get("symbols"):
+            failures.append(f"missing final_holding_quantity was converted into a symbol: {invalid_review}")
+        if not any(item.get("code") == "invalid_final_holding_quantity" for item in invalid_review.get("errors", [])):
+            failures.append(f"missing final_holding_quantity did not produce an error: {invalid_review}")
         fake_codex = workspace / "fake-codex"
         fake_codex_script(fake_codex)
         fake_market_index_snapshot = workspace / "fake-market-index-snapshot.py"
@@ -2592,9 +2592,9 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
                 failures.append(f"unexpected subagent token total: {summary['token_usage']}")
             if summary["token_usage"]["main"]["total_tokens"] != 17 or summary["token_usage"]["total"]["total_tokens"] != 377:
                 failures.append(f"unexpected pipeline token summary with main events: {summary['token_usage']}")
-            verdict_summary = summary.get("verdict_summary") if isinstance(summary.get("verdict_summary"), dict) else {}
-            if verdict_summary.get("symbol_count") != 1 or not verdict_summary.get("symbols"):
-                failures.append(f"pipeline summary omitted compact verdict summary: {verdict_summary}")
+            review_summary = summary.get("review_summary") if isinstance(summary.get("review_summary"), dict) else {}
+            if review_summary.get("symbol_count") != 1 or not review_summary.get("symbols"):
+                failures.append(f"pipeline summary omitted compact review summary: {review_summary}")
             account_display = summary.get("account_display_summary") if isinstance(summary.get("account_display_summary"), dict) else {}
             if "today_buy_amount" in account_display or "today_sell_amount" in account_display:
                 failures.append(f"display account summary should not expose same-day totals as main fields: {account_display}")
@@ -2630,12 +2630,12 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
                 failures.append(f"portfolio report was not written: {report_path}")
             else:
                 report_text = report_path.read_text(encoding="utf-8")
-                if "## 4. `first-verdict` 독립 평결" not in report_text or "## 5. `second-verdict` 포트폴리오 평결" not in report_text:
-                    failures.append(f"portfolio report omitted verdict sections: {report_path}")
+                if "## 4. `analyst-review` 독립 평결" not in report_text or "## 5. `judge-review` 포트폴리오 평결" not in report_text:
+                    failures.append(f"portfolio report omitted review sections: {report_path}")
                 if "평균 보정 신뢰도(0-10)" not in report_text or "role별 점수/신뢰도/보정신뢰도/보정점수" not in report_text:
-                    failures.append("portfolio report omitted first-verdict effective confidence columns")
+                    failures.append("portfolio report omitted analyst-review effective confidence columns")
                 if "| 8.0 | 10.0 | 8.0 | 3 |" not in report_text:
-                    failures.append("portfolio report omitted first-verdict effective confidence values")
+                    failures.append("portfolio report omitted analyst-review effective confidence values")
                 if "analyst-quality-value: 8/8/10.0/8.0" not in report_text or "analyst-news-flow: 5/5/2.5/5.0(평균 제외)" not in report_text:
                     failures.append("portfolio report omitted role-level effective confidence details")
                 if "주문 전 기존 미체결/예약 주문 조회: no" not in report_text or "주문 전 기존 미체결/예약 주문: 미조회" not in report_text:
@@ -2773,8 +2773,8 @@ print(json.dumps(execution, ensure_ascii=False))
                 failures.append("summarize did not preserve run.json stages")
             if summarized.get("status") != "success":
                 failures.append(f"summarize did not reflect completed order execution: {summarized.get('status')}")
-            if (summarized.get("verdict_summary") or {}).get("submitted_order_count") != 1:
-                failures.append(f"summarize did not carry submitted order count: {summarized.get('verdict_summary')}")
+            if (summarized.get("review_summary") or {}).get("submitted_order_count") != 1:
+                failures.append(f"summarize did not carry submitted order count: {summarized.get('review_summary')}")
             summarized_telegram = Path(str(summarized.get("telegram_summary_path") or ""))
             if not summarized_telegram.exists() or "selftest-resv-1" not in summarized_telegram.read_text(encoding="utf-8"):
                 failures.append("summarize did not refresh telegram summary with submitted order evidence")
@@ -2807,8 +2807,8 @@ print(json.dumps(execution, ensure_ascii=False))
                 "run.json",
                 "check-portfolio.json",
                 "decision-brief.json",
-                "verdict-first.json",
-                "verdict-second.json",
+                "analyst-review.json",
+                "judge-review.json",
                 "account-before-order.json",
                 "execution.json",
             ):
@@ -2838,8 +2838,8 @@ print(json.dumps(execution, ensure_ascii=False))
                 "run.json",
                 "check-portfolio.json",
                 "decision-brief.json",
-                "verdict-first.json",
-                "verdict-second.json",
+                "analyst-review.json",
+                "judge-review.json",
                 "account-before-order.json",
                 "execution.json",
             ):
@@ -2900,7 +2900,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--news-cache-path", default="")
     run.add_argument("--main-events", default="", help="Optional Codex JSONL events path for Main-agent token accounting.")
     run.add_argument("--submit-orders", action="store_true", help="For explicit demo-submit/real-submit runs, execute immediate or reservation orders through execute_orders.py.")
-    run.add_argument("--verdict-extra-instructions-file", default="", help="Optional JSON file with first_verdict/second_verdict supplemental instructions.")
+    run.add_argument("--review-extra-instructions-file", default="", help="Optional JSON file with analyst_review/judge_review supplemental instructions.")
     run.add_argument(
         "--order-path",
         choices=[ORDER_PATH_AUTO, "reservation", "immediate"],
@@ -2921,7 +2921,7 @@ def build_parser() -> argparse.ArgumentParser:
     summarize.add_argument("--request-type", default="analysis", choices=["analysis", "prepare", "demo-submit", "real-submit"])
     summarize.add_argument("--order-path", choices=[ORDER_PATH_AUTO, "reservation", "immediate"], default=ORDER_PATH_AUTO)
     summarize.add_argument("--portfolio-json", default="")
-    summarize.add_argument("--verdict-extra-instructions-file", default="")
+    summarize.add_argument("--review-extra-instructions-file", default="")
 
     subparsers.add_parser("self-test", help="Run an offline pipeline smoke test with a fake codex binary.")
     return parser

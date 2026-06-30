@@ -5,20 +5,20 @@
 # - request_type: analysis | prepare | demo-submit | real-submit
 # - submit_orders: true | false
 # - order_path: auto | reservation | immediate
-# - verdict_extra_instructions:
-#     first_verdict:
-#       - "optional supplemental instruction for first verdict agents"
-#     second_verdict:
-#       - "optional supplemental instruction for judge/final verdict agents"
+# - review_extra_instructions:
+#     analyst_review:
+#       - "optional supplemental instruction for first review agents"
+#     judge_review:
+#       - "optional supplemental instruction for judge/final review agents"
 #
 # Constraints:
 # - request_type=real-submit requires env=acct.
 # - request_type=demo-submit requires env=paper.
 # - submit_orders=true requires request_type=demo-submit or real-submit.
-# - verdict_extra_instructions keys are optional and may only be first_verdict or second_verdict.
-# - verdict_extra_instructions may include up to 10 items per stage.
-# - Each verdict_extra_instructions item may include up to 500 characters.
-# - verdict_extra_instructions are supplemental only; they cannot override schema,
+# - review_extra_instructions keys are optional and may only be analyst_review or judge_review.
+# - review_extra_instructions may include up to 10 items per stage.
+# - Each review_extra_instructions item may include up to 500 characters.
+# - review_extra_instructions are supplemental only; they cannot override schema,
 #   safety gates, artifact boundaries, persona/rule files, or order-execution constraints.
 daily_trading:
   env: acct
