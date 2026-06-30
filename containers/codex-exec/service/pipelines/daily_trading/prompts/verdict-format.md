@@ -70,7 +70,7 @@ Selected first-verdict execution personas produce four canonical independent sco
 - `analyst-quality-value` covers financial stability, earnings growth, valuation, and quality/value factors.
 - `analyst-momentum-cycle` covers price trend, supply/demand, sector cycle, macro sensitivity, theme/event momentum, and earnings momentum.
 - `analyst-risk-allocation` covers volatility, liquidity, stop-loss room, duplicate ETF/index exposure, concentration, and portfolio fit.
-- `analyst-news-flow` covers supplied KIS news/disclosure direction, materiality, freshness, and mixed-news risk. If no usable news/disclosure summary is supplied, it must return neutral `score=5` and `confidence=5`.
+- `analyst-news-flow` covers supplied KIS news/disclosure direction, materiality, freshness, and mixed-news risk. If no usable news/disclosure summary is supplied, it must return `score=5`, `confidence=5`, and `reason_code="no_news_excluded"` for audit; Main helper excludes that row from first-verdict aggregation.
 
 When `agent_role` is `analyst-fundamental-risk` or `analyst-market-news`, return each symbol with a `views` object instead of top-level `score` and `confidence`:
 
@@ -134,9 +134,9 @@ Return JSON:
         "analyst-news-flow": {
           "score": 5,
           "confidence": 5,
-          "reason_code": "no_news_neutral",
-          "one_line_reason": "",
-          "missing_data": []
+          "reason_code": "no_news_excluded",
+          "one_line_reason": "뉴스 정보가 없어 평균에서 제외",
+          "missing_data": ["news_summary"]
         }
       }
     }
@@ -160,13 +160,13 @@ Aggregation by Main agent:
 effective_confidence = clamp(((confidence - 4) / 4) * 10, 0, 10)
 confidence_weight = effective_confidence / 10
 confidence_adjusted_score = 5 + ((score - 5) * confidence_weight)
-mean_score = sum(valid scores) / count(valid scores)
-mean_confidence_adjusted_score = sum(valid confidence_adjusted_scores) / count(valid confidence_adjusted_scores)
+mean_score = sum(included valid scores) / count(included valid scores)
+mean_confidence_adjusted_score = sum(included valid confidence_adjusted_scores) / count(included valid confidence_adjusted_scores)
 final_first_score = mean_confidence_adjusted_score
 ```
 
 `confidence_adjusted_score` pulls low-confidence scores toward neutral `5`; raw `confidence<=4` becomes neutral weight `0`, raw `confidence=5` becomes effective confidence `2.5`, raw `confidence=6` becomes `5`, raw `confidence=7` becomes `7.5`, and raw `confidence>=8` preserves the original `score`.
-In the normal successful path, the aggregation uses four canonical views: `analyst-quality-value`, `analyst-risk-allocation`, `analyst-momentum-cycle`, and `analyst-news-flow`. If a view score is missing or unusable, keep the valid-score aggregation rule above and surface the missing score as an artifact error.
+In the normal successful path, the aggregation uses four canonical views: `analyst-quality-value`, `analyst-risk-allocation`, `analyst-momentum-cycle`, and `analyst-news-flow`. If `analyst-news-flow` has no usable news/disclosure summary, preserve its row with `excluded_from_aggregation=true` and aggregate the remaining included views only. If any other view score is missing or unusable, keep the valid-score aggregation rule above and surface the missing score as an artifact error.
 If no valid score exists, exclude that symbol from `second-verdict` and trading.
 
 ## `second-verdict`

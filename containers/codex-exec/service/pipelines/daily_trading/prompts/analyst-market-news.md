@@ -26,7 +26,7 @@
 ## `analyst-news-flow` 관점
 
 - 제공된 KIS 뉴스/공시 요약만으로 뉴스 흐름의 방향성과 강도를 평가한다.
-- 뉴스 또는 공시 요약이 없거나 usable news가 0건이면 반드시 `score: 5`, `confidence: 5`, `reason_code: "no_news_neutral"`을 사용한다.
+- 뉴스 또는 공시 요약이 없거나 usable news가 0건이면 `score: 5`, `confidence: 5`, `reason_code: "no_news_excluded"`를 사용한다. Main helper는 이 row를 감사용으로 보존하되 first-verdict 평균 모수에서는 제외한다.
 - 뉴스가 있을 때의 점수 기준은 다른 first-verdict persona와 같은 `0`부터 `10`까지의 정수 scale을 따른다.
 - 호재성 계약, 수주, 실적 개선, 규제 완화, 목표가 상향, 업황 개선, 자사주/배당 강화는 상방 요인으로 본다.
 - 악재성 실적 쇼크, 규제/소송, 신용/유동성 우려, 목표가 하향, 대규모 매도/오버행, 공시 리스크는 하방 요인으로 본다.

@@ -888,7 +888,7 @@ def write_combined_first_sidecar(
         symbol_name = f"{item.get('symbol_id', '')} {item.get('symbol_name', '')}".strip()
         for score in expanded_first_scores(role, item):
             if symbols_by_id is not None:
-                score = enforce_news_flow_neutral_without_news(score, symbols_by_id.get(symbol_key(item), {}))
+                score = mark_news_flow_excluded_without_news(score, symbols_by_id.get(symbol_key(item), {}))
             lines.append(
                 f"| {score.get('agent_role', '')} | {symbol_name} | {as_int(score.get('score'))} | {as_int(score.get('confidence'))} | {score.get('one_line_reason', '')} |"
             )
@@ -977,14 +977,15 @@ def has_usable_news_summary(symbol: dict[str, Any]) -> bool:
     return isinstance(news_summary, list) and any(isinstance(item, dict) for item in news_summary)
 
 
-def enforce_news_flow_neutral_without_news(score_item: dict[str, Any], brief_symbol: dict[str, Any]) -> dict[str, Any]:
+def mark_news_flow_excluded_without_news(score_item: dict[str, Any], brief_symbol: dict[str, Any]) -> dict[str, Any]:
     if str(score_item.get("agent_role") or "") != "analyst-news-flow" or has_usable_news_summary(brief_symbol):
         return score_item
     normalized = dict(score_item)
     normalized["score"] = 5
     normalized["confidence"] = 5
-    normalized["reason_code"] = "no_news_neutral"
-    normalized["one_line_reason"] = normalized.get("one_line_reason") or "뉴스 정보가 없어 중립 5점"
+    normalized["reason_code"] = "no_news_excluded"
+    normalized["one_line_reason"] = "뉴스 정보가 없어 평균에서 제외"
+    normalized["excluded_from_aggregation"] = True
     missing_data = normalized.get("missing_data")
     if not isinstance(missing_data, list):
         missing_data = []
@@ -1026,10 +1027,11 @@ def build_verdict_first(args: argparse.Namespace) -> dict[str, Any]:
             if symbol_id not in agent_scores:
                 continue
             for score_item in expanded_first_scores(role, item):
-                score_item = enforce_news_flow_neutral_without_news(score_item, symbols_by_id.get(symbol_id, {}))
+                score_item = mark_news_flow_excluded_without_news(score_item, symbols_by_id.get(symbol_id, {}))
                 expanded_role = str(score_item.get("agent_role") or role)
                 score = clamp_score(score_item.get("score"), 5)
                 confidence = clamp_score(score_item.get("confidence"), 5)
+                excluded_from_aggregation = bool(score_item.get("excluded_from_aggregation"))
                 agent_scores[symbol_id].append(
                     {
                         "agent_role": expanded_role,
@@ -1041,6 +1043,7 @@ def build_verdict_first(args: argparse.Namespace) -> dict[str, Any]:
                         "reason_code": safe_name(str(score_item.get("reason_code") or "hold_neutral")).lower(),
                         "one_line_reason": score_item.get("one_line_reason") or "",
                         "missing_data": score_item.get("missing_data") if isinstance(score_item.get("missing_data"), list) else [],
+                        "excluded_from_aggregation": excluded_from_aggregation,
                     }
                 )
 
@@ -1063,8 +1066,11 @@ def build_verdict_first(args: argparse.Namespace) -> dict[str, Any]:
             )
         if not scores:
             continue
-        mean_score = sum(item["score"] for item in scores) / len(scores)
-        mean_adjusted = sum(item["confidence_adjusted_score"] for item in scores) / len(scores)
+        aggregation_scores = [item for item in scores if not item.get("excluded_from_aggregation")]
+        if not aggregation_scores:
+            continue
+        mean_score = sum(item["score"] for item in aggregation_scores) / len(aggregation_scores)
+        mean_adjusted = sum(item["confidence_adjusted_score"] for item in aggregation_scores) / len(aggregation_scores)
         brief_symbol = symbols_by_id.get(symbol_id, {})
         artifact["symbols"].append(
             {
@@ -1073,6 +1079,7 @@ def build_verdict_first(args: argparse.Namespace) -> dict[str, Any]:
                 "agent_scores": scores,
                 "mean_score": mean_score,
                 "mean_confidence_adjusted_score": mean_adjusted,
+                "aggregation_score_count": len(aggregation_scores),
                 "final_first_score": mean_adjusted,
             }
         )
@@ -1712,25 +1719,31 @@ symbols:
                     symbol_ids="",
                 )
             )
-            if verdict_first["symbols"][0]["final_first_score"] != 5.375:
+            if verdict_first["symbols"][0]["final_first_score"] != 5.5:
                 failures.append(f"unexpected first verdict score: {verdict_first}")
             news_scores = [
                 item
                 for item in verdict_first["symbols"][0].get("agent_scores", [])
                 if item.get("agent_role") == "analyst-news-flow"
             ]
-            if not news_scores or news_scores[0].get("score") != 5 or news_scores[0].get("confidence") != 5:
-                failures.append(f"news-flow without news should be neutral 5/5: {verdict_first}")
-            if not news_scores or news_scores[0].get("effective_confidence") != 2.5:
-                failures.append(f"confidence 5 should rescale to effective confidence 2.5: {verdict_first}")
+            if (
+                not news_scores
+                or news_scores[0].get("score") != 5
+                or news_scores[0].get("confidence") != 5
+                or news_scores[0].get("reason_code") != "no_news_excluded"
+                or news_scores[0].get("excluded_from_aggregation") is not True
+            ):
+                failures.append(f"news-flow without news should be marked excluded from aggregation: {verdict_first}")
+            if verdict_first["symbols"][0].get("aggregation_score_count") != 3:
+                failures.append(f"no-news news-flow should be excluded from aggregation count: {verdict_first}")
             market_news_sidecar = (
                 run_dir
                 / "verdicts"
                 / "first-verdict--analyst-market-news--first-analyst-market-news.md"
             )
             market_news_text = market_news_sidecar.read_text(encoding="utf-8")
-            if "| analyst-news-flow | 005930 삼성전자 | 5 | 5 |" not in market_news_text:
-                failures.append(f"news-flow sidecar should reflect neutral 5/5: {market_news_text}")
+            if "| analyst-news-flow | 005930 삼성전자 | 5 | 5 | 뉴스 정보가 없어 평균에서 제외 |" not in market_news_text:
+                failures.append(f"news-flow sidecar should reflect average exclusion: {market_news_text}")
             missing_wrapper_path = subagent_dir / "first-analyst-fundamental-risk.wrapper.json"
             missing_wrapper = load_json(missing_wrapper_path)
             missing_wrapper["parsed_json"]["symbols"][1]["views"].pop("analyst-risk-allocation")

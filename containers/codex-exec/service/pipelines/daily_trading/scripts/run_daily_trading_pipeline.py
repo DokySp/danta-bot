@@ -1410,9 +1410,14 @@ class Pipeline:
             if not isinstance(item, dict):
                 continue
             agent_scores = item.get("agent_scores") if isinstance(item.get("agent_scores"), list) else []
+            aggregation_scores = [
+                score
+                for score in agent_scores
+                if isinstance(score, dict) and not score.get("excluded_from_aggregation")
+            ]
             effective_values = [
                 as_float(score.get("effective_confidence"))
-                for score in agent_scores
+                for score in aggregation_scores
                 if isinstance(score, dict) and as_float(score.get("effective_confidence")) is not None
             ]
             mean_effective = (
@@ -1424,15 +1429,18 @@ class Pipeline:
             for score in agent_scores:
                 if not isinstance(score, dict):
                     continue
-                role_details.append(
+                detail = (
                     f"{score.get('agent_role', '')}: "
                     f"{score.get('score', '')}/{score.get('confidence', '')}/"
                     f"{score.get('effective_confidence', '')}/{score.get('confidence_adjusted_score', '')}"
                 )
+                if score.get("excluded_from_aggregation"):
+                    detail = f"{detail}(평균 제외)"
+                role_details.append(detail)
             reasons = [str(score.get("one_line_reason", "")) for score in agent_scores if isinstance(score, dict) and score.get("one_line_reason")]
             lines.append(
                 f"| {md_cell(item.get('symbol_id'))} | {md_cell(item.get('symbol_name'))} | {item.get('mean_score', '')} | "
-                f"{mean_effective} | {item.get('mean_confidence_adjusted_score', '')} | {len(agent_scores)} | "
+                f"{mean_effective} | {item.get('mean_confidence_adjusted_score', '')} | {len(aggregation_scores)} | "
                 f"{md_cell('; '.join(role_details))} | {md_cell('; '.join(reasons[:2]))} | - |"
             )
 
@@ -1930,8 +1938,8 @@ for index, symbol in enumerate(symbols, start=1):
                 "analyst-news-flow": {
                     "score": 5,
                     "confidence": 5,
-                    "reason_code": "no_news_neutral",
-                    "one_line_reason": "뉴스 정보가 없어 중립 5점",
+                    "reason_code": "no_news_excluded",
+                    "one_line_reason": "뉴스 정보가 없어 평균에서 제외",
                     "missing_data": ["news_summary"]
                 }
             }
@@ -2626,9 +2634,9 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
                     failures.append(f"portfolio report omitted verdict sections: {report_path}")
                 if "평균 보정 신뢰도(0-10)" not in report_text or "role별 점수/신뢰도/보정신뢰도/보정점수" not in report_text:
                     failures.append("portfolio report omitted first-verdict effective confidence columns")
-                if "| 8.125 | 7.25 | 4 |" not in report_text:
+                if "| 8.0 | 10.0 | 8.0 | 3 |" not in report_text:
                     failures.append("portfolio report omitted first-verdict effective confidence values")
-                if "analyst-quality-value: 8/8/10.0/8.0" not in report_text or "analyst-news-flow: 5/5/2.5/5.0" not in report_text:
+                if "analyst-quality-value: 8/8/10.0/8.0" not in report_text or "analyst-news-flow: 5/5/2.5/5.0(평균 제외)" not in report_text:
                     failures.append("portfolio report omitted role-level effective confidence details")
                 if "주문 전 기존 미체결/예약 주문 조회: no" not in report_text or "주문 전 기존 미체결/예약 주문: 미조회" not in report_text:
                     failures.append("portfolio report did not preserve active-order gate lookup state")

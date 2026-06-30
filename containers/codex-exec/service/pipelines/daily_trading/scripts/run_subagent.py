@@ -1785,8 +1785,8 @@ else:
                         "analyst-news-flow": {
                             "score": 5,
                             "confidence": 5,
-                            "reason_code": "no_news_neutral",
-                            "one_line_reason": "뉴스 정보가 없어 중립 5점",
+                            "reason_code": "no_news_excluded",
+                            "one_line_reason": "뉴스 정보가 없어 평균에서 제외",
                             "missing_data": ["news_summary"],
                         },
                     }
