@@ -7,7 +7,6 @@ from ...touch_points.touch_point import (
     render_touch_point,
     touch_point_caption,
 )
-from ..gateway import TypingIndicator
 
 
 def handle_show_touch_point(worker: Any, task: Any, args: str) -> None:
@@ -17,13 +16,7 @@ def handle_show_touch_point(worker: Any, task: Any, args: str) -> None:
         worker.gateway.send_message(exc.html_message, task.chat_id, task.route)
         return
 
-    with TypingIndicator(
-        worker.gateway,
-        task.chat_id,
-        task.route,
-        worker.config.telegram_typing_interval_seconds,
-    ):
-        summary = render_touch_point(worker.config, request)
+    summary = render_touch_point(worker.config, request)
 
     image_path = Path(str(summary["image_path"]))
     worker.gateway.send_photo(image_path, touch_point_caption(summary), task.chat_id, task.route)

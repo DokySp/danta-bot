@@ -1,8 +1,6 @@
 import logging
 from typing import Any
 
-from ..gateway import TypingIndicator
-
 
 def handle_new(worker: Any, task: Any, args: str) -> None:
     if args:
@@ -12,13 +10,7 @@ def handle_new(worker: Any, task: Any, args: str) -> None:
             task.route,
         )
         return
-    with TypingIndicator(
-        worker.gateway,
-        task.chat_id,
-        task.route,
-        worker.config.telegram_typing_interval_seconds,
-    ):
-        session_id, output = worker.runner.run_new_session(worker.config.new_session_prompt)
+    session_id, output = worker.runner.run_new_session(worker.config.new_session_prompt)
     worker.state.set_default_session(session_id)
     logging.info("new default session_id=%s", session_id)
     worker.gateway.send_message(output, task.chat_id, task.route)
@@ -32,11 +24,5 @@ def handle_usage(worker: Any, task: Any, args: str) -> None:
             task.route,
         )
         return
-    with TypingIndicator(
-        worker.gateway,
-        task.chat_id,
-        task.route,
-        worker.config.telegram_typing_interval_seconds,
-    ):
-        output = worker.runner.run_usage()
+    output = worker.runner.run_usage()
     worker.gateway.send_message(output, task.chat_id, task.route)

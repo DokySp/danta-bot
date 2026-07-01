@@ -109,7 +109,13 @@ class TelegramWorker:
 
         command = parse_telegram_command(text)
         if command is not None:
-            handle_telegram_command(self, task, *command)
+            with TypingIndicator(
+                self.gateway,
+                task.chat_id,
+                task.route,
+                self.config.telegram_typing_interval_seconds,
+            ):
+                handle_telegram_command(self, task, *command)
             return
 
         session_id = self.state.get_default_session()
