@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -220,6 +221,42 @@ def non_negative_int_value(value: Any) -> int | None:
             return None
         return parsed if parsed >= 0 else None
     return None
+
+
+def decimal_value(value: Any) -> Decimal | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    text = str(value).strip().replace(",", "")
+    if not text:
+        return None
+    try:
+        return Decimal(text)
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def non_negative_decimal_value(value: Any) -> Decimal | None:
+    parsed = decimal_value(value)
+    if parsed is None or parsed < 0:
+        return None
+    return parsed
+
+
+def positive_decimal_value(value: Any) -> Decimal | None:
+    parsed = decimal_value(value)
+    if parsed is None or parsed <= 0:
+        return None
+    return parsed
+
+
+def decimal_json_value(value: Decimal) -> int | float:
+    if value == value.to_integral_value():
+        return int(value)
+    return float(value)
+
+
+def round_half_up_quantity(target_value: Decimal, price: Decimal) -> int:
+    return int((target_value / price).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
 def format_number(value: Any) -> str:
@@ -1021,38 +1058,121 @@ class Pipeline:
             raise RuntimeError("order-execution failed")
         return execution
 
+    def judge_review_context_by_symbol(self, wrapper: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        paths = wrapper.get("review_input_paths") if isinstance(wrapper.get("review_input_paths"), dict) else {}
+        review_core_path = paths.get("review_core")
+        if not review_core_path:
+            return {}
+        payload = load_json_if_exists(Path(str(review_core_path)))
+        symbols = payload.get("symbols") if isinstance(payload, dict) else None
+        if not isinstance(symbols, list):
+            return {}
+        result: dict[str, dict[str, Any]] = {}
+        for item in symbols:
+            if isinstance(item, dict):
+                key = symbol_key(item)
+                if key:
+                    result[key] = item
+        return result
+
+    def same_day_buy_exists(self, context: dict[str, Any]) -> bool:
+        timeline = context.get("today_trade_timeline_context") if isinstance(context.get("today_trade_timeline_context"), dict) else {}
+        if as_int(timeline.get("buy_fill_count")) > 0 or as_int(timeline.get("buy_quantity")) > 0:
+            return True
+        fills = timeline.get("fills")
+        if isinstance(fills, list):
+            return any(isinstance(fill, dict) and str(fill.get("direction") or "").lower() == "buy" for fill in fills)
+        return False
+
+    def derive_judge_final_quantity(
+        self,
+        item: dict[str, Any],
+        context: dict[str, Any],
+    ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+        symbol_id = symbol_key(item)
+        errors: list[dict[str, Any]] = []
+        if context:
+            merged_context = dict(item)
+            merged_context.update(context)
+            context = merged_context
+        else:
+            context = item
+        target_value = non_negative_decimal_value(item.get("target_position_value_krw"))
+        if target_value is None:
+            errors.append(
+                {
+                    "stage": "judge-review",
+                    "source": "pipeline",
+                    "code": "invalid_target_position_value_krw",
+                    "message": f"{symbol_id}: target_position_value_krw must be a non-negative number",
+                    "required": True,
+                }
+            )
+            return None, errors
+
+        price = positive_decimal_value((context.get("price") or {}).get("current_or_last") if isinstance(context.get("price"), dict) else None)
+        if price is None:
+            price = positive_decimal_value((item.get("price") or {}).get("current_or_last") if isinstance(item.get("price"), dict) else None)
+        if price is None:
+            errors.append(
+                {
+                    "stage": "judge-review",
+                    "source": "pipeline",
+                    "code": "invalid_price_current_or_last",
+                    "message": f"{symbol_id}: price.current_or_last must be a positive number to derive final_holding_quantity",
+                    "required": True,
+                }
+            )
+            return None, errors
+
+        holding_context = context.get("holding_quantity_context") if isinstance(context.get("holding_quantity_context"), dict) else {}
+        if not holding_context and isinstance(item.get("holding_quantity_context"), dict):
+            holding_context = item.get("holding_quantity_context") or {}
+        expected_qty = as_int(holding_context.get("expected_holding_quantity"))
+        baseline_value = Decimal(expected_qty) * price
+        additional_buy_reason = str(item.get("additional_buy_reason") or "").strip()
+        if self.same_day_buy_exists(context) and target_value > baseline_value and not additional_buy_reason:
+            errors.append(
+                {
+                    "stage": "judge-review",
+                    "source": "pipeline",
+                    "code": "missing_additional_buy_reason",
+                    "message": f"{symbol_id}: additional_buy_reason is required when increasing target_position_value_krw after a same-day buy",
+                    "required": True,
+                }
+            )
+            return None, errors
+
+        normalized = {
+            "symbol_id": symbol_id,
+            "symbol_name": item.get("symbol_name") or context.get("symbol_name") or symbol_id,
+            "target_position_value_krw": decimal_json_value(target_value),
+            "baseline_position_value_krw": decimal_json_value(baseline_value),
+            "final_holding_quantity": round_half_up_quantity(target_value, price),
+            "relative_attractiveness_rank": as_int(item.get("relative_attractiveness_rank")),
+            "reason_code": safe_name(str(item.get("reason_code") or "hold_neutral")).lower(),
+            "one_line_reason": str(item.get("one_line_reason") or "")[:300],
+        }
+        if additional_buy_reason:
+            normalized["additional_buy_reason"] = additional_buy_reason[:300]
+        return normalized, errors
+
     def write_judge_review(self, wrapper: dict[str, Any]) -> None:
         parsed = wrapper.get("parsed_json") if isinstance(wrapper.get("parsed_json"), dict) else {}
         symbols: list[dict[str, Any]] = []
         errors = wrapper.get("errors") if isinstance(wrapper.get("errors"), list) else []
+        context_by_symbol = self.judge_review_context_by_symbol(wrapper)
         for item in parsed.get("symbols", []):
             if not isinstance(item, dict):
                 continue
             symbol_id = symbol_key(item)
             if not symbol_id:
                 continue
-            final_quantity = non_negative_int_value(item.get("final_holding_quantity"))
-            if final_quantity is None:
-                errors.append(
-                    {
-                        "stage": "judge-review",
-                        "source": "pipeline",
-                        "code": "invalid_final_holding_quantity",
-                        "message": f"{symbol_id}: final_holding_quantity must be a non-negative integer",
-                        "required": True,
-                    }
-                )
+            normalized, item_errors = self.derive_judge_final_quantity(item, context_by_symbol.get(symbol_id, {}))
+            errors.extend(item_errors)
+            if normalized is None:
                 continue
-            symbols.append(
-                {
-                    "symbol_id": symbol_id,
-                    "symbol_name": item.get("symbol_name") or symbol_id,
-                    "final_holding_quantity": final_quantity,
-                    "relative_attractiveness_rank": as_int(item.get("relative_attractiveness_rank")),
-                    "reason_code": safe_name(str(item.get("reason_code") or "hold_neutral")).lower(),
-                    "one_line_reason": str(item.get("one_line_reason") or "")[:300],
-                }
-            )
+            symbols.append(normalized)
         artifact = {
             "schema_version": "1",
             "run_id": self.run_id,
@@ -1071,13 +1191,13 @@ class Pipeline:
     def write_second_sidecar(self, role: str, task_name: str, symbols: list[dict[str, Any]]) -> None:
         path = self.output_dir / "reviews" / f"judge-review--{safe_name(role)}--{safe_name(task_name)}.md"
         lines = [
-            "| 종목 | 최종수량 | 상대매력도 | 판단코드 | 의견(판단) |",
-            "|---|---:|---:|---|---|",
+            "| 종목 | 목표금액 | 최종수량 | 상대매력도 | 판단코드 | 의견(판단) |",
+            "|---|---:|---:|---:|---|---|",
         ]
         for item in symbols:
             symbol_name = f"{item.get('symbol_id', '')} {item.get('symbol_name', '')}".strip()
             lines.append(
-                f"| {symbol_name} | {as_int(item.get('final_holding_quantity'))} | {as_int(item.get('relative_attractiveness_rank'))} | {item.get('reason_code', '')} | {item.get('one_line_reason', '')} |"
+                f"| {symbol_name} | {format_number(item.get('target_position_value_krw'))} | {as_int(item.get('final_holding_quantity'))} | {as_int(item.get('relative_attractiveness_rank'))} | {item.get('reason_code', '')} | {item.get('one_line_reason', '')} |"
             )
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -1448,18 +1568,18 @@ class Pipeline:
             [
                 "",
                 "## 5. `judge-review` 포트폴리오 평결",
-                "- 최종 포트폴리오 판단: `judge` 최종 보유수량 결과 사용",
-                "- 잔여 현금 처리: 목표현금을 별도 판단값으로 만들지 않고 최종 보유수량 충족 후 남는 금액으로만 기록",
+                "- 최종 포트폴리오 판단: `judge` 목표 보유금액을 기준으로 Main/pipeline이 최종 보유수량 산출",
+                "- 잔여 현금 처리: 목표현금을 별도 판단값으로 만들지 않고 최종 보유수량 산출 후 남는 금액으로만 기록",
                 f"- Main agent 검증 결과: {execution.get('status', '')}",
                 "",
-                "| 종목식별자 | 종목명 | 현재 보유수량 | 최종 보유수량 | 상대매력도 | 판단 코드 | 한 줄 판단 |",
-                "|---|---|---:|---:|---:|---|---|",
+                "| 종목식별자 | 종목명 | 현재 보유수량 | 목표 보유금액 | 최종 보유수량 | 상대매력도 | 판단 코드 | 한 줄 판단 |",
+                "|---|---|---:|---:|---:|---:|---|---|",
             ]
         )
         for item in review.get("symbols", []) if isinstance(review.get("symbols"), list) else []:
             lines.append(
                 f"| {md_cell(item.get('symbol_id'))} | {md_cell(item.get('symbol_name'))} | {as_int(item.get('current_live_holding_quantity'))} | "
-                f"{as_int(item.get('final_holding_quantity'))} | {as_int(item.get('relative_attractiveness_rank'))} | "
+                f"{format_number(item.get('target_position_value_krw'))} | {as_int(item.get('final_holding_quantity'))} | {as_int(item.get('relative_attractiveness_rank'))} | "
                 f"{md_cell(item.get('reason_code'))} | {md_cell(item.get('one_line_reason'))} |"
             )
 
@@ -1574,7 +1694,8 @@ class Pipeline:
                 "",
                 "## 11. 메모",
                 "- 당일 체결수량은 현재 보유수량에 이미 반영된 값으로 보고 다시 차감하지 않음",
-                "- `judge-review`는 단일 `judge` 최종 보유수량을 사용하며 deterministic helper와 `execute_orders.py`가 총자산/주문가능금액/집중도/active 주문/same-day/account-order gate를 검증함",
+                "- `judge-review`는 단일 `judge` 목표 보유금액을 사용하며 Main/pipeline이 가격 기준 반올림 수량을 산출함",
+                "- 목표금액 초과분만을 이유로 매수 수량을 줄이지 않으며 주문가능금액, active 주문, same-day, account-order 검증은 기존 실행 단계에서 처리함",
                 "- 투자 권유가 아니라 의사결정 보조 분석입니다.",
             ]
         )
@@ -1902,7 +2023,7 @@ for index, symbol in enumerate(symbols, start=1):
         rows.append({
             "symbol_id": symbol,
             "symbol_name": symbol,
-            "final_holding_quantity": 1 if symbol == "005930" else 0,
+            "target_position_value_krw": 70000 if symbol == "005930" else 0,
             "relative_attractiveness_rank": index,
             "reason_code": "hold_neutral",
             "one_line_reason": "self-test"
@@ -2413,7 +2534,9 @@ def run_self_test() -> int:
                             {
                                 "symbol_id": "005930",
                                 "symbol_name": "삼성전자",
-                                "final_holding_quantity": 1,
+                                "target_position_value_krw": 70000,
+                                "price": {"current_or_last": 70000},
+                                "holding_quantity_context": {"expected_holding_quantity": 1},
                                 "relative_attractiveness_rank": 1,
                                 "reason_code": "hold_neutral",
                                 "one_line_reason": "retry self-test",
@@ -2450,6 +2573,103 @@ def run_self_test() -> int:
         retry_symbol = (retry_review.get("symbols") or [{}])[0]
         if retry_symbol.get("final_holding_quantity") != 1:
             failures.append(f"final_holding_quantity was not preserved in judge-review.json: {retry_symbol}")
+        if retry_symbol.get("target_position_value_krw") != 70000:
+            failures.append(f"target_position_value_krw was not preserved in judge-review.json: {retry_symbol}")
+        half_up_dir = workspace / "reports" / "runs" / "half-up-probe"
+        half_up_dir.mkdir(parents=True, exist_ok=True)
+        half_up_pipeline = Pipeline(
+            argparse.Namespace(
+                command="run",
+                workspace_dir=str(workspace),
+                output_dir=str(half_up_dir),
+                run_id="half-up-probe",
+                started_at="2026-06-18T09:00:00+09:00",
+                env="acct",
+                request_type="analysis",
+                portfolio_json=str(portfolio_path),
+                financial_cache_path="",
+                news_cache_path="",
+                main_events="",
+                date="2026-06-18",
+                reuse_existing_artifacts=True,
+                skip_account=False,
+                max_workers=3,
+            )
+        )
+        half_up_pipeline.write_judge_review(
+            {
+                "stage": "judge-review",
+                "parsed_json": {
+                    "stage": "judge-review",
+                    "symbols": [
+                        {
+                            "symbol_id": "005930",
+                            "symbol_name": "삼성전자",
+                            "target_position_value_krw": 105000,
+                            "final_holding_quantity": 99,
+                            "price": {"current_or_last": 70000},
+                            "holding_quantity_context": {"expected_holding_quantity": 1},
+                            "relative_attractiveness_rank": 1,
+                            "reason_code": "increase_target",
+                            "one_line_reason": "half-up self-test",
+                        }
+                    ],
+                },
+                "errors": [],
+            }
+        )
+        half_up_review = load_json_if_exists(half_up_dir / "judge-review.json") or {}
+        half_up_symbol = (half_up_review.get("symbols") or [{}])[0]
+        if half_up_symbol.get("final_holding_quantity") != 2:
+            failures.append(f"Decimal ROUND_HALF_UP did not derive 1.5 shares as 2 and ignore judge final quantity: {half_up_symbol}")
+        same_day_dir = workspace / "reports" / "runs" / "same-day-buy-probe"
+        same_day_dir.mkdir(parents=True, exist_ok=True)
+        same_day_pipeline = Pipeline(
+            argparse.Namespace(
+                command="run",
+                workspace_dir=str(workspace),
+                output_dir=str(same_day_dir),
+                run_id="same-day-buy-probe",
+                started_at="2026-06-18T09:00:00+09:00",
+                env="acct",
+                request_type="analysis",
+                portfolio_json=str(portfolio_path),
+                financial_cache_path="",
+                news_cache_path="",
+                main_events="",
+                date="2026-06-18",
+                reuse_existing_artifacts=True,
+                skip_account=False,
+                max_workers=3,
+            )
+        )
+        same_day_pipeline.write_judge_review(
+            {
+                "stage": "judge-review",
+                "parsed_json": {
+                    "stage": "judge-review",
+                    "symbols": [
+                        {
+                            "symbol_id": "005930",
+                            "symbol_name": "삼성전자",
+                            "target_position_value_krw": 140000,
+                            "price": {"current_or_last": 70000},
+                            "holding_quantity_context": {"expected_holding_quantity": 1},
+                            "today_trade_timeline_context": {"buy_fill_count": 1, "buy_quantity": 1},
+                            "relative_attractiveness_rank": 1,
+                            "reason_code": "increase_without_reason",
+                            "one_line_reason": "same-day self-test",
+                        }
+                    ],
+                },
+                "errors": [],
+            }
+        )
+        same_day_review = load_json_if_exists(same_day_dir / "judge-review.json") or {}
+        if same_day_review.get("symbols"):
+            failures.append(f"same-day increased target without additional_buy_reason was accepted: {same_day_review}")
+        if not any(item.get("code") == "missing_additional_buy_reason" for item in same_day_review.get("errors", [])):
+            failures.append(f"same-day increased target did not require additional_buy_reason: {same_day_review}")
         invalid_dir = workspace / "reports" / "runs" / "invalid-final-probe"
         invalid_dir.mkdir(parents=True, exist_ok=True)
         invalid_pipeline = Pipeline(
@@ -2480,6 +2700,8 @@ def run_self_test() -> int:
                         {
                             "symbol_id": "005930",
                             "symbol_name": "삼성전자",
+                            "price": {"current_or_last": 70000},
+                            "holding_quantity_context": {"expected_holding_quantity": 1},
                             "relative_attractiveness_rank": 1,
                             "reason_code": "hold_neutral",
                             "one_line_reason": "invalid self-test",
@@ -2491,9 +2713,9 @@ def run_self_test() -> int:
         )
         invalid_review = load_json_if_exists(invalid_dir / "judge-review.json") or {}
         if invalid_review.get("symbols"):
-            failures.append(f"missing final_holding_quantity was converted into a symbol: {invalid_review}")
-        if not any(item.get("code") == "invalid_final_holding_quantity" for item in invalid_review.get("errors", [])):
-            failures.append(f"missing final_holding_quantity did not produce an error: {invalid_review}")
+            failures.append(f"missing target_position_value_krw was converted into a symbol: {invalid_review}")
+        if not any(item.get("code") == "invalid_target_position_value_krw" for item in invalid_review.get("errors", [])):
+            failures.append(f"missing target_position_value_krw did not produce an error: {invalid_review}")
         fake_codex = workspace / "fake-codex"
         fake_codex_script(fake_codex)
         fake_market_index_snapshot = workspace / "fake-market-index-snapshot.py"

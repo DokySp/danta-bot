@@ -740,6 +740,27 @@ def non_negative_int_value(raw: Any) -> int | None:
     return None
 
 
+def non_negative_number_value(raw: Any) -> int | float | None:
+    if isinstance(raw, bool) or raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        if raw < 0:
+            return None
+        return int(raw) if isinstance(raw, float) and raw.is_integer() else raw
+    if isinstance(raw, str):
+        text = raw.strip().replace(",", "")
+        if not text:
+            return None
+        try:
+            value = float(text)
+        except ValueError:
+            return None
+        if value < 0:
+            return None
+        return int(value) if value.is_integer() else value
+    return None
+
+
 def first_present_int_value(*values: Any) -> int:
     for value in values:
         if value is not None:
@@ -779,7 +800,7 @@ def build_holding_quantity_context(symbol: dict[str, Any]) -> dict[str, Any]:
         "pending_and_reserved_buy_quantity": pending_buy,
         "pending_and_reserved_sell_quantity": pending_sell,
         "expected_holding_quantity": expected,
-        "final_holding_quantity_semantics": "final total holding quantity after active pending/reserved orders; not order quantity",
+        "target_position_value_semantics": "judge decides target_position_value_krw first; pipeline derives final_holding_quantity from target_position_value_krw / price.current_or_last with Decimal ROUND_HALF_UP",
         "direction_examples": {
             "maintain": expected,
             "increase_by_1": expected + 1,
@@ -1040,8 +1061,10 @@ def compact_review_prompt(spec: dict[str, Any]) -> str | None:
                 "When referring to per-analyst scores in agent_scores, use confidence_adjusted_score as the score; score and confidence are supporting inputs explaining that adjusted score.",
                 "If a symbol's analyst-review score is missing, unavailable, or unusable, treat it as neutral 5 and continue.",
                 "`analyst-review` scores are judgment inputs, not hard buy/sell gates.",
-                "Return final_holding_quantity as the final total holding quantity after this decision, not an order quantity or additional buy/sell quantity.",
-                "No additional buy, no extra exposure, or 추가 확대 없음 means final_holding_quantity equals holding_quantity_context.expected_holding_quantity, not 0.",
+                "Return target_position_value_krw for every symbol as the target KRW position value after this decision.",
+                "The pipeline derives final_holding_quantity from target_position_value_krw / price.current_or_last with Decimal ROUND_HALF_UP; judge-supplied final_holding_quantity is optional and ignored for sizing.",
+                "No additional buy, no extra exposure, or 추가 확대 없음 means target_position_value_krw must not exceed holding_quantity_context.expected_holding_quantity * price.current_or_last, not 0.",
+                "If today_trade_timeline_context shows a same-day buy fill and target_position_value_krw exceeds that baseline, include additional_buy_reason with the new evidence or materially changed price/portfolio context.",
                 "Use recent_trade_context as reassessment input, not a default hold/block reason: same-direction additional trades and opposite-direction final holding changes are allowed after explicitly reassessing price movement, final_first_score, risk, order/fill state, and thesis evidence.",
                 "Use today_trade_timeline_context as reassessment input, not a same-day churn block: same-direction additional trades and opposite-direction final holding changes are allowed after explicitly reassessing price movement, final_first_score, risk, order/fill state, and thesis evidence.",
                 "Treat long_term_thesis_intact as a sell/reduce suppression signal, not as add permission; increase only when add_allowed evidence is also present.",
@@ -1317,11 +1340,19 @@ def compact_review_payload_errors(payload: Any, stage: str, agent_role: str = ""
                         )
         if stage == "judge-review":
             final_value = non_negative_int_value(symbol.get("final_holding_quantity")) if "final_holding_quantity" in symbol else None
-            if "final_holding_quantity" not in symbol:
+            target_value = non_negative_number_value(symbol.get("target_position_value_krw")) if "target_position_value_krw" in symbol else None
+            if "target_position_value_krw" not in symbol:
                 errors.append(
                     {
                         "code": "invalid_compact_review_schema",
-                        "message": f"symbols[{index}] missing final_holding_quantity",
+                        "message": f"symbols[{index}] missing target_position_value_krw",
+                    }
+                )
+            if "target_position_value_krw" in symbol and target_value is None:
+                errors.append(
+                    {
+                        "code": "invalid_compact_review_schema",
+                        "message": f"symbols[{index}].target_position_value_krw must be a non-negative number",
                     }
                 )
             if "final_holding_quantity" in symbol and final_value is None:
@@ -1800,7 +1831,7 @@ else:
                         "reason_code": "hold_neutral",
                         "one_line_reason": "self-test",
                         **(
-                            {"final_holding_quantity": 1, "relative_attractiveness_rank": 1}
+                            {"target_position_value_krw": 70000, "relative_attractiveness_rank": 1}
                             if stage == "judge-review"
                             else first_payload
                         ),
@@ -2100,7 +2131,7 @@ def assert_compact_review_prompt(tmp: Path) -> None:
         "Use recent_trade_context as reassessment input, not a default hold/block reason:",
         "Use today_trade_timeline_context as reassessment input, not a same-day churn block:",
         "Treat long_term_thesis_intact as a sell/reduce suppression signal",
-        "final_holding_quantity",
+        "target_position_value_krw",
         "No additional buy",
     ]
     missing = [part for part in second_required_parts if part not in second_prompt]
@@ -2384,7 +2415,7 @@ def run_self_test() -> int:
                 )
                 if not any(error.get("code") == "invalid_compact_review_schema" for error in invalid_second_errors):
                     raise AssertionError(f"invalid compact judge-review schema was accepted: {invalid_second_errors}")
-                final_quantity_errors = compact_review_payload_errors(
+                target_value_errors = compact_review_payload_errors(
                     {
                         "stage": "judge-review",
                         "symbols": [
@@ -2393,16 +2424,16 @@ def run_self_test() -> int:
                                 "symbol_name": "삼성전자",
                                 "reason_code": "hold_neutral",
                                 "one_line_reason": "유지한다.",
-                                "final_holding_quantity": 8,
+                                "target_position_value_krw": 560000,
                                 "relative_attractiveness_rank": 1,
                             }
                         ],
                     },
                     "judge-review",
                 )
-                if final_quantity_errors:
-                    raise AssertionError(f"final_holding_quantity judge-review schema was rejected: {final_quantity_errors}")
-                invalid_final_quantity_errors = compact_review_payload_errors(
+                if target_value_errors:
+                    raise AssertionError(f"target_position_value_krw judge-review schema was rejected: {target_value_errors}")
+                invalid_target_value_errors = compact_review_payload_errors(
                     {
                         "stage": "judge-review",
                         "symbols": [
@@ -2411,15 +2442,15 @@ def run_self_test() -> int:
                                 "symbol_name": "삼성전자",
                                 "reason_code": "hold_neutral",
                                 "one_line_reason": "유지한다.",
-                                "final_holding_quantity": None,
+                                "target_position_value_krw": -1,
                                 "relative_attractiveness_rank": 1,
                             }
                         ],
                     },
                     "judge-review",
                 )
-                if not any("final_holding_quantity must be a non-negative integer" in str(error.get("message")) for error in invalid_final_quantity_errors):
-                    raise AssertionError(f"invalid final_holding_quantity was not rejected: {invalid_final_quantity_errors}")
+                if not any("target_position_value_krw must be a non-negative number" in str(error.get("message")) for error in invalid_target_value_errors):
+                    raise AssertionError(f"invalid target_position_value_krw was not rejected: {invalid_target_value_errors}")
                 reduce_to_zero_errors = compact_review_payload_errors(
                     {
                         "stage": "judge-review",
@@ -2429,7 +2460,7 @@ def run_self_test() -> int:
                                 "symbol_name": "삼성전자",
                                 "reason_code": "exit_position",
                                 "one_line_reason": "명시적으로 청산한다.",
-                                "final_holding_quantity": 0,
+                                "target_position_value_krw": 0,
                                 "relative_attractiveness_rank": 1,
                             }
                         ],
@@ -2437,7 +2468,7 @@ def run_self_test() -> int:
                     "judge-review",
                 )
                 if reduce_to_zero_errors:
-                    raise AssertionError(f"reduce-to-zero final_holding_quantity schema was rejected: {reduce_to_zero_errors}")
+                    raise AssertionError(f"reduce-to-zero target_position_value_krw schema was rejected: {reduce_to_zero_errors}")
                 top_level_score_payload = normalize_compact_review_payload(
                     {
                         "stage": "analyst-review",

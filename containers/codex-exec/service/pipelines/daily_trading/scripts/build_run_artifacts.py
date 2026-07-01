@@ -882,13 +882,13 @@ def write_combined_first_sidecar(
 
 def write_second_sidecar(path: Path, symbols: list[dict[str, Any]]) -> None:
     lines = [
-        "| 종목 | 최종수량 | 상대매력도 | 판단코드 | 의견(판단) |",
-        "|---|---:|---:|---|---|",
+        "| 종목 | 목표금액 | 최종수량 | 상대매력도 | 판단코드 | 의견(판단) |",
+        "|---|---:|---:|---:|---|---|",
     ]
     for item in symbols:
         symbol_name = f"{item.get('symbol_id', '')} {item.get('symbol_name', '')}".strip()
         lines.append(
-            f"| {symbol_name} | {as_int(item.get('final_holding_quantity'))} | {as_int(item.get('relative_attractiveness_rank'))} | {item.get('reason_code', '')} | {item.get('one_line_reason', '')} |"
+            f"| {symbol_name} | {as_int(item.get('target_position_value_krw')):,} | {as_int(item.get('final_holding_quantity'))} | {as_int(item.get('relative_attractiveness_rank'))} | {item.get('reason_code', '')} | {item.get('one_line_reason', '')} |"
         )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")

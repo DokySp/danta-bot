@@ -44,7 +44,7 @@ python3 <daily-trading-pipeline>/scripts/run_daily_trading_pipeline.py run \
 | 3 | `Main agent` + Collection sub-agents | `scripts/collect_main_evidence.py` direct KIS 가격·계좌 증거 수집, cache miss/universe mismatch 시 `get` 확인 후 1회 `$collect-financial-information`, `$collect-news-information` 및 재 `get`, `market_index_snapshot` deterministic 지수 수집 | 전체 종목 universe, 거래 환경 | `price-chart.json`, `account-before-order.json`, 선택적 `account-asset-snapshot.json`, 선택적 `collection-summary.json`, 선택적 full-universe 또는 partial financial/news memory 경로, 선택적 `market-index-snapshot.json` | 가격·관측시각은 필수, `account-asset-snapshot`은 총자산 추이용 optional stage이며 실패해도 필수 price/account evidence를 깨지 않음; financial/news는 같은 날짜 full-universe cache hit 시 collector를 생략하며, cache miss/universe mismatch면 get→collect→get을 한 번만 수행하고 그래도 미완성이면 partial cache를 사용함; market index snapshot 실패는 non-blocking |
 | 4 | `Main agent` + `scripts/build_run_artifacts.py` | deterministic 병합/sanitize | `price-chart.json`, `$check-portfolio` JSON, 선택적 `memory/collect-financial-information/financial-YYYY-MM-DD.yaml`, 선택적 `memory/collect-news-information/news-YYYY-MM-DD.yaml`, 선택적 `market-index-snapshot.json` | `decision-brief.json`, 제외 종목 목록 | 식별자와 가격 snapshot이 있으면 재무/뉴스/market index snapshot 누락만으로 제외하지 않음; Main agent가 직접 JSON을 조립하지 않고 helper를 호출 |
 | 5 | `analyst-review` sub-agents + `scripts/build_run_artifacts.py` | selected 2 execution personas, deterministic spec/merge into 4 canonical views | launcher-created role-scoped `review-core`, `analyst-review-format.md` | `analyst-review.json`, `reviews/analyst-review--<agent_role>--<task_name>.md` | `analyst-quality-risk`는 `analyst-quality-value`와 `analyst-risk-allocation` view를 독립 산출하고, `analyst-momentum-news`는 `analyst-momentum-cycle`과 `analyst-news-flow` view를 독립 산출; sub-agent는 compact JSON만 반환하고 companion MD와 score merge는 helper가 생성 |
-| 6 | `judge-review` sub-agent + `scripts/build_run_artifacts.py` | `judge`, deterministic 대상/spec 생성 | launcher-created `review-core`, selected-symbol analyst-review slice, `analyst-review-format.md` | `judge-review.json`, `reviews/judge-review--judge--<task_name>.md` | 최종 보유수량은 단일 judge가 제안하고 목표현금은 만들지 않으며, helper/Main agent가 schema·자산·집중도·계좌 gate만 검증; 실패 시 failed task만 최대 2회 retry |
+| 6 | `judge-review` sub-agent + `scripts/build_run_artifacts.py` | `judge`, deterministic 대상/spec 생성 | launcher-created `review-core`, selected-symbol analyst-review slice, `analyst-review-format.md` | `judge-review.json`, `reviews/judge-review--judge--<task_name>.md` | 단일 judge가 종목별 목표금액을 제안하고 helper/Main agent가 이를 half-up 반올림 최종 보유수량으로 정규화한다. 목표현금은 만들지 않으며, helper/Main agent가 schema·계좌 gate를 검증; 실패 시 failed task만 최대 2회 retry |
 | 7 | `scripts/build_run_artifacts.py` + `scripts/execute_orders.py` | deterministic 주문 계산, KIS read-only pending/reserved/주문가능 조회, KIS `order_cash`/`order_resv`/정정취소 API | `judge-review.json`, 최신 계좌 상태, 명시적 demo/real 실행 요청 | `account-before-order.json`, `execution.json`, `order-execution-log.json` | helper가 비제출 주문 수학/gate 요약을 먼저 만들고, 명시 실행 요청에서 `--submit-orders`가 있으면 `execute_orders.py`가 최신 계좌 gate를 갱신한 뒤 즉시/예약 주문을 제출·정정·취소하거나 명확히 차단한다. 명시적 지정가 예약 요청에서는 `execution-plan`의 `order_price`를 기본 지정가 후보로 인정한다 |
 | 8 | `scripts/run_daily_trading_pipeline.py summarize` + `scripts/render_telegram_summary.py` | report template, Telegram fixed template, run artifact update | 최종 `execution.json`, `run.json`, `judge-review.json`, `pipeline-summary.json` | 최종 `pipeline-summary.json`, `telegram-summary.txt`, `reports/YYYY-MM-DD_포트폴리오.md`, 최종 `run.json` | partial/failed artifact를 삭제하지 않음; Telegram 응답은 `telegram-summary.txt`를 그대로 사용 |
 
@@ -71,7 +71,7 @@ python3 <daily-trading-pipeline>/scripts/run_daily_trading_pipeline.py run \
 | `collect-financial-information` | KIS quotation/financial/estimate API 기반 재무 YAML 캐시 경로 | `gpt-5.4-mini` | `low` |
 | `collect-news-information` | KIS 뉴스 YAML 캐시 경로/요약 | `gpt-5.4-mini` | `low` |
 | selected 2 analyst-review execution personas | `analyst-review` 독립 종목 점수 (`analyst-quality-risk`와 `analyst-momentum-news`가 각각 두 view 산출) | `gpt-5.5` | `medium` |
-| `judge` | `judge-review` 포트폴리오 최종 보유수량 | `gpt-5.5` | `medium` |
+| `judge` | `judge-review` 포트폴리오 목표금액 | `gpt-5.5` | `medium` |
 
 ## API 권한
 
@@ -198,7 +198,7 @@ Run 아티팩트는 `reports/runs/<run_id>/` 아래에 둔다.
 - `run.json`은 `run_id`, `started_at`, status, stage records를 보존한다.
 - `decision-brief.json`은 compact canonical review input이다.
 - `analyst-review.json`은 analyst-review score view 병합 결과다.
-- `judge-review.json`은 단일 judge final holding set이다.
+- `judge-review.json`은 단일 judge target position value와 helper가 정규화한 final holding set이다.
 - `execution.json`은 final holding delta, gate decision, active-order reconciliation, submitted/skipped/blocked order result, sanitized error를 기록한다.
 - `pipeline-summary.json`은 service output을 위한 compact diagnostic source다.
 - `telegram-summary.txt`는 `pipeline-summary.json`에서 렌더링한 고정 user-facing 응답이며, service code는 raw artifact에서 새 summary를 재구성하지 않는다.
@@ -216,7 +216,7 @@ Run 아티팩트는 `reports/runs/<run_id>/` 아래에 둔다.
 
 ### 주문 실행 계약
 
-- `judge-review`는 final holding quantity를 결정하고, deterministic helper가 이를 order candidate로 변환한다.
+- `judge-review`는 target position value를 결정하고, deterministic helper가 이를 half-up 반올림 final holding quantity와 order candidate로 변환한다.
 - 실제 order API는 명시적 demo/real authorization 이후 모든 gate를 통과했을 때만 `execute_orders.py`가 호출한다.
 - 지원 대상은 immediate cash order, reservation order, active order reconciliation을 위한 supported correction/cancellation API다.
 - 주문 전 `execute_orders.py`는 active pending/reserved order와 order-available quantity를 포함한 required read-only account gate를 갱신한다.

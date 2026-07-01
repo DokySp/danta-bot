@@ -38,13 +38,14 @@ Main-generated `judge-review` sidecar content:
 - Header exactly:
 
   ```markdown
-  | 종목 | 최종수량 | 상대매력도 | 판단코드 | 의견(판단) |
-  |---|---:|---:|---|---|
+  | 종목 | 목표금액 | 최종수량 | 상대매력도 | 판단코드 | 의견(판단) |
+  |---|---:|---:|---:|---|---|
   ```
 
 - One row for every supplied judge-review asset.
 - `종목` includes symbol id and name.
-- `최종수량` is the non-negative integer final holding quantity.
+- `목표금액` is `target_position_value_krw`.
+- `최종수량` is the non-negative integer final holding quantity derived by Main/pipeline.
 - `상대매력도` is the integer rank from `relative_attractiveness_rank`.
 - `판단코드` is `reason_code`.
 - `의견(판단)` is `one_line_reason`.
@@ -178,10 +179,10 @@ Return JSON:
     {
       "symbol_id": "005930",
       "symbol_name": "삼성전자",
-      "final_holding_quantity": 8,
+      "target_position_value_krw": 560000,
       "relative_attractiveness_rank": 1,
       "reason_code": "hold_final_quantity",
-      "one_line_reason": "expected_holding_quantity 8주를 유지한다."
+      "one_line_reason": "기준금액 수준의 목표금액을 유지한다."
     }
   ],
   "errors": []
@@ -190,12 +191,15 @@ Return JSON:
 
 Rules:
 
-- `final_holding_quantity` is a non-negative integer final holding quantity after this decision, not an order quantity and not an additional buy/sell quantity.
-- Use each symbol's `holding_quantity_context.expected_holding_quantity` as the explicit baseline for `final_holding_quantity`.
-- A reduce rationale must set `final_holding_quantity` below `expected_holding_quantity`; an increase rationale must set it above; a hold rationale must set it equal.
-- "No additional buy", "no extra exposure", or "추가 확대 없음" is a hold rationale: set `final_holding_quantity` equal to `expected_holding_quantity`, not `0`.
-- `reason_code` and `one_line_reason` must describe the same reduce/hold/increase direction implied by `final_holding_quantity`.
-- Every judge-review symbol receives a final holding quantity, including valid reduce-to-zero holdings when the rationale explicitly says reduce/exit/sell.
+- `target_position_value_krw` is required for every judge-review symbol. It is the judge's target position value in KRW after this decision.
+- `target_position_value_krw` must be numeric and non-negative. `0` is valid when the rationale explicitly says reduce-to-zero or exit.
+- `final_holding_quantity` is optional in judge output and is not the judge's sizing decision. Main/pipeline derives it from `target_position_value_krw / price.current_or_last` using Decimal `ROUND_HALF_UP`.
+- Use each symbol's `holding_quantity_context.expected_holding_quantity * price.current_or_last` as the explicit baseline position value.
+- A reduce rationale must set `target_position_value_krw` below that baseline; an increase rationale must set it above; a hold rationale must keep it at the baseline level.
+- "No additional buy", "no extra exposure", or "추가 확대 없음" is a hold rationale: do not raise `target_position_value_krw` above the baseline, and do not set it to `0`.
+- If `today_trade_timeline_context` shows a same-day buy fill and `target_position_value_krw` is above the baseline, include `additional_buy_reason` with the new evidence or materially changed price/portfolio context supporting the increase.
+- `reason_code` and `one_line_reason` must describe the same reduce/hold/increase direction implied by `target_position_value_krw` versus the baseline.
+- Every judge-review symbol receives a target position value, including valid `0` values when the rationale explicitly says reduce/exit/sell.
 - Consider relative attractiveness, duplicate exposure, current weight, price/chart conditions, and the supplied selected-symbol analyst-review results.
 - Treat `final_first_score` as the unrounded confidence-adjusted analyst-review score: `>= 6` is a buy/increase candidate, `<= 4` is a reduce/exit candidate, and `5` is neutral.
 - When referring to per-analyst scores in `agent_scores`, use `confidence_adjusted_score` as the score. `score` and `confidence` are supporting inputs explaining that adjusted score.
@@ -203,7 +207,7 @@ Rules:
 - `analyst-review` scores are judgment inputs, not hard buy/sell gates.
 - For holding symbols, distinguish `long_term_thesis_intact` from `add_allowed`: intact thesis suppresses unnecessary sell/reduce decisions, but it is not by itself permission to increase final holding quantity.
 - Judge long-term thesis from supplied evidence only: core investment rationale, material news/disclosure risk, quality/value deterioration, whether a price shock indicates structural damage or short-term volatility, and portfolio weight/concentration.
-- Increase final holding quantity only when add conditions are also satisfied: quality/value advantage, acceptable risk/allocation, weight/concentration room, explicit reassessment of any same-day/recent trade context, and no supplied material adverse news/disclosure.
+- Increase target position value only when add conditions are also satisfied: quality/value advantage, acceptable risk/allocation, weight/concentration room, explicit reassessment of any same-day/recent trade context, and no supplied material adverse news/disclosure.
 - Do not take profit solely because a position is up or the current day is sharply positive when thesis remains intact. If overextension, overweight, and a clearly better alternative are all present, prefer partial reduction over full exit.
 - Do not use same-day fills or `recent_trade_context` as a default hold/block reason. Same-direction additional trades and opposite-direction final holding changes are allowed only after explicitly reassessing price movement, `final_first_score`, risk, order/fill state, and thesis evidence; encode that reassessment in `reason_code` and `one_line_reason`.
 - No fixed cash ratio or fixed investment ratio.
@@ -212,13 +216,13 @@ Rules:
 
 Validation by Main agent:
 
-- Use the single valid `judge` final holding quantities as the canonical `judge-review.json` `final_holding_quantity` values.
-- If the valid judge result is missing for a symbol, set no final holding quantity and exclude it from orders.
-- Validate final holdings against total assets and the latest available account/order gate using immutable price snapshot valuations.
-- If final holdings exceed assets, reduce only buy-side quantities in reverse relative-attractiveness order. Do not increase sell-side final quantities.
-- If final holdings are below assets, leave the remainder as residual cash. Do not create, report, or optimize toward a cash target value.
-- Preserve total-asset/cash, duplicate exposure, high-price concentration, active order, order validity, and market open gates.
-- Apply latest account constraints after final holding validation.
+- Use the single valid `judge` target position values as the canonical `judge-review.json` `target_position_value_krw` values.
+- Main/pipeline derives canonical `final_holding_quantity` values from `target_position_value_krw / price.current_or_last` using Decimal `ROUND_HALF_UP`.
+- If the valid judge result is missing a target position value for a symbol, set no final holding quantity and exclude it from orders.
+- Do not reduce buy-side quantities solely because rounded target shares exceed `target_position_value_krw`; affordability and order availability are handled by existing account/order gates.
+- If derived final holdings are below assets, leave the remainder as residual cash. Do not create, report, or optimize toward a cash target value.
+- Preserve existing account/order execution checks such as orderable cash, active orders, same-day context, order validity, and market open checks.
+- Apply latest account constraints after final holding derivation.
 
 ## Allowed Values
 
