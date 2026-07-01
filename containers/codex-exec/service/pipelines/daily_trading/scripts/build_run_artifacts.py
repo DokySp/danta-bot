@@ -687,17 +687,6 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
         }
     )
 
-    if account.get("active_order_lookup_performed") is False or account.get("order_available_lookup_performed") is False:
-        artifact["errors"].append(
-            {
-                "stage": "account-before-order",
-                "source": "collect_main_evidence",
-                "code": "order_gate_fields_missing",
-                "message": "active_order_lookup_performed/order_available_lookup_performed are false; order submission requires refresh before execution",
-                "required": False,
-            }
-        )
-
     for item in price_chart.get("symbols", []):
         if not isinstance(item, dict):
             continue
@@ -1580,8 +1569,10 @@ symbols:
                     market_index_snapshot_json=str(market_index_snapshot_path),
                 )
             )
-            if brief["status"] != "partial" or len(brief["symbols"]) != 2:
+            if brief["status"] != "success" or len(brief["symbols"]) != 2:
                 failures.append(f"unexpected decision brief: {brief}")
+            if any(item.get("code") == "order_gate_fields_missing" for item in brief.get("errors", [])):
+                failures.append(f"decision brief should not include stale order gate error: {brief}")
             decision_brief_text = (run_dir / "decision-brief.json").read_text(encoding="utf-8")
             if "\n  " in decision_brief_text:
                 failures.append("decision-brief.json should be stored as compact JSON")
