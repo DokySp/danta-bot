@@ -1076,6 +1076,94 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
                 blocked += 1
                 continue
 
+            conflict_remaining = as_int(conflict.get("remaining_quantity"))
+            active_matches_desired_sell = desired_side == "sell" and can_correct(conflict, desired_side, order_path, order_api)
+            corrected_active_order_id = ""
+            active_adjustment_recorded = False
+
+            if active_matches_desired_sell and conflict_remaining >= desired_qty:
+                if desired_qty <= 0 or price <= 0:
+                    order["result"] = "blocked"
+                    order["reason"] = "invalid_order_quantity_or_price"
+                    order["order_or_reservation_id"] = conflict.get("order_id", "")
+                    order_adjustments.append(adjustment_row(conflict, action="block", reason="invalid_order_quantity_or_price", result="blocked"))
+                    blocked += 1
+                    continue
+                desired_order = dict(order)
+                desired_order["direction"] = desired_side
+                desired_order["validated_order_quantity"] = desired_qty
+                desired_order["additional_required_quantity"] = desired_delta
+                try:
+                    request_id, action, message = adjust_active_order(kis, conflict, desired_order)
+                except Exception as exc:  # noqa: BLE001
+                    order["result"] = "blocked"
+                    order["reason"] = "active_order_adjustment_failed"
+                    order["order_or_reservation_id"] = conflict.get("order_id", "")
+                    order["attempts"].append(attempt(conflict.get("order_api") or "order_rvsecncl", "blocked", redact(exc), "api_error"))
+                    order_adjustments.append(adjustment_row(conflict, action="block", reason="active_order_adjustment_failed", result="blocked"))
+                    blocked += 1
+                    continue
+                row = adjustment_row(conflict, action=action, reason="active_order_adjustment_required", result="submitted")
+                row["adjustment_request_id"] = request_id
+                row["attempts"].append(attempt(conflict.get("order_api") or "order_rvsecncl", "submitted", message))
+                order_adjustments.append(row)
+                order["attempts"].append(attempt(conflict.get("order_api") or "order_rvsecncl", "submitted", message))
+                if action == "correct":
+                    order["result"] = "submitted"
+                    order["reason"] = "active_order_correction_submitted"
+                    order["direction"] = desired_side
+                    order["additional_required_quantity"] = desired_delta
+                    order["validated_order_quantity"] = desired_qty
+                    order["order_or_reservation_id"] = request_id
+                    submitted += 1
+                    continue
+                order["result"] = "blocked"
+                order["reason"] = "active_order_adjustment_unavailable"
+                order["direction"] = desired_side
+                order["additional_required_quantity"] = desired_delta
+                order["validated_order_quantity"] = desired_qty
+                order["order_or_reservation_id"] = request_id or conflict.get("order_id", "")
+                row["replacement_required"] = True
+                blocked += 1
+                continue
+
+            if active_matches_desired_sell and 0 < conflict_remaining < desired_qty and as_int(conflict.get("order_price")) != price:
+                if price <= 0:
+                    order["result"] = "blocked"
+                    order["reason"] = "invalid_order_quantity_or_price"
+                    order["order_or_reservation_id"] = conflict.get("order_id", "")
+                    order_adjustments.append(adjustment_row(conflict, action="block", reason="invalid_order_quantity_or_price", result="blocked"))
+                    blocked += 1
+                    continue
+                covered_order = dict(order)
+                covered_order["direction"] = desired_side
+                covered_order["validated_order_quantity"] = conflict_remaining
+                covered_order["additional_required_quantity"] = conflict_remaining if desired_side == "buy" else -conflict_remaining
+                try:
+                    request_id, action, message = adjust_active_order(kis, conflict, covered_order)
+                except Exception as exc:  # noqa: BLE001
+                    order["result"] = "blocked"
+                    order["reason"] = "active_order_adjustment_failed"
+                    order["order_or_reservation_id"] = conflict.get("order_id", "")
+                    order["attempts"].append(attempt(conflict.get("order_api") or "order_rvsecncl", "blocked", redact(exc), "api_error"))
+                    order_adjustments.append(adjustment_row(conflict, action="block", reason="active_order_adjustment_failed", result="blocked"))
+                    blocked += 1
+                    continue
+                if action != "correct":
+                    order["result"] = "blocked"
+                    order["reason"] = "active_order_adjustment_unavailable"
+                    order["order_or_reservation_id"] = request_id or conflict.get("order_id", "")
+                    order_adjustments.append(adjustment_row(conflict, action=action, reason="active_order_adjustment_required", result="blocked"))
+                    blocked += 1
+                    continue
+                row = adjustment_row(conflict, action=action, reason="active_order_adjustment_required", result="submitted")
+                row["adjustment_request_id"] = request_id
+                row["attempts"].append(attempt(conflict.get("order_api") or "order_rvsecncl", "submitted", message))
+                order_adjustments.append(row)
+                order["attempts"].append(attempt(conflict.get("order_api") or "order_rvsecncl", "submitted", message))
+                corrected_active_order_id = request_id
+                active_adjustment_recorded = True
+
             if (
                 side != "none"
                 and conflict.get("direction") == side
@@ -1102,7 +1190,8 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
                     cash_limit=cash_limit,
                     local_sell_gate=True,
                 )
-                order_adjustments.append(adjustment_row(conflict, action="keep", reason="same_direction_active_order_kept", result="skipped"))
+                if not active_adjustment_recorded:
+                    order_adjustments.append(adjustment_row(conflict, action="keep", reason="same_direction_active_order_kept", result="skipped"))
                 if quantity_blocked:
                     order["order_or_reservation_id"] = conflict.get("order_id", "")
                     blocked += 1
@@ -1134,7 +1223,10 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
                 order["result"] = "submitted"
                 order["reason"] = "active_order_kept_and_additional_order_submitted"
                 order["order_or_reservation_id"] = order_id
-                order["kept_active_order_id"] = conflict.get("order_id", "")
+                if corrected_active_order_id:
+                    order["corrected_active_order_id"] = corrected_active_order_id
+                else:
+                    order["kept_active_order_id"] = conflict.get("order_id", "")
                 order["attempts"].append(attempt(order_api, "submitted", f"additional_order_id={order_id}"))
                 submitted += 1
                 continue
@@ -1833,6 +1925,178 @@ def self_test() -> int:
             failures.append(f"zero max_buy_qty did not block buy order: {zero_orders['000270']}")
         if zero_orders["005930"].get("reason") != "sell_quantity_exceeds_order_available_quantity":
             failures.append(f"zero max_sell_qty did not block sell order: {zero_orders['005930']}")
+
+        active_sell_base = {
+            "symbol_id": "402340",
+            "symbol_name": "SK스퀘어",
+            "order_id": "old-sell",
+            "order_kind": "pending",
+            "direction": "sell",
+            "remaining_quantity": 1,
+            "order_price": 1_630_000,
+            "active_status": "active",
+            "order_api": "order_cash",
+            "order_path": "immediate",
+            "execution_environment": "real",
+            "observed_at": now_iso(),
+            "krx_fwdg_ord_orgno": "91255",
+            "orgn_odno": "old-sell",
+        }
+
+        active_sell_correction_execution = {
+            "orders": [
+                {"symbol_id": "402340", "symbol_name": "SK스퀘어", "final_holding_quantity": 0, "order_price": 1_595_000, "order_path": "immediate"}
+            ]
+        }
+        original_adjust_active_order = globals()["adjust_active_order"]
+        original_submit_order = globals()["submit_order"]
+        correction_adjustments: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
+        unexpected_submissions: list[dict[str, Any]] = []
+
+        def fake_correct_active_sell(kis: Any, active: dict[str, Any], desired: dict[str, Any] | None) -> tuple[str, str, str]:
+            correction_adjustments.append((dict(active), dict(desired) if desired else None))
+            return "correct-sell", "correct", "fake active sell correction"
+
+        def fake_unexpected_submit(kis: Any, order: dict[str, Any]) -> str:
+            unexpected_submissions.append(dict(order))
+            return "unexpected-submit"
+
+        try:
+            globals()["adjust_active_order"] = fake_correct_active_sell
+            globals()["submit_order"] = fake_unexpected_submit
+            reconcile(
+                {"account_summary": {"cash_amount": 1_000_000}, "symbols": [{"symbol_id": "402340", "symbol_name": "SK스퀘어", "current_live_holding_quantity": 1}]},
+                active_sell_correction_execution,
+                [dict(active_sell_base)],
+                {},
+                {"402340": {"max_sell_qty": 0}},
+                submit=True,
+                kis=FakeKis(),
+            )
+        finally:
+            globals()["adjust_active_order"] = original_adjust_active_order
+            globals()["submit_order"] = original_submit_order
+        active_sell_correction_order = active_sell_correction_execution["orders"][0]
+        if active_sell_correction_order.get("result") != "submitted" or active_sell_correction_order.get("reason") != "active_order_correction_submitted":
+            failures.append(f"covered active sell was not corrected without new sell gate: {active_sell_correction_order}")
+        if active_sell_correction_order.get("reason") in {"sell_quantity_exceeds_available_holding", "sell_quantity_exceeds_order_available_quantity"}:
+            failures.append(f"covered active sell hit a sell gate: {active_sell_correction_order}")
+        if unexpected_submissions:
+            failures.append(f"covered active sell correction should not submit a new order: {unexpected_submissions}")
+        if not correction_adjustments or (correction_adjustments[0][1] or {}).get("validated_order_quantity") != 1:
+            failures.append(f"covered active sell correction used wrong desired order: {correction_adjustments}")
+
+        partial_active_sell_execution = {
+            "orders": [
+                {"symbol_id": "402340", "symbol_name": "SK스퀘어", "final_holding_quantity": 1, "order_price": 1_630_000, "order_path": "immediate"}
+            ]
+        }
+        partial_submissions: list[dict[str, Any]] = []
+
+        def fake_submit_partial_sell(kis: Any, order: dict[str, Any]) -> str:
+            partial_submissions.append(dict(order))
+            return "new-sell"
+
+        try:
+            globals()["submit_order"] = fake_submit_partial_sell
+            reconcile(
+                {"account_summary": {"cash_amount": 1_000_000}, "symbols": [{"symbol_id": "402340", "symbol_name": "SK스퀘어", "current_live_holding_quantity": 5}]},
+                partial_active_sell_execution,
+                [dict(active_sell_base, remaining_quantity=2)],
+                {},
+                {"402340": {"max_sell_qty": 1}},
+                submit=True,
+                kis=FakeKis(),
+            )
+        finally:
+            globals()["submit_order"] = original_submit_order
+        partial_active_sell_order = partial_active_sell_execution["orders"][0]
+        if partial_active_sell_order.get("result") != "submitted" or partial_active_sell_order.get("reason") != "active_order_kept_and_additional_order_submitted":
+            failures.append(f"partial active sell did not submit only additional quantity: {partial_active_sell_order}")
+        if partial_active_sell_order.get("validated_order_quantity") != 1:
+            failures.append(f"partial active sell additional quantity was not gated independently: {partial_active_sell_order}")
+        if (partial_active_sell_order.get("quantity_adjustment") or {}).get("reason") != "sell_quantity_reduced_to_order_available_quantity":
+            failures.append(f"partial active sell additional gate reason missing: {partial_active_sell_order}")
+        if not partial_submissions or partial_submissions[0].get("validated_order_quantity") != 1:
+            failures.append(f"partial active sell submitted wrong additional order: {partial_submissions}")
+
+        active_sell_cancel_only_execution = {
+            "orders": [
+                {"symbol_id": "402340", "symbol_name": "SK스퀘어", "final_holding_quantity": 1, "order_price": 1_595_000, "order_path": "immediate"}
+            ]
+        }
+        cancel_only_adjustments: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
+        cancel_only_submissions: list[dict[str, Any]] = []
+
+        def fake_cancel_active_sell(kis: Any, active: dict[str, Any], desired: dict[str, Any] | None) -> tuple[str, str, str]:
+            cancel_only_adjustments.append((dict(active), dict(desired) if desired else None))
+            return "cancel-sell", "cancel", "fake active sell cancel"
+
+        def fake_cancel_only_submit(kis: Any, order: dict[str, Any]) -> str:
+            cancel_only_submissions.append(dict(order))
+            return "unexpected-buy"
+
+        try:
+            globals()["adjust_active_order"] = fake_cancel_active_sell
+            globals()["submit_order"] = fake_cancel_only_submit
+            reconcile(
+                {"account_summary": {"cash_amount": 1_000_000}, "symbols": [{"symbol_id": "402340", "symbol_name": "SK스퀘어", "current_live_holding_quantity": 1}]},
+                active_sell_cancel_only_execution,
+                [dict(active_sell_base)],
+                {"402340": {"max_buy_qty": 1, "max_buy_amt": 1_000_000}},
+                {},
+                submit=True,
+                kis=FakeKis(),
+            )
+        finally:
+            globals()["adjust_active_order"] = original_adjust_active_order
+            globals()["submit_order"] = original_submit_order
+        active_sell_cancel_only_order = active_sell_cancel_only_execution["orders"][0]
+        if active_sell_cancel_only_order.get("result") != "submitted" or active_sell_cancel_only_order.get("reason") != "active_order_cancel_submitted":
+            failures.append(f"active sell cancel-only case was not cancel-only: {active_sell_cancel_only_order}")
+        if not cancel_only_adjustments or cancel_only_adjustments[0][1] is not None:
+            failures.append(f"active sell cancel-only should cancel without desired replacement: {cancel_only_adjustments}")
+        if cancel_only_submissions:
+            failures.append(f"active sell cancel-only should not submit replacement buy: {cancel_only_submissions}")
+
+        active_sell_replacement_buy_execution = {
+            "orders": [
+                {"symbol_id": "402340", "symbol_name": "SK스퀘어", "final_holding_quantity": 2, "order_price": 1_595_000, "order_path": "immediate"}
+            ]
+        }
+        replacement_buy_adjustments: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
+        replacement_buy_submissions: list[dict[str, Any]] = []
+
+        def fake_cancel_for_replacement_buy(kis: Any, active: dict[str, Any], desired: dict[str, Any] | None) -> tuple[str, str, str]:
+            replacement_buy_adjustments.append((dict(active), dict(desired) if desired else None))
+            return "cancel-before-buy", "cancel", "fake active sell cancel"
+
+        def fake_submit_replacement_buy(kis: Any, order: dict[str, Any]) -> str:
+            replacement_buy_submissions.append(dict(order))
+            return "replacement-buy"
+
+        try:
+            globals()["adjust_active_order"] = fake_cancel_for_replacement_buy
+            globals()["submit_order"] = fake_submit_replacement_buy
+            reconcile(
+                {"account_summary": {"cash_amount": 1_000_000}, "symbols": [{"symbol_id": "402340", "symbol_name": "SK스퀘어", "current_live_holding_quantity": 1}]},
+                active_sell_replacement_buy_execution,
+                [dict(active_sell_base)],
+                {"402340": {"max_buy_qty": 1, "max_buy_amt": 2_000_000}},
+                {},
+                submit=True,
+                kis=FakeKis(),
+            )
+        finally:
+            globals()["adjust_active_order"] = original_adjust_active_order
+            globals()["submit_order"] = original_submit_order
+        active_sell_replacement_buy_order = active_sell_replacement_buy_execution["orders"][0]
+        if active_sell_replacement_buy_order.get("result") != "submitted" or active_sell_replacement_buy_order.get("reason") != "active_order_cancel_and_replacement_submitted":
+            failures.append(f"active sell replacement-buy case did not cancel and buy: {active_sell_replacement_buy_order}")
+        if not replacement_buy_adjustments or replacement_buy_adjustments[0][1] is not None:
+            failures.append(f"active sell replacement-buy should cancel before replacement: {replacement_buy_adjustments}")
+        if not replacement_buy_submissions or replacement_buy_submissions[0].get("direction") != "buy" or replacement_buy_submissions[0].get("validated_order_quantity") != 1:
+            failures.append(f"active sell replacement buy used wrong replacement order: {replacement_buy_submissions}")
 
         active_additional_execution = {
             "orders": [
