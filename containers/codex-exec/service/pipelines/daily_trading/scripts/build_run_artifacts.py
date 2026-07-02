@@ -8,8 +8,10 @@ planning, and token accounting out of the Main agent prompt path.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
+import os
 import re
 import sys
 import tempfile
@@ -51,6 +53,27 @@ CHART_RECENT_ROW_LIMITS = {
     "monthly": 4,
     "intraday": 5,
 }
+STRATEGY_POLICY_CONFIG_ENV = "DAILY_TRADING_STRATEGY_POLICY_CONFIG"
+STRATEGY_POLICY_CONFIG_FILENAME = "daily-trading-strategy-policy.yaml"
+STRATEGY_ADVISORY_LABELS = {
+    "favor",
+    "neutral",
+    "discourage",
+    "observe_first",
+    "strong_review_required",
+}
+STRATEGY_REGIMES = {
+    "insufficient_market_data",
+    "neutral",
+    "risk_on",
+    "weak_downside",
+    "panic_downside",
+}
+STRATEGY_BIAS_FIELDS = (
+    "new_exposure_review_bias",
+    "downside_add_review_bias",
+    "index_drop_sell_review_bias",
+)
 
 
 def now_iso() -> str:
@@ -61,9 +84,17 @@ def pipeline_dir() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def default_strategy_policy_config_path() -> Path:
+    return pipeline_dir().parents[2] / "profiles" / "base" / "config" / STRATEGY_POLICY_CONFIG_FILENAME
+
+
 def load_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def load_yaml(path: Path | None) -> Any:
@@ -77,6 +108,125 @@ def load_yaml(path: Path | None) -> Any:
         return yaml.safe_load(path.read_text(encoding="utf-8"))
     except Exception:
         return None
+
+
+def load_required_yaml(path: Path) -> Any:
+    try:
+        import yaml  # type: ignore[import-not-found]
+    except Exception as exc:  # pragma: no cover - depends on runtime image
+        raise RuntimeError(f"PyYAML is required to read {path}") from exc
+    try:
+        return yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ValueError(f"failed to parse YAML: {path}") from exc
+
+
+def resolve_strategy_policy_config_path(value: str | Path | None = None) -> Path:
+    text = str(value or os.getenv(STRATEGY_POLICY_CONFIG_ENV, "")).strip()
+    if text:
+        path = Path(text).expanduser()
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        if not path.exists():
+            raise FileNotFoundError(f"strategy policy config not found: {path}")
+        return path.resolve()
+    path = default_strategy_policy_config_path()
+    if not path.exists():
+        raise FileNotFoundError(f"default strategy policy config not found: {path}")
+    return path.resolve()
+
+
+def finite_float_value(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isfinite(parsed):
+        return parsed
+    return None
+
+
+def required_finite_number(payload: dict[str, Any], key: str, source: Path) -> float:
+    value = finite_float_value(payload.get(key))
+    if value is None:
+        raise ValueError(f"strategy policy {key} must be a finite number: {source}")
+    return value
+
+
+def validate_strategy_policy_config(payload: Any, source: Path) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError(f"strategy policy config must be an object: {source}")
+    tracked = payload.get("tracked_indexes")
+    if not isinstance(tracked, list) or not [str(item).strip() for item in tracked if str(item).strip()]:
+        raise ValueError(f"strategy policy tracked_indexes must be a non-empty list: {source}")
+    thresholds = payload.get("regime_thresholds")
+    if not isinstance(thresholds, dict):
+        raise ValueError(f"strategy policy regime_thresholds must be an object: {source}")
+    normalized_thresholds = {
+        "panic_downside_any_lte_pct": required_finite_number(thresholds, "panic_downside_any_lte_pct", source),
+        "weak_downside_any_lte_pct": required_finite_number(thresholds, "weak_downside_any_lte_pct", source),
+        "risk_on_all_gte_pct": required_finite_number(thresholds, "risk_on_all_gte_pct", source),
+    }
+    if normalized_thresholds["panic_downside_any_lte_pct"] > normalized_thresholds["weak_downside_any_lte_pct"]:
+        raise ValueError(f"strategy policy panic threshold must be <= weak threshold: {source}")
+
+    labels = payload.get("advisory_labels")
+    if not isinstance(labels, dict):
+        raise ValueError(f"strategy policy advisory_labels must be an object: {source}")
+    normalized_labels = {key: str(labels.get(key) or "").strip() for key in STRATEGY_ADVISORY_LABELS}
+    missing_labels = [key for key, value in normalized_labels.items() if not value]
+    if missing_labels:
+        raise ValueError(f"strategy policy advisory_labels missing: {', '.join(sorted(missing_labels))}")
+
+    regime_bias = payload.get("regime_bias")
+    if not isinstance(regime_bias, dict):
+        raise ValueError(f"strategy policy regime_bias must be an object: {source}")
+    normalized_bias: dict[str, dict[str, str]] = {}
+    for regime in STRATEGY_REGIMES:
+        entry = regime_bias.get(regime)
+        if not isinstance(entry, dict):
+            raise ValueError(f"strategy policy regime_bias.{regime} must be an object: {source}")
+        normalized_entry: dict[str, str] = {}
+        for field in STRATEGY_BIAS_FIELDS:
+            label = str(entry.get(field) or "").strip()
+            if label not in STRATEGY_ADVISORY_LABELS:
+                raise ValueError(f"strategy policy regime_bias.{regime}.{field} has unsupported label: {label}")
+            normalized_entry[field] = label
+        normalized_entry["advisory_reason"] = str(entry.get("advisory_reason") or "").strip()
+        normalized_bias[regime] = normalized_entry
+
+    downside_add = payload.get("downside_add_review")
+    if not isinstance(downside_add, dict):
+        raise ValueError(f"strategy policy downside_add_review must be an object: {source}")
+    downside_target = str(downside_add.get("target") or "").strip()
+    if downside_target != "all_current_holdings":
+        raise ValueError(f"strategy policy downside_add_review.target must be all_current_holdings: {source}")
+
+    concentration = payload.get("concentration_levels") if isinstance(payload.get("concentration_levels"), dict) else {}
+    low = finite_float_value(concentration.get("low_lte_pct"))
+    moderate = finite_float_value(concentration.get("moderate_lte_pct"))
+    if low is None or moderate is None or low < 0 or moderate < low:
+        raise ValueError(f"strategy policy concentration_levels are invalid: {source}")
+
+    return {
+        "schema_version": str(payload.get("schema_version") or "1"),
+        "tracked_indexes": [str(item).strip() for item in tracked if str(item).strip()],
+        "regime_thresholds": normalized_thresholds,
+        "advisory_labels": normalized_labels,
+        "regime_bias": normalized_bias,
+        "downside_add_review": {"target": downside_target},
+        "concentration_levels": {
+            "low_lte_pct": low,
+            "moderate_lte_pct": moderate,
+        },
+    }
+
+
+def load_strategy_policy_config(path_value: str | Path | None = None) -> tuple[dict[str, Any], Path]:
+    path = resolve_strategy_policy_config_path(path_value)
+    return validate_strategy_policy_config(load_required_yaml(path), path), path
 
 
 def write_json(path: Path, payload: Any) -> None:
@@ -282,6 +432,137 @@ def compact_market_index_snapshot(path: str | None) -> dict[str, Any]:
         "warnings": list(payload.get("warnings") or [])[:5],
         "errors": list(payload.get("errors") or [])[:5],
     }
+
+
+def tracked_index_changes(
+    market_index_snapshot: dict[str, Any],
+    tracked_indexes: list[str],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    wanted = {str(item).strip().upper() for item in tracked_indexes if str(item).strip()}
+    found: dict[str, dict[str, Any]] = {}
+    for item in market_index_snapshot.get("indexes", []) if isinstance(market_index_snapshot, dict) else []:
+        if not isinstance(item, dict):
+            continue
+        symbol = str(item.get("symbol") or "").strip().upper()
+        if symbol not in wanted:
+            continue
+        change = finite_float_value(item.get("change_percent"))
+        if change is None:
+            continue
+        found[symbol] = {
+            "symbol": symbol,
+            "change_percent": round_float(change),
+            "status": item.get("status") or "",
+            "observed_at": item.get("observed_at") or "",
+            "market_status": item.get("market_status") or "",
+        }
+    ordered = [found[str(symbol).strip().upper()] for symbol in tracked_indexes if str(symbol).strip().upper() in found]
+    missing = [str(symbol).strip().upper() for symbol in tracked_indexes if str(symbol).strip().upper() not in found]
+    return ordered, missing
+
+
+def strategy_regime(policy: dict[str, Any], tracked_changes: list[dict[str, Any]], missing: list[str]) -> str:
+    if not tracked_changes:
+        return "insufficient_market_data"
+    thresholds = policy.get("regime_thresholds") if isinstance(policy.get("regime_thresholds"), dict) else {}
+    panic = float(thresholds.get("panic_downside_any_lte_pct"))
+    weak = float(thresholds.get("weak_downside_any_lte_pct"))
+    risk_on = float(thresholds.get("risk_on_all_gte_pct"))
+    changes = [
+        float(item["change_percent"])
+        for item in tracked_changes
+        if finite_float_value(item.get("change_percent")) is not None
+    ]
+    if any(change <= panic for change in changes):
+        return "panic_downside"
+    if any(change <= weak for change in changes):
+        return "weak_downside"
+    if not missing and len(changes) == len(policy.get("tracked_indexes", [])) and all(change >= risk_on for change in changes):
+        return "risk_on"
+    return "neutral"
+
+
+def build_strategy_context(
+    policy: dict[str, Any],
+    policy_path: Path,
+    market_index_snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    tracked, missing = tracked_index_changes(market_index_snapshot, list(policy.get("tracked_indexes") or []))
+    regime = strategy_regime(policy, tracked, missing)
+    bias = dict((policy.get("regime_bias") or {}).get(regime) or {})
+    return {
+        "schema_version": "1",
+        "policy_source": {
+            "path": str(policy_path),
+            "sha256": file_sha256(policy_path),
+            "schema_version": policy.get("schema_version") or "1",
+        },
+        "advisory_semantics": "strategy_context and symbol_strategy_context are advisory inputs for target_position_value_krw judgment, not order allow/block rules.",
+        "regime": regime,
+        "tracked_indexes": tracked,
+        "missing_tracked_indexes": missing,
+        "partial_missing_index_policy": "downside regimes use available tracked indexes; risk_on requires all configured tracked indexes to be usable.",
+        "new_exposure_review_bias": bias.get("new_exposure_review_bias") or "neutral",
+        "downside_add_review_bias": bias.get("downside_add_review_bias") or "neutral",
+        "index_drop_sell_review_bias": bias.get("index_drop_sell_review_bias") or "neutral",
+        "advisory_reason": bias.get("advisory_reason") or "",
+        "advisory_labels": policy.get("advisory_labels") or {},
+    }
+
+
+def concentration_context(
+    valuation_amount: Any,
+    total_evaluation_amount: Any,
+    policy: dict[str, Any],
+) -> dict[str, Any]:
+    valuation = finite_float_value(valuation_amount)
+    total = finite_float_value(total_evaluation_amount)
+    if valuation is None or total is None or total <= 0:
+        return {}
+    pct = (valuation / total) * 100
+    levels = policy.get("concentration_levels") if isinstance(policy.get("concentration_levels"), dict) else {}
+    low = finite_float_value(levels.get("low_lte_pct"))
+    moderate = finite_float_value(levels.get("moderate_lte_pct"))
+    if low is None or moderate is None:
+        return {"concentration_pct": round_float(pct)}
+    if pct <= low:
+        level = "low"
+    elif pct <= moderate:
+        level = "moderate"
+    else:
+        level = "high"
+    return {"concentration_pct": round_float(pct), "concentration_level": level}
+
+
+def build_symbol_strategy_context(
+    policy: dict[str, Any],
+    strategy_context: dict[str, Any],
+    account_exposure: dict[str, Any],
+    account_exposure_summary: dict[str, Any],
+) -> dict[str, Any]:
+    holding_quantity = as_int(account_exposure.get("current_live_holding_quantity"))
+    current_holding = holding_quantity > 0
+    downside_regime = strategy_context.get("regime") in {"weak_downside", "panic_downside"}
+    downside_target = ((policy.get("downside_add_review") or {}).get("target") == "all_current_holdings")
+    context: dict[str, Any] = {
+        "current_holding": current_holding,
+        "current_live_holding_quantity": holding_quantity,
+        "downside_add_review_target": bool(current_holding and downside_regime and downside_target),
+        "downside_add_review_scope": (policy.get("downside_add_review") or {}).get("target") or "",
+        "advisory_semantics": "review target is advisory context for judge target exposure, not an order allow/block rule.",
+    }
+    pnl_rate = finite_float_value(account_exposure.get("pnl_rate"))
+    if pnl_rate is not None:
+        context["pnl_rate"] = round_float(pnl_rate)
+        context["loss_position"] = pnl_rate < 0
+    context.update(
+        concentration_context(
+            account_exposure.get("valuation_amount"),
+            account_exposure_summary.get("total_evaluation_amount"),
+            policy,
+        )
+    )
+    return context
 
 
 def fills_by_symbol(today_fills: Any) -> dict[str, list[dict[str, Any]]]:
@@ -670,6 +951,12 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
 
     financial_cache = load_yaml(Path(args.financial_cache_path)) if args.financial_cache_path else None
     news_cache = load_yaml(Path(args.news_cache_path)) if args.news_cache_path else None
+    strategy_policy, strategy_policy_path = load_strategy_policy_config(
+        getattr(args, "strategy_policy_config", "")
+    )
+    market_index_snapshot = compact_market_index_snapshot(args.market_index_snapshot_json)
+    account_exposure_summary = account_summary(account)
+    strategy_context = build_strategy_context(strategy_policy, strategy_policy_path, market_index_snapshot)
 
     artifact = common_envelope(run_id, started_at, "decision-brief")
     artifact.update(
@@ -682,8 +969,9 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
                 "holding": portfolio.get("holding", []),
                 "universe": portfolio.get("universe", []),
             },
-            "market_index_snapshot": compact_market_index_snapshot(args.market_index_snapshot_json),
-            "account_exposure_summary": account_summary(account),
+            "market_index_snapshot": market_index_snapshot,
+            "account_exposure_summary": account_exposure_summary,
+            "strategy_context": strategy_context,
         }
     )
 
@@ -702,6 +990,7 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
         financial_summary = financial_summary_for(financial_cache, symbol_id, args.financial_cache_path)
         etf_summary = etf_summary_for(financial_cache, symbol_id, args.financial_cache_path) if str(item.get("product_type") or "").lower() in {"etf", "etn"} else {}
         same_day_context = today_trade_context(fills_by_id.get(symbol_id, []), price.get("current_or_last"))
+        account_exposure = compact_account_exposure(account_item)
         symbol = {
             "symbol_id": symbol_id,
             "symbol_name": item.get("symbol_name") or (account_item or {}).get("symbol_name") or symbol_id,
@@ -722,7 +1011,13 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
             "financial_summary": financial_summary,
             "etf_summary": etf_summary,
             "news_summary": news_summary_for(news_cache, symbol_id, args.news_cache_path),
-            "account_exposure": compact_account_exposure(account_item),
+            "account_exposure": account_exposure,
+            "symbol_strategy_context": build_symbol_strategy_context(
+                strategy_policy,
+                strategy_context,
+                account_exposure,
+                account_exposure_summary,
+            ),
             "today_trade_price_context": {key: value for key, value in same_day_context.items() if key != "fills"},
             "today_trade_timeline_context": same_day_context,
             "required_missing": required_missing,
@@ -1451,8 +1746,22 @@ def run_self_test() -> int:
                 "account_summary": {"cash_amount": 1000000, "total_evaluation_amount": 1500000},
                 "active_orders": [],
                 "symbols": [
-                    {"symbol_id": "005930", "symbol_name": "삼성전자", "current_live_holding_quantity": 1, "current_price": 70000},
-                    {"symbol_id": "000660", "symbol_name": "SK하이닉스", "current_live_holding_quantity": 0, "current_price": 200000},
+                    {
+                        "symbol_id": "005930",
+                        "symbol_name": "삼성전자",
+                        "current_live_holding_quantity": 1,
+                        "current_price": 70000,
+                        "valuation_amount": 70000,
+                        "pnl_amount": -2500,
+                        "pnl_rate": -3.5,
+                    },
+                    {
+                        "symbol_id": "000660",
+                        "symbol_name": "SK하이닉스",
+                        "current_live_holding_quantity": 0,
+                        "current_price": 200000,
+                        "valuation_amount": 0,
+                    },
                 ],
             },
         )
@@ -1587,6 +1896,78 @@ symbols:
                 failures.append(f"no-news placeholder should not be included: {by_symbol['005930']}")
             if (brief.get("market_index_snapshot") or {}).get("indexes", [{}])[0].get("symbol") != "KOSPI":
                 failures.append(f"decision brief should include compact market index snapshot: {brief.get('market_index_snapshot')}")
+            strategy = brief.get("strategy_context") if isinstance(brief.get("strategy_context"), dict) else {}
+            if strategy.get("regime") != "neutral" or strategy.get("missing_tracked_indexes") != ["KOSDAQ"]:
+                failures.append(f"strategy context should use partial missing-index policy: {strategy}")
+            if strategy.get("new_exposure_review_bias") != "neutral":
+                failures.append(f"neutral strategy context should use neutral new-exposure bias: {strategy}")
+            if not str((strategy.get("policy_source") or {}).get("sha256") or ""):
+                failures.append(f"strategy context should include policy source hash: {strategy}")
+            strategy_policy, strategy_policy_path = load_strategy_policy_config("")
+            panic_context = build_strategy_context(
+                strategy_policy,
+                strategy_policy_path,
+                {
+                    "indexes": [
+                        {"symbol": "KOSPI", "change_percent": -4.5, "status": "success"},
+                        {"symbol": "KOSDAQ", "change_percent": -1.0, "status": "success"},
+                    ]
+                },
+            )
+            if panic_context.get("regime") != "panic_downside" or panic_context.get("new_exposure_review_bias") != "observe_first":
+                failures.append(f"panic strategy context should take priority over weak downside: {panic_context}")
+            weak_context = build_strategy_context(
+                strategy_policy,
+                strategy_policy_path,
+                {"indexes": [{"symbol": "KOSPI", "change_percent": -2.5, "status": "success"}]},
+            )
+            if weak_context.get("regime") != "weak_downside" or weak_context.get("missing_tracked_indexes") != ["KOSDAQ"]:
+                failures.append(f"weak strategy context should use available tracked indexes: {weak_context}")
+            missing_context = build_strategy_context(strategy_policy, strategy_policy_path, {"indexes": []})
+            if missing_context.get("regime") != "insufficient_market_data":
+                failures.append(f"missing market data should produce insufficient_market_data: {missing_context}")
+            symbol_strategy = by_symbol["005930"].get("symbol_strategy_context", {})
+            if symbol_strategy.get("current_holding") is not True or symbol_strategy.get("loss_position") is not True:
+                failures.append(f"holding loss symbol should include strategy context: {symbol_strategy}")
+            if symbol_strategy.get("concentration_level") != "low":
+                failures.append(f"symbol concentration should be calculated: {symbol_strategy}")
+            panic_symbol_strategy = build_symbol_strategy_context(
+                strategy_policy,
+                panic_context,
+                by_symbol["005930"].get("account_exposure", {}),
+                brief.get("account_exposure_summary", {}),
+            )
+            if panic_symbol_strategy.get("downside_add_review_target") is not True:
+                failures.append(f"panic current holding should be downside add review target: {panic_symbol_strategy}")
+            invalid_policy = tmp / "invalid-strategy-policy.yaml"
+            invalid_policy.write_text("tracked_indexes: []\n", encoding="utf-8")
+            try:
+                load_strategy_policy_config(invalid_policy)
+                failures.append("invalid strategy policy config should fail validation")
+            except ValueError:
+                pass
+            override_policy = tmp / "override-strategy-policy.yaml"
+            override_policy.write_text(
+                default_strategy_policy_config_path().read_text(encoding="utf-8").replace(
+                    "risk_on_all_gte_pct: 1.5",
+                    "risk_on_all_gte_pct: 0.1",
+                ),
+                encoding="utf-8",
+            )
+            override_config, override_path = load_strategy_policy_config(override_policy)
+            if override_path != override_policy.resolve() or override_config.get("regime_thresholds", {}).get("risk_on_all_gte_pct") != 0.1:
+                failures.append(f"explicit strategy policy override was not loaded: {override_path} {override_config}")
+            old_strategy_env = os.environ.get(STRATEGY_POLICY_CONFIG_ENV)
+            os.environ[STRATEGY_POLICY_CONFIG_ENV] = str(override_policy)
+            try:
+                _, env_override_path = load_strategy_policy_config("")
+                if env_override_path != override_policy.resolve():
+                    failures.append(f"env strategy policy override was not loaded: {env_override_path}")
+            finally:
+                if old_strategy_env is None:
+                    os.environ.pop(STRATEGY_POLICY_CONFIG_ENV, None)
+                else:
+                    os.environ[STRATEGY_POLICY_CONFIG_ENV] = old_strategy_env
             chart_context = by_symbol["005930"].get("chart_context", {})
             if chart_context.get("daily_summary", {}).get("latest_close") != 70000:
                 failures.append(f"chart summary should include latest close: {by_symbol['005930']}")
@@ -1965,6 +2346,7 @@ def build_parser() -> argparse.ArgumentParser:
     decision.add_argument("--financial-cache-path", default="")
     decision.add_argument("--news-cache-path", default="")
     decision.add_argument("--market-index-snapshot-json", default="")
+    decision.add_argument("--strategy-policy-config", default="")
     decision.add_argument("--run-id")
     decision.add_argument("--started-at")
     decision.add_argument("--output", type=Path, default=None)
