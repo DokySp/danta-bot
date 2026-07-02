@@ -800,12 +800,7 @@ def build_holding_quantity_context(symbol: dict[str, Any]) -> dict[str, Any]:
         "pending_and_reserved_buy_quantity": pending_buy,
         "pending_and_reserved_sell_quantity": pending_sell,
         "expected_holding_quantity": expected,
-        "target_position_value_semantics": "judge decides target_position_value_krw first; pipeline derives final_holding_quantity from target_position_value_krw / price.current_or_last with Decimal ROUND_HALF_UP",
-        "direction_examples": {
-            "maintain": expected,
-            "increase_by_1": expected + 1,
-            "reduce_by_1": max(0, expected - 1),
-        },
+        "target_position_value_semantics": "judge decides target_position_value_krw as desired exposure first; expected_holding_quantity is the baseline hold quantity, and pipeline derives final_holding_quantity from target_position_value_krw / price.current_or_last with Decimal ROUND_HALF_UP",
     }
 
 
@@ -2202,8 +2197,10 @@ def assert_review_input_slices(tmp: Path) -> None:
             holding_context = first_symbol.get("holding_quantity_context", {})
             if holding_context.get("expected_holding_quantity") != 11:
                 raise AssertionError(f"review-core did not add expected holding context: {first_symbol}")
-            if holding_context.get("direction_examples", {}).get("reduce_by_1") != 10:
-                raise AssertionError(f"review-core did not add final holding direction examples: {first_symbol}")
+            if "direction_examples" in holding_context:
+                raise AssertionError(f"review-core kept direction examples: {first_symbol}")
+            if "target_position_value_krw" not in holding_context.get("target_position_value_semantics", ""):
+                raise AssertionError(f"review-core did not add target value semantics: {first_symbol}")
             if "recent_trade_context" not in first_symbol:
                 raise AssertionError(f"review-core did not add recent trade context: {first_symbol}")
             recent_trades = first_symbol.get("recent_trade_context", {}).get("recent_submitted_trades", [])
