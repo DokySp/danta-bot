@@ -87,6 +87,9 @@ def render(summary: dict[str, Any]) -> str:
     total_tokens = ((tokens.get("total") or {}).get("total_tokens")) if isinstance(tokens.get("total"), dict) else 0
     orders = [item for item in execution.get("orders", []) if isinstance(item, dict)]
     submitted_or_blocked = [item for item in orders if item.get("result") in {"submitted", "blocked", "failed"}]
+    submitted_count = len([item for item in orders if item.get("result") == "submitted"])
+    blocked_failed_count = len([item for item in orders if item.get("result") in {"blocked", "failed"}])
+    skipped_count = len([item for item in orders if item.get("result") == "skipped"])
     review_symbols = [item for item in review.get("symbols", []) if isinstance(item, dict)]
     changed = [
         item
@@ -134,7 +137,10 @@ def render(summary: dict[str, Any]) -> str:
             "주문",
             f"- 요청 유형: {text(execution.get('request_type') or '-')}",
             f"- 상태: {text(execution.get('status') or '-')}",
-            f"- 주문 수: {as_int(execution.get('order_count'))}",
+            f"- 실행계획 항목: {len(orders)}건",
+            f"- 제출: {submitted_count}건",
+            f"- 차단·실패: {blocked_failed_count}건",
+            f"- 스킵: {skipped_count}건",
         ]
     )
     if execution.get("requires_main_agent_order_execution"):
@@ -168,7 +174,7 @@ def render(summary: dict[str, Any]) -> str:
 
 
 def self_test() -> int:
-    payload = {
+    submitted_payload = {
         "run_id": "self-test",
         "status": "success",
         "report_path": "reports/2026-06-18_포트폴리오.md",
@@ -206,11 +212,103 @@ def self_test() -> int:
         },
         "token_usage": {"total": {"total_tokens": 123}},
     }
-    rendered = render(payload)
-    required = ["daily-trading 결과: success", "계좌", "주문", "005930 삼성전자: buy 3주 -> 1주", "조정=buy_quantity_reduced_to_order_available_quantity", "평결", "총 사용 토큰: 123"]
-    missing = [item for item in required if item not in rendered]
-    if missing:
-        print(json.dumps({"status": "failed", "missing": missing}, ensure_ascii=False))
+    blocked_payload = {
+        "run_id": "self-test-blocked",
+        "status": "partial",
+        "report_path": "reports/2026-07-02_포트폴리오.md",
+        "account_display_summary": {
+            "cash_amount": 1000,
+            "securities_valuation_amount": 2000,
+            "total_evaluation_amount": 3000,
+            "total_pnl_amount": -10,
+        },
+        "evidence_summary": {
+            "financial": {"display_text": "재무 cache hit"},
+            "news": {"display_text": "뉴스 0건"},
+        },
+        "execution": {
+            "request_type": "real-submit",
+            "status": "partial",
+            "order_count": 8,
+            "orders": [
+                {
+                    "symbol_id": "402340",
+                    "symbol_name": "SK스퀘어",
+                    "direction": "sell",
+                    "requested_quantity": 1,
+                    "quantity": 1,
+                    "result": "blocked",
+                    "reason": "sell_quantity_exceeds_order_available_quantity",
+                    "order_or_reservation_id": "0028360200",
+                },
+                *[
+                    {
+                        "symbol_id": f"00000{index}",
+                        "symbol_name": f"스킵종목{index}",
+                        "direction": "none",
+                        "quantity": 0,
+                        "result": "skipped",
+                        "reason": "final_equals_expected_holding_quantity",
+                    }
+                    for index in range(1, 8)
+                ],
+            ],
+        },
+        "review_summary": {
+            "symbols": [
+                {
+                    "symbol_id": "402340",
+                    "symbol_name": "SK스퀘어",
+                    "current_live_holding_quantity": 1,
+                    "final_holding_quantity": 0,
+                    "one_line_reason": "청산 목표",
+                    "order_result": "blocked",
+                }
+            ]
+        },
+        "token_usage": {"total": {"total_tokens": 456}},
+    }
+    checks = [
+        (
+            "submitted",
+            render(submitted_payload),
+            [
+                "daily-trading 결과: success",
+                "계좌",
+                "주문",
+                "- 실행계획 항목: 1건",
+                "- 제출: 1건",
+                "- 차단·실패: 0건",
+                "- 스킵: 0건",
+                "005930 삼성전자: buy 3주 -> 1주",
+                "조정=buy_quantity_reduced_to_order_available_quantity",
+                "평결",
+                "총 사용 토큰: 123",
+            ],
+            ["주문 수:"],
+        ),
+        (
+            "blocked-with-skips",
+            render(blocked_payload),
+            [
+                "daily-trading 결과: partial",
+                "- 실행계획 항목: 8건",
+                "- 제출: 0건",
+                "- 차단·실패: 1건",
+                "- 스킵: 7건",
+                "402340 SK스퀘어: sell 1주, blocked (sell_quantity_exceeds_order_available_quantity) / 0028360200",
+            ],
+            ["주문 수: 8", "스킵종목1", "final_equals_expected_holding_quantity"],
+        ),
+    ]
+    failures = []
+    for name, rendered, required, forbidden in checks:
+        missing = [item for item in required if item not in rendered]
+        present = [item for item in forbidden if item in rendered]
+        if missing or present:
+            failures.append({"case": name, "missing": missing, "forbidden_present": present})
+    if failures:
+        print(json.dumps({"status": "failed", "failures": failures}, ensure_ascii=False))
         return 1
     print(json.dumps({"status": "success"}, ensure_ascii=False))
     return 0
