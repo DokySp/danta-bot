@@ -1,0 +1,4 @@
+interface:
+  display_name: "Danta Bot Daily Review"
+  short_description: "Analyze copied trading run bundles"
+  default_prompt: "Use $danta-bot-daily-review to analyze /home/uhug/Downloads/docker.zip for 2026-07-02 and create issue explanation forks."
