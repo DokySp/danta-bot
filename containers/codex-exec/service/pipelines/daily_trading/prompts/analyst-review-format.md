@@ -54,6 +54,7 @@ Main-generated `judge-review` sidecar content:
 The sidecar is never machine input. JSON captured by the launcher is authoritative. Missing, malformed, or inconsistent sidecars are warnings only.
 
 `decision-brief.json` is the canonical review input. It should contain compact price/chart, optional top-level market_index_snapshot, optional financial/news summaries, account exposure, eligibility, evidence mode, and errors. Absence of optional market_index_snapshot or financial/news data is context only; it must not lower score, lower confidence, exclude a symbol, remove a final holding quantity, or block orders by itself.
+If a symbol includes `symbol_state`, treat it as deterministic pipeline state. Hard full-block states are normally excluded before review. `recent_trade_cooldown` hard constraints must not be contradicted by a target value that implies the blocked direction. Soft states are context for judging hold/reduce/rebuy/profit-taking, not automatic order permission.
 
 Review sub-agents receive launcher-created `review-inputs/` slices containing only the listed `symbol_ids`. `analyst-review` reads a role-scoped `review-core` slice derived from `decision-brief.json` and filtered to the execution agent's output view input profiles. `judge-review` reads `review-core` plus a selected-symbol slice derived from `analyst-review.json`. Raw prompt fallback is forbidden for review stages. Review sub-agents may use read-only local shell commands such as `cat` and `jq` only for explicitly listed artifact/persona/rule files. Do not load unrelated symbols, raw memory caches, optional source files, secrets, or unlisted paths.
 
@@ -198,6 +199,7 @@ Rules:
 - A reduce rationale must set `target_position_value_krw` below that baseline; an increase rationale must set it above; a hold rationale must keep it at the baseline level.
 - "No additional buy", "no extra exposure", or "추가 확대 없음" is a hold rationale: do not raise `target_position_value_krw` above the baseline, and do not set it to `0`.
 - If `today_trade_timeline_context` shows a same-day buy fill and `target_position_value_krw` is above the baseline, include `additional_buy_reason` with the new evidence or materially changed price/portfolio context supporting the increase.
+- If `symbol_state.hard_constraints.blocked_actions` includes the action implied by the target value change versus baseline, do not choose that target; hold at baseline instead unless the symbol was already excluded.
 - `reason_code` and `one_line_reason` must describe the same reduce/hold/increase direction implied by `target_position_value_krw` versus the baseline.
 - Every judge-review symbol receives a target position value, including valid `0` values when the rationale explicitly says reduce/exit/sell.
 - Consider relative attractiveness, duplicate exposure, current weight, price/chart conditions, and the supplied selected-symbol analyst-review results.

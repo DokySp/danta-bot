@@ -676,6 +676,35 @@ def block_order(order: dict[str, Any], *, reason: str, gate: str, message: str, 
     order["attempts"].append(attempt(gate, "blocked", message, error_code))
 
 
+def side_actions(side: str) -> set[str]:
+    if side == "buy":
+        return {"buy", "increase"}
+    if side == "sell":
+        return {"sell", "reduce"}
+    return set()
+
+
+def symbol_state_context(order: dict[str, Any]) -> dict[str, Any]:
+    context = order.get("symbol_state_context")
+    if isinstance(context, dict):
+        return context
+    state = str(order.get("symbol_state") or "").strip()
+    return {"state": state} if state else {}
+
+
+def symbol_state_blocks_order(order: dict[str, Any], side: str) -> tuple[bool, str]:
+    if side not in {"buy", "sell"}:
+        return False, ""
+    context = symbol_state_context(order)
+    constraints = context.get("hard_constraints") if isinstance(context.get("hard_constraints"), dict) else {}
+    blocked_actions = constraints.get("blocked_actions") if isinstance(constraints.get("blocked_actions"), list) else []
+    blocked = {str(action).strip().lower() for action in blocked_actions}
+    if side_actions(side) & blocked:
+        state = str(context.get("state") or order.get("symbol_state") or "unknown")
+        return True, f"symbol_state_{state}_blocks_{side}"
+    return False, ""
+
+
 def buy_cash_limit(capacities: dict[str, dict[str, int]]) -> int | None:
     positive = [as_int(item.get("max_buy_amt")) for item in capacities.values() if as_int(item.get("max_buy_amt")) > 0]
     if positive:
@@ -1032,6 +1061,17 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
                 "to": price,
                 "reason": "krx_tick_size",
             }
+        state_blocked, state_reason = symbol_state_blocks_order(order, side)
+        if state_blocked:
+            block_order(
+                order,
+                reason=state_reason,
+                gate="symbol_state",
+                message=state_reason,
+                error_code="symbol_state_action_blocked",
+            )
+            blocked += 1
+            continue
         desired_delta = final_quantity - current
         desired_side = "buy" if desired_delta > 0 else "sell" if desired_delta < 0 else ""
         desired_qty = abs(desired_delta)
@@ -1524,6 +1564,7 @@ def self_test() -> int:
             "symbols": [
                 {"symbol_id": "005930", "symbol_name": "삼성전자", "current_live_holding_quantity": 8, "current_price": 70000},
                 {"symbol_id": "000270", "symbol_name": "기아", "current_live_holding_quantity": 18, "current_price": 100000},
+                {"symbol_id": "035420", "symbol_name": "NAVER", "current_live_holding_quantity": 1, "current_price": 200000},
             ],
         }
         execution = {
@@ -1535,6 +1576,19 @@ def self_test() -> int:
             "orders": [
                 {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 6, "order_price": 70000, "direction": "sell", "result": "blocked"},
                 {"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 20, "order_price": 100000, "direction": "buy", "result": "blocked"},
+                {
+                    "symbol_id": "035420",
+                    "symbol_name": "NAVER",
+                    "final_holding_quantity": 0,
+                    "order_price": 200000,
+                    "direction": "sell",
+                    "result": "blocked",
+                    "symbol_state": "recent_trade_cooldown",
+                    "symbol_state_context": {
+                        "state": "recent_trade_cooldown",
+                        "hard_constraints": {"blocked_actions": ["sell", "reduce"], "allowed_actions": ["hold"]},
+                    },
+                },
             ],
         }
         write_json(root / "account-before-order.json", account)
@@ -1548,6 +1602,8 @@ def self_test() -> int:
             failures.append("matching existing reservation not kept")
         if orders["000270"].get("reason") != "buy_cash_limit_missing":
             failures.append(f"dry-run buy without max_buy_amt was not blocked: {orders['000270']}")
+        if orders["035420"].get("reason") != "symbol_state_recent_trade_cooldown_blocks_sell":
+            failures.append(f"symbol state hard block was not enforced: {orders['035420']}")
         account_after = load_json(root / "account-before-order.json")
         if account_after.get("active_order_lookup_performed") is not True or account_after.get("order_available_lookup_performed") is not True:
             failures.append("account gates not refreshed")

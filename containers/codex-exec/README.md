@@ -73,7 +73,7 @@ env_file:
 
 프로필 Compose는 `./config`를 `/app/config`로 writable bind mount합니다. 따라서 호스트의
 `containers/codex-exec/profiles/<name>/config/schedules.yaml`, `portfolio.txt`,
-`touch-points.yaml`, `execute-trade.yaml`을 수정하면 컨테이너 안의 `/app/config`에도 즉시 보이고, 다음 Codex 실행이나
+`touch-points.yaml`, `execute-trade.yaml`, `symbol-state-policy.yaml`을 수정하면 컨테이너 안의 `/app/config`에도 즉시 보이고, 다음 Codex 실행이나
 스케줄러 tick부터 새 내용이 사용됩니다. `codex-exec.env`처럼 프로세스 환경변수로 주입되는 값은
 컨테이너 시작 시점에만 읽히므로 변경 후 Compose 재생성이 필요합니다. 컨테이너 안의 Codex 스킬이
 config를 수정하려면 호스트 config 파일과 디렉터리가 컨테이너 실행 UID 1000에 쓰기 가능해야 합니다.
@@ -113,6 +113,7 @@ CODEX_MCP_TRADING_ENV=paper
 ## Telegram Commands
 
 - `/new`: `"새 대화 시작"` 더미 메시지로 새 Codex 세션을 만들고 기본 세션으로 저장합니다.
+- `/show_symbol_flags`: 최신 daily-trading `symbol-states.json`에서 `normal_rebalance`가 아닌 종목과 상태 플래그를 보여줍니다. `all`을 붙이면 전체 상태를 표시하고, run id를 넘기면 해당 실행 산출물을 조회합니다.
 - 일반 메시지: 저장된 기본 세션으로 `codex exec resume`을 실행합니다.
 
 결과는 `TELEGRAM_GATEWAY_URL`의 `/sendMessage`로 `parse_mode=HTML`, `escape=false` 형태로 전송합니다.

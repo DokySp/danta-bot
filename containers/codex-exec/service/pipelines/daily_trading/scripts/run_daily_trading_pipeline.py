@@ -41,6 +41,7 @@ REGULAR_ORDER_START_MINUTE = 9 * 60
 REGULAR_ORDER_END_MINUTE = 15 * 60 + 30
 RESERVATION_ORDER_START_MINUTE = 15 * 60 + 40
 RESERVATION_ORDER_END_MINUTE = 7 * 60 + 30
+SYMBOL_STATE_POLICY_FILENAME = "symbol-state-policy.yaml"
 
 
 def now_kst() -> datetime:
@@ -464,6 +465,12 @@ class Pipeline:
         self.review_extra_instructions_path = self.resolve_optional_path(
             getattr(args, "review_extra_instructions_file", "")
         )
+        self.user_trading_instructions_path = self.resolve_optional_path(
+            getattr(args, "user_trading_instructions_file", "")
+        )
+        self.symbol_state_policy_path = self.resolve_symbol_state_policy_path(
+            getattr(args, "symbol_state_policy", "")
+        )
         self.order_path_requested = str(getattr(args, "order_path", ORDER_PATH_AUTO) or ORDER_PATH_AUTO)
         try:
             self.order_path, self.order_path_reason = resolve_order_path(self.order_path_requested, self.started_at)
@@ -483,12 +490,34 @@ class Pipeline:
             return None
         return resolve_workspace_path(self.workspace_dir, text)
 
+    def resolve_symbol_state_policy_path(self, value: str) -> Path | None:
+        text = str(value or "").strip()
+        if text:
+            return resolve_workspace_path(self.workspace_dir, text)
+        if getattr(self.args, "command", "") != "run":
+            return None
+        for candidate in (
+            Path("/app/config") / SYMBOL_STATE_POLICY_FILENAME,
+            self.repo_root / "containers/codex-exec/profiles/base/config" / SYMBOL_STATE_POLICY_FILENAME,
+        ):
+            if candidate.exists():
+                return candidate
+        return None
+
     def daily_trading_config_summary(self) -> dict[str, Any]:
         summary: dict[str, Any] = {}
         if self.review_extra_instructions_path is not None:
             summary["review_extra_instructions_path"] = str(self.review_extra_instructions_path)
             if self.review_extra_instructions_path.exists():
                 summary["review_extra_instructions_sha256"] = file_sha256(self.review_extra_instructions_path)
+        if self.user_trading_instructions_path is not None:
+            summary["user_trading_instructions_path"] = str(self.user_trading_instructions_path)
+            if self.user_trading_instructions_path.exists():
+                summary["user_trading_instructions_sha256"] = file_sha256(self.user_trading_instructions_path)
+        if self.symbol_state_policy_path is not None:
+            summary["symbol_state_policy_path"] = str(self.symbol_state_policy_path)
+            if self.symbol_state_policy_path.exists():
+                summary["symbol_state_policy_sha256"] = file_sha256(self.symbol_state_policy_path)
         return summary
 
     def add_stage(self, name: str, status: str, *, detail: str = "", required: bool = True, path: Path | None = None) -> None:
@@ -1084,6 +1113,17 @@ class Pipeline:
             return any(isinstance(fill, dict) and str(fill.get("direction") or "").lower() == "buy" for fill in fills)
         return False
 
+    def symbol_state_blocks_target_change(self, context: dict[str, Any], target_value: Decimal, baseline_value: Decimal) -> tuple[bool, str]:
+        state = context.get("symbol_state") if isinstance(context.get("symbol_state"), dict) else {}
+        constraints = state.get("hard_constraints") if isinstance(state.get("hard_constraints"), dict) else {}
+        blocked_actions = constraints.get("blocked_actions") if isinstance(constraints.get("blocked_actions"), list) else []
+        blocked = {str(action).strip().lower() for action in blocked_actions}
+        if target_value > baseline_value and {"buy", "increase"} & blocked:
+            return True, f"symbol_state_{state.get('state') or 'unknown'}_blocks_increase"
+        if target_value < baseline_value and {"sell", "reduce"} & blocked:
+            return True, f"symbol_state_{state.get('state') or 'unknown'}_blocks_reduce"
+        return False, ""
+
     def derive_judge_final_quantity(
         self,
         item: dict[str, Any],
@@ -1130,6 +1170,18 @@ class Pipeline:
             holding_context = item.get("holding_quantity_context") or {}
         expected_qty = as_int(holding_context.get("expected_holding_quantity"))
         baseline_value = Decimal(expected_qty) * price
+        state_blocked, state_reason = self.symbol_state_blocks_target_change(context, target_value, baseline_value)
+        if state_blocked:
+            errors.append(
+                {
+                    "stage": "judge-review",
+                    "source": "pipeline",
+                    "code": "symbol_state_action_blocked",
+                    "message": f"{symbol_id}: {state_reason}",
+                    "required": True,
+                }
+            )
+            return None, errors
         additional_buy_reason = str(item.get("additional_buy_reason") or "").strip()
         if self.same_day_buy_exists(context) and target_value > baseline_value and not additional_buy_reason:
             errors.append(
@@ -1518,6 +1570,7 @@ class Pipeline:
                 f"- `decision-brief.json` 생성 여부: {'yes' if decision else 'no'}",
                 f"- 포함된 eligible 종목 수: {sum(1 for item in decision_brief.get('symbols', []) if isinstance(item, dict) and item.get('eligible_for_review', False)) if isinstance(decision_brief, dict) else 0}",
                 f"- price-only eligible 종목 수: {price_only_count}",
+                f"- symbol-states.json: {md_cell((decision_brief.get('symbol_state_summary') or {}).get('artifact_path') if isinstance(decision_brief.get('symbol_state_summary'), dict) else '')}",
                 "- 제외된 raw payload / 기사 원문 / 민감정보: yes",
                 f"- 핵심 누락 또는 오류: {decision.get('error_count', 0)}건",
                 "",
@@ -1591,7 +1644,7 @@ class Pipeline:
             and (
                 item.get("result") == "submitted"
                 or isinstance(item.get("quantity_adjustment"), dict)
-                or str(item.get("reason") or "").startswith(("buy_quantity_", "sell_quantity_", "buy_cash_gate_"))
+                or str(item.get("reason") or "").startswith(("buy_quantity_", "sell_quantity_", "buy_cash_gate_", "symbol_state_"))
             )
         ]
         lines.extend(
@@ -1742,6 +1795,7 @@ class Pipeline:
                     "quantity": item.get("validated_order_quantity"),
                     "requested_quantity": item.get("requested_order_quantity"),
                     "quantity_adjustment": item.get("quantity_adjustment") if isinstance(item.get("quantity_adjustment"), dict) else {},
+                    "symbol_state": item.get("symbol_state") or "",
                     "result": item.get("result"),
                     "reason": item.get("reason"),
                     "order_or_reservation_id": item.get("order_or_reservation_id"),
@@ -1781,6 +1835,7 @@ class Pipeline:
                 "status": decision_brief.get("status"),
                 "symbol_count": len(decision_brief.get("symbols", [])) if isinstance(decision_brief.get("symbols"), list) else 0,
                 "error_count": len(decision_brief.get("errors", [])) if isinstance(decision_brief.get("errors"), list) else 0,
+                "symbol_state_summary": decision_brief.get("symbol_state_summary") if isinstance(decision_brief.get("symbol_state_summary"), dict) else {},
             },
             "review_summary": review_summary,
             "account_summary": account_summary,
@@ -1828,6 +1883,7 @@ class Pipeline:
                 "account_before_order": str(self.output_dir / "account-before-order.json"),
                 "account_asset_snapshot": str(self.output_dir / "account-asset-snapshot.json"),
                 "today_fills": str(self.output_dir / "today-fills.json"),
+                "symbol_states": str(self.output_dir / "symbol-states.json"),
                 "decision_brief": str(self.output_dir / "decision-brief.json"),
                 "analyst_review": str(self.output_dir / "analyst-review.json"),
                 "judge_review": str(self.output_dir / "judge-review.json"),
@@ -1905,6 +1961,10 @@ class Pipeline:
             decision_args.extend(["--news-cache-path", news_cache])
         if market_index_snapshot:
             decision_args.extend(["--market-index-snapshot-json", market_index_snapshot])
+        if self.user_trading_instructions_path:
+            decision_args.extend(["--user-trading-instructions", str(self.user_trading_instructions_path)])
+        if self.symbol_state_policy_path:
+            decision_args.extend(["--symbol-state-policy", str(self.symbol_state_policy_path)])
         decision = self.run_artifact_command("decision-brief", decision_args)
         decision_status = str((decision or {}).get("status") or "")
         self.add_stage("decision-brief", "success" if decision_status in {"success", "partial"} else "failed", detail=f"status={decision_status}", path=self.output_dir / "decision-brief.json")
@@ -2776,6 +2836,7 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
                     financial_cache_path="",
                     news_cache_path="",
                     main_events=str(main_events),
+                    symbol_state_policy="",
                     date="2026-06-18",
                     reuse_existing_artifacts=True,
                     skip_account=False,
@@ -3130,6 +3191,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--main-events", default="", help="Optional Codex JSONL events path for Main-agent token accounting.")
     run.add_argument("--submit-orders", action="store_true", help="For explicit demo-submit/real-submit runs, execute immediate or reservation orders through execute_orders.py.")
     run.add_argument("--review-extra-instructions-file", default="", help="Optional JSON file with analyst_review/judge_review supplemental instructions.")
+    run.add_argument("--user-trading-instructions-file", default="", help="Optional JSON/YAML file with per-symbol user trade bans such as no_trade.")
+    run.add_argument("--symbol-state-policy", default="", help="Optional YAML file with deterministic symbol-state thresholds.")
     run.add_argument(
         "--order-path",
         choices=[ORDER_PATH_AUTO, "reservation", "immediate"],
@@ -3151,6 +3214,7 @@ def build_parser() -> argparse.ArgumentParser:
     summarize.add_argument("--order-path", choices=[ORDER_PATH_AUTO, "reservation", "immediate"], default=ORDER_PATH_AUTO)
     summarize.add_argument("--portfolio-json", default="")
     summarize.add_argument("--review-extra-instructions-file", default="")
+    summarize.add_argument("--user-trading-instructions-file", default="")
 
     subparsers.add_parser("self-test", help="Run an offline pipeline smoke test with a fake codex binary.")
     return parser
