@@ -696,8 +696,6 @@ def build_review_core_payload(payload: Any, symbol_ids: list[str], agent_role: s
     core = dict(filter_symbol_fields_for_agent(filtered, agent_role) if agent_role else filtered)
     if agent_role and safe_name(agent_role).lower() not in MARKET_INDEX_SNAPSHOT_AGENT_ROLES:
         core.pop("market_index_snapshot", None)
-    if agent_role and safe_name(agent_role).lower() != "judge":
-        core.pop("strategy_context", None)
     core["slice_type"] = "review-core"
     core["source_brief_type"] = filtered.get("brief_type") or "decision-brief"
     return core
@@ -1065,7 +1063,6 @@ def compact_review_prompt(spec: dict[str, Any]) -> str | None:
                 "Use recent_trade_context as reassessment input, not a default hold/block reason: same-direction additional trades and opposite-direction final holding changes are allowed after explicitly reassessing price movement, final_first_score, risk, order/fill state, and thesis evidence.",
                 "Use today_trade_timeline_context as reassessment input, not a same-day churn block: same-direction additional trades and opposite-direction final holding changes are allowed after explicitly reassessing price movement, final_first_score, risk, order/fill state, and thesis evidence.",
                 "Treat long_term_thesis_intact as a sell/reduce suppression signal, not as add permission; increase only when add_allowed evidence is also present.",
-                "Use strategy_context and symbol_strategy_context as advisory inputs for target_position_value_krw, not as order allow/block rules.",
             ]
         )
 
@@ -1999,14 +1996,6 @@ def write_sample_review_inputs(tmp: Path) -> None:
                     }
                 ],
             },
-            "strategy_context": {
-                "schema_version": "1",
-                "regime": "weak_downside",
-                "new_exposure_review_bias": "discourage",
-                "downside_add_review_bias": "strong_review_required",
-                "index_drop_sell_review_bias": "discourage",
-                "advisory_semantics": "advisory only",
-            },
             "errors": [
                 {"symbol_id": "005930", "code": "keep_symbol_error"},
                 {"symbol_id": "035420", "code": "drop_symbol_error"},
@@ -2035,11 +2024,6 @@ def write_sample_review_inputs(tmp: Path) -> None:
                         "current_live_holding_quantity": 10,
                         "pending_and_reserved_buy_quantity": 2,
                         "pending_and_reserved_sell_quantity": 1,
-                    },
-                    "symbol_strategy_context": {
-                        "current_holding": True,
-                        "downside_add_review_target": True,
-                        "advisory_semantics": "advisory only",
                     },
                     "today_trade_price_context": {
                         "has_same_day_trade": True,
@@ -2142,7 +2126,6 @@ def assert_compact_review_prompt(tmp: Path) -> None:
         "Use recent_trade_context as reassessment input, not a default hold/block reason:",
         "Use today_trade_timeline_context as reassessment input, not a same-day churn block:",
         "Treat long_term_thesis_intact as a sell/reduce suppression signal",
-        "Use strategy_context and symbol_strategy_context as advisory inputs for target_position_value_krw, not as order allow/block rules.",
         "target_position_value_krw",
         "No additional buy",
     ]
@@ -2176,11 +2159,6 @@ def assert_review_input_slices(tmp: Path) -> None:
     quality_core = load_json(Path(quality_slices["decision_brief"]))
     if quality_core.get("market_index_snapshot", {}).get("indexes", [{}])[0].get("symbol") != "NASDAQ":
         raise AssertionError(f"quality-risk slice dropped market_index_snapshot: {quality_core}")
-    if "strategy_context" in quality_core:
-        raise AssertionError(f"analyst-review slice kept strategy_context: {quality_core}")
-    if "symbol_strategy_context" in (quality_core.get("symbols") or [{}])[0]:
-        raise AssertionError(f"analyst-review slice kept symbol_strategy_context: {quality_core}")
-
     payload = compact_spec(tmp, stage="judge-review", agent_role="judge", task_name="slice-test")
     slices = write_review_input_slices(payload)
     expected_keys = {"decision_brief", "review_core", "analyst_review"}
@@ -2199,8 +2177,6 @@ def assert_review_input_slices(tmp: Path) -> None:
         if key == "review_core":
             if slice_payload.get("market_index_snapshot", {}).get("indexes", [{}])[0].get("symbol") != "NASDAQ":
                 raise AssertionError(f"judge-review slice dropped market_index_snapshot: {slice_payload}")
-            if slice_payload.get("strategy_context", {}).get("regime") != "weak_downside":
-                raise AssertionError(f"judge-review slice dropped strategy_context: {slice_payload}")
             error_codes = [item.get("code") for item in slice_payload.get("errors", []) if isinstance(item, dict)]
             if error_codes != ["keep_symbol_error", "keep_run_error"]:
                 raise AssertionError(f"review-core did not filter symbol-scoped errors: {slice_payload}")
@@ -2215,8 +2191,6 @@ def assert_review_input_slices(tmp: Path) -> None:
                 raise AssertionError(f"review-core truncated warnings: {first_symbol}")
             if first_symbol.get("custom_detail") != {"keep": True}:
                 raise AssertionError(f"judge-review review-core dropped custom detail: {first_symbol}")
-            if first_symbol.get("symbol_strategy_context", {}).get("downside_add_review_target") is not True:
-                raise AssertionError(f"judge-review review-core dropped symbol_strategy_context: {first_symbol}")
             if first_symbol.get("today_trade_timeline_context", {}).get("fills", [{}])[0].get("price") != 70100:
                 raise AssertionError(f"judge-review review-core dropped same-day fill timeline: {first_symbol}")
             holding_context = first_symbol.get("holding_quantity_context", {})

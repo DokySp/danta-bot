@@ -41,8 +41,6 @@ REGULAR_ORDER_START_MINUTE = 9 * 60
 REGULAR_ORDER_END_MINUTE = 15 * 60 + 30
 RESERVATION_ORDER_START_MINUTE = 15 * 60 + 40
 RESERVATION_ORDER_END_MINUTE = 7 * 60 + 30
-STRATEGY_POLICY_CONFIG_ENV = "DAILY_TRADING_STRATEGY_POLICY_CONFIG"
-STRATEGY_POLICY_CONFIG_FILENAME = "daily-trading-strategy-policy.yaml"
 
 
 def now_kst() -> datetime:
@@ -133,34 +131,6 @@ def resolve_workspace_path(workspace_dir: Path, path_text: str | Path) -> Path:
     if path.is_absolute():
         return path
     return workspace_dir / path
-
-
-def strategy_policy_config_candidates(workspace_dir: Path, workspace_repo_root: Path) -> list[Path]:
-    code_repo_root = repo_root_from(script_dir())
-    return [
-        Path("/app/config") / STRATEGY_POLICY_CONFIG_FILENAME,
-        code_repo_root / "containers/codex-exec/profiles/base/config" / STRATEGY_POLICY_CONFIG_FILENAME,
-        workspace_repo_root / "containers/codex-exec/profiles/base/config" / STRATEGY_POLICY_CONFIG_FILENAME,
-        workspace_dir / "containers/codex-exec/profiles/base/config" / STRATEGY_POLICY_CONFIG_FILENAME,
-    ]
-
-
-def resolve_strategy_policy_config_path(
-    workspace_dir: Path,
-    workspace_repo_root: Path,
-    configured: str = "",
-) -> Path:
-    explicit = str(configured or os.getenv(STRATEGY_POLICY_CONFIG_ENV, "")).strip()
-    if explicit:
-        path = resolve_workspace_path(workspace_dir, explicit)
-        if not path.exists():
-            raise FileNotFoundError(f"strategy policy config not found: {path}")
-        return path.resolve()
-    for path in strategy_policy_config_candidates(workspace_dir, workspace_repo_root):
-        if path.exists():
-            return path.resolve()
-    searched = ", ".join(str(path) for path in strategy_policy_config_candidates(workspace_dir, workspace_repo_root))
-    raise FileNotFoundError(f"default strategy policy config not found; searched: {searched}")
 
 
 def repo_root_from(path: Path) -> Path:
@@ -494,11 +464,6 @@ class Pipeline:
         self.review_extra_instructions_path = self.resolve_optional_path(
             getattr(args, "review_extra_instructions_file", "")
         )
-        self.strategy_policy_config_path = resolve_strategy_policy_config_path(
-            self.workspace_dir,
-            self.repo_root,
-            str(getattr(args, "strategy_policy_config", "") or ""),
-        )
         self.order_path_requested = str(getattr(args, "order_path", ORDER_PATH_AUTO) or ORDER_PATH_AUTO)
         try:
             self.order_path, self.order_path_reason = resolve_order_path(self.order_path_requested, self.started_at)
@@ -524,8 +489,6 @@ class Pipeline:
             summary["review_extra_instructions_path"] = str(self.review_extra_instructions_path)
             if self.review_extra_instructions_path.exists():
                 summary["review_extra_instructions_sha256"] = file_sha256(self.review_extra_instructions_path)
-        summary["strategy_policy_config_path"] = str(self.strategy_policy_config_path)
-        summary["strategy_policy_config_sha256"] = file_sha256(self.strategy_policy_config_path)
         return summary
 
     def add_stage(self, name: str, status: str, *, detail: str = "", required: bool = True, path: Path | None = None) -> None:
@@ -1935,8 +1898,6 @@ class Pipeline:
             str(self.output_dir),
             "--portfolio-json",
             str(portfolio_path),
-            "--strategy-policy-config",
-            str(self.strategy_policy_config_path),
         ]
         if financial_cache:
             decision_args.extend(["--financial-cache-path", financial_cache])
@@ -2787,42 +2748,12 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
 """,
             encoding="utf-8",
         )
-        override_policy = workspace / "override-strategy-policy.yaml"
-        default_policy = repo_root_from(script_dir()) / "containers/codex-exec/profiles/base/config" / STRATEGY_POLICY_CONFIG_FILENAME
-        override_policy.write_text(
-            default_policy.read_text(encoding="utf-8").replace(
-                "risk_on_all_gte_pct: 1.5",
-                "risk_on_all_gte_pct: 0.1",
-            ),
-            encoding="utf-8",
-        )
-        env_conflict_policy = workspace / "env-conflict-strategy-policy.yaml"
-        env_conflict_policy.write_text(
-            default_policy.read_text(encoding="utf-8").replace(
-                "risk_on_all_gte_pct: 1.5",
-                "risk_on_all_gte_pct: 9.9",
-            ),
-            encoding="utf-8",
-        )
         old_codex_bin = os.environ.get("CODEX_BIN")
         old_reuse = os.environ.get("CODEX_SUBAGENT_REUSE_SUCCESS")
         old_market_index_snapshot = os.environ.get("DAILY_TRADING_MARKET_INDEX_SNAPSHOT_SCRIPT")
-        old_strategy_policy = os.environ.get(STRATEGY_POLICY_CONFIG_ENV)
-        os.environ[STRATEGY_POLICY_CONFIG_ENV] = str(override_policy)
-        try:
-            if resolve_strategy_policy_config_path(workspace, repo_root_from(workspace), "") != override_policy.resolve():
-                failures.append("strategy policy env override did not resolve to override file")
-        finally:
-            if old_strategy_policy is None:
-                os.environ.pop(STRATEGY_POLICY_CONFIG_ENV, None)
-            else:
-                os.environ[STRATEGY_POLICY_CONFIG_ENV] = old_strategy_policy
         os.environ["CODEX_BIN"] = str(fake_codex)
         os.environ["CODEX_SUBAGENT_REUSE_SUCCESS"] = "0"
         os.environ["DAILY_TRADING_MARKET_INDEX_SNAPSHOT_SCRIPT"] = str(fake_market_index_snapshot)
-        os.environ[STRATEGY_POLICY_CONFIG_ENV] = str(env_conflict_policy)
-        if resolve_strategy_policy_config_path(workspace, repo_root_from(workspace), str(override_policy)) != override_policy.resolve():
-            failures.append("strategy policy CLI override did not take priority over env override")
         try:
             main_events = workspace / "main-events.jsonl"
             main_events.write_text(
@@ -2849,7 +2780,6 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
                     reuse_existing_artifacts=True,
                     skip_account=False,
                     max_workers=2,
-                    strategy_policy_config=str(override_policy),
                 )
             )
             summary = pipeline.run()
@@ -2861,14 +2791,6 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
             decision_payload = load_json(run_dir / "decision-brief.json")
             if len((decision_payload.get("market_index_snapshot") or {}).get("indexes", [])) != 5:
                 failures.append(f"decision brief did not include five market index snapshot indexes: {decision_payload.get('market_index_snapshot')}")
-            if (decision_payload.get("strategy_context") or {}).get("regime") != "risk_on":
-                failures.append(f"decision brief did not include computed strategy context: {decision_payload.get('strategy_context')}")
-            run_config = (load_json(run_dir / "run.json").get("daily_trading_config") or {})
-            if (
-                run_config.get("strategy_policy_config_path") != str(override_policy.resolve())
-                or run_config.get("strategy_policy_config_sha256") != file_sha256(override_policy)
-            ):
-                failures.append(f"run config did not record strategy policy path/hash: {run_config}")
             order_path_selection = (summary.get("execution") or {}).get("order_path_selection") if isinstance(summary.get("execution"), dict) else {}
             if order_path_selection.get("resolved") != "immediate" or order_path_selection.get("reason") != "auto_regular_session":
                 failures.append(f"pipeline did not resolve auto order path to immediate: {order_path_selection}")
@@ -2878,8 +2800,8 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
                 for item in command_log.get("commands", [])
                 if isinstance(item, dict) and item.get("stage") == "decision-brief"
             ]
-            if not decision_commands or "--strategy-policy-config" not in decision_commands[-1]:
-                failures.append(f"decision-brief command should receive strategy policy config: {decision_commands}")
+            if not decision_commands:
+                failures.append(f"decision-brief command should be recorded: {decision_commands}")
             execution_commands = [
                 item.get("command")
                 for item in command_log.get("commands", [])
@@ -3185,10 +3107,6 @@ print(json.dumps(execution, ensure_ascii=False))
                 os.environ.pop("DAILY_TRADING_MARKET_INDEX_SNAPSHOT_SCRIPT", None)
             else:
                 os.environ["DAILY_TRADING_MARKET_INDEX_SNAPSHOT_SCRIPT"] = old_market_index_snapshot
-            if old_strategy_policy is None:
-                os.environ.pop(STRATEGY_POLICY_CONFIG_ENV, None)
-            else:
-                os.environ[STRATEGY_POLICY_CONFIG_ENV] = old_strategy_policy
 
     payload = {"status": "passed" if not failures else "failed", "failures": failures}
     print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
@@ -3212,7 +3130,6 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--main-events", default="", help="Optional Codex JSONL events path for Main-agent token accounting.")
     run.add_argument("--submit-orders", action="store_true", help="For explicit demo-submit/real-submit runs, execute immediate or reservation orders through execute_orders.py.")
     run.add_argument("--review-extra-instructions-file", default="", help="Optional JSON file with analyst_review/judge_review supplemental instructions.")
-    run.add_argument("--strategy-policy-config", default="", help="Optional YAML file for computed judge strategy context.")
     run.add_argument(
         "--order-path",
         choices=[ORDER_PATH_AUTO, "reservation", "immediate"],
@@ -3234,7 +3151,6 @@ def build_parser() -> argparse.ArgumentParser:
     summarize.add_argument("--order-path", choices=[ORDER_PATH_AUTO, "reservation", "immediate"], default=ORDER_PATH_AUTO)
     summarize.add_argument("--portfolio-json", default="")
     summarize.add_argument("--review-extra-instructions-file", default="")
-    summarize.add_argument("--strategy-policy-config", default="")
 
     subparsers.add_parser("self-test", help="Run an offline pipeline smoke test with a fake codex binary.")
     return parser
