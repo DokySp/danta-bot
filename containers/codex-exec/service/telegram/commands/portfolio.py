@@ -1,6 +1,12 @@
 from typing import Any
 
-from ...trading.portfolio_commands import PortfolioCommandError, add_portfolio_ticker, remove_portfolio_ticker
+from ...trading.portfolio_commands import (
+    PortfolioCommandError,
+    add_portfolio_except_ticker,
+    add_portfolio_ticker,
+    remove_portfolio_except_ticker,
+    remove_portfolio_ticker,
+)
 
 
 def handle_add_portfolio_ticker(worker: Any, task: Any, args: str) -> None:
@@ -15,6 +21,24 @@ def handle_add_portfolio_ticker(worker: Any, task: Any, args: str) -> None:
 def handle_remove_portfolio_ticker(worker: Any, task: Any, args: str) -> None:
     try:
         result = remove_portfolio_ticker(worker.config.portfolio_file, args)
+    except PortfolioCommandError as exc:
+        worker.gateway.send_message(exc.html_message, task.chat_id, task.route)
+        return
+    worker.gateway.send_message(result.html_message, task.chat_id, task.route)
+
+
+def handle_add_portfolio_except_ticker(worker: Any, task: Any, args: str) -> None:
+    try:
+        result = add_portfolio_except_ticker(worker.config.portfolio_except_file, args)
+    except PortfolioCommandError as exc:
+        worker.gateway.send_message(exc.html_message, task.chat_id, task.route)
+        return
+    worker.gateway.send_message(result.html_message, task.chat_id, task.route)
+
+
+def handle_remove_portfolio_except_ticker(worker: Any, task: Any, args: str) -> None:
+    try:
+        result = remove_portfolio_except_ticker(worker.config.portfolio_except_file, args)
     except PortfolioCommandError as exc:
         worker.gateway.send_message(exc.html_message, task.chat_id, task.route)
         return

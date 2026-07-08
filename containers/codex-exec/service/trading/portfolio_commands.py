@@ -19,12 +19,14 @@ def parse_portfolio_symbols(path: Path) -> list[str]:
     text = path.read_text()
     symbols: list[str] = []
     seen: set[str] = set()
-    for token in text.replace(",", " ").split():
-        symbol = token.strip()
-        if not symbol or symbol in seen:
-            continue
-        symbols.append(symbol)
-        seen.add(symbol)
+    for line in text.splitlines():
+        line = line.split("#", 1)[0]
+        for token in line.replace(",", " ").split():
+            symbol = token.strip()
+            if not symbol or symbol in seen:
+                continue
+            symbols.append(symbol)
+            seen.add(symbol)
     return symbols
 
 
@@ -46,13 +48,13 @@ def parse_portfolio_ticker_arg(args: str, command: str) -> str:
     return parts[0].strip()
 
 
-def add_portfolio_ticker(path: Path, args: str) -> PortfolioCommandResult:
-    ticker = parse_portfolio_ticker_arg(args, "add_portfolio_ticker")
+def add_ticker(path: Path, args: str, *, command: str, label: str) -> PortfolioCommandResult:
+    ticker = parse_portfolio_ticker_arg(args, command)
     symbols = parse_portfolio_symbols(path)
     if ticker in symbols:
         return PortfolioCommandResult(
             (
-                "<b>포트폴리오 종목 추가</b>\n"
+                f"<b>{label} 추가</b>\n"
                 f"<code>{ticker}</code>는 이미 포함되어 있습니다.\n"
                 f"총 <code>{len(symbols)}</code>개"
             )
@@ -61,21 +63,21 @@ def add_portfolio_ticker(path: Path, args: str) -> PortfolioCommandResult:
     write_portfolio_symbols(path, symbols)
     return PortfolioCommandResult(
         (
-            "<b>포트폴리오 종목 추가</b>\n"
+            f"<b>{label} 추가</b>\n"
             f"<code>{ticker}</code> 추가 완료\n"
             f"총 <code>{len(symbols)}</code>개"
         )
     )
 
 
-def remove_portfolio_ticker(path: Path, args: str) -> PortfolioCommandResult:
-    ticker = parse_portfolio_ticker_arg(args, "remove_portfolio_ticker")
+def remove_ticker(path: Path, args: str, *, command: str, label: str) -> PortfolioCommandResult:
+    ticker = parse_portfolio_ticker_arg(args, command)
     symbols = parse_portfolio_symbols(path)
     if ticker not in symbols:
         return PortfolioCommandResult(
             (
-                "<b>포트폴리오 종목 삭제</b>\n"
-                f"<code>{ticker}</code>는 포트폴리오에 없습니다.\n"
+                f"<b>{label} 삭제</b>\n"
+                f"<code>{ticker}</code>는 목록에 없습니다.\n"
                 f"총 <code>{len(symbols)}</code>개"
             )
         )
@@ -83,8 +85,24 @@ def remove_portfolio_ticker(path: Path, args: str) -> PortfolioCommandResult:
     write_portfolio_symbols(path, symbols)
     return PortfolioCommandResult(
         (
-            "<b>포트폴리오 종목 삭제</b>\n"
+            f"<b>{label} 삭제</b>\n"
             f"<code>{ticker}</code> 삭제 완료\n"
             f"총 <code>{len(symbols)}</code>개"
         )
     )
+
+
+def add_portfolio_ticker(path: Path, args: str) -> PortfolioCommandResult:
+    return add_ticker(path, args, command="add_portfolio_ticker", label="포트폴리오 종목")
+
+
+def remove_portfolio_ticker(path: Path, args: str) -> PortfolioCommandResult:
+    return remove_ticker(path, args, command="remove_portfolio_ticker", label="포트폴리오 종목")
+
+
+def add_portfolio_except_ticker(path: Path, args: str) -> PortfolioCommandResult:
+    return add_ticker(path, args, command="add_portfolio_except_ticker", label="제외 종목")
+
+
+def remove_portfolio_except_ticker(path: Path, args: str) -> PortfolioCommandResult:
+    return remove_ticker(path, args, command="remove_portfolio_except_ticker", label="제외 종목")

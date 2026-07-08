@@ -163,6 +163,39 @@ def symbol_key(value: Any) -> str:
     return digits.zfill(6) if digits and digits == text else text
 
 
+PORTFOLIO_EXCEPT_ENV_VAR = "PORTFOLIO_EXCEPT_FILE"
+
+
+def portfolio_except_file_candidates() -> list[Path]:
+    configured = os.environ.get(PORTFOLIO_EXCEPT_ENV_VAR, "").strip()
+    if configured:
+        return [Path(configured).expanduser()]
+    return [
+        Path("/app/config/portfolio-except.txt"),
+        Path("/workspace/containers/codex-exec/profiles/base/config/portfolio-except.txt"),
+        Path("containers/codex-exec/profiles/base/config/portfolio-except.txt"),
+    ]
+
+
+def load_portfolio_except_symbols() -> set[str]:
+    for path in portfolio_except_file_candidates():
+        try:
+            if not path.is_file():
+                continue
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        symbols: set[str] = set()
+        for line in text.splitlines():
+            line = line.split("#", 1)[0]
+            for entry in line.split(","):
+                parts = entry.split()
+                if parts:
+                    symbols.add(symbol_key(parts[0]))
+        return symbols
+    return set()
+
+
 def env_dv(raw: str | None) -> str:
     value = (raw or os.environ.get("CODEX_MCP_TRADING_ENV") or "acct").strip().lower()
     if value in {"paper", "demo", "mock"}:
@@ -676,35 +709,6 @@ def block_order(order: dict[str, Any], *, reason: str, gate: str, message: str, 
     order["attempts"].append(attempt(gate, "blocked", message, error_code))
 
 
-def side_actions(side: str) -> set[str]:
-    if side == "buy":
-        return {"buy", "increase"}
-    if side == "sell":
-        return {"sell", "reduce"}
-    return set()
-
-
-def symbol_state_context(order: dict[str, Any]) -> dict[str, Any]:
-    context = order.get("symbol_state_context")
-    if isinstance(context, dict):
-        return context
-    state = str(order.get("symbol_state") or "").strip()
-    return {"state": state} if state else {}
-
-
-def symbol_state_blocks_order(order: dict[str, Any], side: str) -> tuple[bool, str]:
-    if side not in {"buy", "sell"}:
-        return False, ""
-    context = symbol_state_context(order)
-    constraints = context.get("hard_constraints") if isinstance(context.get("hard_constraints"), dict) else {}
-    blocked_actions = constraints.get("blocked_actions") if isinstance(constraints.get("blocked_actions"), list) else []
-    blocked = {str(action).strip().lower() for action in blocked_actions}
-    if side_actions(side) & blocked:
-        state = str(context.get("state") or order.get("symbol_state") or "unknown")
-        return True, f"symbol_state_{state}_blocks_{side}"
-    return False, ""
-
-
 def buy_cash_limit(capacities: dict[str, dict[str, int]]) -> int | None:
     positive = [as_int(item.get("max_buy_amt")) for item in capacities.values() if as_int(item.get("max_buy_amt")) > 0]
     if positive:
@@ -990,6 +994,7 @@ def refresh_gates(args: argparse.Namespace, account: dict[str, Any], execution: 
 
 
 def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[dict[str, Any]], capacities: dict[str, dict[str, int]], sell_capacities: dict[str, dict[str, int]], *, submit: bool, kis: Kis | None) -> None:
+    portfolio_except = load_portfolio_except_symbols()
     active_qty = active_quantities(active)
     active_by_symbol: dict[str, list[dict[str, Any]]] = {}
     for item in active:
@@ -1010,6 +1015,25 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
         active_item = active_qty.get(symbol, {"buy": 0, "sell": 0})
         current = as_int(account_item.get("current_live_holding_quantity"), as_int(order.get("current_live_holding_quantity")))
         expected = current + active_item["buy"] - active_item["sell"]
+        if symbol in portfolio_except:
+            order.update(
+                {
+                    "symbol_id": symbol,
+                    "direction": "none",
+                    "current_live_holding_quantity": current,
+                    "pending_and_reserved_buy_quantity": active_item["buy"],
+                    "pending_and_reserved_sell_quantity": active_item["sell"],
+                    "expected_holding_quantity": expected,
+                    "additional_required_quantity": 0,
+                    "validated_order_quantity": 0,
+                    "result": "blocked",
+                    "reason": "symbol_in_portfolio_except_list",
+                    "attempts": order.get("attempts") if isinstance(order.get("attempts"), list) else [],
+                }
+            )
+            order["attempts"].append(attempt("portfolio-except-list", "blocked", "symbol is listed in the portfolio-except exclusion list", "symbol_in_portfolio_except_list"))
+            blocked += 1
+            continue
         final_quantity = non_negative_int_value(order.get("final_holding_quantity"))
         if final_quantity is None:
             order.update(
@@ -1061,17 +1085,6 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
                 "to": price,
                 "reason": "krx_tick_size",
             }
-        state_blocked, state_reason = symbol_state_blocks_order(order, side)
-        if state_blocked:
-            block_order(
-                order,
-                reason=state_reason,
-                gate="symbol_state",
-                message=state_reason,
-                error_code="symbol_state_action_blocked",
-            )
-            blocked += 1
-            continue
         desired_delta = final_quantity - current
         desired_side = "buy" if desired_delta > 0 else "sell" if desired_delta < 0 else ""
         desired_qty = abs(desired_delta)
@@ -1553,6 +1566,8 @@ def self_test() -> int:
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
+        previous_portfolio_except_env = os.environ.get(PORTFOLIO_EXCEPT_ENV_VAR)
+        os.environ[PORTFOLIO_EXCEPT_ENV_VAR] = str(root / "portfolio-except.txt")
         account = {
             "schema_version": "1",
             "execution_environment": "real",
@@ -1564,7 +1579,6 @@ def self_test() -> int:
             "symbols": [
                 {"symbol_id": "005930", "symbol_name": "삼성전자", "current_live_holding_quantity": 8, "current_price": 70000},
                 {"symbol_id": "000270", "symbol_name": "기아", "current_live_holding_quantity": 18, "current_price": 100000},
-                {"symbol_id": "035420", "symbol_name": "NAVER", "current_live_holding_quantity": 1, "current_price": 200000},
             ],
         }
         execution = {
@@ -1576,19 +1590,6 @@ def self_test() -> int:
             "orders": [
                 {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 6, "order_price": 70000, "direction": "sell", "result": "blocked"},
                 {"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 20, "order_price": 100000, "direction": "buy", "result": "blocked"},
-                {
-                    "symbol_id": "035420",
-                    "symbol_name": "NAVER",
-                    "final_holding_quantity": 0,
-                    "order_price": 200000,
-                    "direction": "sell",
-                    "result": "blocked",
-                    "symbol_state": "recent_trade_cooldown",
-                    "symbol_state_context": {
-                        "state": "recent_trade_cooldown",
-                        "hard_constraints": {"blocked_actions": ["sell", "reduce"], "allowed_actions": ["hold"]},
-                    },
-                },
             ],
         }
         write_json(root / "account-before-order.json", account)
@@ -1602,8 +1603,6 @@ def self_test() -> int:
             failures.append("matching existing reservation not kept")
         if orders["000270"].get("reason") != "buy_cash_limit_missing":
             failures.append(f"dry-run buy without max_buy_amt was not blocked: {orders['000270']}")
-        if orders["035420"].get("reason") != "symbol_state_recent_trade_cooldown_blocks_sell":
-            failures.append(f"symbol state hard block was not enforced: {orders['035420']}")
         account_after = load_json(root / "account-before-order.json")
         if account_after.get("active_order_lookup_performed") is not True or account_after.get("order_available_lookup_performed") is not True:
             failures.append("account gates not refreshed")
@@ -1614,6 +1613,37 @@ def self_test() -> int:
             failures.append(f"missing final_holding_quantity was not blocked as invalid: {invalid_final_order}")
         if invalid_final_order.get("validated_order_quantity") != 0 or invalid_final_order.get("additional_required_quantity") != 0:
             failures.append(f"missing final_holding_quantity was converted into an order quantity: {invalid_final_order}")
+        (root / "portfolio-except.txt").write_text("# excluded\n000270, 005930\n", encoding="utf-8")
+        portfolio_except_execution = {
+            "orders": [
+                {"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 20, "order_price": 100000, "direction": "buy"},
+                {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 6, "order_price": 70000, "direction": "sell"},
+                {"symbol_id": "035420", "symbol_name": "NAVER", "final_holding_quantity": 1, "order_price": 200000, "direction": "none"},
+            ]
+        }
+        reconcile(
+            {"account_summary": {"cash_amount": 10_000_000}, "symbols": [
+                {"symbol_id": "000270", "symbol_name": "기아", "current_live_holding_quantity": 18, "current_price": 100000},
+                {"symbol_id": "005930", "symbol_name": "삼성전자", "current_live_holding_quantity": 8, "current_price": 70000},
+                {"symbol_id": "035420", "symbol_name": "NAVER", "current_live_holding_quantity": 1, "current_price": 200000},
+            ]},
+            portfolio_except_execution,
+            [],
+            {"000270": {"max_buy_qty": 5, "max_buy_amt": 1_000_000}},
+            {"005930": {"max_sell_qty": 5}},
+            submit=False,
+            kis=None,
+        )
+        portfolio_except_orders = {item["symbol_id"]: item for item in portfolio_except_execution["orders"]}
+        for excluded_symbol in ("000270", "005930"):
+            excluded_order = portfolio_except_orders[excluded_symbol]
+            if excluded_order.get("result") != "blocked" or excluded_order.get("reason") != "symbol_in_portfolio_except_list":
+                failures.append(f"portfolio-except symbol was not blocked: {excluded_order}")
+            if excluded_order.get("validated_order_quantity") != 0:
+                failures.append(f"portfolio-except symbol produced an order quantity: {excluded_order}")
+        if portfolio_except_orders["035420"].get("reason") == "symbol_in_portfolio_except_list":
+            failures.append(f"symbol outside portfolio-except list was blocked: {portfolio_except_orders['035420']}")
+        (root / "portfolio-except.txt").unlink()
         write_json(root / "execution.json", execution)
 
         reservation = normalize_reservation(
@@ -2459,6 +2489,10 @@ def self_test() -> int:
         failed_replacement_order = failed_replacement_execution["orders"][0]
         if failed_replacement_order.get("result") != "blocked" or failed_replacement_order.get("reason") != "replacement_order_submission_failed":
             failures.append(f"replacement submit exception was not blocked: {failed_replacement_order}")
+        if previous_portfolio_except_env is None:
+            os.environ.pop(PORTFOLIO_EXCEPT_ENV_VAR, None)
+        else:
+            os.environ[PORTFOLIO_EXCEPT_ENV_VAR] = previous_portfolio_except_env
         if failures:
             print(json.dumps({"status": "failed", "failures": failures}, ensure_ascii=False, indent=2))
             return 1

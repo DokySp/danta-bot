@@ -4,6 +4,7 @@ import argparse
 import json
 import logging
 import math
+import os
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -193,6 +194,7 @@ def enqueue_deferred_buy_retries(
     expires_at = due_at + timedelta(seconds=max(0, expires_after_seconds))
     created: list[Path] = []
     env = str(execution.get("execution_environment") or "").strip() if isinstance(execution, dict) else ""
+    portfolio_except = execute_orders.load_portfolio_except_symbols()
     for order in orders:
         if not isinstance(order, dict) or str(order.get("direction") or "").strip() != "buy":
             continue
@@ -200,6 +202,8 @@ def enqueue_deferred_buy_retries(
         if not reason:
             continue
         symbol = execute_orders.symbol_key(order)
+        if symbol in portfolio_except:
+            continue
         qty = retry_quantity(order)
         target = target_quantity(order)
         price = execute_orders.as_price(order.get("order_price"))
@@ -333,6 +337,8 @@ def process_artifact(path: Path, config: Config) -> dict[str, Any]:
     execute_orders.write_json(path, payload)
 
     symbol = execute_orders.symbol_key(payload)
+    if symbol in execute_orders.load_portfolio_except_symbols():
+        return mark_terminal(path, payload, state="dropped", reason="symbol_in_portfolio_except_list")
     target = execute_orders.as_int(payload.get("target_holding_quantity"))
     requested_qty = execute_orders.as_int(payload.get("retry_quantity"))
     env = execute_orders.env_dv(str(payload.get("execution_environment") or config.mcp_trading_env))
@@ -481,6 +487,8 @@ def self_test() -> None:
     assert cash_gate_reason(submitted_adjusted) == "buy_quantity_reduced_to_remaining_cash"
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
+        previous_portfolio_except_env = os.environ.get(execute_orders.PORTFOLIO_EXCEPT_ENV_VAR)
+        os.environ[execute_orders.PORTFOLIO_EXCEPT_ENV_VAR] = str(tmp_path / "portfolio-except.txt")
         path = tmp_path / "deferred-buy-retry.yaml"
         path.write_text(
             "deferred_buy_retry:\n"
@@ -515,6 +523,7 @@ def self_test() -> None:
             bundled_skills_dir=Path(tmp),
             sync_skills_overwrite=False,
             portfolio_file=Path(tmp) / "portfolio.txt",
+            portfolio_except_file=Path(tmp) / "portfolio-except.txt",
         )
         loaded = load_deferred_buy_retry_config(config)
         assert loaded.enabled is True
@@ -558,9 +567,23 @@ def self_test() -> None:
         expires_at = parse_time(artifact["expires_at"])
         assert due_at is not None and expires_at is not None
         assert int((expires_at - due_at).total_seconds()) == 600
+        (tmp_path / "portfolio-except.txt").write_text("000660\n", encoding="utf-8")
+        skipped = enqueue_deferred_buy_retries(
+            workspace_dir=tmp_path / "excluded-check",
+            source_run_dir=run_dir,
+            delay_seconds=loaded.delay_seconds,
+            expires_after_seconds=loaded.expires_after_seconds,
+            slippage_bps=loaded.slippage_bps,
+        )
+        assert skipped == []
+        (tmp_path / "portfolio-except.txt").unlink()
         path.write_text("deferred_buy_retry:\n  enabled: false\n", encoding="utf-8")
         disabled = load_deferred_buy_retry_config(config)
         assert disabled.enabled is False
+        if previous_portfolio_except_env is None:
+            os.environ.pop(execute_orders.PORTFOLIO_EXCEPT_ENV_VAR, None)
+        else:
+            os.environ[execute_orders.PORTFOLIO_EXCEPT_ENV_VAR] = previous_portfolio_except_env
 
 
 def main() -> int:

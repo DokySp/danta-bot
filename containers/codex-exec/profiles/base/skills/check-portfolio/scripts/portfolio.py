@@ -67,6 +67,22 @@ def configured_portfolio_path(repo_root: Path | None) -> Path | None:
     return first_existing(candidates)
 
 
+def configured_portfolio_except_path(repo_root: Path | None) -> Path | None:
+    candidates: list[Path] = []
+    if os.environ.get("PORTFOLIO_EXCEPT_FILE"):
+        candidates.append(Path(os.environ["PORTFOLIO_EXCEPT_FILE"]).expanduser())
+    candidates.extend(
+        [
+            Path("/app/config/portfolio-except.txt"),
+            Path("/workspace/containers/codex-exec/profiles/base/config/portfolio-except.txt"),
+            Path("containers/codex-exec/profiles/base/config/portfolio-except.txt"),
+        ]
+    )
+    if repo_root is not None:
+        candidates.append(repo_root / "containers/codex-exec/profiles/base/config/portfolio-except.txt")
+    return first_existing(candidates)
+
+
 def assistant_recommendation_path(repo_root: Path | None) -> Path | None:
     candidates: list[Path] = []
     if os.environ.get("ASSISTANT_PORTFOLIO_CACHE_FILE"):
@@ -462,16 +478,23 @@ def fetch_holding_symbols(retries: int) -> list[str]:
     return dedupe(symbols)
 
 
-def compose_payload(recommanded: list[str], specified: list[str], raw_holding: list[str]) -> dict[str, list[str]]:
-    recommanded = dedupe(recommanded)
-    specified = dedupe(specified)
-    holding = dedupe(raw_holding)
+def compose_payload(
+    recommanded: list[str],
+    specified: list[str],
+    raw_holding: list[str],
+    portfolio_except: list[str] | None = None,
+) -> dict[str, list[str]]:
+    excluded = set(dedupe(portfolio_except or []))
+    recommanded = [symbol for symbol in dedupe(recommanded) if symbol not in excluded]
+    specified = [symbol for symbol in dedupe(specified) if symbol not in excluded]
+    holding = [symbol for symbol in dedupe(raw_holding) if symbol not in excluded]
     universe = dedupe(recommanded + specified + holding)
     return {
         "recommanded": recommanded,
         "specified": specified,
         "holding": holding,
         "universe": universe,
+        "portfolio_except": sorted(excluded),
     }
 
 
@@ -479,8 +502,9 @@ def build_payload(*, include_holdings: bool, retries: int) -> dict[str, list[str
     repo_root = find_repo_root()
     recommanded = symbols_from_file(assistant_recommendation_path(repo_root))
     specified = symbols_from_file(configured_portfolio_path(repo_root))
+    portfolio_except = symbols_from_file(configured_portfolio_except_path(repo_root))
     raw_holding = fetch_holding_symbols(retries) if include_holdings else []
-    return compose_payload(recommanded, specified, raw_holding)
+    return compose_payload(recommanded, specified, raw_holding, portfolio_except)
 
 
 def command_read(args: argparse.Namespace) -> int:
@@ -501,6 +525,13 @@ def command_self_test(_args: argparse.Namespace) -> int:
     payload = compose_payload(["111111", "005930"], ["005930", "000660"], ["005930", "035420", "035420"])
     assert payload["holding"] == ["005930", "035420"]
     assert payload["universe"] == ["111111", "005930", "000660", "035420"]
+    assert payload["portfolio_except"] == []
+    excluded_payload = compose_payload(["111111", "005930"], ["005930", "000660"], ["005930", "035420"], ["005930", "000660"])
+    assert excluded_payload["recommanded"] == ["111111"]
+    assert excluded_payload["specified"] == []
+    assert excluded_payload["holding"] == ["035420"]
+    assert excluded_payload["universe"] == ["111111", "035420"]
+    assert excluded_payload["portfolio_except"] == ["000660", "005930"]
     assert normalize_trading_env("acct") == "real"
     assert normalize_trading_env("paper") == "demo"
     assert balance_tr_id("demo") == "VTTC8434R"

@@ -3,9 +3,13 @@ from collections.abc import Callable
 from typing import Any
 
 from .new_usage import handle_new, handle_usage
-from .portfolio import handle_add_portfolio_ticker, handle_remove_portfolio_ticker
+from .portfolio import (
+    handle_add_portfolio_except_ticker,
+    handle_add_portfolio_ticker,
+    handle_remove_portfolio_except_ticker,
+    handle_remove_portfolio_ticker,
+)
 from .schedule import handle_schedule_off, handle_schedule_on
-from .symbol_flags import handle_show_symbol_flags
 from .touch_point import handle_show_touch_point
 from .version import handle_version
 
@@ -17,14 +21,12 @@ def handle_telegram_command(worker: Any, task: Any, command: str, args: str) -> 
         "new": handle_new,
         "usage": handle_usage,
         "version": handle_version,
-        "show-symbol-flags": handle_show_symbol_flags,
-        "show_symbol_flags": handle_show_symbol_flags,
-        "show-symbol-states": handle_show_symbol_flags,
-        "show_symbol_states": handle_show_symbol_flags,
         "show-touch-point": handle_show_touch_point,
         "show_touch_point": handle_show_touch_point,
         "add_portfolio_ticker": handle_add_portfolio_ticker,
         "remove_portfolio_ticker": handle_remove_portfolio_ticker,
+        "add_portfolio_except_ticker": handle_add_portfolio_except_ticker,
+        "remove_portfolio_except_ticker": handle_remove_portfolio_except_ticker,
         "schedule_on": handle_schedule_on,
         "schedule_off": handle_schedule_off,
     }

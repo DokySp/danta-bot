@@ -9,19 +9,6 @@ from pathlib import Path
 from typing import Any
 
 
-STATE_LABELS = {
-    "user_no_trade": "사용자 거래금지",
-    "order_state_locked": "주문/계좌 상태 잠금",
-    "recent_trade_cooldown": "당일 거래 쿨다운",
-    "profit_take_candidate": "익절/비중 축소 후보",
-    "risk_reduce_candidate": "하락 초입 축소 후보",
-    "missed_reduce_observe": "추격 매도 금지 관찰",
-    "bottom_watch": "저점 감시",
-    "staged_rebuy_candidate": "분할 추매 후보",
-    "normal_rebalance": "일반 판단",
-}
-
-
 def load_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
@@ -62,22 +49,6 @@ def text(value: Any) -> str:
     return str(value if value is not None else "").replace("\n", " ").strip()
 
 
-def symbol_state_code(item: dict[str, Any]) -> str:
-    state = item.get("symbol_state")
-    if isinstance(state, dict):
-        return text(state.get("state") or "")
-    return text(state or "")
-
-
-def symbol_state_suffix(item: dict[str, Any]) -> str:
-    state = symbol_state_code(item)
-    if not state:
-        return ""
-    label = STATE_LABELS.get(state)
-    label_suffix = f"({label})" if label else ""
-    return f", 플래그={state}{label_suffix}"
-
-
 def order_line(item: dict[str, Any]) -> str:
     symbol = text(f"{item.get('symbol_id', '')} {item.get('symbol_name', '')}".strip())
     direction = text(item.get("direction") or "none")
@@ -91,7 +62,7 @@ def order_line(item: dict[str, Any]) -> str:
     quantity_text = f"{requested_quantity}주 -> {quantity}주" if requested_quantity and requested_quantity != quantity else f"{quantity}주"
     adjustment_reason = text(adjustment.get("reason") or "")
     adjustment_suffix = f", 조정={adjustment_reason}" if adjustment_reason else ""
-    return f"- {symbol}: {direction} {quantity_text}, {result} ({reason}{adjustment_suffix}{symbol_state_suffix(item)}){suffix}"
+    return f"- {symbol}: {direction} {quantity_text}, {result} ({reason}{adjustment_suffix}){suffix}"
 
 
 def review_line(item: dict[str, Any]) -> str:
@@ -233,7 +204,6 @@ def self_test() -> int:
                     "result": "submitted",
                     "reason": "accepted",
                     "order_or_reservation_id": "r1",
-                    "symbol_state": "normal_rebalance",
                 }
             ],
         },
@@ -270,7 +240,6 @@ def self_test() -> int:
                     "result": "blocked",
                     "reason": "sell_quantity_exceeds_order_available_quantity",
                     "order_or_reservation_id": "0028360200",
-                    "symbol_state": "risk_reduce_candidate",
                 },
                 *[
                     {
@@ -313,7 +282,6 @@ def self_test() -> int:
                 "- 스킵: 0건",
                 "005930 삼성전자: buy 3주 -> 1주",
                 "조정=buy_quantity_reduced_to_order_available_quantity",
-                "플래그=normal_rebalance(일반 판단)",
                 "평결",
                 "총 사용 토큰: 123",
             ],
@@ -328,7 +296,7 @@ def self_test() -> int:
                 "- 제출: 0건",
                 "- 차단·실패: 1건",
                 "- 스킵: 7건",
-                "402340 SK스퀘어: sell 1주, blocked (sell_quantity_exceeds_order_available_quantity, 플래그=risk_reduce_candidate(하락 초입 축소 후보)) / 0028360200",
+                "402340 SK스퀘어: sell 1주, blocked (sell_quantity_exceeds_order_available_quantity) / 0028360200",
             ],
             ["주문 수: 8", "스킵종목1", "final_equals_expected_holding_quantity"],
         ),

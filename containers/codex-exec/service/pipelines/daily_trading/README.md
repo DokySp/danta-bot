@@ -4,26 +4,6 @@
 
 Sub-agent 모델과 effort는 `DAILY_TRADING_SUBAGENT_MODEL_CONFIG` 또는 `containers/codex-exec/profiles/base/config/daily-trading-subagents.yaml`에서 조정하고, `scripts/run_subagent.py`가 해당 값을 `codex exec` 명령에 지정한다.
 
-종목 상태 플래그의 deterministic threshold는 `/app/config/symbol-state-policy.yaml` 또는 `containers/codex-exec/profiles/base/config/symbol-state-policy.yaml`에서 조정한다. 이 파일은 soft state 숫자 기준만 다루며, hard state 차단 규칙과 상태 우선순위는 코드에 남긴다.
-
-## 종목 상태 플래그
-
-`scripts/build_run_artifacts.py`의 `decision-brief` 단계가 종목별 `symbol_state`를 산정하고 `symbol-states.json`에 저장한다. hard full-block 상태는 `analyst-review`와 `judge-review` 입력에서 제외하고, hard directional 상태는 입력에 포함하되 반대 방향 목표값과 주문을 차단한다. soft 상태는 판단 보조 맥락이며 자동 주문 허가가 아니다.
-
-| priority | 상태값 | 성격 | 의미 | 산정 기준 |
-|---:|---|---|---|---|
-| 1 | `user_no_trade` | hard full-block | 사용자 명시 거래금지 | 사용자 거래 지시 파일에 해당 종목의 `no_trade`, `trade_banned`, `blocked`, 또는 전체/매수/매도 차단 지시가 있음 |
-| 2 | `order_state_locked` | hard full-block | 주문/계좌 상태 갱신 필요 | active 매수/매도 주문이 있거나, 현재가/관측시각이 없거나, 계좌 조회가 실패/스킵됨 |
-| 3 | `recent_trade_cooldown` | hard directional | 당일 체결 직후 반대매매 금지 | 당일 체결이 있으며, 마지막 체결 방향의 반대 방향 증감 목표와 주문을 차단함. `source_actor`가 있으면 그 값을 우선하고, 없으면 `order_employee_no`가 `OpnAPI`인지로 봇/비봇 체결을 판별한다 |
-| 4 | `profit_take_candidate` | soft | 익절 또는 비중 축소 후보 | 보유 중이고 평가손익률이 수익 기준 이상이며, 집중도 또는 과열 신호 중 하나가 있음 |
-| 5 | `risk_reduce_candidate` | soft | 하락 초입 비중 축소 후보 | 보유 중이고 하락 신호가 있으며, 축소 검토 비중 이상이거나 추세 훼손 신호가 있음 |
-| 6 | `missed_reduce_observe` | soft | 추격 매도 금지 관찰 | 보유 중이고 급락 상태이거나, 저점권이면서 추세 훼손 상태라 추격 매도 위험이 큼 |
-| 7 | `bottom_watch` | soft | 저점 감시 | 저점권이거나, 저점 근처이면서 추세 훼손 상태임. 아직 반등/안정 확인 전 |
-| 8 | `staged_rebuy_candidate` | soft | 분할 추매 후보 | 저점 감시 조건을 만족하고, 반등/안정 신호가 있으며, 추매 가능한 비중 여유가 있음 |
-| 9 | `normal_rebalance` | soft fallback | 일반 리밸런싱 | 위 상태에 해당하지 않음 |
-
-soft 상태의 숫자 기준은 `symbol-state-policy.yaml`의 `thresholds`에 있으며, 각 값 옆 `used by:` 주석이 어느 플래그에서 쓰이는지 표시한다.
-
 Scheduled daily-trading jobs with a `daily_trading` block in `schedules.yaml` are executed by the codex-exec Python direct runner, which calls `scripts/run_daily_trading_pipeline.py run` without starting Main Codex. Telegram/user-facing 응답은 `pipeline-summary.json`을 직접 말로 재구성하지 않고, `scripts/render_telegram_summary.py`가 `pipeline-summary.json`에서 생성한 `telegram-summary.txt`를 그대로 사용한다. `pipeline-summary.json`은 `review_summary`, `account_display_summary`, `evidence_summary`, `telegram_response_policy`, `report_path`, `telegram_summary_path`를 포함하므로 진단이 필요할 때만 읽는다. 명시적으로 승인된 `demo-submit` 또는 `real-submit`에서는 `--submit-orders`를 함께 넘겨 `scripts/execute_orders.py`가 read-only gate 갱신, 기존 pending/reserved 주문 조정 판정, 즉시/예약 주문 제출·정정·취소·차단, 최종 summary 재생성을 수행하게 한다. `--order-path auto`는 KST 기준 `09:00 <= t < 15:30` 평일 실행을 `order_cash`, `15:40 <= t` 또는 `t < 07:30` 실행과 주말 실행을 `order_resv`로 해석하는 기본값이다. 휴장일 판단과 스케줄 활성화는 daily-trading 내부가 아니라 별도 check-holiday 경계에서 처리한다. `--order-path reservation`은 `order_resv`, `--order-path immediate`는 `order_cash` 후보로 명시 고정한다. `--submit-orders` 없이 `execution.requires_main_agent_order_execution=true`가 남아 있으면 그 run은 비제출 gate 요약 상태이며 최종 주문 실행 결과가 아니다. 명시적 지정가 예약 요청에서 사용자별 종목 가격이 없으면 `execution-plan`의 `order_price`를 기본 지정가 후보로 사용하며, 해당 가격이 파이프라인에서 산출됐다는 이유만으로 차단하지 않는다. `scripts/run_subagent.py`, `scripts/build_run_artifacts.py`, `scripts/render_telegram_summary.py`, `prompts/*.md`, 중간 JSON은 pipeline 실패 진단 때만 연다. 설치 또는 pipeline/launcher/helper 변경 후에는 `python3 <daily-trading-pipeline>/scripts/run_daily_trading_pipeline.py self-test`, `python3 <daily-trading-pipeline>/scripts/run_subagent.py self-test`, `python3 <daily-trading-pipeline>/scripts/build_run_artifacts.py self-test`, `python3 <daily-trading-pipeline>/scripts/execute_orders.py self-test`, `python3 <daily-trading-pipeline>/scripts/render_telegram_summary.py --self-test`로 검증한다.
 
 Routine command:
@@ -38,7 +18,6 @@ python3 <daily-trading-pipeline>/scripts/run_daily_trading_pipeline.py run \
   --request-type <analysis|prepare|demo-submit|real-submit> \
   [--submit-orders] \
   [--order-path <auto|reservation|immediate>] \
-  [--symbol-state-policy <path>] \
   [--main-events <codex-json-events-path>]
 ```
 
@@ -194,6 +173,15 @@ Run 아티팩트는 `reports/runs/<run_id>/` 아래에 둔다.
 기존 active pending/reserved 주문이 최종 보유수량, 방향, 잔여수량, 가격, 주문 API, 주문 경로와 맞지 않으면 `scripts/execute_orders.py`는 필수 원주문 식별자가 있을 때 같은 방향/API/경로 주문은 정정하고, 취소가 필요한 대체 주문은 취소 요청이 접수된 뒤 같은 명시 실행 run에서 검증된 대체 주문을 제출한다. 식별자가 없거나 취소/정정/대체 주문 결과가 불확실하면 `execution.json`에 `blocked`로 남긴다.
 
 사용자 또는 schedule이 demo 또는 real 실행을 명시했고 `--submit-orders`가 전달됐으며 `execute_orders.py`의 모든 실행 gate를 통과한 경우에만 `scripts/execute_orders.py`가 주문 API를 호출한다.
+
+### portfolio-except 제외 종목
+
+`config/portfolio-except.txt`(형식은 `portfolio.txt`와 동일, env `PORTFOLIO_EXCEPT_FILE`로 override)는 봇 매매 제외 종목 목록이다. 두 겹으로 강제된다.
+
+- `$check-portfolio`가 recommanded/specified/holding 세 소스 모두에서 해당 종목을 빼고 `universe`를 조립하므로, 제외 종목은 decision-brief, analyst-review, judge-review에 아예 나타나지 않는다. payload의 `portfolio_except` 키로 제외 목록을 노출한다.
+- `scripts/execute_orders.py`의 `reconcile`이 최종 gate로, 어떤 경로로든 계획에 제외 종목 주문이 들어오면 `symbol_in_portfolio_except_list`로 `blocked` 처리한다. 제외 종목의 기존 active 주문도 계획 순회에서 차단되므로 정정/취소 대상이 되지 않는다. deferred-buy-retry도 enqueue와 실행 시점 양쪽에서 같은 목록을 확인한다.
+
+목록은 파일을 직접 수정하거나 Telegram `/add_portfolio_except_ticker`, `/remove_portfolio_except_ticker` 명령으로 관리하며, 변경은 다음 run부터 반영된다(`/app/config` bind mount). 이미 접수된 미체결/예약 주문은 자동 취소하지 않으므로 필요하면 사용자가 직접 정리한다.
 
 ## 유지보수 계약
 

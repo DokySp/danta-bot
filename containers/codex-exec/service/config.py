@@ -81,6 +81,7 @@ class Config:
     bundled_skills_dir: Path
     sync_skills_overwrite: bool
     portfolio_file: Path
+    portfolio_except_file: Path
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -122,4 +123,5 @@ class Config:
             bundled_skills_dir=Path(os.getenv("BUNDLED_SKILLS_DIR", "/app/skills")),
             sync_skills_overwrite=required_env_bool("CODEX_SYNC_SKILLS_OVERWRITE"),
             portfolio_file=Path(os.getenv("PORTFOLIO_FILE", "/app/config/portfolio.txt")),
+            portfolio_except_file=Path(os.getenv("PORTFOLIO_EXCEPT_FILE", "/app/config/portfolio-except.txt")),
         )

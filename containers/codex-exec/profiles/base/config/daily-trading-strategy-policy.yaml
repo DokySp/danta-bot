@@ -1,0 +1,51 @@
+schema_version: "1"
+
+tracked_indexes:
+  - KOSPI
+  - KOSDAQ
+
+regime_thresholds:
+  panic_downside_any_lte_pct: -4.0
+  weak_downside_any_lte_pct: -2.0
+  risk_on_all_gte_pct: 1.5
+
+advisory_labels:
+  favor: "판단 참고값이며 주문 허용 규칙이 아님. 근거가 충분하면 목표 노출 확대를 우호적으로 검토한다."
+  neutral: "판단 참고값이며 주문 허용/차단 규칙이 아님. 기존 evidence 중심으로 중립 검토한다."
+  discourage: "판단 참고값이며 주문 차단 규칙이 아님. 반대 evidence가 강하지 않으면 목표 노출 확대나 투매를 낮게 본다."
+  observe_first: "판단 참고값이며 주문 차단 규칙이 아님. 신규 노출 확대보다 관망과 보유 재평가를 우선 검토한다."
+  strong_review_required: "판단 참고값이며 주문 허용 규칙이 아님. 손실 포지션 추가매수는 thesis, 집중도, 손실 확대 위험을 더 엄격히 검토한다."
+
+regime_bias:
+  insufficient_market_data:
+    new_exposure_review_bias: neutral
+    downside_add_review_bias: neutral
+    index_drop_sell_review_bias: neutral
+    advisory_reason: "시장 지수 데이터가 부족하므로 전략 bias를 중립으로 둔다."
+  neutral:
+    new_exposure_review_bias: neutral
+    downside_add_review_bias: neutral
+    index_drop_sell_review_bias: neutral
+    advisory_reason: "명확한 강세/약세 regime이 아니므로 기존 evidence 중심으로 판단한다."
+  risk_on:
+    new_exposure_review_bias: favor
+    downside_add_review_bias: neutral
+    index_drop_sell_review_bias: neutral
+    advisory_reason: "추적 지수가 모두 강세 기준 이상이면 근거 있는 추세 확대를 우호적으로 검토한다."
+  weak_downside:
+    new_exposure_review_bias: discourage
+    downside_add_review_bias: strong_review_required
+    index_drop_sell_review_bias: discourage
+    advisory_reason: "약세장에서는 신규 노출 확대보다 보유 유지/축소 재평가와 손실 포지션 추가매수의 엄격 검토를 우선한다."
+  panic_downside:
+    new_exposure_review_bias: observe_first
+    downside_add_review_bias: strong_review_required
+    index_drop_sell_review_bias: discourage
+    advisory_reason: "급락장에서는 기본 관망을 우선하고, 지수 급락만으로 투매하지 않으며 손실 포지션 추가매수는 매우 신중히 검토한다."
+
+downside_add_review:
+  target: all_current_holdings
+
+concentration_levels:
+  low_lte_pct: 5.0
+  moderate_lte_pct: 15.0
