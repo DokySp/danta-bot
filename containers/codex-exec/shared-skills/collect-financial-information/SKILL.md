@@ -70,7 +70,7 @@ KIS API details:
 - ETF/ETN `inquire_price`: `/uapi/etfetn/v1/quotations/inquire-price`, `tr_id=FHPST02400000`
 - ETF/ETN `nav_comparison_trend`: `/uapi/etfetn/v1/quotations/nav-comparison-trend`, `tr_id=FHPST02440000`
 
-`invest_opinion` uses `FID_INPUT_DATE_1=<three days before --date>` and `FID_INPUT_DATE_2=<--date>` by default. Override the start date only with `--start-date YYYYMMDD` when explicitly requested.
+`invest_opinion` uses `FID_INPUT_DATE_1=<28 days before --date>` and `FID_INPUT_DATE_2=<--date>` by default, so the cache holds a multi-broker target-price consensus window. Override the start date only with `--start-date YYYYMMDD` when explicitly requested.
 
 The saved `estimate_perform` data keeps only `output1` (`종목 및 최신 투자의견 요약`). `output2`, `output3`, and `output4` are intentionally excluded from both the main cache and the source-field sidecar.
 

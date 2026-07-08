@@ -667,13 +667,16 @@ def first_present_from(sources: tuple[dict[str, Any], ...], keys: tuple[str, ...
     return None
 
 
+FINANCIAL_SYMBOL_PAYLOAD_MARKER_KEYS = ("주식현재가 시세", "국내주식 종목추정실적", "국내주식 종목투자의견")
+
+
 def unwrap_financial_symbol_payload(symbol_payload: Any) -> dict[str, Any] | None:
     if not isinstance(symbol_payload, dict):
         return None
-    if "주식현재가 시세" in symbol_payload or "국내주식 종목추정실적" in symbol_payload:
+    if any(key in symbol_payload for key in FINANCIAL_SYMBOL_PAYLOAD_MARKER_KEYS):
         return symbol_payload
     for nested in symbol_payload.values():
-        if isinstance(nested, dict) and ("주식현재가 시세" in nested or "국내주식 종목추정실적" in nested):
+        if isinstance(nested, dict) and any(key in nested for key in FINANCIAL_SYMBOL_PAYLOAD_MARKER_KEYS):
             return nested
     return symbol_payload
 
@@ -706,6 +709,23 @@ def financial_summary_for(cache: Any, symbol_id: str, cache_path: str) -> dict[s
     price = price_rows[0] if price_rows and isinstance(price_rows[0], dict) else {}
     opinion_rows = ((symbol_payload.get("국내주식 종목추정실적") or {}).get("종목 및 최신 투자의견 요약") or [])
     opinion = opinion_rows[0] if opinion_rows and isinstance(opinion_rows[0], dict) else {}
+    target_rows = ((symbol_payload.get("국내주식 종목투자의견") or {}).get("응답") or [])
+    targets = []
+    for row in target_rows:
+        if not isinstance(row, dict):
+            continue
+        value = as_int(str(row.get("목표가") or "").replace(",", "").strip() or 0)
+        if value <= 0:
+            continue
+        targets.append(
+            {
+                "value": value,
+                "date": str(row.get("주식 영업일자") or "").strip(),
+                "broker": str(row.get("증권사명") or "").strip(),
+                "opinion": str(row.get("투자의견") or "").strip(),
+            }
+        )
+    targets.sort(key=lambda entry: entry["date"], reverse=True)
     quote_parts = []
     for label, key in (("현재가", "현재가"), ("등락률", "전일 대비율"), ("PER", "주가수익비율(PER)"), ("PBR", "주가순자산비율(PBR)")):
         if price.get(key) not in (None, ""):
@@ -713,11 +733,40 @@ def financial_summary_for(cache: Any, symbol_id: str, cache_path: str) -> dict[s
             quote_parts.append(f"{label} {price.get(key)}{suffix}")
     if quote_parts:
         summary["items"].append(", ".join(quote_parts))
+    if targets:
+        latest = targets[0]
+        latest_source = ", ".join(part for part in (latest["broker"], latest["opinion"], latest["date"]) if part)
+        current_price = as_int(str(price.get("현재가") or "").replace(",", "").strip() or 0)
+
+        def gap_text(reference_value: int) -> str:
+            if current_price <= 0 or reference_value <= 0:
+                return ""
+            return f"현재가대비 괴리율 {(current_price - reference_value) / reference_value * 100:.1f}%"
+
+        if len(targets) == 1:
+            single_parts = [part for part in (latest_source, gap_text(latest["value"])) if part]
+            item = f"목표가 {latest['value']}"
+            if single_parts:
+                item += f" ({', '.join(single_parts)})"
+        else:
+            values = sorted(entry["value"] for entry in targets)
+            mid = len(values) // 2
+            median_value = values[mid] if len(values) % 2 else (values[mid - 1] + values[mid]) // 2
+            gap = gap_text(median_value)
+            dates = [entry["date"] for entry in targets if entry["date"]]
+            date_span = f"(발표 {min(dates)}~{max(dates)})" if dates else ""
+            item = f"목표가 컨센서스 {len(targets)}건{date_span} 중앙값 {median_value}"
+            if gap:
+                item += f"({gap})"
+            item += f", 범위 {values[0]}~{values[-1]}, 최신 {latest['value']}"
+            if latest_source:
+                item += f" ({latest_source})"
+        summary["items"].append(item)
     if opinion.get("추천의견"):
         summary["items"].append(f"최신 투자의견 {opinion.get('추천의견')}")
     if price.get("업종명"):
         summary["items"].append(f"업종 {price.get('업종명')}")
-    summary["items"] = summary["items"][:3]
+    summary["items"] = summary["items"][:4]
     if not summary["items"]:
         summary["cache_status"] = "supplied_empty"
     return summary
@@ -1820,6 +1869,22 @@ symbols:
             전일 대비율: "1.2"
             주가수익비율(PER): "12.3"
             업종명: "전기전자"
+      국내주식 종목투자의견:
+        응답:
+          - 주식 영업일자: "20260706"
+            증권사명: "메리츠"
+            투자의견: "BUY"
+            목표가: "500000"
+            전일 종가: "309500"
+            목표가 괴리율: "-38.10"
+          - 주식 영업일자: "20260708"
+            증권사명: "키움"
+            투자의견: "BUY"
+            목표가: "390000"
+          - 주식 영업일자: "20260701"
+            증권사명: "한투"
+            투자의견: "BUY"
+            목표가: "460000"
 ''',
             encoding="utf-8",
         )
@@ -1892,6 +1957,11 @@ symbols:
                 failures.append(f"financial-missing symbol should remain price_only: {by_symbol['000660']}")
             if by_symbol["000660"].get("financial_summary", {}).get("cache_status") != "missing_symbol":
                 failures.append(f"financial-missing symbol should be marked missing_symbol: {by_symbol['000660']}")
+            financial_items = by_symbol["005930"].get("financial_summary", {}).get("items", [])
+            target_price_items = [item for item in financial_items if item.startswith("목표가 컨센서스")]
+            expected_target_item = "목표가 컨센서스 3건(발표 20260701~20260708) 중앙값 460000(현재가대비 괴리율 -84.8%), 범위 390000~500000, 최신 390000 (키움, BUY, 20260708)"
+            if target_price_items != [expected_target_item]:
+                failures.append(f"invest opinion target consensus should be summarized: {financial_items}")
             if by_symbol["005930"].get("news_summary"):
                 failures.append(f"no-news placeholder should not be included: {by_symbol['005930']}")
             if (brief.get("market_index_snapshot") or {}).get("indexes", [{}])[0].get("symbol") != "KOSPI":

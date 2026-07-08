@@ -343,9 +343,12 @@ def api_date(date_hyphen: str) -> str:
     return date_hyphen.replace("-", "")
 
 
+INVEST_OPINION_WINDOW_DAYS = 28
+
+
 def default_start_date(date_hyphen: str) -> str:
     target = datetime.strptime(date_hyphen, "%Y-%m-%d").date()
-    return (target - timedelta(days=3)).strftime("%Y%m%d")
+    return (target - timedelta(days=INVEST_OPINION_WINDOW_DAYS)).strftime("%Y%m%d")
 
 
 def read_json(path: Path) -> Any:
@@ -1158,7 +1161,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
     assert stdout.getvalue().strip().endswith("financial-2026-06-10.yaml")
     assert api_params("estimate_perform", "005930", namespace, date_hyphen) == {"SHT_CD": "005930"}
     assert api_params("invest_opinion", "005930", namespace, date_hyphen)["FID_COND_SCR_DIV_CODE"] == "16633"
-    assert api_params("invest_opinion", "005930", namespace, date_hyphen)["FID_INPUT_DATE_1"] == "20260607"
+    assert api_params("invest_opinion", "005930", namespace, date_hyphen)["FID_INPUT_DATE_1"] == "20260513"
     assert api_params("invest_opinion", "005930", namespace, date_hyphen)["FID_INPUT_DATE_2"] == "20260610"
     cache = merge_cache(
         date_hyphen,
@@ -1281,7 +1284,7 @@ def build_parser() -> argparse.ArgumentParser:
     collect_parser.add_argument("--symbols-file", help="Comma/newline separated symbol list.")
     collect_parser.add_argument("--market", default="J", help="KIS market code. Defaults to J.")
     collect_parser.add_argument("--product-type", default="300", help="KIS product type code. Defaults to 300.")
-    collect_parser.add_argument("--start-date", help="Invest opinion start date in YYYYMMDD. Defaults to three days before --date.")
+    collect_parser.add_argument("--start-date", help="Invest opinion start date in YYYYMMDD. Defaults to 28 days before --date.")
     collect_parser.add_argument("--include-etf", action="store_true", help="Also call ETF/ETN price and NAV APIs.")
     collect_parser.add_argument("--retries", type=int, default=3, help="Retry count per KIS request.")
     collect_parser.add_argument("--max-pages", type=int, default=3, help="Maximum KIS continuation pages per API.")
