@@ -1002,6 +1002,10 @@ def normalize_fill(row: dict[str, Any], *, env_dv: str, observed_at: str) -> dic
     order_date = str(first_present(row, ("ord_dt", "ORD_DT", "ord_date", "ORD_DATE")) or "").strip()
     if order_date and filled_at and len(filled_at) == 6 and filled_at.isdigit():
         filled_at = f"{order_date[0:4]}-{order_date[4:6]}-{order_date[6:8]}T{filled_at[0:2]}:{filled_at[2:4]}:{filled_at[4:6]}+09:00"
+    order_employee_no = str(first_present(row, ("ordr_empno", "ORDR_EMPNO", "ord_empno", "ORD_EMPNO")) or "").strip()
+    order_actor = "unknown"
+    if order_employee_no:
+        order_actor = "bot_opnapi" if order_employee_no.lower() == "opnapi" else "non_bot_user"
     return {
         "symbol_id": symbol,
         "symbol_name": text_first(row, ("prdt_name", "PRDT_NAME", "prdt_abrv_name", "PRDT_ABRV_NAME", "hts_kor_isnm", "HTS_KOR_ISNM")) or symbol,
@@ -1012,9 +1016,130 @@ def normalize_fill(row: dict[str, Any], *, env_dv: str, observed_at: str) -> dic
         "filled_amount": filled_amount,
         "order_id": str(first_present(row, ("odno", "ODNO", "ord_no", "ORD_NO")) or "").strip(),
         "order_date": order_date,
+        "order_employee_no": order_employee_no,
+        "source_actor": order_actor,
+        "exchange_id": str(first_present(row, ("excg_id_dvsn_cd", "EXCG_ID_DVSN_CD", "tr_mket_name", "TR_MKET_NAME")) or "").strip(),
+        "terminal_media_kind_code": str(first_present(row, ("tmnl_mdia_kind_cd", "TMNL_MDIA_KIND_CD")) or "").strip(),
         "execution_environment": env_dv,
         "observed_at": observed_at,
     }
+
+
+def daily_ccld_base_params(cano: str, product: str, day: str, ctx_fk100: str, ctx_nk100: str) -> dict[str, str]:
+    return {
+        "CANO": cano,
+        "ACNT_PRDT_CD": product,
+        "INQR_STRT_DT": day,
+        "INQR_END_DT": day,
+        "SLL_BUY_DVSN_CD": "00",
+        "INQR_DVSN": "00",
+        "PDNO": "",
+        "CCLD_DVSN": "01",
+        "ORD_GNO_BRNO": "",
+        "ODNO": "",
+        "INQR_DVSN_3": "00",
+        "INQR_DVSN_1": "",
+        "CTX_AREA_FK100": ctx_fk100,
+        "CTX_AREA_NK100": ctx_nk100,
+    }
+
+
+def daily_ccld_query_variants() -> list[tuple[str, dict[str, str]]]:
+    return [
+        ("default", {}),
+        ("KRX", {"EXCG_ID_DVSN_CD": "KRX"}),
+        ("NXT", {"EXCG_ID_DVSN_CD": "NXT"}),
+        ("SOR", {"EXCG_ID_DVSN_CD": "SOR"}),
+    ]
+
+
+def fetch_daily_ccld_rows(
+    *,
+    cano: str,
+    product: str,
+    day: str,
+    app_key: str,
+    app_secret: str,
+    token: str,
+    retries: int,
+    env_dv: str,
+    query_name: str,
+    extra_params: dict[str, str],
+) -> list[dict[str, Any]]:
+    raw_rows: list[dict[str, Any]] = []
+    ctx_fk100 = ""
+    ctx_nk100 = ""
+    tr_cont = ""
+    for _page in range(20):
+        params = daily_ccld_base_params(cano, product, day, ctx_fk100, ctx_nk100)
+        params.update(extra_params)
+        body, response_headers = call_endpoint(
+            "inquire_daily_ccld",
+            params,
+            app_key,
+            app_secret,
+            token,
+            retries,
+            env_dv=env_dv,
+            tr_cont=tr_cont,
+        )
+        for row in output_rows_from_body(body, "output1"):
+            copied = dict(row)
+            copied["_daily_ccld_query"] = query_name
+            raw_rows.append(copied)
+        ctx_fk100, ctx_nk100 = continuation_context(body)
+        next_tr_cont = response_headers.get("tr_cont", "").strip()
+        if next_tr_cont not in {"F", "M"}:
+            break
+        tr_cont = "N"
+        time.sleep(0.2)
+    return raw_rows
+
+
+def fill_dedup_key(fill: dict[str, Any]) -> tuple[Any, ...]:
+    order_id = str(fill.get("order_id") or "")
+    if order_id:
+        return (
+            str(fill.get("symbol_id") or ""),
+            str(fill.get("direction") or ""),
+            str(fill.get("filled_at") or ""),
+            str(fill.get("order_date") or ""),
+            order_id,
+            parse_int(fill.get("filled_quantity")) or 0,
+            parse_int(fill.get("filled_price")) or 0,
+        )
+    return (
+        str(fill.get("symbol_id") or ""),
+        str(fill.get("direction") or ""),
+        str(fill.get("filled_at") or ""),
+        str(fill.get("order_date") or ""),
+        parse_int(fill.get("filled_quantity")) or 0,
+        parse_int(fill.get("filled_price")) or 0,
+        parse_int(fill.get("filled_amount")) or 0,
+        str(fill.get("exchange_id") or ""),
+        str(fill.get("order_employee_no") or ""),
+    )
+
+
+def merge_duplicate_fills(fills: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_key: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for fill in fills:
+        key = fill_dedup_key(fill)
+        existing = by_key.get(key)
+        query = str(fill.pop("daily_ccld_query", "") or "").strip()
+        if existing is None:
+            copied = dict(fill)
+            copied["source_queries"] = [query] if query else []
+            by_key[key] = copied
+            continue
+        if query:
+            queries = existing.setdefault("source_queries", [])
+            if isinstance(queries, list) and query not in queries:
+                queries.append(query)
+        for field in ("order_employee_no", "source_actor", "exchange_id", "terminal_media_kind_code"):
+            if not existing.get(field) and fill.get(field):
+                existing[field] = fill.get(field)
+    return list(by_key.values())
 
 
 def collect_today_fills_artifact(
@@ -1031,49 +1156,49 @@ def collect_today_fills_artifact(
     cano, product = account_parts(env_dv)
     day = datetime.fromisoformat(started_at).astimezone(KST).strftime("%Y%m%d") if started_at else datetime.now(KST).strftime("%Y%m%d")
     raw_rows: list[dict[str, Any]] = []
-    ctx_fk100 = ""
-    ctx_nk100 = ""
-    tr_cont = ""
-    for _page in range(20):
-        body, response_headers = call_endpoint(
-            "inquire_daily_ccld",
-            {
-                "CANO": cano,
-                "ACNT_PRDT_CD": product,
-                "INQR_STRT_DT": day,
-                "INQR_END_DT": day,
-                "SLL_BUY_DVSN_CD": "00",
-                "INQR_DVSN": "00",
-                "PDNO": "",
-                "CCLD_DVSN": "01",
-                "ORD_GNO_BRNO": "",
-                "ODNO": "",
-                "INQR_DVSN_3": "00",
-                "INQR_DVSN_1": "",
-                "CTX_AREA_FK100": ctx_fk100,
-                "CTX_AREA_NK100": ctx_nk100,
-            },
-            app_key,
-            app_secret,
-            token,
-            retries,
-            env_dv=env_dv,
-            tr_cont=tr_cont,
-        )
-        raw_rows.extend(output_rows_from_body(body, "output1"))
-        ctx_fk100, ctx_nk100 = continuation_context(body)
-        next_tr_cont = response_headers.get("tr_cont", "").strip()
-        if next_tr_cont not in {"F", "M"}:
-            break
-        tr_cont = "N"
-        time.sleep(0.2)
+    errors: list[dict[str, Any]] = []
+    for query_name, extra_params in daily_ccld_query_variants():
+        try:
+            raw_rows.extend(
+                fetch_daily_ccld_rows(
+                    cano=cano,
+                    product=product,
+                    day=day,
+                    app_key=app_key,
+                    app_secret=app_secret,
+                    token=token,
+                    retries=retries,
+                    env_dv=env_dv,
+                    query_name=query_name,
+                    extra_params=extra_params,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - other variants may still return useful fills
+            errors.append(
+                safe_error(
+                    exc,
+                    code="today_fills_query_variant_failed",
+                    stage="today-fills",
+                    source=f"direct_kis.inquire_daily_ccld.{query_name}",
+                    required=query_name == "default",
+                )
+            )
+            if query_name == "default":
+                raise
     wanted = {normalize_symbol_key(symbol) for symbol in symbols}
     observed_at = now_kst_iso()
     fills = [
         fill
-        for fill in (normalize_fill(row, env_dv=env_dv, observed_at=observed_at) for row in raw_rows)
+        for fill in (
+            dict(
+                normalize_fill(row, env_dv=env_dv, observed_at=observed_at),
+                daily_ccld_query=str(row.get("_daily_ccld_query") or ""),
+            )
+            for row in raw_rows
+        )
         if fill.get("symbol_id") in wanted and fill.get("direction") in {"buy", "sell"} and fill.get("filled_quantity", 0) > 0
     ]
+    fills = merge_duplicate_fills(fills)
     fills.sort(key=lambda item: (str(item.get("filled_at") or ""), str(item.get("order_id") or "")))
     return {
         "schema_version": "1",
@@ -1086,9 +1211,10 @@ def collect_today_fills_artifact(
         "skip_reason": "",
         "execution_environment": env_dv,
         "source_api": "direct_kis.inquire_daily_ccld",
+        "source_queries": [name for name, _ in daily_ccld_query_variants()],
         "symbols": [{"symbol_id": symbol} for symbol in symbols],
         "fills": fills,
-        "errors": [],
+        "errors": errors,
     }
 
 
@@ -1688,6 +1814,8 @@ def command_self_test(_args: argparse.Namespace) -> int:
             "ord_dt": "20260618",
             "ord_tmd": "094200",
             "odno": "1",
+            "ordr_empno": "N한국",
+            "excg_id_dvsn_cd": "SOR",
         },
         env_dv="real",
         observed_at="2026-06-18T09:43:00+09:00",
@@ -1696,6 +1824,11 @@ def command_self_test(_args: argparse.Namespace) -> int:
     assert fill["direction"] == "buy"
     assert fill["filled_price"] == 70100
     assert fill["filled_at"] == "2026-06-18T09:42:00+09:00"
+    assert fill["source_actor"] == "non_bot_user"
+    assert fill["exchange_id"] == "SOR"
+    duplicate_fills = merge_duplicate_fills([dict(fill, daily_ccld_query="default"), dict(fill, daily_ccld_query="SOR")])
+    assert len(duplicate_fills) == 1
+    assert duplicate_fills[0]["source_queries"] == ["default", "SOR"]
     asset_summary = account_asset_summary_from_row(
         {
             "tot_asst_amt": "20000000",
