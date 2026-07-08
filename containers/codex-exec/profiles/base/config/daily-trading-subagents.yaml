@@ -3,7 +3,7 @@ collection:
   model_reasoning_effort: low
 analyst_review:
   model: gpt-5.5
-  model_reasoning_effort: medium
+  model_reasoning_effort: high
 judge_review:
   model: gpt-5.5
-  model_reasoning_effort: medium
+  model_reasoning_effort: high
