@@ -860,7 +860,7 @@ def recent_submitted_trade_context(output_dir: Path, symbol_id: str, run_limit: 
     return {
         "recent_submitted_trades": trades,
         "inspected_run_ids": inspected_runs,
-        "policy": "Use recent submitted trades as reassessment input, not a default hold/block reason; same-direction additional trades and opposite-direction final holding changes are allowed after explicitly reassessing price movement, final_first_score, risk, order/fill state, and thesis evidence.",
+        "policy": "Recent submitted trades are context for sizing within the allowed candidate direction; the score-band direction preconditions still apply.",
     }
 
 
@@ -1044,30 +1044,43 @@ def compact_review_prompt(spec: dict[str, Any]) -> str | None:
                 "",
                 f"For this combined analyst-review task, return two independent view results for every symbol: {', '.join(output_roles)}.",
                 "Use a separate pass for each view and evaluate that view only from its own rubric and supplied evidence.",
-                "Do not let either view's score, confidence, reason_code, or one_line_reason depend on the other view's conclusion.",
+                "Do not let either view's score, reason_code, or one_line_reason depend on the other view's conclusion.",
                 "Use today_trade_price_context to avoid same-day churn: compare last fill price/direction with current_or_last price before strengthening buy/sell opinions.",
-                f"Return each symbol with a views object keyed by {', '.join(output_roles)}; each view must contain score, confidence, reason_code, one_line_reason, and missing_data.",
+                "Carry evidence strength in the score itself: keep scores close to neutral 5 when evidence is thin, stale, or conflicting. There is no confidence field.",
+                f"Return each symbol with a views object keyed by {', '.join(output_roles)}; each view must contain score, reason_code, one_line_reason, and missing_data.",
             ]
         )
     if stage == "judge-review":
+        candidate_directions = spec.get("candidate_directions") if isinstance(spec.get("candidate_directions"), dict) else {}
+        thresholds = spec.get("score_band_thresholds") if isinstance(spec.get("score_band_thresholds"), dict) else {}
+        sell_below = thresholds.get("sell_below", 4)
+        buy_above = thresholds.get("buy_above", 6)
+        portfolio_snapshot = spec.get("portfolio_snapshot") if isinstance(spec.get("portfolio_snapshot"), list) else []
         lines.extend(
             [
                 "",
                 "For judge-review, use the lossless selected-symbol analyst-review slice from analyst_review.",
-                "Interpret final_first_score as the unrounded confidence-adjusted analyst-review score: >= 6 is a buy/increase candidate, <= 4 is a reduce/exit candidate, and 5 is neutral.",
-                "When referring to per-analyst scores in agent_scores, use confidence_adjusted_score as the score; score and confidence are supporting inputs explaining that adjusted score.",
-                "If a symbol's analyst-review score is missing, unavailable, or unusable, treat it as neutral 5 and continue.",
-                "`analyst-review` scores are judgment inputs, not hard buy/sell gates.",
-                "Return target_position_value_krw for every symbol as the target KRW position value after this decision.",
+                f"The supplied symbols are pre-selected candidates by score band: sell candidates are held symbols with final_first_score < {sell_below}, buy candidates have final_first_score > {buy_above}. Symbols between the bands are held by the pipeline and are not yours to decide.",
+                "Direction preconditions are hard constraints: a sell candidate may only be sold (partial or full) or held (target_position_value_krw <= baseline); a buy candidate may only be bought or held (target_position_value_krw >= baseline). Violations are rejected by the pipeline.",
+                "When evidence is insufficient or conflicting, the default decision is hold at the baseline.",
+                "final_first_score is the simple mean of the included analyst view scores; per-analyst scores in agent_scores carry the evidence behind it.",
+                "Return target_position_value_krw for every supplied symbol as the target KRW position value after this decision.",
                 "The pipeline derives final_holding_quantity from target_position_value_krw / price.current_or_last with Decimal ROUND_HALF_UP; judge-supplied final_holding_quantity is optional and ignored for sizing.",
-                "No additional buy, no extra exposure, or 추가 확대 없음 means target_position_value_krw must not exceed holding_quantity_context.expected_holding_quantity * price.current_or_last, not 0.",
+                "No additional buy, no extra exposure, or 추가 확대 없음 means target_position_value_krw must stay at the baseline (holding_quantity_context.expected_holding_quantity * price.current_or_last), not 0.",
                 "If today_trade_timeline_context shows a same-day buy fill and target_position_value_krw exceeds that baseline, include additional_buy_reason with the new evidence or materially changed price/portfolio context.",
-                "Use recent_trade_context as reassessment input, not a default hold/block reason: same-direction additional trades and opposite-direction final holding changes are allowed after explicitly reassessing price movement, final_first_score, risk, order/fill state, and thesis evidence.",
-                "Use today_trade_timeline_context as reassessment input, not a same-day churn block: same-direction additional trades and opposite-direction final holding changes are allowed after explicitly reassessing price movement, final_first_score, risk, order/fill state, and thesis evidence.",
-                "Treat long_term_thesis_intact as a sell/reduce suppression signal, not as add permission; increase only when add_allowed evidence is also present.",
+                "For held sell candidates, an intact long-term thesis favors holding despite the low score; sell only when thesis damage, material adverse news/disclosure, or structural deterioration is supported by supplied evidence.",
                 "Use strategy_context and symbol_strategy_context as advisory inputs for target_position_value_krw, not as order allow/block rules.",
             ]
         )
+        if candidate_directions:
+            lines.append("candidate_directions: " + ",".join(f"{symbol}={direction}" for symbol, direction in sorted(candidate_directions.items())))
+        if portfolio_snapshot:
+            lines.extend(
+                [
+                    "Read-only portfolio snapshot of every held symbol (score/quantity/valuation/pnl_rate/candidate_direction); use it for portfolio-level sizing context only and never return decisions for snapshot-only symbols:",
+                    "portfolio_snapshot: " + json.dumps(portfolio_snapshot, ensure_ascii=False, separators=(",", ":")),
+                ]
+            )
 
     lines.extend(
         [
@@ -1319,7 +1332,7 @@ def compact_review_payload_errors(payload: Any, stage: str, agent_role: str = ""
             if has_combined_views:
                 for role in output_roles:
                     view = views[role]
-                    for field in ("score", "confidence", "reason_code", "one_line_reason"):
+                    for field in ("score", "reason_code", "one_line_reason"):
                         if field not in view:
                             errors.append(
                                 {
@@ -1328,7 +1341,7 @@ def compact_review_payload_errors(payload: Any, stage: str, agent_role: str = ""
                                 }
                             )
             else:
-                for field in ("score", "confidence"):
+                for field in ("score",):
                     if field not in symbol:
                         errors.append(
                             {
@@ -2135,13 +2148,11 @@ def assert_compact_review_prompt(tmp: Path) -> None:
         "stage: judge-review",
         "analyst_review:",
         "For judge-review, use the lossless selected-symbol analyst-review slice from analyst_review.",
-        "Interpret final_first_score as the unrounded confidence-adjusted analyst-review score: >= 6 is a buy/increase candidate, <= 4 is a reduce/exit candidate, and 5 is neutral.",
-        "When referring to per-analyst scores in agent_scores, use confidence_adjusted_score as the score;",
-        "If a symbol's analyst-review score is missing, unavailable, or unusable, treat it as neutral 5 and continue.",
-        "`analyst-review` scores are judgment inputs, not hard buy/sell gates.",
-        "Use recent_trade_context as reassessment input, not a default hold/block reason:",
-        "Use today_trade_timeline_context as reassessment input, not a same-day churn block:",
-        "Treat long_term_thesis_intact as a sell/reduce suppression signal",
+        "The supplied symbols are pre-selected candidates by score band: sell candidates are held symbols with final_first_score < 4, buy candidates have final_first_score > 6.",
+        "Direction preconditions are hard constraints: a sell candidate may only be sold (partial or full) or held (target_position_value_krw <= baseline); a buy candidate may only be bought or held (target_position_value_krw >= baseline).",
+        "When evidence is insufficient or conflicting, the default decision is hold at the baseline.",
+        "final_first_score is the simple mean of the included analyst view scores",
+        "For held sell candidates, an intact long-term thesis favors holding despite the low score",
         "Use strategy_context and symbol_strategy_context as advisory inputs for target_position_value_krw, not as order allow/block rules.",
         "target_position_value_krw",
         "No additional buy",
@@ -2149,6 +2160,17 @@ def assert_compact_review_prompt(tmp: Path) -> None:
     missing = [part for part in second_required_parts if part not in second_prompt]
     if missing:
         raise AssertionError(f"compact judge-review prompt missing {missing}: {second_prompt}")
+    banded_spec = compact_spec(tmp, stage="judge-review", agent_role="judge", task_name="second-banded")
+    banded_spec["candidate_directions"] = {"005930": "sell", "000660": "buy"}
+    banded_spec["score_band_thresholds"] = {"sell_below": 4.0, "buy_above": 6.0}
+    banded_spec["portfolio_snapshot"] = [
+        {"symbol_id": "005930", "symbol_name": "삼성전자", "final_first_score": 3.5, "current_live_holding_quantity": 5, "valuation_amount": 350000, "pnl_rate": -3.2, "candidate_direction": "sell"}
+    ]
+    banded_prompt = build_prompt(banded_spec)
+    if "candidate_directions: 000660=buy,005930=sell" not in banded_prompt:
+        raise AssertionError(f"candidate directions missing from judge prompt: {banded_prompt}")
+    if "portfolio_snapshot: " not in banded_prompt or '"final_first_score":3.5' not in banded_prompt.replace(" ", ""):
+        raise AssertionError(f"portfolio snapshot missing from judge prompt: {banded_prompt}")
 
 
 def assert_review_input_slices(tmp: Path) -> None:

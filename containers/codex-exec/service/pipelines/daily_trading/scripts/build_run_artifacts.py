@@ -317,10 +317,6 @@ def clamp_score(value: Any, default: int = 5) -> int:
     return max(0, min(10, as_int(value, default)))
 
 
-def effective_confidence_score(confidence: int) -> float:
-    return max(0.0, min(10.0, ((confidence - 4) / 4) * 10))
-
-
 def normalize_symbol_ids(raw: Any) -> list[str]:
     values = raw
     if isinstance(raw, dict):
@@ -1181,11 +1177,6 @@ def normalize_review_payload(payload: Any, stage: str) -> dict[str, Any] | None:
     return normalized
 
 
-def confidence_adjusted_score(score: int, confidence: int) -> float:
-    effective_confidence = effective_confidence_score(confidence)
-    return 5 + ((score - 5) * (effective_confidence / 10))
-
-
 def finite_number(value: Any) -> float | None:
     number = as_number(value)
     if isinstance(number, bool) or number is None:
@@ -1206,13 +1197,13 @@ def second_sidecar_path(output_dir: Path, role: str, task_name: str) -> Path:
 
 def write_first_sidecar(path: Path, symbols: list[dict[str, Any]]) -> None:
     lines = [
-        "| 종목 | 점수 | confidence(확신도) | 의견(판단) |",
-        "|---|---:|---:|---|",
+        "| 종목 | 점수 | 의견(판단) |",
+        "|---|---:|---|",
     ]
     for item in symbols:
         symbol_name = f"{item.get('symbol_id', '')} {item.get('symbol_name', '')}".strip()
         lines.append(
-            f"| {symbol_name} | {as_int(item.get('score'))} | {as_int(item.get('confidence'))} | {item.get('one_line_reason', '')} |"
+            f"| {symbol_name} | {as_int(item.get('score'))} | {item.get('one_line_reason', '')} |"
         )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -1225,8 +1216,8 @@ def write_combined_first_sidecar(
     symbols_by_id: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     lines = [
-        "| 관점 | 종목 | 점수 | confidence(확신도) | 의견(판단) |",
-        "|---|---|---:|---:|---|",
+        "| 관점 | 종목 | 점수 | 의견(판단) |",
+        "|---|---|---:|---|",
     ]
     for item in symbols:
         symbol_name = f"{item.get('symbol_id', '')} {item.get('symbol_name', '')}".strip()
@@ -1234,7 +1225,7 @@ def write_combined_first_sidecar(
             if symbols_by_id is not None:
                 score = mark_news_flow_excluded_without_news(score, symbols_by_id.get(symbol_key(item), {}))
             lines.append(
-                f"| {score.get('agent_role', '')} | {symbol_name} | {as_int(score.get('score'))} | {as_int(score.get('confidence'))} | {score.get('one_line_reason', '')} |"
+                f"| {score.get('agent_role', '')} | {symbol_name} | {as_int(score.get('score'))} | {score.get('one_line_reason', '')} |"
             )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -1326,7 +1317,6 @@ def mark_news_flow_excluded_without_news(score_item: dict[str, Any], brief_symbo
         return score_item
     normalized = dict(score_item)
     normalized["score"] = 5
-    normalized["confidence"] = 5
     normalized["reason_code"] = "no_news_excluded"
     normalized["one_line_reason"] = "뉴스 정보가 없어 평균에서 제외"
     normalized["excluded_from_aggregation"] = True
@@ -1374,16 +1364,12 @@ def build_analyst_review(args: argparse.Namespace) -> dict[str, Any]:
                 score_item = mark_news_flow_excluded_without_news(score_item, symbols_by_id.get(symbol_id, {}))
                 expanded_role = str(score_item.get("agent_role") or role)
                 score = clamp_score(score_item.get("score"), 5)
-                confidence = clamp_score(score_item.get("confidence"), 5)
                 excluded_from_aggregation = bool(score_item.get("excluded_from_aggregation"))
                 agent_scores[symbol_id].append(
                     {
                         "agent_role": expanded_role,
                         "source_agent_role": role,
                         "score": score,
-                        "confidence": confidence,
-                        "effective_confidence": effective_confidence_score(confidence),
-                        "confidence_adjusted_score": confidence_adjusted_score(score, confidence),
                         "reason_code": safe_name(str(score_item.get("reason_code") or "hold_neutral")).lower(),
                         "one_line_reason": score_item.get("one_line_reason") or "",
                         "missing_data": score_item.get("missing_data") if isinstance(score_item.get("missing_data"), list) else [],
@@ -1414,7 +1400,6 @@ def build_analyst_review(args: argparse.Namespace) -> dict[str, Any]:
         if not aggregation_scores:
             continue
         mean_score = sum(item["score"] for item in aggregation_scores) / len(aggregation_scores)
-        mean_adjusted = sum(item["confidence_adjusted_score"] for item in aggregation_scores) / len(aggregation_scores)
         brief_symbol = symbols_by_id.get(symbol_id, {})
         artifact["symbols"].append(
             {
@@ -1422,9 +1407,8 @@ def build_analyst_review(args: argparse.Namespace) -> dict[str, Any]:
                 "symbol_name": brief_symbol.get("symbol_name") or symbol_id,
                 "agent_scores": scores,
                 "mean_score": mean_score,
-                "mean_confidence_adjusted_score": mean_adjusted,
                 "aggregation_score_count": len(aggregation_scores),
-                "final_first_score": mean_adjusted,
+                "final_first_score": mean_score,
             }
         )
     artifact["status"] = "partial" if artifact["errors"] else "success"
@@ -1438,16 +1422,46 @@ def build_second_spec(args: argparse.Namespace) -> dict[str, Any]:
     analyst_review = load_json(Path(args.analyst_review or output_dir / "analyst-review.json"))
     portfolio = read_json_arg(args.portfolio_json)
     eligible = set(eligible_symbol_ids(decision_brief))
+    holding_set = {symbol_id for symbol_id in normalize_symbol_ids(portfolio.get("holding", [])) if symbol_id in eligible}
+    brief_by_symbol = indexed_symbols(decision_brief.get("symbols"))
 
+    # Score bands are action preconditions: sell decisions only for held symbols
+    # scoring below sell_max_score, buy decisions only above buy_min_score.
+    # Symbols between the bands never reach the judge, so holding them is the
+    # only possible outcome.
     selected: list[str] = []
+    candidate_directions: dict[str, str] = {}
+    scores_by_symbol: dict[str, float] = {}
     for item in analyst_review.get("symbols", []):
         symbol_id = symbol_key(item)
         final_first_score = finite_number(item.get("final_first_score"))
-        if symbol_id in eligible and final_first_score is not None and final_first_score >= args.min_score:
+        if not symbol_id or symbol_id not in eligible or final_first_score is None:
+            continue
+        scores_by_symbol[symbol_id] = final_first_score
+        if symbol_id in candidate_directions:
+            continue
+        if final_first_score > args.buy_min_score:
+            candidate_directions[symbol_id] = "buy"
             selected.append(symbol_id)
-    for symbol_id in normalize_symbol_ids(portfolio.get("holding", [])):
-        if symbol_id in eligible and symbol_id not in selected:
+        elif final_first_score < args.sell_max_score and symbol_id in holding_set:
+            candidate_directions[symbol_id] = "sell"
             selected.append(symbol_id)
+
+    portfolio_snapshot: list[dict[str, Any]] = []
+    for symbol_id in sorted(holding_set):
+        brief_item = brief_by_symbol.get(symbol_id, {})
+        exposure = brief_item.get("account_exposure") if isinstance(brief_item.get("account_exposure"), dict) else {}
+        portfolio_snapshot.append(
+            {
+                "symbol_id": symbol_id,
+                "symbol_name": brief_item.get("symbol_name") or symbol_id,
+                "final_first_score": scores_by_symbol.get(symbol_id),
+                "current_live_holding_quantity": as_int(exposure.get("current_live_holding_quantity")),
+                "valuation_amount": as_int(exposure.get("valuation_amount")),
+                "pnl_rate": as_number(exposure.get("pnl_rate")),
+                "candidate_direction": candidate_directions.get(symbol_id, "hold"),
+            }
+        )
 
     (output_dir / "judge-review-symbols.txt").write_text("\n".join(selected) + ("\n" if selected else ""), encoding="utf-8")
 
@@ -1469,9 +1483,12 @@ def build_second_spec(args: argparse.Namespace) -> dict[str, Any]:
             "decision_brief": artifact_path(args.decision_brief or output_dir / "decision-brief.json", absolute_paths),
             "analyst_review": artifact_path(args.analyst_review or output_dir / "analyst-review.json", absolute_paths),
             "persona": artifact_path(daily_pipeline_dir / "prompts" / "judge.md", absolute_paths),
-            "review_format": artifact_path(daily_pipeline_dir / "prompts" / "analyst-review-format.md", absolute_paths),
+            "review_format": artifact_path(daily_pipeline_dir / "prompts" / "judge-review-format.md", absolute_paths),
         },
         "symbol_ids": selected,
+        "candidate_directions": candidate_directions,
+        "score_band_thresholds": {"sell_below": args.sell_max_score, "buy_above": args.buy_min_score},
+        "portfolio_snapshot": portfolio_snapshot,
     }
     if extra_instructions:
         payload["extra_instructions"] = extra_instructions
@@ -1500,6 +1517,14 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
     account = load_json(Path(args.account_before_order or output_dir / "account-before-order.json"))
     decision_brief_path = Path(args.decision_brief) if args.decision_brief else output_dir / "decision-brief.json"
     decision_brief = load_json(decision_brief_path)
+    analyst_review_path = Path(getattr(args, "analyst_review", None) or output_dir / "analyst-review.json")
+    analyst_review = load_json(analyst_review_path) if analyst_review_path.is_file() else {}
+    scores_by_symbol: dict[str, float] = {}
+    for review_item in analyst_review.get("symbols", []) if isinstance(analyst_review, dict) else []:
+        review_symbol_id = symbol_key(review_item)
+        review_score = finite_number(review_item.get("final_first_score"))
+        if review_symbol_id and review_score is not None:
+            scores_by_symbol[review_symbol_id] = review_score
     account_by_symbol = indexed_symbols(account.get("symbols"))
     brief_by_symbol = indexed_symbols(decision_brief.get("symbols"))
     active = active_quantities(account)
@@ -1589,6 +1614,7 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
                 "symbol_id": symbol_id,
                 "symbol_name": item.get("symbol_name") or account_item.get("symbol_name") or symbol_id,
                 "direction": direction,
+                "final_first_score": scores_by_symbol.get(symbol_id),
                 "current_live_holding_quantity": current_qty,
                 "pending_and_reserved_buy_quantity": buy_qty,
                 "pending_and_reserved_sell_quantity": sell_qty,
@@ -2124,7 +2150,6 @@ symbols:
                         "symbol_id": "005930",
                         "symbol_name": "삼성전자",
                         "score": 7,
-                        "confidence": 5,
                         "reason_code": "buy_candidate",
                         "one_line_reason": "test",
                     },
@@ -2132,7 +2157,6 @@ symbols:
                         "symbol_id": "000660",
                         "symbol_name": "SK하이닉스",
                         "score": 5,
-                        "confidence": 5,
                         "reason_code": "hold_neutral",
                         "one_line_reason": "test",
                     },
@@ -2146,7 +2170,6 @@ symbols:
                             "views": {
                                 view_role: {
                                     "score": item["score"],
-                                    "confidence": item["confidence"],
                                     "reason_code": item["reason_code"],
                                     "one_line_reason": f"{view_role} {item['one_line_reason']}",
                                     "missing_data": [],
@@ -2178,8 +2201,12 @@ symbols:
                     symbol_ids="",
                 )
             )
-            if analyst_review["symbols"][0]["final_first_score"] != 5.5:
+            if analyst_review["symbols"][0]["final_first_score"] != 7.0:
                 failures.append(f"unexpected first review score: {analyst_review}")
+            if analyst_review["symbols"][0].get("mean_score") != 7.0:
+                failures.append(f"final_first_score must equal the simple mean of included scores: {analyst_review}")
+            if any("confidence" in score or "confidence_adjusted_score" in score for score in analyst_review["symbols"][0].get("agent_scores", [])):
+                failures.append(f"agent_scores must not carry confidence fields: {analyst_review}")
             news_scores = [
                 item
                 for item in analyst_review["symbols"][0].get("agent_scores", [])
@@ -2188,7 +2215,6 @@ symbols:
             if (
                 not news_scores
                 or news_scores[0].get("score") != 5
-                or news_scores[0].get("confidence") != 5
                 or news_scores[0].get("reason_code") != "no_news_excluded"
                 or news_scores[0].get("excluded_from_aggregation") is not True
             ):
@@ -2201,7 +2227,7 @@ symbols:
                 / "analyst-review--analyst-momentum-news--first-analyst-momentum-news.md"
             )
             market_news_text = market_news_sidecar.read_text(encoding="utf-8")
-            if "| analyst-news-flow | 005930 삼성전자 | 5 | 5 | 뉴스 정보가 없어 평균에서 제외 |" not in market_news_text:
+            if "| analyst-news-flow | 005930 삼성전자 | 5 | 뉴스 정보가 없어 평균에서 제외 |" not in market_news_text:
                 failures.append(f"news-flow sidecar should reflect average exclusion: {market_news_text}")
             missing_wrapper_path = subagent_dir / "first-analyst-quality-risk.wrapper.json"
             missing_wrapper = load_json(missing_wrapper_path)
@@ -2219,66 +2245,71 @@ symbols:
                 error.get("code") == "missing_agent_score" for error in missing_analyst_review["errors"]
             ):
                 failures.append(f"missing persona score did not produce partial review: {missing_analyst_review}")
-            second_spec = build_second_spec(
-                argparse.Namespace(
+            def second_spec_args(analyst_review_path: str, output_name: str) -> argparse.Namespace:
+                return argparse.Namespace(
                     output_dir=run_dir,
-                    output=run_dir / "judge-review-spec.json",
+                    output=run_dir / output_name,
                     decision_brief=str(run_dir / "decision-brief.json"),
-                    analyst_review=str(run_dir / "analyst-review.json"),
+                    analyst_review=analyst_review_path,
                     portfolio_json=str(tmp / "portfolio.json"),
                     run_id=None,
                     started_at=None,
                     workspace_dir=tmp,
                     pipeline_dir=pipeline_dir(),
                     relative_paths=False,
-                    min_score=6,
+                    buy_min_score=6.0,
+                    sell_max_score=4.0,
                 )
-            )
+
+            second_spec = build_second_spec(second_spec_args(str(run_dir / "analyst-review.json"), "judge-review-spec.json"))
             if second_spec["symbol_ids"] != ["005930"]:
                 failures.append(f"unexpected second spec symbols: {second_spec}")
+            if second_spec.get("candidate_directions") != {"005930": "buy"}:
+                failures.append(f"buy candidate direction missing: {second_spec}")
+            snapshot = second_spec.get("portfolio_snapshot") or []
+            if len(snapshot) != 1 or snapshot[0].get("symbol_id") != "005930" or snapshot[0].get("final_first_score") != 7.0 or snapshot[0].get("candidate_direction") != "buy":
+                failures.append(f"portfolio snapshot should describe every holding: {second_spec}")
+            if str(second_spec.get("artifact_paths", {}).get("review_format", "")).rsplit("/", 1)[-1] != "judge-review-format.md":
+                failures.append(f"judge spec should reference judge-review-format.md: {second_spec}")
             threshold_analyst_review = load_json(run_dir / "analyst-review.json")
             for item in threshold_analyst_review.get("symbols", []):
                 if item.get("symbol_id") == "000660":
-                    item["final_first_score"] = 6.9
-            write_json(run_dir / "analyst-review-threshold-6.9.json", threshold_analyst_review)
-            threshold_69_spec = build_second_spec(
-                argparse.Namespace(
-                    output_dir=run_dir,
-                    output=run_dir / "judge-review-spec-threshold-6.9.json",
-                    decision_brief=str(run_dir / "decision-brief.json"),
-                    analyst_review=str(run_dir / "analyst-review-threshold-6.9.json"),
-                    portfolio_json=str(tmp / "portfolio.json"),
-                    run_id=None,
-                    started_at=None,
-                    workspace_dir=tmp,
-                    pipeline_dir=pipeline_dir(),
-                    relative_paths=False,
-                    min_score=6,
-                )
-            )
-            if threshold_69_spec["symbol_ids"] != ["000660", "005930"]:
-                failures.append(f"6.9 score should select new symbol and holding: {threshold_69_spec}")
+                    item["final_first_score"] = 6.0
+            write_json(run_dir / "analyst-review-threshold-6.0.json", threshold_analyst_review)
+            threshold_60_spec = build_second_spec(second_spec_args(str(run_dir / "analyst-review-threshold-6.0.json"), "judge-review-spec-threshold-6.0.json"))
+            if threshold_60_spec["symbol_ids"] != ["005930"]:
+                failures.append(f"exactly 6.0 must not become a buy candidate: {threshold_60_spec}")
             for item in threshold_analyst_review.get("symbols", []):
                 if item.get("symbol_id") == "000660":
-                    item["final_first_score"] = 7.0
-            write_json(run_dir / "analyst-review-threshold-7.0.json", threshold_analyst_review)
-            threshold_70_spec = build_second_spec(
-                argparse.Namespace(
-                    output_dir=run_dir,
-                    output=run_dir / "judge-review-spec-threshold-7.0.json",
-                    decision_brief=str(run_dir / "decision-brief.json"),
-                    analyst_review=str(run_dir / "analyst-review-threshold-7.0.json"),
-                    portfolio_json=str(tmp / "portfolio.json"),
-                    run_id=None,
-                    started_at=None,
-                    workspace_dir=tmp,
-                    pipeline_dir=pipeline_dir(),
-                    relative_paths=False,
-                    min_score=6,
-                )
-            )
-            if threshold_70_spec["symbol_ids"] != ["000660", "005930"]:
-                failures.append(f"7.0 score should select new symbol and holding: {threshold_70_spec}")
+                    item["final_first_score"] = 6.1
+            write_json(run_dir / "analyst-review-threshold-6.1.json", threshold_analyst_review)
+            threshold_61_spec = build_second_spec(second_spec_args(str(run_dir / "analyst-review-threshold-6.1.json"), "judge-review-spec-threshold-6.1.json"))
+            if threshold_61_spec["symbol_ids"] != ["005930", "000660"] or threshold_61_spec.get("candidate_directions", {}).get("000660") != "buy":
+                failures.append(f"score above 6.0 should become a buy candidate: {threshold_61_spec}")
+            sell_band_review = load_json(run_dir / "analyst-review.json")
+            for item in sell_band_review.get("symbols", []):
+                if item.get("symbol_id") == "005930":
+                    item["final_first_score"] = 3.9
+                if item.get("symbol_id") == "000660":
+                    item["final_first_score"] = 3.0
+            write_json(run_dir / "analyst-review-sell-band.json", sell_band_review)
+            sell_band_spec = build_second_spec(second_spec_args(str(run_dir / "analyst-review-sell-band.json"), "judge-review-spec-sell-band.json"))
+            if sell_band_spec["symbol_ids"] != ["005930"] or sell_band_spec.get("candidate_directions") != {"005930": "sell"}:
+                failures.append(f"only held symbols below 4.0 may become sell candidates: {sell_band_spec}")
+            mid_band_review = load_json(run_dir / "analyst-review.json")
+            for item in mid_band_review.get("symbols", []):
+                item["final_first_score"] = 5.0
+            write_json(run_dir / "analyst-review-mid-band.json", mid_band_review)
+            mid_band_spec = build_second_spec(second_spec_args(str(run_dir / "analyst-review-mid-band.json"), "judge-review-spec-mid-band.json"))
+            if mid_band_spec["symbol_ids"] != [] or mid_band_spec.get("candidate_directions") != {}:
+                failures.append(f"mid-band symbols must not reach the judge: {mid_band_spec}")
+            for item in mid_band_review.get("symbols", []):
+                if item.get("symbol_id") == "005930":
+                    item["final_first_score"] = 4.0
+            write_json(run_dir / "analyst-review-sell-edge.json", mid_band_review)
+            sell_edge_spec = build_second_spec(second_spec_args(str(run_dir / "analyst-review-sell-edge.json"), "judge-review-spec-sell-edge.json"))
+            if sell_edge_spec["symbol_ids"] != []:
+                failures.append(f"exactly 4.0 must not become a sell candidate: {sell_edge_spec}")
             write_json(
                 run_dir / "judge-review.json",
                 {
@@ -2468,7 +2499,8 @@ def build_parser() -> argparse.ArgumentParser:
     second_spec.add_argument("--analyst-review")
     second_spec.add_argument("--workspace-dir", default=".")
     second_spec.add_argument("--pipeline-dir", default=str(pipeline_dir()))
-    second_spec.add_argument("--min-score", type=int, default=6)
+    second_spec.add_argument("--buy-min-score", type=float, default=6.0, help="buy decisions require final_first_score strictly above this")
+    second_spec.add_argument("--sell-max-score", type=float, default=4.0, help="sell decisions require final_first_score strictly below this")
     second_spec.add_argument("--run-id")
     second_spec.add_argument("--started-at")
     second_spec.add_argument("--relative-paths", action="store_true")
@@ -2480,6 +2512,7 @@ def build_parser() -> argparse.ArgumentParser:
     execution.add_argument("--judge-review")
     execution.add_argument("--account-before-order")
     execution.add_argument("--decision-brief", help="Path to decision-brief.json. Defaults to <output-dir>/decision-brief.json.")
+    execution.add_argument("--analyst-review", help="Path to analyst-review.json. Defaults to <output-dir>/analyst-review.json.")
     execution.add_argument("--request-type", choices=["analysis", "prepare", "demo-submit", "real-submit"], default="analysis")
     execution.add_argument("--order-path", choices=["reservation", "immediate"], default="reservation")
     execution.add_argument("--run-id")

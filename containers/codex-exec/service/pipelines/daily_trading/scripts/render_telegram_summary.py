@@ -45,6 +45,9 @@ REASON_LABELS = {
     "replacement_order_submission_failed": "대체주문 제출 실패",
     "order_submission_blocked": "주문 제출 차단",
     "submit_requires_explicit_execution_request": "명시적 실행 요청 필요",
+    "sell_blocked_score_band": "점수 밴드 매도 차단",
+    "buy_blocked_score_band": "점수 밴드 매수 차단",
+    "score_band_value_missing": "점수 확인 불가 차단",
 }
 
 
@@ -260,6 +263,10 @@ def render(summary: dict[str, Any]) -> str:
     if len(submitted_or_blocked) > 5:
         lines.append(f"- 외 {len(submitted_or_blocked) - 5}건")
     lines.extend(["", "<b>평결</b>"])
+    if any(key in review for key in ("sell_candidate_count", "buy_candidate_count", "hold_symbol_count")):
+        lines.append(
+            f"- 후보: 매도 {as_int(review.get('sell_candidate_count'))} · 매수 {as_int(review.get('buy_candidate_count'))} · 유지 {as_int(review.get('hold_symbol_count'))}"
+        )
     for item in changed[:5]:
         lines.append(review_line(item))
     if not changed:
@@ -349,6 +356,9 @@ def self_test() -> int:
             ],
         },
         "review_summary": {
+            "sell_candidate_count": 1,
+            "buy_candidate_count": 2,
+            "hold_symbol_count": 28,
             "symbols": [{"symbol_id": "005930", "symbol_name": "삼성전자", "current_live_holding_quantity": 0, "final_holding_quantity": 1, "one_line_reason": "테스트 <근거>"}]
         },
         "token_usage": {"total": {"total_tokens": 123}},
@@ -439,6 +449,7 @@ def self_test() -> int:
                 "- 계획 1건 · 제출 1 · 차단·실패 0 · 스킵 0",
                 "- 제외 종목: <code>000660</code> <code>005930</code>",
                 "- <code>005930</code> 삼성전자: 매수 3주→1주 · 제출(접수, 조정=매수가능수량으로 축소) / <code>r1</code>",
+                "- 후보: 매도 1 · 매수 2 · 유지 28",
                 "테스트 &lt;근거&gt;",
                 "보고서: <code>2026-06-18_포트폴리오.md</code>",
                 "토큰: 123",

@@ -8,9 +8,9 @@
 
 - 먼저 `analyst-momentum-cycle` 관점만으로 모든 종목을 평가한다.
 - 그 다음 `analyst-news-flow` 관점만으로 모든 종목을 새로 평가한다.
-- 두 번째 관점을 평가할 때 첫 번째 관점의 점수, confidence, reason_code, one_line_reason을 근거로 사용하지 않는다.
+- 두 번째 관점을 평가할 때 첫 번째 관점의 점수, reason_code, one_line_reason을 근거로 사용하지 않는다.
 - 두 관점이 같은 결론을 내도 각자 다른 근거 체계로 설명한다.
-- 뉴스 정보의 유무는 `analyst-news-flow` 관점에만 직접 반영한다. 뉴스가 없다는 이유만으로 `analyst-momentum-cycle` 점수나 확신도를 낮추지 않는다.
+- 뉴스 정보의 유무는 `analyst-news-flow` 관점에만 직접 반영한다. 뉴스가 없다는 이유만으로 `analyst-momentum-cycle` 점수를 낮추지 않는다.
 
 ## `analyst-momentum-cycle` 관점
 
@@ -26,7 +26,7 @@
 ## `analyst-news-flow` 관점
 
 - 제공된 KIS 뉴스/공시 요약만으로 뉴스 흐름의 방향성과 강도를 평가한다.
-- 뉴스 또는 공시 요약이 없거나 usable news가 0건이면 `score: 5`, `confidence: 5`, `reason_code: "no_news_excluded"`를 사용한다. Main helper는 이 row를 감사용으로 보존하되 analyst-review 평균 모수에서는 제외한다.
+- 뉴스 또는 공시 요약이 없거나 usable news가 0건이면 `score: 5`, `reason_code: "no_news_excluded"`를 사용한다. Main helper는 이 row를 감사용으로 보존하되 analyst-review 평균 모수에서는 제외한다.
 - 뉴스가 있을 때의 점수 기준은 다른 analyst-review persona와 같은 `0`부터 `10`까지의 정수 scale을 따른다.
 - 호재성 계약, 수주, 실적 개선, 규제 완화, 목표가 상향, 업황 개선, 자사주/배당 강화는 상방 요인으로 본다.
 - 악재성 실적 쇼크, 규제/소송, 신용/유동성 우려, 목표가 하향, 대규모 매도/오버행, 공시 리스크는 하방 요인으로 본다.
@@ -39,8 +39,9 @@
 - 명시된 artifact/persona/rule 파일은 read-only 로컬 명령(`cat`, `jq`)으로만 읽을 수 있다.
 - 외부 호출, MCP, web/network, 계좌/주문 API, unlisted 파일 읽기, 파일 쓰기, 다른 agent 결과 참조를 금지한다.
 - 반환 JSON은 종목별로 `views.analyst-momentum-cycle`과 `views.analyst-news-flow`를 모두 포함한다.
-- 각 view는 `score`, `confidence`, `reason_code`, `one_line_reason`, `missing_data`를 포함한다.
-- top-level `score`와 `confidence`를 만들지 않는다. 점수는 각 view 안에만 둔다.
+- 각 view는 `score`, `reason_code`, `one_line_reason`, `missing_data`를 포함한다.
+- 근거가 얇거나 오래됐거나 서로 상충하면 점수를 중립 5에 가깝게 유지한다. 불확실성은 점수 자체에 반영하며 별도의 확신도 필드는 없다.
+- top-level `score`를 만들지 않는다. 점수는 각 view 안에만 둔다.
 
 ## 스타일 가이드
 
