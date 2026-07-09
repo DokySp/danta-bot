@@ -1484,6 +1484,8 @@ def build_second_spec(args: argparse.Namespace) -> dict[str, Any]:
             "analyst_review": artifact_path(args.analyst_review or output_dir / "analyst-review.json", absolute_paths),
             "persona": artifact_path(daily_pipeline_dir / "prompts" / "judge.md", absolute_paths),
             "review_format": artifact_path(daily_pipeline_dir / "prompts" / "judge-review-format.md", absolute_paths),
+            "debate_bull_persona": artifact_path(daily_pipeline_dir / "prompts" / "debate-bull.md", absolute_paths),
+            "debate_bear_persona": artifact_path(daily_pipeline_dir / "prompts" / "debate-bear.md", absolute_paths),
         },
         "symbol_ids": selected,
         "candidate_directions": candidate_directions,
@@ -2271,6 +2273,10 @@ symbols:
                 failures.append(f"portfolio snapshot should describe every holding: {second_spec}")
             if str(second_spec.get("artifact_paths", {}).get("review_format", "")).rsplit("/", 1)[-1] != "judge-review-format.md":
                 failures.append(f"judge spec should reference judge-review-format.md: {second_spec}")
+            for debate_key, debate_file in (("debate_bull_persona", "debate-bull.md"), ("debate_bear_persona", "debate-bear.md")):
+                debate_path = str(second_spec.get("artifact_paths", {}).get(debate_key, ""))
+                if debate_path.rsplit("/", 1)[-1] != debate_file or not Path(debate_path).is_file():
+                    failures.append(f"judge spec missing readable {debate_key}: {second_spec}")
             threshold_analyst_review = load_json(run_dir / "analyst-review.json")
             for item in threshold_analyst_review.get("symbols", []):
                 if item.get("symbol_id") == "000660":

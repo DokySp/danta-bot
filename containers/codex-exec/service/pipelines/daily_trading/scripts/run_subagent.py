@@ -1056,6 +1056,12 @@ def compact_review_prompt(spec: dict[str, Any]) -> str | None:
         sell_below = thresholds.get("sell_below", 4)
         buy_above = thresholds.get("buy_above", 6)
         portfolio_snapshot = spec.get("portfolio_snapshot") if isinstance(spec.get("portfolio_snapshot"), list) else []
+        debate_bull = artifacts.get("debate_bull_persona")
+        debate_bear = artifacts.get("debate_bear_persona")
+        if debate_bull:
+            lines.append(f"debate_bull_persona: {debate_bull}")
+        if debate_bear:
+            lines.append(f"debate_bear_persona: {debate_bear}")
         lines.extend(
             [
                 "",
@@ -1070,6 +1076,9 @@ def compact_review_prompt(spec: dict[str, Any]) -> str | None:
                 "If today_trade_timeline_context shows a same-day buy fill and target_position_value_krw exceeds that baseline, include additional_buy_reason with the new evidence or materially changed price/portfolio context.",
                 "For held sell candidates, an intact long-term thesis favors holding despite the low score; sell only when thesis damage, material adverse news/disclosure, or structural deterioration is supported by supplied evidence.",
                 "Use strategy_context and symbol_strategy_context as advisory inputs for target_position_value_krw, not as order allow/block rules.",
+                "Debate sub-agents: spawn the bull/bear debate sub-agents required by the judge persona, passing the debate persona file contents plus the listed input file paths; spawned sub-agents inherit every other restriction.",
+                "Debate procedure: one base round (bull case, bear case, bull rebuttal, bear rebuttal) over all candidates in batch; at most one extra rebuttal round only for symbols you explicitly cannot decide; hard stop after two rounds; if debate agents fail after one retry each, decide without debate using the hold-at-baseline default.",
+                "After the debate, compare each side's strongest argument per symbol; if they balance or evidence is insufficient, hold at the baseline. Reflect the decisive argument (or why both sides cancelled out) in one_line_reason. Do not include debate transcripts in the returned JSON.",
             ]
         )
         if candidate_directions:
@@ -2154,6 +2163,10 @@ def assert_compact_review_prompt(tmp: Path) -> None:
         "final_first_score is the simple mean of the included analyst view scores",
         "For held sell candidates, an intact long-term thesis favors holding despite the low score",
         "Use strategy_context and symbol_strategy_context as advisory inputs for target_position_value_krw, not as order allow/block rules.",
+        "Debate sub-agents: spawn the bull/bear debate sub-agents required by the judge persona",
+        "Debate procedure: one base round (bull case, bear case, bull rebuttal, bear rebuttal) over all candidates in batch",
+        "hard stop after two rounds",
+        "if they balance or evidence is insufficient, hold at the baseline",
         "target_position_value_krw",
         "No additional buy",
     ]
