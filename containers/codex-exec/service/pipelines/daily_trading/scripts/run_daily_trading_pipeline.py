@@ -1261,6 +1261,7 @@ class Pipeline:
     def build_account_display_summary(self, account_summary: dict[str, Any]) -> dict[str, Any]:
         return {
             "cash_amount": account_summary.get("cash_amount"),
+            "orderable_cash_amount": account_summary.get("orderable_cash_amount"),
             "securities_valuation_amount": account_summary.get("securities_valuation_amount"),
             "total_evaluation_amount": account_summary.get("total_evaluation_amount"),
             "total_pnl_amount": account_summary.get("total_pnl_amount"),
@@ -1309,6 +1310,9 @@ class Pipeline:
                     "symbol_name": item.get("symbol_name"),
                     "fill_count": context.get("fill_count"),
                     "net_quantity": context.get("net_quantity"),
+                    "bot_net_quantity": context.get("bot_net_quantity"),
+                    "manual_net_quantity": context.get("manual_net_quantity"),
+                    "manual_fill_count": context.get("manual_fill_count"),
                     "last_direction": context.get("last_direction"),
                     "last_fill_at": context.get("last_fill_at"),
                     "last_fill_price": context.get("last_fill_price"),
@@ -1807,6 +1811,7 @@ class Pipeline:
             "telegram_summary_path": str(telegram_summary_path),
             "daily_trading_config": self.daily_trading_config_summary(),
             "stages": stages,
+            "portfolio_except": normalize_symbol_ids(portfolio.get("portfolio_except")),
             "portfolio_counts": {
                 "recommanded": len(normalize_symbol_ids(portfolio.get("recommanded"))),
                 "recommended": len(normalize_symbol_ids(portfolio.get("recommended"))),
@@ -2929,7 +2934,7 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
                 failures.append(f"telegram summary was not written: {telegram_summary_path}")
             else:
                 telegram_text = telegram_summary_path.read_text(encoding="utf-8")
-                for required_text in ("daily-trading 결과:", "계좌", "주문", "평결", "총 사용 토큰:"):
+                for required_text in ("<b>daily-trading", "<b>계좌</b>", "<b>주문</b>", "<b>평결</b>", "토큰:"):
                     if required_text not in telegram_text:
                         failures.append(f"telegram summary omitted {required_text}: {telegram_summary_path}")
             report_path = Path(str(summary.get("report_path") or ""))

@@ -585,6 +585,7 @@ def fills_by_symbol(today_fills: Any) -> dict[str, list[dict[str, Any]]]:
             "price": as_int(item.get("filled_price")),
             "amount": as_int(item.get("filled_amount")),
             "order_id": str(item.get("order_id") or ""),
+            "source_actor": str(item.get("source_actor") or ""),
         }
         result.setdefault(symbol_id, []).append(compact)
     for rows in result.values():
@@ -610,6 +611,18 @@ def today_trade_context(fills: list[dict[str, Any]], current_price: Any) -> dict
     sell_qty = sum(as_int(item.get("quantity")) for item in fills if item.get("direction") == "sell")
     buy_fills = [item for item in fills if item.get("direction") == "buy"]
     sell_fills = [item for item in fills if item.get("direction") == "sell"]
+
+    def actor_net_quantity(actor: str) -> int:
+        signed = 0
+        for item in fills:
+            if str(item.get("source_actor") or "") != actor:
+                continue
+            if item.get("direction") == "buy":
+                signed += as_int(item.get("quantity"))
+            elif item.get("direction") == "sell":
+                signed -= as_int(item.get("quantity"))
+        return signed
+
     last = fills[-1]
     first_direction = str(fills[0].get("direction") or "")
     last_direction = str(last.get("direction") or "")
@@ -626,6 +639,9 @@ def today_trade_context(fills: list[dict[str, Any]], current_price: Any) -> dict
         "buy_fill_count": len(buy_fills),
         "sell_fill_count": len(sell_fills),
         "net_quantity": buy_qty - sell_qty,
+        "bot_net_quantity": actor_net_quantity("bot_opnapi"),
+        "manual_net_quantity": actor_net_quantity("non_bot_user"),
+        "manual_fill_count": len([item for item in fills if str(item.get("source_actor") or "") == "non_bot_user"]),
         "first_direction": first_direction,
         "last_direction": last_direction,
         "last_buy_fill": buy_fills[-1] if buy_fills else {},
@@ -1830,6 +1846,7 @@ def run_self_test() -> int:
                         "filled_price": 70100,
                         "filled_amount": 70100,
                         "order_id": "fill-1",
+                        "source_actor": "bot_opnapi",
                     },
                     {
                         "symbol_id": "005930",
@@ -1840,6 +1857,7 @@ def run_self_test() -> int:
                         "filled_price": 70300,
                         "filled_amount": 70300,
                         "order_id": "fill-3",
+                        "source_actor": "non_bot_user",
                     },
                     {
                         "symbol_id": "005930",
@@ -1850,6 +1868,7 @@ def run_self_test() -> int:
                         "filled_price": 70200,
                         "filled_amount": 70200,
                         "order_id": "fill-2",
+                        "source_actor": "bot_opnapi",
                     },
                 ],
                 "errors": [],
@@ -2080,6 +2099,9 @@ symbols:
                 failures.append(f"same-day trade timeline should be summarized: {by_symbol['005930']}")
             if by_symbol["005930"].get("today_trade_price_context", {}).get("move_since_last_fill_pct") != -0.43:
                 failures.append(f"same-day trade price context should include current-vs-fill move: {by_symbol['005930']}")
+            actor_context = by_symbol["005930"].get("today_trade_price_context", {})
+            if actor_context.get("bot_net_quantity") != 0 or actor_context.get("manual_net_quantity") != 1 or actor_context.get("manual_fill_count") != 1:
+                failures.append(f"same-day trade context should split bot/manual net quantities: {actor_context}")
             first_specs = build_first_specs(
                 argparse.Namespace(
                     output_dir=run_dir,

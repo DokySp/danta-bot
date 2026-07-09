@@ -977,6 +977,7 @@ def normalize_holding(row: dict[str, Any], *, observed_at: str) -> dict[str, Any
 def build_account_summary(summary: dict[str, Any]) -> dict[str, Any]:
     return {
         "cash_amount": parse_int(first_present(summary, ("dnca_tot_amt", "prvs_rcdl_excc_amt", "ord_psbl_cash"))),
+        "orderable_cash_amount": parse_int(first_present(summary, ("prvs_rcdl_excc_amt", "nxdy_excc_amt", "ord_psbl_cash"))),
         "total_evaluation_amount": parse_int(first_present(summary, ("tot_evlu_amt", "nass_amt", "tot_asst_amt"))),
         "securities_valuation_amount": parse_int(first_present(summary, ("scts_evlu_amt", "tot_stln_slng_chgs"))),
         "total_pnl_amount": parse_int(first_present(summary, ("evlu_pfls_smtl_amt", "evlu_pfls_amt_smtl"))),
@@ -1804,6 +1805,9 @@ def command_self_test(_args: argparse.Namespace) -> int:
     assert sample_account["symbol_id"] == "0183J0"
     assert sample_account["current_live_holding_quantity"] == 3
     assert build_account_summary({"dnca_tot_amt": "1000", "tot_evlu_amt": "2000"})["cash_amount"] == 1000
+    orderable_summary = build_account_summary({"dnca_tot_amt": "5183620", "prvs_rcdl_excc_amt": "1043015", "nxdy_excc_amt": "1276976"})
+    assert orderable_summary["cash_amount"] == 5183620
+    assert orderable_summary["orderable_cash_amount"] == 1043015
     fill = normalize_fill(
         {
             "pdno": "005930",
