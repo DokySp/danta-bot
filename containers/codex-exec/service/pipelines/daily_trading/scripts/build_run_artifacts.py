@@ -1426,7 +1426,7 @@ def build_second_spec(args: argparse.Namespace) -> dict[str, Any]:
     brief_by_symbol = indexed_symbols(decision_brief.get("symbols"))
 
     # Score bands are action preconditions: sell decisions only for held symbols
-    # scoring below sell_max_score, buy decisions only above buy_min_score.
+    # scoring at or below sell_max_score, buy decisions only at or above buy_min_score.
     # Symbols between the bands never reach the judge, so holding them is the
     # only possible outcome.
     selected: list[str] = []
@@ -1440,10 +1440,10 @@ def build_second_spec(args: argparse.Namespace) -> dict[str, Any]:
         scores_by_symbol[symbol_id] = final_first_score
         if symbol_id in candidate_directions:
             continue
-        if final_first_score > args.buy_min_score:
+        if final_first_score >= args.buy_min_score:
             candidate_directions[symbol_id] = "buy"
             selected.append(symbol_id)
-        elif final_first_score < args.sell_max_score and symbol_id in holding_set:
+        elif final_first_score <= args.sell_max_score and symbol_id in holding_set:
             candidate_directions[symbol_id] = "sell"
             selected.append(symbol_id)
 
@@ -2283,15 +2283,15 @@ symbols:
                     item["final_first_score"] = 6.0
             write_json(run_dir / "analyst-review-threshold-6.0.json", threshold_analyst_review)
             threshold_60_spec = build_second_spec(second_spec_args(str(run_dir / "analyst-review-threshold-6.0.json"), "judge-review-spec-threshold-6.0.json"))
-            if threshold_60_spec["symbol_ids"] != ["005930"]:
-                failures.append(f"exactly 6.0 must not become a buy candidate: {threshold_60_spec}")
+            if threshold_60_spec["symbol_ids"] != ["005930", "000660"] or threshold_60_spec.get("candidate_directions", {}).get("000660") != "buy":
+                failures.append(f"exactly 6.0 must become a buy candidate: {threshold_60_spec}")
             for item in threshold_analyst_review.get("symbols", []):
                 if item.get("symbol_id") == "000660":
                     item["final_first_score"] = 6.1
             write_json(run_dir / "analyst-review-threshold-6.1.json", threshold_analyst_review)
             threshold_61_spec = build_second_spec(second_spec_args(str(run_dir / "analyst-review-threshold-6.1.json"), "judge-review-spec-threshold-6.1.json"))
             if threshold_61_spec["symbol_ids"] != ["005930", "000660"] or threshold_61_spec.get("candidate_directions", {}).get("000660") != "buy":
-                failures.append(f"score above 6.0 should become a buy candidate: {threshold_61_spec}")
+                failures.append(f"score at or above 6.0 should become a buy candidate: {threshold_61_spec}")
             sell_band_review = load_json(run_dir / "analyst-review.json")
             for item in sell_band_review.get("symbols", []):
                 if item.get("symbol_id") == "005930":
@@ -2301,7 +2301,7 @@ symbols:
             write_json(run_dir / "analyst-review-sell-band.json", sell_band_review)
             sell_band_spec = build_second_spec(second_spec_args(str(run_dir / "analyst-review-sell-band.json"), "judge-review-spec-sell-band.json"))
             if sell_band_spec["symbol_ids"] != ["005930"] or sell_band_spec.get("candidate_directions") != {"005930": "sell"}:
-                failures.append(f"only held symbols below 4.0 may become sell candidates: {sell_band_spec}")
+                failures.append(f"only held symbols at or below 4.0 may become sell candidates: {sell_band_spec}")
             mid_band_review = load_json(run_dir / "analyst-review.json")
             for item in mid_band_review.get("symbols", []):
                 item["final_first_score"] = 5.0
@@ -2314,8 +2314,8 @@ symbols:
                     item["final_first_score"] = 4.0
             write_json(run_dir / "analyst-review-sell-edge.json", mid_band_review)
             sell_edge_spec = build_second_spec(second_spec_args(str(run_dir / "analyst-review-sell-edge.json"), "judge-review-spec-sell-edge.json"))
-            if sell_edge_spec["symbol_ids"] != []:
-                failures.append(f"exactly 4.0 must not become a sell candidate: {sell_edge_spec}")
+            if sell_edge_spec["symbol_ids"] != ["005930"] or sell_edge_spec.get("candidate_directions") != {"005930": "sell"}:
+                failures.append(f"exactly 4.0 must become a sell candidate: {sell_edge_spec}")
             write_json(
                 run_dir / "judge-review.json",
                 {
@@ -2505,8 +2505,8 @@ def build_parser() -> argparse.ArgumentParser:
     second_spec.add_argument("--analyst-review")
     second_spec.add_argument("--workspace-dir", default=".")
     second_spec.add_argument("--pipeline-dir", default=str(pipeline_dir()))
-    second_spec.add_argument("--buy-min-score", type=float, default=6.0, help="buy decisions require final_first_score strictly above this")
-    second_spec.add_argument("--sell-max-score", type=float, default=4.0, help="sell decisions require final_first_score strictly below this")
+    second_spec.add_argument("--buy-min-score", type=float, default=6.0, help="buy decisions require final_first_score at or above this")
+    second_spec.add_argument("--sell-max-score", type=float, default=4.0, help="sell decisions require final_first_score at or below this")
     second_spec.add_argument("--run-id")
     second_spec.add_argument("--started-at")
     second_spec.add_argument("--relative-paths", action="store_true")

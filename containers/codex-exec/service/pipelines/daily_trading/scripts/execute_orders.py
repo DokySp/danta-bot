@@ -198,7 +198,7 @@ def load_portfolio_except_symbols() -> set[str]:
 
 
 # Score-band gate: new submissions require the analyst-review score band that
-# selected the candidate (sell only below SELL_MAX_SCORE, buy only above
+# selected the candidate (sell at or below SELL_MAX_SCORE, buy at or above
 # BUY_MIN_SCORE). Cancels and corrections of existing active orders are exempt.
 SELL_MAX_SCORE = 4.0
 BUY_MIN_SCORE = 6.0
@@ -210,9 +210,9 @@ def score_band_block_reason(order: dict[str, Any], side: str) -> str:
     raw = order.get("final_first_score")
     if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw):
         return "score_band_value_missing"
-    if side == "sell" and raw >= SELL_MAX_SCORE:
+    if side == "sell" and raw > SELL_MAX_SCORE:
         return "sell_blocked_score_band"
-    if side == "buy" and raw <= BUY_MIN_SCORE:
+    if side == "buy" and raw < BUY_MIN_SCORE:
         return "buy_blocked_score_band"
     return ""
 
@@ -1704,10 +1704,10 @@ def self_test() -> int:
             kis=None,
         )
         score_band_orders = {item["symbol_id"]: item for item in score_band_execution["orders"]}
-        if score_band_orders["005930"].get("result") != "blocked" or score_band_orders["005930"].get("reason") != "sell_blocked_score_band":
-            failures.append(f"sell at boundary score 4.0 was not blocked: {score_band_orders['005930']}")
-        if score_band_orders["000270"].get("result") != "blocked" or score_band_orders["000270"].get("reason") != "buy_blocked_score_band":
-            failures.append(f"buy at boundary score 6.0 was not blocked: {score_band_orders['000270']}")
+        if score_band_orders["005930"].get("reason") != "validated_dry_run_not_submitted":
+            failures.append(f"sell at boundary score 4.0 was not allowed: {score_band_orders['005930']}")
+        if score_band_orders["000270"].get("reason") != "validated_dry_run_not_submitted":
+            failures.append(f"buy at boundary score 6.0 was not allowed: {score_band_orders['000270']}")
         if score_band_orders["000810"].get("result") != "blocked" or score_band_orders["000810"].get("reason") != "score_band_value_missing":
             failures.append(f"missing score did not fail safe: {score_band_orders['000810']}")
         score_band_cancel_execution = {

@@ -42,8 +42,8 @@ The sidecar is never machine input. JSON captured by the launcher is authoritati
 
 The judge input set is selected deterministically by the pipeline from unrounded `final_first_score` (the simple mean of included analyst view scores):
 
-- `final_first_score < 4.0` on a held symbol → **sell candidate**: decide sell (partial or full) or hold. Buying is not allowed.
-- `final_first_score > 6.0` → **buy candidate**: decide buy (initiate or increase) or hold. Selling is not allowed.
+- `final_first_score <= 4.0` on a held symbol → **sell candidate**: decide sell (partial or full) or hold. Buying is not allowed.
+- `final_first_score >= 6.0` → **buy candidate**: decide buy (initiate or increase) or hold. Selling is not allowed.
 - Every other symbol never reaches the judge; holding it is the only outcome. These bands are enforced preconditions, not advisory labels.
 
 The spec supplies `candidate_directions` (symbol → `buy`/`sell`) and `portfolio_snapshot`. `portfolio_snapshot` is read-only context listing every held symbol with its score, quantity, valuation, and pnl so portfolio-level sizing (weights, duplicate exposure, cash allocation) stays informed; the judge must not return decisions for snapshot-only symbols.

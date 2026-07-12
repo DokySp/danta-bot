@@ -1061,7 +1061,7 @@ def compact_review_prompt(spec: dict[str, Any]) -> str | None:
             [
                 "",
                 "For judge-review, use the lossless selected-symbol analyst-review slice from analyst_review.",
-                f"The supplied symbols are pre-selected candidates by score band: sell candidates are held symbols with final_first_score < {sell_below}, buy candidates have final_first_score > {buy_above}. Symbols between the bands are held by the pipeline and are not yours to decide.",
+                f"The supplied symbols are pre-selected candidates by score band: sell candidates are held symbols with final_first_score <= {sell_below}, buy candidates have final_first_score >= {buy_above}. Symbols between the bands are held by the pipeline and are not yours to decide.",
                 "Direction preconditions are hard constraints: a sell candidate may only be sold (partial or full) or held (target_position_value_krw <= baseline); a buy candidate may only be bought or held (target_position_value_krw >= baseline). Violations are rejected by the pipeline.",
                 "When evidence is insufficient or conflicting, the default decision is hold at the baseline.",
                 "final_first_score is the simple mean of the included analyst view scores; per-analyst scores in agent_scores carry the evidence behind it.",
@@ -2152,7 +2152,7 @@ def assert_compact_review_prompt(tmp: Path) -> None:
         "stage: judge-review",
         "analyst_review:",
         "For judge-review, use the lossless selected-symbol analyst-review slice from analyst_review.",
-        "The supplied symbols are pre-selected candidates by score band: sell candidates are held symbols with final_first_score < 4, buy candidates have final_first_score > 6.",
+        "The supplied symbols are pre-selected candidates by score band: sell candidates are held symbols with final_first_score <= 4, buy candidates have final_first_score >= 6.",
         "Direction preconditions are hard constraints: a sell candidate may only be sold (partial or full) or held (target_position_value_krw <= baseline); a buy candidate may only be bought or held (target_position_value_krw >= baseline).",
         "When evidence is insufficient or conflicting, the default decision is hold at the baseline.",
         "final_first_score is the simple mean of the included analyst view scores",
