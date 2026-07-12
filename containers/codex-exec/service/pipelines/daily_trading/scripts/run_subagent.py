@@ -31,12 +31,11 @@ REQUIRED_SPEC_FIELDS = {
 SUBAGENT_MODEL_CONFIG_ENV = "DAILY_TRADING_SUBAGENT_MODEL_CONFIG"
 SUBAGENT_MODEL_CONFIG_FILENAME = "daily-trading-subagents.yaml"
 DEFAULT_SUBAGENT_MODEL_CONFIG = {
-    "collection": {"model": "gpt-5.4-mini", "model_reasoning_effort": "low"},
-    "analyst_review": {"model": "gpt-5.5", "model_reasoning_effort": "medium"},
-    "judge_review": {"model": "gpt-5.5", "model_reasoning_effort": "medium"},
+    "collection": {"model": "gpt-5.6-luna", "model_reasoning_effort": "low"},
+    "analyst_review": {"model": "gpt-5.6-sol", "model_reasoning_effort": "xhigh"},
+    "judge_review": {"model": "gpt-5.6-sol", "model_reasoning_effort": "xhigh"},
 }
 SUBAGENT_MODEL_CONFIG_KEYS = ("collection", "analyst_review", "judge_review")
-VALID_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
 COLLECTION_STAGES = {"financial-collection", "news-collection"}
 FINANCIAL_PATH_OUTPUT_STAGES = {"financial-collection"}
 NEWS_PATH_OUTPUT_STAGES = {"news-collection"}
@@ -205,10 +204,6 @@ def normalize_model_config(payload: Any, source: Path | None) -> dict[str, dict[
     extra_keys = sorted(str(key) for key in payload if str(key) not in SUBAGENT_MODEL_CONFIG_KEYS)
     if extra_keys:
         raise ValueError(f"unsupported sub-agent model config keys: {', '.join(extra_keys)}")
-    for key, entry in config.items():
-        effort = entry["model_reasoning_effort"]
-        if effort not in VALID_REASONING_EFFORTS:
-            raise ValueError(f"unsupported model_reasoning_effort for {key}: {effort}")
     return config
 
 
@@ -2641,8 +2636,8 @@ def run_self_test() -> int:
                         "  model: gpt-5.4-mini",
                         "  model_reasoning_effort: low",
                         "analyst_review:",
-                        "  model: gpt-5.4",
-                        "  model_reasoning_effort: high",
+                        "  model: custom-model",
+                        "  model_reasoning_effort: custom-effort",
                         "judge_review:",
                         "  model: gpt-5.5",
                         "  model_reasoning_effort: medium",
@@ -2658,7 +2653,7 @@ def run_self_test() -> int:
             if custom_wrapper["status"] != "success":
                 failures.append(f"custom model config returned {custom_wrapper['status']}")
             try:
-                assert_argv(argv_log, model="gpt-5.4", effort="high")
+                assert_argv(argv_log, model="custom-model", effort="custom-effort")
             except AssertionError as exc:
                 failures.append(str(exc))
             os.environ.pop(SUBAGENT_MODEL_CONFIG_ENV, None)

@@ -111,7 +111,7 @@ class Config:
                 "paper",
                 MCP_TRADING_ENV_VALUES,
             ),
-            model=os.getenv("CODEX_MODEL", "gpt-5.5"),
+            model=os.getenv("CODEX_MODEL", "gpt-5.6-sol"),
             reasoning_effort=os.getenv("CODEX_REASONING_EFFORT", "medium"),
             codex_timeout_seconds=env_int("CODEX_TIMEOUT_SECONDS", 1800),
             scheduler_poll_seconds=env_int("SCHEDULER_POLL_SECONDS", 15),

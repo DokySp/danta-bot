@@ -130,7 +130,7 @@ schedules:
   - id: weekday-open
     enabled: true
     cron: "0 9 * * 1-5"
-    model: gpt-5.4-mini
+    model: gpt-5.6-luna
     model_reasoning_effort: low
     route: v2
     message: |

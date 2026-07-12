@@ -15,6 +15,6 @@ EOF
 )"
 
 codex exec --yolo \
-  -m gpt-5.5 \
+  -m gpt-5.6-sol \
   -c 'model_reasoning_effort="low"' \
   "${prompt}"
