@@ -1,0 +1,1 @@
+"""Financial information skill tests."""

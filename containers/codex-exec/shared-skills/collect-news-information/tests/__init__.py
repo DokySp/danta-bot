@@ -1,0 +1,1 @@
+"""News information skill tests."""

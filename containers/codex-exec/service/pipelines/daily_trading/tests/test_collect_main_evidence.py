@@ -1,0 +1,191 @@
+#!/usr/bin/env python3
+"""Tests for daily-trading main-evidence collection helpers."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from ..scripts.collect_main_evidence import (
+    account_asset_summary_from_row,
+    append_account_asset_history,
+    build_account_summary,
+    build_collection_summary,
+    build_price_row,
+    merge_duplicate_fills,
+    normalize_fill,
+    normalize_holding,
+    normalize_trading_env,
+    parse_float,
+    parse_int,
+    parse_symbols,
+    safe_error,
+    skipped_account_asset_snapshot,
+    summarize_orderbook,
+)
+
+
+def command_self_test(_args: argparse.Namespace) -> int:
+    assert normalize_trading_env("acct") == "real"
+    assert normalize_trading_env("paper") == "demo"
+    assert parse_symbols("5930,000660,000660") == ["005930", "000660"]
+    assert parse_int("1,234.00") == 1234
+    assert parse_float("-1.25") == -1.25
+    orderbook = summarize_orderbook(
+        {"askp1": "1010", "bidp1": "1000", "total_askp_rsqn": "20", "total_bidp_rsqn": "30"},
+        {"antc_cnpr": "1005", "antc_vol": "12", "vi_cls_code": "N"},
+    )
+    assert orderbook["expected_price"] == 1005
+    assert orderbook["expected_volume"] == 12
+    info = {"prdt_abrv_name": "ACE GOLD ETF", "scty_grp_id_cd": "EF", "etf_dvsn_cd": "02"}
+    price = {"stck_prpr": "18590", "prdy_ctrt": "1.23", "acml_vol": "1000"}
+    row = build_price_row(
+        "411060",
+        info,
+        price,
+        observed_at="2026-06-18T09:00:00+09:00",
+        env_dv="real",
+        market="J",
+        errors=[],
+        charts={
+            "daily": [
+                {"date": "20260617", "close": 18000, "volume": 100},
+                {"date": "20260618", "close": 18590, "volume": 150},
+            ],
+            "weekly": [],
+            "monthly": [],
+        },
+        orderbook={"best_ask": 18600, "best_bid": 18590, "spread_pct": 0.054, "expected_price": 18595},
+        investor_flow={"foreign_net_buy_quantity": 1000},
+    )
+    assert row["product_type"] == "etf"
+    assert row["price"]["current_or_last"] == 18590
+    assert row["charts"]["daily"][0]["date"] == "20260617"
+    assert any(signal["name"] == "daily_change_pct" for signal in row["local_signals"])
+    assert row["orderbook_summary"]["best_bid"] == 18590
+    assert row["orderbook_summary"]["expected_price"] == 18595
+    assert row["investor_flow_summary"]["foreign_net_buy_quantity"] == 1000
+    assert row["eligible_for_review"]
+    sample_account = normalize_holding(
+        {
+            "pdno": "0183J0",
+            "prdt_name": "Samsung Electronics",
+            "hldg_qty": "3",
+            "ord_psbl_qty": "2",
+            "prpr": "70000",
+            "evlu_amt": "210000",
+            "evlu_pfls_amt": "1000",
+            "evlu_pfls_rt": "0.48",
+        },
+        observed_at="2026-06-18T09:00:00+09:00",
+    )
+    assert sample_account["symbol_id"] == "0183J0"
+    assert sample_account["current_live_holding_quantity"] == 3
+    assert build_account_summary({"dnca_tot_amt": "1000", "tot_evlu_amt": "2000"})["cash_amount"] == 1000
+    orderable_summary = build_account_summary({"dnca_tot_amt": "5183620", "prvs_rcdl_excc_amt": "1043015", "nxdy_excc_amt": "1276976"})
+    assert orderable_summary["cash_amount"] == 5183620
+    assert orderable_summary["orderable_cash_amount"] == 1043015
+    fill = normalize_fill(
+        {
+            "pdno": "005930",
+            "prdt_name": "Samsung Electronics",
+            "sll_buy_dvsn_cd": "02",
+            "tot_ccld_qty": "3",
+            "avg_prvs": "70100",
+            "ord_dt": "20260618",
+            "ord_tmd": "094200",
+            "odno": "1",
+            "ordr_empno": "N한국",
+            "excg_id_dvsn_cd": "SOR",
+        },
+        env_dv="real",
+        observed_at="2026-06-18T09:43:00+09:00",
+    )
+    assert fill["symbol_id"] == "005930"
+    assert fill["direction"] == "buy"
+    assert fill["filled_price"] == 70100
+    assert fill["filled_at"] == "2026-06-18T09:42:00+09:00"
+    assert fill["source_actor"] == "non_bot_user"
+    assert fill["exchange_id"] == "SOR"
+    duplicate_fills = merge_duplicate_fills([dict(fill, daily_ccld_query="default"), dict(fill, daily_ccld_query="SOR")])
+    assert len(duplicate_fills) == 1
+    assert duplicate_fills[0]["source_queries"] == ["default", "SOR"]
+    asset_summary = account_asset_summary_from_row(
+        {
+            "tot_asst_amt": "20000000",
+            "tot_dncl_amt": "1000000",
+            "evlu_amt_smtl": "19000000",
+            "pchs_amt_smtl": "18000000",
+            "evlu_pfls_amt_smtl": "1000000",
+            "ovrs_stck_evlu_amt1": "0",
+        }
+    )
+    assert asset_summary["total_asset_amount"] == 20000000
+    assert asset_summary["evaluation_pnl_rate"] == 1000000 / 18000000
+    skipped_asset = skipped_account_asset_snapshot(run_id="self-test", started_at="2026-06-18T09:00:00+09:00", env_dv="real", reason="skip-account option")
+    assert skipped_asset["skipped"] and skipped_asset["status"] == "success"
+    summary = build_collection_summary(
+        run_id="self-test",
+        started_at="2026-06-18T09:00:00+09:00",
+        env_dv="real",
+        symbols=["005930"],
+        price_artifact={"status": "success", "symbols": [{"symbol_id": "005930"}], "errors": []},
+        account_artifact={"status": "success", "symbols": [{"symbol_id": "005930"}], "warnings": [], "errors": []},
+        account_asset_snapshot={
+            "stage": "account-asset-snapshot",
+            "status": "failed",
+            "skipped": False,
+            "errors": [safe_error("optional probe", stage="account-asset-snapshot", required=False)],
+        },
+        today_fills_artifact={
+            "stage": "today-fills",
+            "status": "success",
+            "skipped": False,
+            "fills": [fill],
+            "errors": [],
+        },
+        output_dir=Path("/tmp/daily-trading-self-test"),
+        token_status="existing_token",
+        token_expires_at="",
+    )
+    assert summary["status"] == "success"
+    assert summary["errors"] == []
+    assert summary["counts"]["account_asset_errors"] == 1
+    assert summary["counts"]["today_fill_count"] == 1
+    assert summary["optional_stages"][0]["stage"] == "account-asset-snapshot"
+    assert summary["optional_stages"][1]["stage"] == "today-fills"
+    with tempfile.TemporaryDirectory() as tmp_name:
+        history_path = Path(tmp_name) / "memory" / "account-assets" / "account-assets.jsonl"
+        snapshot = {
+            "schema_version": "1",
+            "run_id": "self-test",
+            "started_at": "2026-06-18T09:00:00+09:00",
+            "observed_at": "2026-06-18T09:01:00+09:00",
+            "generated_at": "2026-06-18T09:01:00+09:00",
+            "status": "success",
+            "source_api": "inquire_balance",
+            "execution_environment": "real",
+            "tot_asst_amt": 20000000,
+            "tot_dncl_amt": 1000000,
+            "evlu_amt_smtl": 19000000,
+            "pchs_amt_smtl": 18000000,
+            "evlu_pfls_amt_smtl": 1000000,
+            "ovrs_stck_evlu_amt1": 0,
+            "account_asset_summary": asset_summary,
+            "raw_secret_probe": "must_not_be_written",
+        }
+        append_account_asset_history(history_path, snapshot)
+        row = json.loads(history_path.read_text(encoding="utf-8").strip())
+        assert row["tot_asst_amt"] == 20000000
+        assert "account_asset_summary" not in row
+        assert "raw_secret_probe" not in row
+    print("self-test ok")
+    return 0
+
+
+class CollectMainEvidenceSelfTest(unittest.TestCase):
+    def test_self_test_suite(self) -> None:
+        self.assertEqual(command_self_test(argparse.Namespace()), 0)
