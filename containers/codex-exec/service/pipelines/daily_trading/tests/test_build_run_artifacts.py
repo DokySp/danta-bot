@@ -23,11 +23,14 @@ from ..scripts.build_run_artifacts import (
     build_strategy_context,
     build_symbol_strategy_context,
     build_token_summary,
+    compact_summary_is_usable,
     default_strategy_policy_config_path,
     etf_summary_for,
+    financial_summary_for,
     load_json,
     load_strategy_policy_config,
     mark_quality_value_excluded_without_financial,
+    news_summary_for,
     pipeline_dir,
     today_trade_collection_context,
     today_trade_context,
@@ -303,6 +306,51 @@ symbols:
                 failures.append(f"financial-missing symbol should remain price_only: {by_symbol['000660']}")
             if by_symbol["000660"].get("financial_summary", {}).get("cache_status") != "missing_symbol":
                 failures.append(f"financial-missing symbol should be marked missing_symbol: {by_symbol['000660']}")
+            price_only_financial = financial_summary_for(
+                {
+                    "symbols": {
+                        "035420": {
+                            "주식현재가 시세": {
+                                "응답": [{"현재가": "200000", "전일 대비율": "1.0", "업종명": "서비스업"}]
+                            }
+                        }
+                    }
+                },
+                "035420",
+                "financial-cache.yaml",
+            )
+            if compact_summary_is_usable(price_only_financial):
+                failures.append(f"price/change/sector-only financial summary should not be quality-value usable: {price_only_financial}")
+            price_only_quality = mark_quality_value_excluded_without_financial(
+                {"agent_role": "analyst-quality-value", "score": 5, "missing_data": []},
+                {"product_type": "stock", "financial_summary": price_only_financial},
+            )
+            if price_only_quality.get("excluded_from_aggregation") is not True:
+                failures.append(f"price-only quality-value score should be excluded from aggregation: {price_only_quality}")
+            opinion_only_financial = financial_summary_for(
+                {
+                    "symbols": {
+                        "035420": {
+                            "국내주식 종목투자의견": {
+                                "응답": [
+                                    {
+                                        "주식 영업일자": "20260618",
+                                        "증권사명": "테스트증권",
+                                        "투자의견": "BUY",
+                                        "목표가": "",
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                },
+                "035420",
+                "financial-cache.yaml",
+            )
+            if not compact_summary_is_usable(opinion_only_financial) or not any(
+                str(item).startswith("최신 투자의견 BUY") for item in opinion_only_financial.get("items", [])
+            ):
+                failures.append(f"target-less broker opinion should remain usable partial quality evidence: {opinion_only_financial}")
             financial_items = by_symbol["005930"].get("financial_summary", {}).get("items", [])
             target_price_items = [item for item in financial_items if item.startswith("목표가 컨센서스")]
             expected_target_item = "목표가 컨센서스 3건(발표 20260701~20260708) 중앙값 460000(현재가대비 괴리율 -84.8%), 범위 390000~500000, 최신 390000 (키움, BUY, 20260708)"
@@ -310,6 +358,31 @@ symbols:
                 failures.append(f"invest opinion target consensus should be summarized: {financial_items}")
             if by_symbol["005930"].get("news_summary"):
                 failures.append(f"no-news placeholder should not be included: {by_symbol['005930']}")
+            freshness_filtered_news = news_summary_for(
+                {
+                    "date": "2026-06-18",
+                    "symbols": {
+                        "005930": {
+                            "articles": [
+                                {"article_date": "2020-01-01", "content": "old-1"},
+                                {"article_date": "2020-01-02", "content": "old-2"},
+                                {"article_date": "2020-01-03", "content": "old-3"},
+                                {"article_date": "2026-06-18T09:30:00+09:00", "content": "fresh"},
+                            ]
+                        }
+                    },
+                },
+                "005930",
+                "news-cache.yaml",
+            )
+            if len(freshness_filtered_news) != 1 or freshness_filtered_news[0].get("content") != "fresh":
+                failures.append(f"news summary should keep matching-date articles after filtering stale leading rows: {freshness_filtered_news}")
+            if news_summary_for(
+                {"symbols": {"005930": [{"article_date": "2026-06-18", "content": "undated cache"}]}},
+                "005930",
+                "news-cache.yaml",
+            ):
+                failures.append("news summary without a verifiable cache date should not be usable")
             if (brief.get("market_index_snapshot") or {}).get("indexes", [{}])[0].get("symbol") != "KOSPI":
                 failures.append(f"decision brief should include compact market index snapshot: {brief.get('market_index_snapshot')}")
             strategy = brief.get("strategy_context") if isinstance(brief.get("strategy_context"), dict) else {}
@@ -780,6 +853,32 @@ symbols:
                 or "etf_summary" not in missing_etf_score.get("missing_data", [])
             ):
                 failures.append(f"ETF without usable summary should be excluded from aggregation: {missing_etf_score}")
+            quality_wrapper_path = subagent_dir / "first-analyst-quality-risk.wrapper.json"
+            valid_quality_wrapper = load_json(quality_wrapper_path)
+            invalid_quality_wrapper = json.loads(json.dumps(valid_quality_wrapper))
+            invalid_quality_wrapper["parsed_json"]["symbols"][0]["views"]["analyst-quality-value"]["score"] = "unknown"
+            write_json(quality_wrapper_path, invalid_quality_wrapper)
+            invalid_score_review = build_analyst_review(
+                argparse.Namespace(
+                    output_dir=run_dir,
+                    output=run_dir / "analyst-review-invalid-score.json",
+                    decision_brief=str(run_dir / "decision-brief.json"),
+                    symbol_ids="",
+                )
+            )
+            invalid_score_symbol = next(
+                (item for item in invalid_score_review.get("symbols", []) if item.get("symbol_id") == "005930"),
+                {},
+            )
+            if not any(error.get("code") == "invalid_agent_score" for error in invalid_score_review.get("errors", [])):
+                failures.append(f"invalid analyst score did not produce a required artifact error: {invalid_score_review}")
+            if any(
+                score.get("agent_role") == "analyst-quality-value"
+                for score in invalid_score_symbol.get("agent_scores", [])
+                if isinstance(score, dict)
+            ):
+                failures.append(f"invalid analyst score was silently converted and aggregated: {invalid_score_symbol}")
+            write_json(quality_wrapper_path, valid_quality_wrapper)
             missing_wrapper_path = subagent_dir / "first-analyst-quality-risk.wrapper.json"
             missing_wrapper = load_json(missing_wrapper_path)
             missing_wrapper["parsed_json"]["symbols"][1]["views"].pop("analyst-risk-allocation")

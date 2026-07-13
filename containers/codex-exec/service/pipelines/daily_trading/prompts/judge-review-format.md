@@ -85,11 +85,12 @@ Rules:
 - `reason_code` and `one_line_reason` must describe the same reduce/hold/increase direction implied by `target_position_value_krw` versus the baseline.
 - Consider relative attractiveness, duplicate exposure, current weight, price/chart conditions, `portfolio_snapshot`, and the supplied selected-symbol analyst-review results that contain usable evidence.
 - Optional evidence marked `missing`, `failed`, `empty`, `unavailable`, or `excluded_from_aggregation` is non-directional. Do not use its absence to justify hold, reduce, or increase decisions, and do not cite it as decisive evidence in `reason_code` or `one_line_reason`.
+- Do not use optional-domain coverage counts or completeness to decide whether the supplied usable evidence is sufficient. Judge sufficiency from the directional strength and conflict of the usable evidence that is actually supplied.
 - If a symbol's analyst-review score is missing, unavailable, or unusable, hold it at the baseline instead of failing the judgment.
 - For held sell candidates, distinguish `long_term_thesis_intact` from thesis damage using supplied usable evidence: supported intact thesis favors holding despite the low score; sell when thesis damage, material adverse news/disclosure, or structural deterioration is supported by supplied evidence. Lack of damage evidence alone does not establish an intact thesis.
 - Judge long-term thesis from supplied evidence only: core investment rationale, material news/disclosure risk, quality/value deterioration, whether a price shock indicates structural damage or short-term volatility, and portfolio weight/concentration.
 - For buy candidates, increase only when add conditions are satisfied: quality/value advantage, acceptable risk/allocation, and weight/concentration room. Apply material adverse news/disclosure only when usable news/disclosure evidence is supplied; unavailable news is neutral rather than favorable or adverse. Otherwise hold at the baseline.
-- When usable evidence is insufficient or conflicting, the default decision is hold at the baseline without citing optional evidence absence as the decision reason.
+- When the supplied usable evidence itself is insufficient or conflicting, the default decision is hold at the baseline without citing optional evidence absence as the decision reason.
 - No fixed cash ratio or fixed investment ratio.
 - The judge cannot add symbols outside the supplied candidate set.
 - Do not return long `cash_rationale`, `duplicate_exposure_limits`, `price_chart_view`, `rationale`, `risks`, or prose arrays.

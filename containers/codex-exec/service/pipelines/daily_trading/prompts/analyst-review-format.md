@@ -33,7 +33,7 @@ Main-generated `analyst-review` sidecar content:
 
 The sidecar is never machine input. JSON captured by the launcher is authoritative. Missing, malformed, or inconsistent sidecars are warnings only.
 
-`decision-brief.json` is the canonical review input. It should contain compact price/chart, optional top-level market_index_snapshot, optional financial/news summaries, account exposure, eligibility, evidence mode, and errors. Absence of optional market_index_snapshot or financial/news data is context only; it must not lower score, exclude a symbol, or block orders by itself.
+`decision-brief.json` is the canonical review input. It should contain compact price/chart, optional top-level market_index_snapshot, optional financial/news summaries, account exposure, eligibility, evidence mode, and errors. Absence of optional market_index_snapshot or financial/news data is context only; it must not lower score, exclude a symbol, or block orders by itself. Missing optional-domain coverage does not make the supplied usable evidence thin, stale, mixed, or conflicting.
 
 Review sub-agents receive launcher-created `review-inputs/` slices containing only the listed `symbol_ids`. `analyst-review` reads a role-scoped `review-core` slice derived from `decision-brief.json` and filtered to the execution agent's output view input profiles. Raw prompt fallback is forbidden for review stages. Review sub-agents may use read-only local shell commands such as `cat` and `jq` only for explicitly listed artifact/persona/rule files. Do not load unrelated symbols, raw memory caches, optional source files, secrets, or unlisted paths.
 
@@ -41,10 +41,10 @@ Review sub-agents receive launcher-created `review-inputs/` slices containing on
 
 Selected analyst-review execution personas produce four canonical independent scores for every eligible symbol. `analyst-quality-risk` runs once and must return two independent views: `analyst-quality-value` and `analyst-risk-allocation`. `analyst-momentum-news` runs once and must return two independent views: `analyst-momentum-cycle` and `analyst-news-flow`.
 
-- `analyst-quality-value` covers financial stability, earnings growth, valuation, and quality/value factors. For stocks, if no usable `financial_summary` is supplied, and for ETF/ETN assets, if no usable `etf_summary` is supplied, it must return `score=5` and `reason_code="no_financial_excluded"` for audit; Main helper excludes that row from analyst-review aggregation.
+- `analyst-quality-value` covers financial stability, earnings growth, valuation, and quality/value factors. For stocks, if no usable `financial_summary` is supplied, and for ETF/ETN assets, if no usable `etf_summary` is supplied, it must return `score=5` and `reason_code="no_financial_excluded"` for audit; Main helper excludes that row from analyst-review aggregation. Current price, daily change, sector name, or ETF volume alone is not usable quality/value evidence.
 - `analyst-momentum-cycle` covers price trend, supply/demand, sector cycle, macro sensitivity, theme/event momentum, and earnings momentum.
 - `analyst-risk-allocation` covers volatility, liquidity, stop-loss room, duplicate ETF/index exposure, concentration, and portfolio fit.
-- `analyst-news-flow` covers supplied KIS news/disclosure direction, materiality, freshness, and mixed-news risk. If no usable news/disclosure summary is supplied, it must return `score=5` and `reason_code="no_news_excluded"` for audit; Main helper excludes that row from analyst-review aggregation.
+- `analyst-news-flow` covers supplied KIS news/disclosure direction, materiality, freshness, and mixed-news risk. Only non-empty news/disclosure entries whose article date matches the cache date are usable. If no usable news/disclosure summary is supplied, it must return `score=5` and `reason_code="no_news_excluded"` for audit; Main helper excludes that row from analyst-review aggregation.
 
 When `agent_role` is `analyst-quality-risk` or `analyst-momentum-news`, return each symbol with a `views` object instead of a top-level `score`:
 
@@ -83,7 +83,7 @@ Score scale:
 | `3-4` | reduce / sell candidate |
 | `0-2` | strong sell candidate |
 
-The score itself must carry the strength of the evidence: when evidence is thin, stale, mixed, or conflicting, keep the score close to neutral `5`. Do not express uncertainty anywhere else; there is no separate confidence field.
+Every `score` must be a JSON integer from `0` to `10`; malformed, fractional, boolean, string, or out-of-range values invalidate the review output. The score itself must carry the directional strength of the supplied usable evidence: keep the score close to neutral `5` only when that evidence is genuinely weakly directional, stale, mixed, or conflicting. Missing optional-domain coverage alone must not pull an included view toward `5`. Do not express uncertainty anywhere else; there is no separate confidence field.
 
 Return JSON:
 

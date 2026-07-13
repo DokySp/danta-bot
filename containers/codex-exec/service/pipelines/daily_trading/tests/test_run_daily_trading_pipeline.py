@@ -24,6 +24,8 @@ from ..scripts.run_daily_trading_pipeline import (
     load_json,
     load_json_if_exists,
     now_iso,
+    news_cache_coverage,
+    news_cache_evidence_counts,
     repo_root_from,
     resolve_order_path,
     resolve_strategy_policy_config_path,
@@ -285,6 +287,25 @@ def run_self_test() -> int:
         no_news_counts = cache_evidence_counts(no_news_cache, ["005930"])
         if no_news_counts.get("present_symbol_count") != 1 or no_news_counts.get("usable_symbol_count") != 0:
             failures.append(f"no-news cache counts did not distinguish present from usable: {no_news_counts}")
+        stale_news_cache = workspace / "stale-news-cache.yaml"
+        stale_news_cache.write_text(
+            'date: "2026-06-18"\nsymbols:\n  "005930":\n    articles:\n      - article_date: "2020-01-01"\n        sentiment: neutral\n        content: "old article"\n',
+            encoding="utf-8",
+        )
+        covered, missing = news_cache_coverage(stale_news_cache, ["005930"], "2026-06-18")
+        if covered or missing != ["005930"]:
+            failures.append(f"stale-only news cache should not satisfy same-date coverage: covered={covered}, missing={missing}")
+        stale_news_counts = news_cache_evidence_counts(stale_news_cache, ["005930"], "2026-06-18")
+        if stale_news_counts.get("present_symbol_count") != 1 or stale_news_counts.get("usable_symbol_count") != 0:
+            failures.append(f"stale-only news cache counts should distinguish present from usable: {stale_news_counts}")
+        fresh_news_cache = workspace / "fresh-news-cache.yaml"
+        fresh_news_cache.write_text(
+            'date: "2026-06-18"\nsymbols:\n  "005930":\n    articles:\n      - article_date: "2026-06-18T09:30:00+09:00"\n        sentiment: positive\n        content: "fresh article"\n',
+            encoding="utf-8",
+        )
+        covered, missing = news_cache_coverage(fresh_news_cache, ["005930"], "2026-06-18")
+        if not covered or missing:
+            failures.append(f"matching-date news cache should satisfy coverage: covered={covered}, missing={missing}")
         if resolve_order_path(ORDER_PATH_AUTO, "2026-06-18T09:00:00+09:00") != ("immediate", "auto_regular_session"):
             failures.append("auto order path did not select immediate during regular KST session")
         if resolve_order_path(ORDER_PATH_AUTO, "2026-06-18T07:00:00+09:00") != ("reservation", "auto_reservation_session"):
@@ -339,6 +360,10 @@ def run_self_test() -> int:
             failures.append("ETF financial cache without NAV evidence should not be accepted as covered")
         if not etf_probe.covered_cache_path("financial", str(fresh_etf_cache), ["069500"], detail="fresh etf cache"):
             failures.append("ETF financial cache with NAV evidence should be accepted as covered")
+        if etf_probe.covered_cache_path("news", str(stale_news_cache), ["005930"], detail="stale news cache"):
+            failures.append("stale-only news cache should not skip same-date news collection")
+        if not etf_probe.covered_cache_path("news", str(fresh_news_cache), ["005930"], detail="fresh news cache"):
+            failures.append("matching-date news cache should be accepted as covered")
         stage_status_probe = Pipeline(
             argparse.Namespace(
                 command="run",

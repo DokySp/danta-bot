@@ -312,8 +312,10 @@ def pct_change(current: float | None, previous: float | None) -> float | None:
     return ((current - previous) / previous) * 100
 
 
-def clamp_score(value: Any, default: int = 5) -> int:
-    return max(0, min(10, as_int(value, default)))
+def review_score_value(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if 0 <= value <= 10 else None
 
 
 def normalize_symbol_ids(raw: Any) -> list[str]:
@@ -746,6 +748,7 @@ def financial_summary_for(cache: Any, symbol_id: str, cache_path: str) -> dict[s
         "cache_path": cache_path or "",
         "cache_status": "supplied" if cache_path else "missing",
         "items": [],
+        "quality_value_usable": False,
     }
     if not cache_path:
         return summary
@@ -766,9 +769,19 @@ def financial_summary_for(cache: Any, symbol_id: str, cache_path: str) -> dict[s
     opinion = opinion_rows[0] if opinion_rows and isinstance(opinion_rows[0], dict) else {}
     target_rows = ((symbol_payload.get("국내주식 종목투자의견") or {}).get("응답") or [])
     targets = []
+    broker_opinions = []
     for row in target_rows:
         if not isinstance(row, dict):
             continue
+        broker_opinion = str(row.get("투자의견") or "").strip()
+        if broker_opinion:
+            broker_opinions.append(
+                {
+                    "date": str(row.get("주식 영업일자") or "").strip(),
+                    "broker": str(row.get("증권사명") or "").strip(),
+                    "opinion": broker_opinion,
+                }
+            )
         value = as_int(str(row.get("목표가") or "").replace(",", "").strip() or 0)
         if value <= 0:
             continue
@@ -781,14 +794,18 @@ def financial_summary_for(cache: Any, symbol_id: str, cache_path: str) -> dict[s
             }
         )
     targets.sort(key=lambda entry: entry["date"], reverse=True)
+    broker_opinions.sort(key=lambda entry: entry["date"], reverse=True)
     quote_parts = []
     for label, key in (("현재가", "현재가"), ("등락률", "전일 대비율"), ("PER", "주가수익비율(PER)"), ("PBR", "주가순자산비율(PBR)")):
         if price.get(key) not in (None, ""):
             suffix = "%" if key == "전일 대비율" else ""
             quote_parts.append(f"{label} {price.get(key)}{suffix}")
+            if key in {"주가수익비율(PER)", "주가순자산비율(PBR)"}:
+                summary["quality_value_usable"] = True
     if quote_parts:
         summary["items"].append(", ".join(quote_parts))
     if targets:
+        summary["quality_value_usable"] = True
         latest = targets[0]
         latest_source = ", ".join(part for part in (latest["broker"], latest["opinion"], latest["date"]) if part)
         current_price = as_int(str(price.get("현재가") or "").replace(",", "").strip() or 0)
@@ -817,8 +834,20 @@ def financial_summary_for(cache: Any, symbol_id: str, cache_path: str) -> dict[s
             if latest_source:
                 item += f" ({latest_source})"
         summary["items"].append(item)
-    if opinion.get("추천의견"):
-        summary["items"].append(f"최신 투자의견 {opinion.get('추천의견')}")
+    recommendation = str(opinion.get("추천의견") or "").strip()
+    recommendation_source = ""
+    if not recommendation and broker_opinions:
+        latest_opinion = broker_opinions[0]
+        recommendation = latest_opinion["opinion"]
+        recommendation_source = ", ".join(
+            part for part in (latest_opinion["broker"], latest_opinion["date"]) if part
+        )
+    if recommendation:
+        item = f"최신 투자의견 {recommendation}"
+        if recommendation_source:
+            item += f" ({recommendation_source})"
+        summary["items"].append(item)
+        summary["quality_value_usable"] = True
     if price.get("업종명"):
         summary["items"].append(f"업종 {price.get('업종명')}")
     summary["items"] = summary["items"][:4]
@@ -832,6 +861,7 @@ def etf_summary_for(cache: Any, symbol_id: str, cache_path: str) -> dict[str, An
         "cache_path": cache_path or "",
         "cache_status": "supplied" if cache_path else "missing",
         "items": [],
+        "quality_value_usable": False,
     }
     if not cache_path:
         return summary
@@ -863,6 +893,8 @@ def etf_summary_for(cache: Any, symbol_id: str, cache_path: str) -> dict[str, An
         value = first_present_from((etf_price, nav_summary, nav_trend), keys)
         if value not in (None, ""):
             parts.append(f"{label} {value}")
+            if label in {"NAV", "괴리율", "추적오차"}:
+                summary["quality_value_usable"] = True
     if parts:
         summary["items"].append(", ".join(parts[:4]))
     for label, keys in (("NAV 전일대비율", ("NAV 전일 대비율", "nav_prdy_ctrt")), ("전일대비율", ("전일 대비율", "prdy_ctrt"))):
@@ -879,11 +911,28 @@ def compact_summary_is_usable(summary: Any) -> bool:
     if not isinstance(summary, dict) or summary.get("cache_status") != "supplied":
         return False
     items = summary.get("items")
-    return isinstance(items, list) and any(str(item or "").strip() for item in items)
+    return (
+        summary.get("quality_value_usable") is True
+        and isinstance(items, list)
+        and any(str(item or "").strip() for item in items)
+    )
+
+
+def normalized_calendar_date(value: Any) -> str:
+    digits = "".join(character for character in str(value or "") if character.isdigit())[:8]
+    if len(digits) != 8:
+        return ""
+    try:
+        return datetime.strptime(digits, "%Y%m%d").date().isoformat()
+    except ValueError:
+        return ""
 
 
 def news_summary_for(cache: Any, symbol_id: str, cache_path: str) -> list[dict[str, Any]]:
     if not cache_path or not isinstance(cache, dict):
+        return []
+    cache_date = normalized_calendar_date(cache.get("date"))
+    if not cache_date:
         return []
     symbols = cache.get("symbols") if isinstance(cache.get("symbols"), dict) else cache
     entries = symbols.get(symbol_id) if isinstance(symbols, dict) else None
@@ -892,19 +941,24 @@ def news_summary_for(cache: Any, symbol_id: str, cache_path: str) -> list[dict[s
     if not isinstance(entries, list):
         return []
     result: list[dict[str, Any]] = []
-    for item in entries[:3]:
+    for item in entries:
         if not isinstance(item, dict):
+            continue
+        article_date = item.get("article_date") or item.get("date") or ""
+        if normalized_calendar_date(article_date) != cache_date:
             continue
         content = shorten(item.get("content") or item.get("text") or item.get("title") or "")
         if is_no_news_content(content):
             continue
         result.append(
             {
-                "article_date": item.get("article_date") or item.get("date") or "",
+                "article_date": article_date,
                 "sentiment": item.get("sentiment") or "neutral",
                 "content": content,
             }
         )
+        if len(result) >= 3:
+            break
     return result
 
 
@@ -1452,9 +1506,24 @@ def build_analyst_review(args: argparse.Namespace) -> dict[str, Any]:
             if symbol_id not in agent_scores:
                 continue
             for score_item in expanded_first_scores(role, item):
-                score_item = mark_optional_view_exclusions(score_item, symbols_by_id.get(symbol_id, {}))
                 expanded_role = str(score_item.get("agent_role") or role)
-                score = clamp_score(score_item.get("score"), 5)
+                score = review_score_value(score_item.get("score"))
+                if score is None:
+                    errors.append(
+                        {
+                            "stage": "analyst-review",
+                            "symbol_id": symbol_id,
+                            "source": wrapper.get("task_name") or role,
+                            "code": "invalid_agent_score",
+                            "message": f"{expanded_role} score must be an integer from 0 to 10",
+                            "required": True,
+                        }
+                    )
+                    continue
+                score_item = mark_optional_view_exclusions(score_item, symbols_by_id.get(symbol_id, {}))
+                score = review_score_value(score_item.get("score"))
+                if score is None:
+                    continue
                 excluded_from_aggregation = bool(score_item.get("excluded_from_aggregation"))
                 agent_scores[symbol_id].append(
                     {

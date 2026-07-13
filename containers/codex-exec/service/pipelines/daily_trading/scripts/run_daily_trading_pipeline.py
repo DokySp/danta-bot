@@ -386,6 +386,46 @@ def cache_symbol_keys(path: Path) -> set[str]:
     return set()
 
 
+def normalized_calendar_date(value: Any) -> str:
+    digits = "".join(character for character in str(value or "") if character.isdigit())[:8]
+    if len(digits) != 8:
+        return ""
+    try:
+        return datetime.strptime(digits, "%Y%m%d").date().isoformat()
+    except ValueError:
+        return ""
+
+
+def news_cache_symbol_keys(path: Path, expected_date: str) -> set[str]:
+    payload = load_json_if_exists(path) if path.suffix.lower() == ".json" else load_yaml_if_exists(path)
+    if not isinstance(payload, dict):
+        return set()
+    cache_date = normalized_calendar_date(payload.get("date"))
+    if not cache_date or cache_date != normalized_calendar_date(expected_date):
+        return set()
+    symbols = payload.get("symbols")
+    if not isinstance(symbols, dict):
+        return set()
+    usable: set[str] = set()
+    for key, value in symbols.items():
+        symbol_id = normalize_symbol_key(key)
+        if not symbol_id:
+            continue
+        entries = value
+        if isinstance(entries, dict):
+            entries = entries.get("items") or entries.get("news") or entries.get("articles") or []
+        if not isinstance(entries, list):
+            continue
+        if any(
+            isinstance(item, dict)
+            and normalized_calendar_date(item.get("article_date") or item.get("date")) == cache_date
+            and cache_symbol_has_content(item)
+            for item in entries
+        ):
+            usable.add(symbol_id)
+    return usable
+
+
 def cache_symbol_all_keys(path: Path) -> set[str]:
     payload = load_json_if_exists(path) if path.suffix.lower() == ".json" else load_yaml_if_exists(path)
     if not isinstance(payload, dict):
@@ -405,9 +445,32 @@ def cache_coverage(path: Path, symbols: list[str]) -> tuple[bool, list[str]]:
     return bool(wanted) and not missing, missing
 
 
+def news_cache_coverage(path: Path, symbols: list[str], expected_date: str) -> tuple[bool, list[str]]:
+    wanted = {normalize_symbol_key(symbol) for symbol in symbols if normalize_symbol_key(symbol)}
+    available = news_cache_symbol_keys(path, expected_date)
+    missing = sorted(wanted - available)
+    return bool(wanted) and not missing, missing
+
+
 def cache_evidence_counts(path: Path, symbols: list[str]) -> dict[str, Any]:
     wanted = {normalize_symbol_key(symbol) for symbol in symbols if normalize_symbol_key(symbol)}
     available = cache_symbol_keys(path)
+    present = cache_symbol_all_keys(path)
+    usable = wanted & available
+    present_wanted = wanted & present
+    return {
+        "wanted_symbol_count": len(wanted),
+        "cache_symbol_count": len(present),
+        "present_symbol_count": len(present_wanted),
+        "usable_symbol_count": len(usable),
+        "missing_usable_symbol_count": len(wanted - available),
+        "missing_usable_symbols_sample": sorted(wanted - available)[:20],
+    }
+
+
+def news_cache_evidence_counts(path: Path, symbols: list[str], expected_date: str) -> dict[str, Any]:
+    wanted = {normalize_symbol_key(symbol) for symbol in symbols if normalize_symbol_key(symbol)}
+    available = news_cache_symbol_keys(path, expected_date)
     present = cache_symbol_all_keys(path)
     usable = wanted & available
     present_wanted = wanted & present
@@ -619,8 +682,11 @@ class Pipeline:
             Path("/app/skills/check-portfolio/scripts/read_portfolio.sh"),
         ]
 
+    def optional_cache_date(self) -> str:
+        return str(getattr(self.args, "date", "") or report_date_from(self.started_at))
+
     def optional_cache_filename(self, domain: str) -> str:
-        date = self.args.date or now_kst().strftime("%Y-%m-%d")
+        date = self.optional_cache_date()
         if domain == "financial":
             return f"financial-{date}.yaml"
         return f"news-{date}.yaml"
@@ -714,7 +780,11 @@ class Pipeline:
 
     def covered_cache_path(self, domain: str, path_text: str, symbols: list[str], *, detail: str) -> str:
         path = resolve_workspace_path(self.workspace_dir, path_text)
-        covered, missing = cache_coverage(path, symbols)
+        if domain == "news":
+            expected_date = self.optional_cache_date()
+            covered, missing = news_cache_coverage(path, symbols, expected_date)
+        else:
+            covered, missing = cache_coverage(path, symbols)
         if covered:
             etf_symbols = self.etf_or_etn_symbol_ids() if domain == "financial" else []
             if etf_symbols and not self.cache_has_etf_nav_evidence(path, etf_symbols):
@@ -765,7 +835,7 @@ class Pipeline:
         path = resolve_workspace_path(self.workspace_dir, path_text)
         return str(path) if path.exists() else ""
 
-    def first_existing_cache_path(self, paths: list[Path], symbols: list[str]) -> Path | None:
+    def first_existing_cache_path(self, paths: list[Path], symbols: list[str], domain: str = "") -> Path | None:
         wanted = {normalize_symbol_key(symbol) for symbol in symbols if normalize_symbol_key(symbol)}
         seen: set[Path] = set()
         for path in paths:
@@ -773,7 +843,14 @@ class Pipeline:
             if resolved in seen:
                 continue
             seen.add(resolved)
-            if resolved.exists() and (cache_symbol_keys(resolved) & wanted):
+            if not resolved.exists():
+                continue
+            if domain == "news":
+                expected_date = self.optional_cache_date()
+                available = news_cache_symbol_keys(resolved, expected_date)
+            else:
+                available = cache_symbol_keys(resolved)
+            if available & wanted:
                 return resolved
         return None
 
@@ -792,7 +869,8 @@ class Pipeline:
         path = self.first_existing_cache_file_path(paths)
         if path is None:
             return None
-        counts = cache_evidence_counts(path, symbols)
+        expected_date = self.optional_cache_date()
+        counts = news_cache_evidence_counts(path, symbols, expected_date)
         if counts["wanted_symbol_count"] > 0 and counts["usable_symbol_count"] == 0:
             return path
         return None
@@ -880,7 +958,7 @@ class Pipeline:
 
         cache_script = self.optional_cache_script(domain)
         if cache_script is None:
-            partial = self.first_existing_cache_path(candidate_paths, symbols)
+            partial = self.first_existing_cache_path(candidate_paths, symbols, domain)
             if partial:
                 self.add_stage(f"{domain}-cache", "partial", detail="optional cache script not found; using existing incomplete cache", required=False, path=partial)
                 return str(partial)
@@ -896,7 +974,7 @@ class Pipeline:
                 return str(zero_news)
             self.add_stage(f"{domain}-cache", "skipped", detail="optional cache script not found", required=False)
             return ""
-        date = self.args.date or now_kst().strftime("%Y-%m-%d")
+        date = self.optional_cache_date()
         get_cmd = [sys.executable, str(cache_script), "get", "--date", date]
         get_result = self.run_cmd(f"{domain}-cache-get", get_cmd, required=False)
         get_path = self.parse_existing_cache_path(get_result.stdout)
@@ -936,7 +1014,7 @@ class Pipeline:
                 covered = self.covered_cache_path(domain, str(collected_path), symbols, detail="optional cache collected once and covers full universe")
             if covered:
                 return covered
-            partial = self.first_existing_cache_path(candidate_paths, symbols)
+            partial = self.first_existing_cache_path(candidate_paths, symbols, domain)
             if partial:
                 self.add_stage(f"{domain}-cache", "partial", detail="optional cache collected once but still missing universe symbols; using partial cache", required=False, path=partial)
                 return str(partial)
@@ -952,7 +1030,7 @@ class Pipeline:
                 return str(zero_news)
             self.add_stage(f"{domain}-cache", "partial", detail="optional cache collected once but no cache file was produced", required=False)
             return ""
-        partial = self.first_existing_cache_path(candidate_paths, symbols)
+        partial = self.first_existing_cache_path(candidate_paths, symbols, domain)
         if partial:
             self.add_stage(f"{domain}-cache", "partial", detail="optional cache collection failed once; using existing incomplete cache", required=False, path=partial)
             return str(partial)
@@ -1450,7 +1528,11 @@ class Pipeline:
                 domain_summary["cache_path"] = path_text
                 path = resolve_workspace_path(self.workspace_dir, path_text)
                 if path.exists():
-                    domain_summary["cache_counts"] = cache_evidence_counts(path, symbols)
+                    if domain == "news":
+                        expected_date = self.optional_cache_date()
+                        domain_summary["cache_counts"] = news_cache_evidence_counts(path, symbols, expected_date)
+                    else:
+                        domain_summary["cache_counts"] = cache_evidence_counts(path, symbols)
             if domain == "news":
                 counts = domain_summary.get("cache_counts") if isinstance(domain_summary.get("cache_counts"), dict) else {}
                 if counts and as_int(counts.get("usable_symbol_count")) == 0:

@@ -487,6 +487,8 @@ def assert_compact_review_prompt(tmp: Path) -> None:
         "symbol_ids: 005930,000660",
         "Return each symbol with a views object keyed by analyst-quality-value, analyst-risk-allocation",
         "Use today_trade_price_context to avoid same-day churn:",
+        "Every score must be a JSON integer from 0 to 10",
+        "Missing optional-domain coverage alone must not pull an included view toward 5",
         "Return JSON only",
     ]
     missing = [part for part in required_parts if part not in prompt]
@@ -504,7 +506,7 @@ def assert_compact_review_prompt(tmp: Path) -> None:
         "For judge-review, use the selected-symbol analyst-review slice from analyst_review; agent_scores excluded from aggregation are intentionally omitted from this judgment input.",
         "The supplied symbols are pre-selected candidates by score band: sell candidates are held symbols with final_first_score <= 4, buy candidates have final_first_score >= 6.",
         "Direction preconditions are hard constraints: a sell candidate may only be sold (partial or full) or held (target_position_value_krw <= baseline); a buy candidate may only be bought or held (target_position_value_krw >= baseline).",
-        "When evidence is insufficient or conflicting, the default decision is hold at the baseline.",
+        "When the supplied usable evidence itself is insufficient or conflicting, the default decision is hold at the baseline.",
         "final_first_score is the simple mean of the included analyst view scores",
         "For held sell candidates, an intact long-term thesis favors holding despite the low score",
         "Use strategy_context and symbol_strategy_context as advisory inputs for target_position_value_krw, not as order allow/block rules.",
@@ -514,6 +516,7 @@ def assert_compact_review_prompt(tmp: Path) -> None:
         "if they balance or evidence is insufficient, hold at the baseline",
         "Optional evidence marked missing, failed, empty, unavailable, or excluded_from_aggregation is non-directional",
         "Do not infer safety, risk, favorable news, thesis integrity, or thesis damage from the absence of optional evidence.",
+        "Do not use optional-domain coverage counts or completeness to decide evidence sufficiency",
         "target_position_value_krw",
         "No additional buy",
         "same-day buy history is unknown",
@@ -899,6 +902,34 @@ def run_self_test() -> int:
                 )
                 if not compact_errors or compact_errors[0].get("code") != "disallowed_compact_review_key":
                     raise AssertionError(f"compact review disallowed keys were not rejected: {compact_errors}")
+                for invalid_score in ("unknown", 5.0, True, -1, 11):
+                    invalid_score_errors = compact_review_payload_errors(
+                        {
+                            "stage": "analyst-review",
+                            "symbols": [
+                                {
+                                    "symbol_id": "005930",
+                                    "symbol_name": "삼성전자",
+                                    "views": {
+                                        "analyst-quality-value": {
+                                            "score": invalid_score,
+                                            "reason_code": "hold_neutral",
+                                            "one_line_reason": "invalid score probe",
+                                        },
+                                        "analyst-risk-allocation": {
+                                            "score": 6,
+                                            "reason_code": "buy_candidate",
+                                            "one_line_reason": "valid score probe",
+                                        },
+                                    },
+                                }
+                            ],
+                        },
+                        "analyst-review",
+                        "analyst-quality-risk",
+                    )
+                    if not any("score must be an integer from 0 to 10" in str(error.get("message")) for error in invalid_score_errors):
+                        raise AssertionError(f"invalid analyst score was accepted: {invalid_score!r} {invalid_score_errors}")
                 invalid_second_errors = compact_review_payload_errors(
                     {"stage": "judge-review", "portfolio": {}, "symbols": [{}]},
                     "judge-review",

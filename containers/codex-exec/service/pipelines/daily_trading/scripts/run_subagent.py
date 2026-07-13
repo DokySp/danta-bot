@@ -759,6 +759,12 @@ def non_negative_number_value(raw: Any) -> int | float | None:
     return None
 
 
+def review_score_value(raw: Any) -> int | None:
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return None
+    return raw if 0 <= raw <= 10 else None
+
+
 def first_present_int_value(*values: Any) -> int:
     for value in values:
         if value is not None:
@@ -1095,7 +1101,8 @@ def compact_review_prompt(spec: dict[str, Any]) -> str | None:
                 "Use a separate pass for each view and evaluate that view only from its own rubric and supplied evidence.",
                 "Do not let either view's score, reason_code, or one_line_reason depend on the other view's conclusion.",
                 "Use today_trade_price_context to avoid same-day churn: compare last fill price/direction with current_or_last price before strengthening buy/sell opinions.",
-                "Carry evidence strength in the score itself: keep scores close to neutral 5 when evidence is thin, stale, or conflicting. There is no confidence field.",
+                "Every score must be a JSON integer from 0 to 10; malformed, fractional, boolean, string, or out-of-range values invalidate the output.",
+                "Carry the directional strength of supplied usable evidence in the score itself: keep scores close to neutral 5 only when that evidence is genuinely weakly directional, stale, or conflicting. Missing optional-domain coverage alone must not pull an included view toward 5. There is no confidence field.",
                 f"Return each symbol with a views object keyed by {', '.join(output_roles)}; each view must contain score, reason_code, one_line_reason, and missing_data.",
             ]
         )
@@ -1117,9 +1124,10 @@ def compact_review_prompt(spec: dict[str, Any]) -> str | None:
                 "For judge-review, use the selected-symbol analyst-review slice from analyst_review; agent_scores excluded from aggregation are intentionally omitted from this judgment input.",
                 "Optional evidence marked missing, failed, empty, unavailable, or excluded_from_aggregation is non-directional: its absence must not affect debate claims, weaknesses, rebuttals, reason_code, one_line_reason, or target_position_value_krw.",
                 "Do not infer safety, risk, favorable news, thesis integrity, or thesis damage from the absence of optional evidence.",
+                "Do not use optional-domain coverage counts or completeness to decide evidence sufficiency; judge only the directional strength and conflict of supplied usable evidence.",
                 f"The supplied symbols are pre-selected candidates by score band: sell candidates are held symbols with final_first_score <= {sell_below}, buy candidates have final_first_score >= {buy_above}. Symbols between the bands are held by the pipeline and are not yours to decide.",
                 "Direction preconditions are hard constraints: a sell candidate may only be sold (partial or full) or held (target_position_value_krw <= baseline); a buy candidate may only be bought or held (target_position_value_krw >= baseline). Violations are rejected by the pipeline.",
-                "When evidence is insufficient or conflicting, the default decision is hold at the baseline.",
+                "When the supplied usable evidence itself is insufficient or conflicting, the default decision is hold at the baseline.",
                 "final_first_score is the simple mean of the included analyst view scores; per-analyst scores in agent_scores carry the evidence behind it.",
                 "Return target_position_value_krw for every supplied symbol as the target KRW position value after this decision.",
                 "The pipeline derives final_holding_quantity from target_position_value_krw / price.current_or_last with Decimal ROUND_HALF_UP; judge-supplied final_holding_quantity is optional and ignored for sizing.",
@@ -1348,6 +1356,13 @@ def compact_review_payload_errors(payload: Any, stage: str, agent_role: str = ""
                                     "message": f"symbols[{index}].views.{role} missing {field}",
                                 }
                             )
+                    if "score" in view and review_score_value(view.get("score")) is None:
+                        errors.append(
+                            {
+                                "code": "invalid_compact_review_schema",
+                                "message": f"symbols[{index}].views.{role}.score must be an integer from 0 to 10",
+                            }
+                        )
             else:
                 for field in ("score",):
                     if field not in symbol:
@@ -1357,6 +1372,13 @@ def compact_review_payload_errors(payload: Any, stage: str, agent_role: str = ""
                                 "message": f"symbols[{index}] missing {field}",
                             }
                         )
+                if "score" in symbol and review_score_value(symbol.get("score")) is None:
+                    errors.append(
+                        {
+                            "code": "invalid_compact_review_schema",
+                            "message": f"symbols[{index}].score must be an integer from 0 to 10",
+                        }
+                    )
         if stage == "judge-review":
             final_value = non_negative_int_value(symbol.get("final_holding_quantity")) if "final_holding_quantity" in symbol else None
             target_value = non_negative_number_value(symbol.get("target_position_value_krw")) if "target_position_value_krw" in symbol else None

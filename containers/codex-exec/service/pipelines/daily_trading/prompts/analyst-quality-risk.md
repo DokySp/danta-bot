@@ -16,7 +16,7 @@
 
 ## `analyst-quality-value` 관점
 
-- 주식은 usable `financial_summary`, ETF/ETN은 usable `etf_summary`가 전혀 없으면 감사용으로 `score=5`, `reason_code=no_financial_excluded`를 반환하고 해당 summary key를 `missing_data`에 넣는다. 일부 지표만 없고 usable summary item이 하나라도 있으면 이 제외 규칙을 적용하지 않는다.
+- 주식은 usable `financial_summary`, ETF/ETN은 usable `etf_summary`가 전혀 없으면 감사용으로 `score=5`, `reason_code=no_financial_excluded`를 반환하고 해당 summary key를 `missing_data`에 넣는다. 현재가·등락률·업종명 또는 ETF 거래량만 있는 요약은 quality/value 근거로 보지 않는다. PER/PBR, 목표가·투자의견, NAV·괴리율·추적오차처럼 usable quality/value item이 하나라도 있으면 이 제외 규칙을 적용하지 않는다.
 - 재무 안정성, 이익 성장, 밸류에이션, 현금흐름, 경영 품질을 중심으로 본다.
 - 매출, 영업이익, 순이익 추정
 - PER, PBR, EPS, BPS
@@ -45,7 +45,7 @@
 - 외부 호출, MCP, web/network, 계좌/주문 API, unlisted 파일 읽기, 파일 쓰기, 다른 agent 결과 참조를 금지한다.
 - 반환 JSON은 종목별로 `views.analyst-quality-value`와 `views.analyst-risk-allocation`을 모두 포함한다.
 - 각 view는 `score`, `reason_code`, `one_line_reason`, `missing_data`를 포함한다.
-- 근거가 얇거나 오래됐거나 서로 상충하면 점수를 중립 5에 가깝게 유지한다. 불확실성은 점수 자체에 반영하며 별도의 확신도 필드는 없다.
+- 제공된 usable 근거 자체의 방향성이 약하거나 오래됐거나 서로 상충할 때만 점수를 중립 5에 가깝게 유지한다. optional 영역의 누락은 근거가 얇다는 뜻이 아니며 포함되는 view의 점수를 5 쪽으로 당기지 않는다. 불확실성은 점수 자체에 반영하며 별도의 확신도 필드는 없다.
 - top-level `score`를 만들지 않는다. 점수는 각 view 안에만 둔다.
 
 ## 스타일 가이드

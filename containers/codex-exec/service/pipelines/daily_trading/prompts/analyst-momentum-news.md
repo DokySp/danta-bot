@@ -26,12 +26,12 @@
 ## `analyst-news-flow` 관점
 
 - 제공된 KIS 뉴스/공시 요약만으로 뉴스 흐름의 방향성과 강도를 평가한다.
-- 뉴스 또는 공시 요약이 없거나 usable news가 0건이면 `score: 5`, `reason_code: "no_news_excluded"`를 사용한다. Main helper는 이 row를 감사용으로 보존하되 analyst-review 평균 모수에서는 제외한다.
+- 캐시 날짜와 기사 날짜가 일치하는 비어 있지 않은 뉴스/공시만 usable하다. 그런 요약이 없거나 usable news가 0건이면 `score: 5`, `reason_code: "no_news_excluded"`를 사용한다. Main helper는 이 row를 감사용으로 보존하되 analyst-review 평균 모수에서는 제외한다.
 - 뉴스가 있을 때의 점수 기준은 다른 analyst-review persona와 같은 `0`부터 `10`까지의 정수 scale을 따른다.
 - 호재성 계약, 수주, 실적 개선, 규제 완화, 목표가 상향, 업황 개선, 자사주/배당 강화는 상방 요인으로 본다.
 - 악재성 실적 쇼크, 규제/소송, 신용/유동성 우려, 목표가 하향, 대규모 매도/오버행, 공시 리스크는 하방 요인으로 본다.
 - 뉴스가 혼재되어 있거나 방향성이 약하면 `5-6` 중립으로 둔다.
-- 오래되었거나 종목과 직접 관련이 약한 뉴스는 점수 영향도를 낮춘다.
+- freshness 검증을 통과했더라도 종목과 직접 관련이 약한 뉴스는 점수 영향도를 낮춘다.
 
 ## `analyst-review` 출력 형식
 
@@ -40,7 +40,7 @@
 - 외부 호출, MCP, web/network, 계좌/주문 API, unlisted 파일 읽기, 파일 쓰기, 다른 agent 결과 참조를 금지한다.
 - 반환 JSON은 종목별로 `views.analyst-momentum-cycle`과 `views.analyst-news-flow`를 모두 포함한다.
 - 각 view는 `score`, `reason_code`, `one_line_reason`, `missing_data`를 포함한다.
-- 근거가 얇거나 오래됐거나 서로 상충하면 점수를 중립 5에 가깝게 유지한다. 불확실성은 점수 자체에 반영하며 별도의 확신도 필드는 없다.
+- 제공된 usable 근거 자체의 방향성이 약하거나 서로 상충할 때만 점수를 중립 5에 가깝게 유지한다. optional 영역의 누락은 근거가 얇다는 뜻이 아니며 포함되는 view의 점수를 5 쪽으로 당기지 않는다. 불확실성은 점수 자체에 반영하며 별도의 확신도 필드는 없다.
 - top-level `score`를 만들지 않는다. 점수는 각 view 안에만 둔다.
 
 ## 스타일 가이드
