@@ -1,4 +1,5 @@
 import html
+import json
 import logging
 import os
 import shlex
@@ -135,6 +136,7 @@ class CodexRunner:
         defaults = runtime_defaults or self.runtime_defaults()
         model_value = model or defaults.model
         reasoning_effort_value = reasoning_effort or defaults.model_reasoning_effort
+        main_model_usage_recorded = False
 
         cmd = [
             self.config.codex_bin,
@@ -157,6 +159,14 @@ class CodexRunner:
         env["CODEX_HOME"] = str(self.config.codex_home)
         env["CODEX_MCP_TRADING_ENV"] = self.config.mcp_trading_env
 
+        if daily_trading_hint:
+            self._append_daily_trading_model_usage(
+                context,
+                model=model_value,
+                reasoning_effort=reasoning_effort_value,
+                subcommand=subcommand,
+            )
+            main_model_usage_recorded = True
         logging.info("running codex command=%s", " ".join(shlex.quote(part) for part in cmd[:-1]))
         try:
             result = subprocess.run(
@@ -170,14 +180,32 @@ class CodexRunner:
                 check=False,
             )
         except Exception as exc:
-            if daily_trading_hint or self._daily_trading_artifact_exists(context):
+            daily_trading_artifact_exists = self._daily_trading_artifact_exists(context)
+            if daily_trading_artifact_exists and not main_model_usage_recorded:
+                self._append_daily_trading_model_usage(
+                    context,
+                    model=model_value,
+                    reasoning_effort=reasoning_effort_value,
+                    subcommand=subcommand,
+                )
+                main_model_usage_recorded = True
+            if daily_trading_hint or daily_trading_artifact_exists:
                 self._append_holding_history_if_available(context)
                 attach_daily_trading_context(exc, context)
             raise
 
         if result.returncode != 0:
             exc = classify_codex_error(result.returncode, result.stdout, result.stderr)
-            if daily_trading_hint or self._daily_trading_artifact_exists(context):
+            daily_trading_artifact_exists = self._daily_trading_artifact_exists(context)
+            if daily_trading_artifact_exists and not main_model_usage_recorded:
+                self._append_daily_trading_model_usage(
+                    context,
+                    model=model_value,
+                    reasoning_effort=reasoning_effort_value,
+                    subcommand=subcommand,
+                )
+                main_model_usage_recorded = True
+            if daily_trading_hint or daily_trading_artifact_exists:
                 self._append_holding_history_if_available(context)
                 attach_daily_trading_context(exc, context)
             raise exc
@@ -188,7 +216,16 @@ class CodexRunner:
         else:
             output = str(event_summary.get("last_agent_message") or "").strip() or result.stdout.strip()
         output = output.strip() or "<i>Codex completed without output.</i>"
-        if daily_trading_hint or self._daily_trading_artifact_exists(context):
+        daily_trading_artifact_exists = self._daily_trading_artifact_exists(context)
+        if daily_trading_artifact_exists and not main_model_usage_recorded:
+            self._append_daily_trading_model_usage(
+                context,
+                model=model_value,
+                reasoning_effort=reasoning_effort_value,
+                subcommand=subcommand,
+            )
+            main_model_usage_recorded = True
+        if daily_trading_hint or daily_trading_artifact_exists:
             refresh_daily_trading_token_artifacts(self.config.workspace_dir, context, result.stdout or "")
             self._append_holding_history_if_available(context)
             output = daily_trading_telegram_summary(self.config.workspace_dir, context) or output
@@ -202,6 +239,41 @@ class CodexRunner:
             usage_after,
         )
         return output
+
+    def _append_daily_trading_model_usage(
+        self,
+        context: Any,
+        *,
+        model: str,
+        reasoning_effort: str,
+        subcommand: list[str],
+    ) -> Path:
+        path = self.config.workspace_dir / "reports" / "runs" / context.run_id / "model-usage.jsonl"
+        task_name = "main-resume" if "resume" in subcommand else "main-exec"
+        payload = {
+            "schema_version": "1",
+            "run_id": context.run_id,
+            "run_started_at": context.started_at,
+            "started_at": context.started_at,
+            "source": "daily-trading-main",
+            "stage": "main",
+            "agent_role": "main",
+            "task_name": task_name,
+            "model": model,
+            "model_reasoning_effort": reasoning_effort,
+        }
+        encoded = (json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode(
+            "utf-8"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o644)
+        try:
+            written = os.write(descriptor, encoded)
+        finally:
+            os.close(descriptor)
+        if written != len(encoded):
+            raise OSError(f"short write while recording model usage: {path}")
+        return path
 
     def _read_usage_snapshot(self) -> dict[str, Any] | None:
         return read_usage_snapshot(self.config)

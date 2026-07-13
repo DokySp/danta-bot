@@ -553,6 +553,7 @@ class Pipeline:
         self.command_log_path = self.output_dir / "pipeline-command-log.json"
         self.summary_path = self.output_dir / "pipeline-summary.json"
         self.run_path = self.output_dir / "run.json"
+        self.model_usage_path = self.output_dir / "model-usage.jsonl"
         self.review_extra_instructions_path = self.resolve_optional_path(
             getattr(args, "review_extra_instructions_file", "")
         )
@@ -615,6 +616,7 @@ class Pipeline:
                 "updated_at": now_iso(),
                 "status": status or self.pipeline_status(),
                 "pipeline_summary": str(self.summary_path),
+                "model_usage": str(self.model_usage_path),
                 "order_path_selection": {
                     "requested": self.order_path_requested,
                     "resolved": self.order_path,
@@ -2031,6 +2033,7 @@ class Pipeline:
                 "judge_review": str(self.output_dir / "judge-review.json"),
                 "execution": str(self.output_dir / "execution.json"),
                 "token_summary": str(self.output_dir / "token-summary.json"),
+                "model_usage": str(self.model_usage_path),
                 "portfolio_report": str(report_path),
                 "telegram_summary": str(telegram_summary_path),
             },

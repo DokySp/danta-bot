@@ -1013,6 +1013,11 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
             artifacts = summary.get("artifacts") if isinstance(summary.get("artifacts"), dict) else {}
             if not str(artifacts.get("account_asset_snapshot", "")).endswith("account-asset-snapshot.json"):
                 failures.append(f"pipeline summary omitted account asset artifact path: {artifacts}")
+            if not str(artifacts.get("model_usage", "")).endswith("model-usage.jsonl"):
+                failures.append(f"pipeline summary omitted model usage artifact path: {artifacts}")
+            run_payload = load_json(run_dir / "run.json")
+            if not str(run_payload.get("model_usage", "")).endswith("model-usage.jsonl"):
+                failures.append(f"run.json omitted model usage artifact path: {run_payload}")
             evidence_summary = summary.get("evidence_summary") if isinstance(summary.get("evidence_summary"), dict) else {}
             if not isinstance(evidence_summary.get("news"), dict) or "display_text" not in evidence_summary.get("news", {}):
                 failures.append(f"pipeline summary omitted displayable news evidence status: {evidence_summary}")

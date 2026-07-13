@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -112,6 +113,80 @@ class RuntimeConfigTest(unittest.TestCase):
             self.assertEqual(commands[2][commands[2].index("-m") + 1], "model-c")
             self.assertIn('model_reasoning_effort="medium"', commands[2])
             self.assertTrue(commands[2][-1].startswith("updated prompt"))
+
+    def test_daily_trading_main_records_model_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            runtime_path = tmp_path / "codex-runtime.yaml"
+            write_runtime_config(runtime_path, model="default-model", effort="medium")
+            runner = object.__new__(CodexRunner)
+            runner.config = SimpleNamespace(
+                codex_runtime_config_file=runtime_path,
+                codex_bin="codex",
+                codex_home=tmp_path / "codex-home",
+                mcp_trading_env="paper",
+                workspace_dir=tmp_path,
+                bypass_sandbox=False,
+                codex_timeout_seconds=10,
+            )
+            runner.tmp_dir = tmp_path / "tmp"
+            runner.tmp_dir.mkdir()
+            runner._read_usage_snapshot = lambda: None
+            runner._append_token_usage_summary = lambda output, *_args: output
+            runner._daily_trading_artifact_exists = lambda candidate: candidate.run_id == "main-fallback-test"
+            runner._append_holding_history_if_available = lambda _context: None
+
+            context = SimpleNamespace(
+                run_id="main-model-test",
+                started_at="2026-07-14T09:00:00+09:00",
+                started_at_display="2026-07-14 09:00:00 KST",
+            )
+            fallback_context = SimpleNamespace(
+                run_id="main-fallback-test",
+                started_at="2026-07-14T09:05:00+09:00",
+                started_at_display="2026-07-14 09:05:00 KST",
+            )
+
+            def fake_run(cmd: list[str], **_kwargs: object) -> SimpleNamespace:
+                output_path = Path(cmd[cmd.index("-o") + 1])
+                output_path.write_text("ok", encoding="utf-8")
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with (
+                patch("service.codex.runner.new_codex_run_context", side_effect=[context, fallback_context]),
+                patch("service.codex.runner.subprocess.run", side_effect=fake_run),
+                patch("service.codex.runner.refresh_daily_trading_token_artifacts"),
+                patch("service.codex.runner.daily_trading_telegram_summary", return_value=None),
+            ):
+                runner.run_once(
+                    "daily trading",
+                    daily_trading_hint=True,
+                    model="main-model",
+                    reasoning_effort="high",
+                )
+                runner.run_once(
+                    "fallback daily trading",
+                    model="fallback-model",
+                    reasoning_effort="medium",
+                )
+
+            model_usage_path = tmp_path / "reports" / "runs" / context.run_id / "model-usage.jsonl"
+            entries = [json.loads(line) for line in model_usage_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["source"], "daily-trading-main")
+            self.assertEqual(entries[0]["stage"], "main")
+            self.assertEqual(entries[0]["model"], "main-model")
+            self.assertEqual(entries[0]["model_reasoning_effort"], "high")
+            fallback_model_usage_path = (
+                tmp_path / "reports" / "runs" / fallback_context.run_id / "model-usage.jsonl"
+            )
+            fallback_entries = [
+                json.loads(line) for line in fallback_model_usage_path.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(len(fallback_entries), 1)
+            self.assertEqual(fallback_entries[0]["source"], "daily-trading-main")
+            self.assertEqual(fallback_entries[0]["model"], "fallback-model")
+            self.assertEqual(fallback_entries[0]["model_reasoning_effort"], "medium")
 
 
 if __name__ == "__main__":

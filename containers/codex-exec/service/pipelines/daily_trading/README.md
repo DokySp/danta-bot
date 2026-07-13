@@ -138,6 +138,7 @@ News 수집 허용 범위:
 Run 아티팩트는 `reports/runs/<run_id>/` 아래에 둔다.
 
 - `run.json`
+- `model-usage.jsonl` (daily-trading Main/sub-agent에 실제 전달한 model, reasoning effort, stage, role, task를 한 줄씩 기록; 알려진 daily-trading 호출은 실행 직전, 사후 감지된 Main fallback은 run artifact 확인 직후 기록)
 - `price-chart.json`
 - `collection-summary.json` (optional direct main-evidence helper summary)
 - `account-asset-snapshot.json` (optional total-asset snapshot for reporting/dashboard only)

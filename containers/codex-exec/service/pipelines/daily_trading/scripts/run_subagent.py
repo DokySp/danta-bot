@@ -30,6 +30,7 @@ REQUIRED_SPEC_FIELDS = {
 }
 RUNTIME_CONFIG_ENV = "CODEX_RUNTIME_CONFIG_FILE"
 RUNTIME_CONFIG_FILENAME = "codex-runtime.yaml"
+MODEL_USAGE_FILENAME = "model-usage.jsonl"
 DEFAULT_RUNTIME_CONFIG_PATH = Path("/app/config") / RUNTIME_CONFIG_FILENAME
 BAKED_RUNTIME_CONFIG_PATH = Path("/app/default-config") / RUNTIME_CONFIG_FILENAME
 DEFAULT_SUBAGENT_MODEL_CONFIG = {
@@ -1442,6 +1443,40 @@ def event_log_paths(spec: dict[str, Any]) -> tuple[Path, Path]:
     return subagent_dir / f"{task_name}.events.jsonl", subagent_dir / f"{task_name}.stderr.txt"
 
 
+def append_model_usage(
+    spec: dict[str, Any],
+    *,
+    model: str,
+    reasoning_effort: str,
+    started_at: str,
+) -> Path:
+    path = Path(str(spec["output_dir"])) / MODEL_USAGE_FILENAME
+    payload = {
+        "schema_version": "1",
+        "run_id": str(spec["run_id"]),
+        "run_started_at": str(spec["started_at"]),
+        "started_at": started_at,
+        "source": "daily-trading-subagent",
+        "stage": str(spec["stage"]),
+        "agent_role": str(spec["agent_role"]),
+        "task_name": str(spec["task_name"]),
+        "model": model,
+        "model_reasoning_effort": reasoning_effort,
+    }
+    encoded = (json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode(
+        "utf-8"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o644)
+    try:
+        written = os.write(descriptor, encoded)
+    finally:
+        os.close(descriptor)
+    if written != len(encoded):
+        raise OSError(f"short write while recording model usage: {path}")
+    return path
+
+
 def write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
@@ -1556,6 +1591,12 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
 
     started_at = now_iso()
     started = time.monotonic()
+    model_usage_path = append_model_usage(
+        spec,
+        model=model,
+        reasoning_effort=effort,
+        started_at=started_at,
+    )
     cmd = [
         os.getenv("CODEX_BIN", "codex"),
         "exec",
@@ -1663,6 +1704,9 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
         "stage": str(spec["stage"]),
         "agent_role": str(spec["agent_role"]),
         "task_name": str(spec["task_name"]),
+        "model": model,
+        "model_reasoning_effort": effort,
+        "model_usage_path": str(model_usage_path),
         "status": status,
         "started_at": started_at,
         "ended_at": ended_at,

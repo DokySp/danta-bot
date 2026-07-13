@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from ..scripts.run_subagent import (
+    MODEL_USAGE_FILENAME,
     RUNTIME_CONFIG_ENV,
     build_prompt,
     compact_prompt,
@@ -1130,6 +1131,34 @@ def run_self_test() -> int:
                 assert_argv(argv_log, model="custom-model", effort="custom-effort")
             except AssertionError as exc:
                 failures.append(str(exc))
+            model_usage_path = tmp / "reports" / "runs" / "self-test" / MODEL_USAGE_FILENAME
+            try:
+                model_usage_entries = [
+                    json.loads(line)
+                    for line in model_usage_path.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+            except (OSError, json.JSONDecodeError) as exc:
+                failures.append(f"model usage log could not be read: {exc}")
+                model_usage_entries = []
+            custom_model_entries = [
+                item for item in model_usage_entries if item.get("task_name") == "first-custom-model"
+            ]
+            if len(custom_model_entries) != 1:
+                failures.append(f"custom model invocation was not recorded exactly once: {custom_model_entries}")
+            elif (
+                custom_model_entries[0].get("model") != "custom-model"
+                or custom_model_entries[0].get("model_reasoning_effort") != "custom-effort"
+                or custom_model_entries[0].get("stage") != "analyst-review"
+                or custom_model_entries[0].get("agent_role") != "analyst-momentum-news"
+            ):
+                failures.append(f"custom model invocation log was incorrect: {custom_model_entries[0]}")
+            if (
+                custom_wrapper.get("model") != "custom-model"
+                or custom_wrapper.get("model_reasoning_effort") != "custom-effort"
+                or custom_wrapper.get("model_usage_path") != str(model_usage_path)
+            ):
+                failures.append(f"custom wrapper omitted explicit model provenance: {custom_wrapper}")
             os.environ.pop(RUNTIME_CONFIG_ENV, None)
 
             write_sample_review_inputs(tmp)
@@ -1153,6 +1182,13 @@ def run_self_test() -> int:
                 failures.append(f"reuse setup wrapper failed: {first_reuse_wrapper}")
             if not second_reuse_wrapper.get("reused_existing_wrapper") or argv_after != argv_before:
                 failures.append(f"successful wrapper was not reused: {second_reuse_wrapper}")
+            reuse_model_entries = [
+                json.loads(line)
+                for line in model_usage_path.read_text(encoding="utf-8").splitlines()
+                if line.strip() and json.loads(line).get("task_name") == "reuse-first"
+            ]
+            if len(reuse_model_entries) != 1:
+                failures.append(f"reused wrapper recorded a non-executed model invocation: {reuse_model_entries}")
             group_reuse_before = len(argv_log.read_text(encoding="utf-8").splitlines())
             group_reuse = run_group([reuse_spec], max_workers=1)
             group_reuse_after = len(argv_log.read_text(encoding="utf-8").splitlines())
@@ -1202,6 +1238,17 @@ def run_self_test() -> int:
             )
             if group["status"] != "success" or group["count"] != 2:
                 failures.append(f"run-group returned unexpected result: {group}")
+            try:
+                group_model_entries = [
+                    json.loads(line)
+                    for line in model_usage_path.read_text(encoding="utf-8").splitlines()
+                    if line.strip() and json.loads(line).get("task_name") in {"g-financial", "g-news"}
+                ]
+            except json.JSONDecodeError as exc:
+                failures.append(f"parallel model usage writes produced invalid JSONL: {exc}")
+                group_model_entries = []
+            if {item.get("task_name") for item in group_model_entries} != {"g-financial", "g-news"}:
+                failures.append(f"parallel model invocations were not recorded: {group_model_entries}")
             wrapper_count = len(list((Path(group["wrappers"][0]["raw_output_path"]).parent).glob("g-*.wrapper.json")))
             if wrapper_count != 2:
                 failures.append(f"expected 2 group wrapper files, got {wrapper_count}")
