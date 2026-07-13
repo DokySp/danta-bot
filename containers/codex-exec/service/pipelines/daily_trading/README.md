@@ -31,6 +31,7 @@ python3 <daily-trading-pipeline>/scripts/run_daily_trading_pipeline.py run \
 |---|---|
 | 메인 실행 주체 | `Main agent` |
 | 1차 독립 종목 평결 단계 | `analyst-review` |
+| 최종 평결 전 낙관/비관 토론 단계 | `judge-debate` |
 | 2차 포트폴리오 최종 보유수량 평결 단계 | `judge-review` |
 | canonical 평결 입력 | `decision-brief.json` |
 | sub-agent 평결 입력 | launcher-created selected-symbol slices; analyst-review는 output view profile 기반 role-scoped slice |
@@ -46,7 +47,7 @@ python3 <daily-trading-pipeline>/scripts/run_daily_trading_pipeline.py run \
 | 3 | `Main agent` + Collection sub-agents | `scripts/collect_main_evidence.py` direct KIS 가격·계좌 증거 수집, cache miss/universe mismatch 시 `get` 확인 후 1회 `$collect-financial-information`, `$collect-news-information` 및 재 `get`, `market_index_snapshot` deterministic 지수 수집 | 전체 종목 universe, 거래 환경 | `price-chart.json`, `account-before-order.json`, 선택적 `account-asset-snapshot.json`, 선택적 `collection-summary.json`, 선택적 full-universe 또는 partial financial/news memory 경로, 선택적 `market-index-snapshot.json` | 가격·관측시각은 필수, `account-asset-snapshot`은 총자산 추이용 optional stage이며 실패해도 필수 price/account evidence를 깨지 않음; financial/news는 같은 날짜 full-universe cache hit 시 collector를 생략하며, cache miss/universe mismatch면 get→collect→get을 한 번만 수행하고 그래도 미완성이면 partial cache를 사용함; market index snapshot 실패는 non-blocking |
 | 4 | `Main agent` + `scripts/build_run_artifacts.py` | deterministic 병합/sanitize | `price-chart.json`, `$check-portfolio` JSON, 선택적 `memory/collect-financial-information/financial-YYYY-MM-DD.yaml`, 선택적 `memory/collect-news-information/news-YYYY-MM-DD.yaml`, 선택적 `market-index-snapshot.json` | `decision-brief.json`, 제외 종목 목록 | 식별자와 가격 snapshot이 있으면 재무/뉴스/market index snapshot 누락만으로 제외하지 않음; Main agent가 직접 JSON을 조립하지 않고 helper를 호출 |
 | 5 | `analyst-review` sub-agents + `scripts/build_run_artifacts.py` | selected 2 execution personas, deterministic spec/merge into 4 canonical views | launcher-created role-scoped `review-core`, `analyst-review-format.md` | `analyst-review.json`, `reviews/analyst-review--<agent_role>--<task_name>.md` | `analyst-quality-risk`는 `analyst-quality-value`와 `analyst-risk-allocation` view를 독립 산출하고, `analyst-momentum-news`는 `analyst-momentum-cycle`과 `analyst-news-flow` view를 독립 산출; sub-agent는 compact JSON만 반환하고 companion MD와 score merge는 helper가 생성 |
-| 6 | `judge-review` sub-agent + `scripts/build_run_artifacts.py` | `judge`, deterministic 대상/spec 생성(점수 밴드: 보유 `<4` 매도 후보, `>6` 매수 후보, 4~6 유지 확정), 내부 bull/bear 토론(기본 1라운드, 최대 2, 합의 불충분 시 보유) | launcher-created `review-core`, selected-symbol analyst-review slice, `judge-review-format.md`, `debate-bull.md`/`debate-bear.md` | `judge-review.json`, `reviews/judge-review--judge--<task_name>.md` | 단일 judge가 종목별 목표금액을 제안하고 helper/Main agent가 이를 half-up 반올림 최종 보유수량으로 정규화한다. 목표현금은 만들지 않으며, helper/Main agent가 schema·계좌 gate를 검증; 실패 시 failed task만 최대 2회 retry |
+| 6 | `scripts/run_daily_trading_pipeline.py` + persistent Bull/Bear sessions + `judge-review` | 점수 밴드로 후보를 고른 뒤 Bull/Bear opening을 병렬 실행하고 각 session ID를 보존해 `rebuttal-1`, `rebuttal-2(closing)`를 `codex exec resume`으로 재개한 다음 단일 judge 최종 단계로 넘김 | launcher-created selected-symbol slices, `debate-format.md`, `debate-bull.md`/`debate-bear.md`, 정규화된 `judge-debate.json`, `judge-review-format.md` | `debate/*.json`, attempt별 wrapper/raw/events, `judge-debate.json`, `judge-review.json`, judge sidecar | 각 debate phase는 Bull/Bear `wait_all` barrier이며 성공한 쪽은 재실행하지 않고 실패한 쪽만 같은 session으로 1회 retry한다. challenge에 따른 조건부 추가 토론·재판정은 없고 judge는 sub-agent를 생성하지 않는다. judge의 기존 기술적 출력 실패 재시도는 별도이며, 토론 불완전·누락 또는 논거 불충분 시 기준 노출 유지 |
 | 7 | `scripts/build_run_artifacts.py` + `scripts/execute_orders.py` | deterministic 주문 계산, KIS read-only pending/reserved/주문가능 조회, KIS `order_cash`/`order_resv`/정정취소 API | `judge-review.json`, 최신 계좌 상태, 명시적 demo/real 실행 요청 | `account-before-order.json`, `execution.json`, `order-execution-log.json` | helper가 비제출 주문 수학/gate 요약을 먼저 만들고, 명시 실행 요청에서 `--submit-orders`가 있으면 `execute_orders.py`가 최신 계좌 gate를 갱신한 뒤 즉시/예약 주문을 제출·정정·취소하거나 명확히 차단한다. 명시적 지정가 예약 요청에서는 `execution-plan`의 `order_price`를 기본 지정가 후보로 인정한다 |
 | 8 | `scripts/run_daily_trading_pipeline.py summarize` + `scripts/render_telegram_summary.py` | report template, Telegram fixed template, run artifact update | 최종 `execution.json`, `run.json`, `judge-review.json`, `pipeline-summary.json` | 최종 `pipeline-summary.json`, `telegram-summary.txt`, `reports/YYYY-MM-DD_포트폴리오.md`, 최종 `run.json` | partial/failed artifact를 삭제하지 않음; Telegram 응답은 `telegram-summary.txt`를 그대로 사용 |
 
@@ -73,6 +74,7 @@ python3 <daily-trading-pipeline>/scripts/run_daily_trading_pipeline.py run \
 | `collect-financial-information` | KIS quotation/financial/estimate API 기반 재무 YAML 캐시 경로 | `gpt-5.6-luna` | `low` |
 | `collect-news-information` | KIS 뉴스 YAML 캐시 경로/요약 | `gpt-5.6-luna` | `low` |
 | selected 2 analyst-review execution personas | `analyst-review` 독립 종목 점수 (`analyst-quality-risk`와 `analyst-momentum-news`가 각각 두 view 산출) | `gpt-5.6-sol` | `xhigh` |
+| `debate-bull`, `debate-bear` | `judge-debate` 낙관/비관 opening 및 동일 session의 1·2차 반박 | `gpt-5.6-sol` | `xhigh` |
 | `judge` | `judge-review` 포트폴리오 목표금액 | `gpt-5.6-sol` | `xhigh` |
 
 ## API 권한
@@ -147,6 +149,9 @@ Run 아티팩트는 `reports/runs/<run_id>/` 아래에 둔다.
 - `decision-brief.json`
 - `review-inputs/*.review-core.json` / `review-inputs/*.analyst-review-slice.json` (launcher-created non-canonical selected-symbol slices; analyst-review `review-core`는 role-scoped)
 - `analyst-review.json`
+- `debate/opening.json`, `debate/rebuttal-1.json`, `debate/rebuttal-2.json` 및 phase/attempt별 spec
+- `subagents/judge-debate-*.wrapper.json`, `.raw.txt`, `.events.jsonl` (Bull/Bear session ID와 명시적 판단·반박 로그)
+- `judge-debate.json` (judge가 읽는 정규화된 전체 토론 artifact)
 - `judge-review.json`
 - `reviews/<stage>--<agent_role>--<task_name>.md` (review agent별 사람 확인용 companion Markdown)
 - `account-before-order.json`
@@ -157,7 +162,7 @@ Run 아티팩트는 `reports/runs/<run_id>/` 아래에 둔다.
 
 ## 평결 입력
 
-`decision-brief.json`은 Main agent가 수집 결과를 합쳐 만든 canonical review input이다. `analyst-review` sub-agent에는 launcher가 `decision-brief.json`에서 파생한 role-scoped `review-core` slice를 전달한다. 이 slice는 해당 execution agent가 산출해야 하는 view들의 입력 profile union만 보존한다. `judge-review`에는 `analyst-review.json` 전체가 아니라 selected-symbol analyst-review slice를 전달하고, 보유/가격 정보는 함께 전달되는 `review-core`에서 읽는다.
+`decision-brief.json`은 Main agent가 수집 결과를 합쳐 만든 canonical review input이다. `analyst-review` sub-agent에는 launcher가 `decision-brief.json`에서 파생한 role-scoped `review-core` slice를 전달한다. 이 slice는 해당 execution agent가 산출해야 하는 view들의 입력 profile union만 보존한다. `judge-debate` opening의 Bull/Bear에도 같은 selected-symbol 입력을 주고, 이후 두 반박은 opening에서 생성된 각 session을 재개하면서 상대의 직전 raw JSON artifact를 명시적으로 전달한다. `judge-review`에는 `analyst-review.json` 전체가 아니라 selected-symbol analyst-review slice와 정규화된 `judge-debate.json`을 전달하고, 보유/가격 정보는 함께 전달되는 `review-core`에서 읽는다.
 
 `decision-brief.json`에는 종목 식별자, eligibility, `evidence_mode`, 가격, 핵심 price/chart signal, compact 기간봉/분봉·호가·체결·수급 요약, top-level `market_index_snapshot`, 가능한 financial memory 경로와 짧은 financial/ETF summary, 가능한 뉴스 memory 경로와 짧은 KIS 뉴스/공시 요약, 계좌 노출, 누락/오류 사유를 압축해서 담는다. `market_index_snapshot`는 S&P 500, Nasdaq, Dow, KOSPI, KOSDAQ의 run-level 참고 지표이며 종목별로 복사하지 않는다. financial/news memory 파일은 사람이 읽는 참고자료이다. Main agent는 그중 짧은 bullet만 선별해 `decision-brief.json`에 복사한다. `reports/runs/<run_id>/financial.md`, `reports/runs/<run_id>/news.md`는 만들지 않는다. 긴 raw API payload, 기사 원문, 반복 source detail, 민감정보는 제외한다. 종목별 price/chart signal은 최대 12개, financial summary는 최대 3개 bullet, KIS 뉴스/공시는 최대 3개 item, warning/error는 최대 5개로 제한하고 반복되는 domain-wide 누락 사유는 한 번만 요약한다.
 

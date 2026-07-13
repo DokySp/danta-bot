@@ -7,17 +7,17 @@
 - 최종 보유수량 산출, 방향 제약 검증, 주문 가능성 검증, 주문 실행은 Main/pipeline 책임이다.
 - 출력 JSON 형식, 필드 스키마, 검증 규칙은 `judge-review-format.md`와 pipeline validation을 따른다.
 
-## 토론 절차 (필수)
+## 토론 결과 사용 (필수)
 
-후보 종목이 1개 이상이면 목표금액을 정하기 전에 낙관/비관 토론을 거친다.
+후보 종목이 1개 이상이면 Python pipeline이 먼저 낙관/비관 토론을 완료하고 `debate_artifact`를 제공한다.
 
-- sub-agent 2개를 생성한다: 낙관 토론자(`debate-bull.md` 페르소나)와 비관 토론자(`debate-bear.md` 페르소나). 각 sub-agent 프롬프트에 페르소나 파일 내용과 이 판단에서 제공받은 입력 파일 경로(후보 슬라이스, 집계에서 제외된 row가 제거된 analyst-review 슬라이스), candidate_directions, portfolio_snapshot을 전달한다. 후보 전체를 한 번의 호출로 배치 처리한다.
-- 라운드 구성: ① 낙관 주장 → ② 비관 주장 → ③ 낙관이 비관을 반박 → ④ 비관이 낙관을 반박. 여기까지가 기본 1라운드(총 4회 호출)다.
-- 기본 1라운드 후 특정 종목의 판단이 불가능하다고 명시적으로 결론 내린 경우에만 그 종목들에 한해 반박 라운드를 1회 추가할 수 있다. optional evidence 부재만으로 추가 라운드를 열지 않는다. **최대 2라운드에서 강제 종료한다.** 그 이상 토론을 반복하지 않는다.
-- 토론 sub-agent가 실패하거나 출력이 비정상이면 재시도는 각 1회까지만 하고, 그래도 실패하면 토론 없이 아래 판단 철학의 기본값(보유)으로 처리한다.
-- 토론 종료 후 종목별로 양측의 가장 강한 usable 논거를 비교해 판단한다. optional evidence 부재는 어느 방향의 논거로도 세지 않는다. Optional 영역의 충족 개수나 coverage 완전성을 usable evidence의 충분성 기준으로 삼지 않는다. **제공된 usable 논거 자체가 팽팽하거나 방향성이 불충분하면 기본값은 기준 노출 유지다.**
-- 각 종목의 `one_line_reason`에는 채택한 측의 결정적 usable 논거(또는 보유 결정이면 양측이 상쇄되거나 유효한 방향성 논거가 형성되지 않은 이유)를 압축해 반영하고 optional evidence 부재를 결정 사유로 쓰지 않는다.
-- 토론 sub-agent에게도 외부 호출·KIS·MCP·web/network·파일 쓰기 금지를 적용한다. 토론 전문은 반환 JSON에 포함하지 않는다.
+- 토론은 동일 Bull/Bear session을 유지한 고정 순서 `opening → rebuttal-1 → rebuttal-2(closing)`로 이미 끝난 상태다.
+- judge는 sub-agent를 생성·재개하거나 추가 토론을 요청하지 않는다. 최종 판단은 한 번만 수행한다.
+- 종목별로 양측의 명시적 claim, rebuttal, concession, unresolved conflict와 final position을 비교한다.
+- optional evidence 부재는 어느 방향의 논거로도 세지 않는다. Optional 영역의 충족 개수나 coverage 완전성을 usable evidence의 충분성 기준으로 삼지 않는다.
+- `debate_artifact.status`가 `incomplete`이거나 제공된 usable 논거 자체가 팽팽하거나 방향성이 불충분하면 기본값은 기준 노출 유지다.
+- 각 종목의 `one_line_reason`에는 채택한 측의 결정적 `argument_id`와 usable 논거를 압축해 반영한다. 보유 결정이면 양측이 상쇄되거나 유효한 방향성 논거가 형성되지 않은 이유를 쓰고 optional evidence 부재를 결정 사유로 쓰지 않는다.
+- 토론 전문이나 raw event는 반환 JSON에 포함하지 않는다.
 
 ## 판단 철학
 
@@ -32,5 +32,5 @@
 ## 경계
 
 - 외부 호출, MCP, web/network, 계좌/주문 API 호출, 파일 쓰기, 주문 실행을 하지 않는다.
-- 예외: 토론 절차를 위한 토론 sub-agent 생성은 허용한다. 토론 sub-agent에게도 같은 금지가 적용된다.
+- 토론 sub-agent를 생성·재개하거나 추가 라운드를 열지 않는다.
 - 반환은 `judge-review-format.md`의 compact `judge-review` JSON 형식만 사용한다.

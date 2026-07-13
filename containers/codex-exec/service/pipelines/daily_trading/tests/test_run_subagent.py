@@ -79,6 +79,12 @@ def assert_all_supported_stages_use_expected_models() -> None:
             model_config["judge_review"]["model"],
             model_config["judge_review"]["model_reasoning_effort"],
         ),
+        (
+            "judge-debate",
+            "debate-bull",
+            model_config["judge_review"]["model"],
+            model_config["judge_review"]["model_reasoning_effort"],
+        ),
     ]
     for stage, role, model, effort in cases:
         assert_model_effort(stage, role, model=model, effort=effort)
@@ -131,7 +137,40 @@ else:
         }
     else:
         prompt = sys.argv[-1] if sys.argv else ""
-        if "stage: analyst-review" in prompt or "stage: judge-review" in prompt:
+        if "stage: judge-debate" in prompt:
+            phase = next((value for value in ("opening", "rebuttal-1", "rebuttal-2") if f"debate_phase: {value}" in prompt), "opening")
+            side = "bull" if "debate_side: bull" in prompt else "bear"
+            opponent = "bear" if side == "bull" else "bull"
+            symbol_line = next((line for line in prompt.splitlines() if line.startswith("symbol_ids: ")), "symbol_ids: 005930")
+            symbols = [value.strip() for value in symbol_line.split(":", 1)[1].split(",") if value.strip()]
+            target_phase = "opening" if phase == "rebuttal-1" else "rebuttal-1"
+            kind = {"opening": "claim", "rebuttal-1": "rebuttal", "rebuttal-2": "closing"}[phase]
+            payload = {
+                "stage": "judge-debate",
+                "phase": phase,
+                "side": side,
+                "symbols": [
+                    {
+                        "symbol_id": symbol,
+                        "symbol_name": symbol,
+                        "arguments": [
+                            {
+                                "argument_id": f"{symbol}-{side}-{phase}-1",
+                                "kind": kind,
+                                "targets": [] if phase == "opening" else [f"{symbol}-{opponent}-{target_phase}-1"],
+                                "statement": f"{side} {phase} self-test",
+                                "evidence_refs": [f"decision-brief:{symbol}:price"],
+                            }
+                        ],
+                        "concessions": [],
+                        "unresolved_conflicts": [] if phase != "rebuttal-2" else ["self-test conflict"],
+                        "final_position": "" if phase != "rebuttal-2" else f"{side} final position",
+                    }
+                    for symbol in symbols
+                ],
+                "errors": [],
+            }
+        elif "stage: analyst-review" in prompt or "stage: judge-review" in prompt:
             stage = "judge-review" if "stage: judge-review" in prompt else "analyst-review"
             if "agent_role: analyst-quality-risk" in prompt:
                 first_payload = {
@@ -197,6 +236,14 @@ else:
             payload = {"ok": True, "argv": sys.argv[1:]}
     output_path.write_text(json.dumps(payload), encoding="utf-8")
 if "--json" in sys.argv:
+    prompt = sys.argv[-1] if sys.argv else ""
+    if "agent_role: debate-bull" in prompt:
+        thread_id = "00000000-0000-4000-8000-000000000001"
+    elif "agent_role: debate-bear" in prompt:
+        thread_id = "00000000-0000-4000-8000-000000000002"
+    else:
+        thread_id = "00000000-0000-4000-8000-000000000099"
+    print(json.dumps({"type": "thread.started", "thread_id": thread_id}))
     if os.environ.get("FAKE_CODEX_DIAGNOSTIC_EVENTS") == "1":
         print(json.dumps({"type": "event_msg", "payload": {"type": "tool_call", "tool_name": "shell", "command": ["cat", "artifact.json"]}}))
         print(json.dumps({"type": "event_msg", "payload": {"type": "tool_result", "tool_name": "shell", "content": "x" * 2048}}))
@@ -254,12 +301,72 @@ def compact_spec(tmp: Path, *, stage: str, agent_role: str, task_name: str) -> d
         "persona": f"prompts/{agent_role}.md",
         "review_format": "prompts/analyst-review-format.md",
     }
+    if stage == "judge-review":
+        payload["artifact_paths"]["debate_artifact"] = str(
+            tmp / "reports" / "runs" / "self-test" / "judge-debate.json"
+        )
     payload["symbol_ids"] = ["005930", {"symbol_id": "000660"}, "005930"]
+    return payload
+
+
+def compact_debate_spec(
+    tmp: Path,
+    *,
+    side: str,
+    phase: str,
+    task_name: str,
+    session_id: str = "",
+) -> dict[str, Any]:
+    run_dir = tmp / "reports" / "runs" / "self-test"
+    payload = {
+        "run_id": "self-test",
+        "started_at": "2026-06-08T09:00:00+09:00",
+        "stage": "judge-debate",
+        "agent_role": f"debate-{side}",
+        "task_name": task_name,
+        "debate_phase": phase,
+        "workspace_dir": str(tmp),
+        "output_dir": str(run_dir),
+        "artifact_paths": {
+            "persona": f"prompts/debate-{side}.md",
+            "debate_format": "prompts/debate-format.md",
+        },
+        "symbol_ids": ["005930", "000660"],
+        "candidate_directions": {"005930": "buy", "000660": "sell"},
+    }
+    if phase == "opening":
+        payload["artifact_paths"].update(
+            {
+                "decision_brief": str(run_dir / "decision-brief.json"),
+                "analyst_review": str(run_dir / "analyst-review.json"),
+            }
+        )
+    else:
+        opponent = "bear" if side == "bull" else "bull"
+        previous_phase = "opening" if phase == "rebuttal-1" else "rebuttal-1"
+        payload["resume_session_id"] = session_id
+        payload["artifact_paths"].update(
+            {
+                "own_previous_turn": str(run_dir / "subagents" / f"debate-{side}-{previous_phase}.raw.txt"),
+                "opponent_previous_turn": str(run_dir / "subagents" / f"debate-{opponent}-{previous_phase}.raw.txt"),
+            }
+        )
     return payload
 
 
 def write_sample_review_inputs(tmp: Path) -> None:
     run_dir = tmp / "reports" / "runs" / "self-test"
+    write_json(
+        run_dir / "judge-debate.json",
+        {
+            "schema_version": "1",
+            "run_id": "self-test",
+            "stage": "judge-debate",
+            "status": "success",
+            "phases": [],
+            "errors": [],
+        },
+    )
     write_json(
         run_dir / "execution.json",
         {
@@ -511,10 +618,10 @@ def assert_compact_review_prompt(tmp: Path) -> None:
         "final_first_score is the simple mean of the included analyst view scores",
         "For held sell candidates, an intact long-term thesis favors holding despite the low score",
         "Use strategy_context and symbol_strategy_context as advisory inputs for target_position_value_krw, not as order allow/block rules.",
-        "Debate sub-agents: spawn the bull/bear debate sub-agents required by the judge persona",
-        "Debate procedure: one base round (bull case, bear case, bull rebuttal, bear rebuttal) over all candidates in batch",
-        "hard stop after two rounds",
-        "if they balance or evidence is insufficient, hold at the baseline",
+        "debate_artifact:",
+        "The Python pipeline already completed the fixed bull/bear opening, rebuttal-1, and rebuttal-2 closing turns.",
+        "Do not spawn or resume debate agents and do not request another round.",
+        "If debate_artifact status is incomplete, or if the completed debate remains balanced or directionally insufficient, hold at the baseline.",
         "Optional evidence marked missing, failed, empty, unavailable, or excluded_from_aggregation is non-directional",
         "Do not infer safety, risk, favorable news, thesis integrity, or thesis damage from the absence of optional evidence.",
         "Do not use optional-domain coverage counts or completeness to decide evidence sufficiency",
@@ -526,6 +633,40 @@ def assert_compact_review_prompt(tmp: Path) -> None:
     missing = [part for part in second_required_parts if part not in second_prompt]
     if missing:
         raise AssertionError(f"compact judge-review prompt missing {missing}: {second_prompt}")
+    if "spawn the bull/bear" in second_prompt or "hard stop after two rounds" in second_prompt:
+        raise AssertionError(f"judge prompt still owns debate orchestration: {second_prompt}")
+
+    opening_prompt = build_prompt(
+        compact_debate_spec(
+            tmp,
+            side="bull",
+            phase="opening",
+            task_name="debate-bull-opening",
+        )
+    )
+    opening_required = [
+        "stage: judge-debate",
+        "debate_phase: opening",
+        "debate_side: bull",
+        "persona: prompts/debate-bull.md",
+        "debate_format: prompts/debate-format.md",
+        "Opening: independently present the strongest supported case",
+        "Every argument.kind must be claim",
+    ]
+    missing = [part for part in opening_required if part not in opening_prompt]
+    if missing:
+        raise AssertionError(f"compact opening prompt missing {missing}: {opening_prompt}")
+    rebuttal_prompt = build_prompt(
+        compact_debate_spec(
+            tmp,
+            side="bull",
+            phase="rebuttal-1",
+            task_name="debate-bull-rebuttal-1",
+            session_id="00000000-0000-4000-8000-000000000001",
+        )
+    )
+    if "resume_session_id: 00000000-0000-4000-8000-000000000001" not in rebuttal_prompt or "Every argument.kind must be rebuttal" not in rebuttal_prompt:
+        raise AssertionError(f"compact resumed rebuttal prompt missing session contract: {rebuttal_prompt}")
     banded_spec = compact_spec(tmp, stage="judge-review", agent_role="judge", task_name="second-banded")
     banded_spec["candidate_directions"] = {"005930": "sell", "000660": "buy"}
     banded_spec["score_band_thresholds"] = {"sell_below": 4.0, "buy_above": 6.0}
@@ -807,6 +948,21 @@ def run_self_test() -> int:
                 )
                 missing_analyst_review["artifact_paths"].pop("analyst_review")
                 assert_invalid_spec(missing_analyst_review, "artifact_paths.analyst_review")
+                missing_debate_artifact = compact_spec(
+                    tmp,
+                    stage="judge-review",
+                    agent_role="judge",
+                    task_name="missing-debate-artifact",
+                )
+                missing_debate_artifact["artifact_paths"].pop("debate_artifact")
+                assert_invalid_spec(missing_debate_artifact, "artifact_paths.debate_artifact")
+                missing_resume = compact_debate_spec(
+                    tmp,
+                    side="bull",
+                    phase="rebuttal-1",
+                    task_name="missing-resume",
+                )
+                assert_invalid_spec(missing_resume, "resume_session_id")
                 assert_invalid_spec(
                     compact_spec(
                         tmp,
@@ -1160,6 +1316,70 @@ def run_self_test() -> int:
             ):
                 failures.append(f"custom wrapper omitted explicit model provenance: {custom_wrapper}")
             os.environ.pop(RUNTIME_CONFIG_ENV, None)
+
+            write_sample_review_inputs(tmp)
+            opening_specs = [
+                compact_debate_spec(
+                    tmp,
+                    side=side,
+                    phase="opening",
+                    task_name=f"debate-{side}-opening",
+                )
+                for side in ("bull", "bear")
+            ]
+            opening_group = run_group(opening_specs, max_workers=2)
+            if opening_group.get("status") != "success" or len(opening_group.get("wrappers") or []) != 2:
+                failures.append(f"persistent debate opening group failed: {opening_group}")
+            opening_by_side = {
+                wrapper.get("agent_role", "").removeprefix("debate-"): wrapper
+                for wrapper in opening_group.get("wrappers", [])
+            }
+            expected_session_ids = {
+                "bull": "00000000-0000-4000-8000-000000000001",
+                "bear": "00000000-0000-4000-8000-000000000002",
+            }
+            if {side: wrapper.get("session_id") for side, wrapper in opening_by_side.items()} != expected_session_ids:
+                failures.append(f"opening did not capture stable debate session ids: {opening_by_side}")
+            previous_by_side = opening_by_side
+            for phase in ("rebuttal-1", "rebuttal-2"):
+                phase_specs = []
+                for side in ("bull", "bear"):
+                    opponent = "bear" if side == "bull" else "bull"
+                    phase_spec = compact_debate_spec(
+                        tmp,
+                        side=side,
+                        phase=phase,
+                        task_name=f"debate-{side}-{phase}",
+                        session_id=expected_session_ids[side],
+                    )
+                    phase_spec["artifact_paths"]["own_previous_turn"] = previous_by_side[side]["raw_output_path"]
+                    phase_spec["artifact_paths"]["opponent_previous_turn"] = previous_by_side[opponent]["raw_output_path"]
+                    phase_specs.append(phase_spec)
+                phase_group = run_group(phase_specs, max_workers=2)
+                if phase_group.get("status") != "success":
+                    failures.append(f"persistent debate {phase} group failed: {phase_group}")
+                    break
+                phase_by_side = {
+                    wrapper.get("agent_role", "").removeprefix("debate-"): wrapper
+                    for wrapper in phase_group.get("wrappers", [])
+                }
+                if any(
+                    wrapper.get("session_id") != expected_session_ids.get(side)
+                    or wrapper.get("resume_session_id") != expected_session_ids.get(side)
+                    or wrapper.get("event_retention") != "always"
+                    or not wrapper.get("event_log_retained")
+                    for side, wrapper in phase_by_side.items()
+                ):
+                    failures.append(f"{phase} did not resume and retain the original sessions: {phase_by_side}")
+                previous_by_side = phase_by_side
+            debate_argv = [
+                json.loads(line)
+                for line in argv_log.read_text(encoding="utf-8").splitlines()
+                if "stage: judge-debate" in line
+            ]
+            resume_argv = [argv for argv in debate_argv if "resume" in argv]
+            if len(debate_argv) != 6 or len(resume_argv) != 4:
+                failures.append(f"fixed debate should use 2 openings and 4 resumed turns: {debate_argv}")
 
             write_sample_review_inputs(tmp)
             compact_wrapper = run_one(

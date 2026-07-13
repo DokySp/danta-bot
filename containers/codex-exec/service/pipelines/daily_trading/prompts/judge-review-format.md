@@ -4,7 +4,7 @@
 
 Review agents use only supplied immutable artifacts, persona text, and this format. They may use read-only local shell commands such as `cat` and `jq` only for explicitly listed artifact/persona/rule files. They must not call KIS, MCP, web, network, account/order APIs, or external data sources; read unrelated files; recollect; write files; or write canonical artifacts.
 
-Debate exception: the judge may spawn bull/bear debate sub-agents as described in `judge.md`. Spawned debate sub-agents inherit every restriction above (no KIS/MCP/web/network, no file writes, listed files only) and their transcripts are never part of the returned JSON.
+Debate boundary: the Python pipeline runs persistent bull/bear sessions before judge-review and supplies one normalized `debate_artifact`. The judge must not spawn or resume debate agents, request another round, or include debate transcripts in the returned JSON.
 
 Review agents return compact JSON only. They must not emit Markdown, diffs, code fences, long prose, raw artifact excerpts, or raw source payloads. `human_markdown_path` is informational only; the Main agent creates one human-review Markdown sidecar from parsed JSON:
 

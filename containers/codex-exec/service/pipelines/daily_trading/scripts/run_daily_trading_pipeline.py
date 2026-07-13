@@ -34,6 +34,9 @@ ANALYST_REVIEW_ROLES = (
     "analyst-quality-risk",
     "analyst-momentum-news",
 )
+DEBATE_SIDES = ("bull", "bear")
+DEBATE_PHASES = ("opening", "rebuttal-1", "rebuttal-2")
+DEBATE_MAX_ATTEMPTS = 2
 COMMAND_OUTPUT_LIMIT = 2000
 ORDER_PATH_AUTO = "auto"
 REGULAR_ORDER_START_MINUTE = 9 * 60
@@ -1112,6 +1115,282 @@ class Pipeline:
         self.add_stage("analyst-review", "failed", detail="required analyst-review wrapper failed", path=self.command_log_path)
         raise RuntimeError("analyst-review failed")
 
+    def build_debate_turn_spec(
+        self,
+        judge_spec: dict[str, Any],
+        *,
+        side: str,
+        phase: str,
+        attempt: int,
+        session_id: str = "",
+        own_previous: dict[str, Any] | None = None,
+        opponent_previous: dict[str, Any] | None = None,
+        retry_of_task_name: str = "",
+    ) -> dict[str, Any]:
+        judge_artifacts = judge_spec.get("artifact_paths") if isinstance(judge_spec.get("artifact_paths"), dict) else {}
+        persona_key = f"debate_{side}_persona"
+        artifacts = {
+            "persona": str(judge_artifacts.get(persona_key) or ""),
+            "debate_format": str(judge_artifacts.get("debate_format") or ""),
+        }
+        if phase == "opening":
+            artifacts.update(
+                {
+                    "decision_brief": str(judge_artifacts.get("decision_brief") or ""),
+                    "analyst_review": str(judge_artifacts.get("analyst_review") or ""),
+                }
+            )
+        else:
+            artifacts.update(
+                {
+                    "own_previous_turn": str((own_previous or {}).get("raw_output_path") or ""),
+                    "opponent_previous_turn": str((opponent_previous or {}).get("raw_output_path") or ""),
+                }
+            )
+        task_name = f"judge-debate-{side}-{phase}-attempt-{attempt:02d}"
+        spec: dict[str, Any] = {
+            "run_id": self.run_id,
+            "started_at": self.started_at,
+            "stage": "judge-debate",
+            "agent_role": f"debate-{side}",
+            "task_name": task_name,
+            "debate_phase": phase,
+            "workspace_dir": str(self.workspace_dir),
+            "output_dir": str(self.output_dir),
+            "artifact_paths": artifacts,
+            "symbol_ids": normalize_symbol_ids(judge_spec.get("symbol_ids")),
+            "candidate_directions": dict(judge_spec.get("candidate_directions") or {}),
+            "portfolio_snapshot": list(judge_spec.get("portfolio_snapshot") or []),
+        }
+        if session_id:
+            spec["resume_session_id"] = session_id
+        if retry_of_task_name:
+            spec["retry_of_task_name"] = retry_of_task_name
+        if isinstance(judge_spec.get("extra_instructions"), list) and judge_spec["extra_instructions"]:
+            spec["extra_instructions"] = list(judge_spec["extra_instructions"])
+        return spec
+
+    def debate_wrapper_summary(self, wrapper: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "status": str(wrapper.get("status") or "failed"),
+            "task_name": str(wrapper.get("task_name") or ""),
+            "agent_role": str(wrapper.get("agent_role") or ""),
+            "debate_phase": str(wrapper.get("debate_phase") or ""),
+            "session_id": str(wrapper.get("session_id") or ""),
+            "resume_session_id": str(wrapper.get("resume_session_id") or ""),
+            "reported_session_id": str(wrapper.get("reported_session_id") or ""),
+            "wrapper_path": str(wrapper.get("wrapper_path") or ""),
+            "raw_output_path": str(wrapper.get("raw_output_path") or ""),
+            "event_log_path": str(wrapper.get("event_log_path") or ""),
+            "event_log_retained": bool(wrapper.get("event_log_retained")),
+            "spec_fingerprint": str(wrapper.get("spec_fingerprint") or ""),
+            "errors": wrapper.get("errors") if isinstance(wrapper.get("errors"), list) else [],
+        }
+
+    def run_debate_phase(
+        self,
+        judge_spec: dict[str, Any],
+        *,
+        phase: str,
+        session_ids: dict[str, str],
+        previous_wrappers: dict[str, dict[str, Any]],
+    ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+        successful: dict[str, dict[str, Any]] = {}
+        latest: dict[str, dict[str, Any]] = {}
+        attempt_history: dict[str, list[dict[str, Any]]] = {side: [] for side in DEBATE_SIDES}
+        retry_of: dict[str, str] = {}
+
+        for attempt in range(1, DEBATE_MAX_ATTEMPTS + 1):
+            pending = [side for side in DEBATE_SIDES if side not in successful]
+            if not pending:
+                break
+            specs: list[dict[str, Any]] = []
+            for side in pending:
+                opponent = "bear" if side == "bull" else "bull"
+                specs.append(
+                    self.build_debate_turn_spec(
+                        judge_spec,
+                        side=side,
+                        phase=phase,
+                        attempt=attempt,
+                        session_id=session_ids.get(side, ""),
+                        own_previous=previous_wrappers.get(side),
+                        opponent_previous=previous_wrappers.get(opponent),
+                        retry_of_task_name=retry_of.get(side, ""),
+                    )
+                )
+            specs_path = self.output_dir / "debate" / f"{phase}.attempt-{attempt:02d}.specs.json"
+            write_json(
+                specs_path,
+                {
+                    "schema_version": "1",
+                    "run_id": self.run_id,
+                    "phase": phase,
+                    "attempt": attempt,
+                    "specs": specs,
+                },
+            )
+            result = self.run_cmd(
+                f"judge-debate-{phase}-attempt-{attempt:02d}",
+                [
+                    sys.executable,
+                    self.subagent_script(),
+                    "run-group",
+                    "--spec",
+                    str(specs_path),
+                    "--max-workers",
+                    str(min(2, max(1, self.args.max_workers))),
+                ],
+                required=False,
+            )
+            try:
+                group = json.loads(result.stdout)
+            except json.JSONDecodeError:
+                group = {}
+            wrappers = group.get("wrappers") if isinstance(group.get("wrappers"), list) else []
+            wrappers_by_side = {
+                str(wrapper.get("agent_role") or "").removeprefix("debate-"): wrapper
+                for wrapper in wrappers
+                if isinstance(wrapper, dict)
+            }
+            for side in pending:
+                wrapper = wrappers_by_side.get(side) or {
+                    "status": "failed",
+                    "stage": "judge-debate",
+                    "agent_role": f"debate-{side}",
+                    "task_name": f"judge-debate-{side}-{phase}-attempt-{attempt:02d}",
+                    "debate_phase": phase,
+                    "errors": [
+                        {
+                            "code": "missing_debate_wrapper",
+                            "message": f"{side} {phase} did not return a wrapper",
+                        }
+                    ],
+                }
+                latest[side] = wrapper
+                attempt_history[side].append(self.debate_wrapper_summary(wrapper))
+                returned_session_id = str(wrapper.get("session_id") or "").strip()
+                current_session_id = session_ids.get(side, "")
+                if returned_session_id and (not current_session_id or returned_session_id == current_session_id):
+                    session_ids[side] = returned_session_id
+                if wrapper.get("status") == "success" and returned_session_id:
+                    successful[side] = wrapper
+                else:
+                    retry_of[side] = str(wrapper.get("task_name") or "")
+
+        missing = [side for side in DEBATE_SIDES if side not in successful]
+        errors: list[dict[str, Any]] = []
+        for side in missing:
+            errors.append(
+                {
+                    "stage": "judge-debate",
+                    "phase": phase,
+                    "side": side,
+                    "code": "debate_side_failed",
+                    "message": f"{side} failed {phase} after {DEBATE_MAX_ATTEMPTS} attempts",
+                    "required": False,
+                }
+            )
+        phase_artifact = {
+            "schema_version": "1",
+            "run_id": self.run_id,
+            "started_at": self.started_at,
+            "generated_at": now_iso(),
+            "stage": "judge-debate",
+            "phase": phase,
+            "status": "success" if not missing else "incomplete",
+            "session_ids": dict(session_ids),
+            "sides": {
+                side: {
+                    **self.debate_wrapper_summary(successful.get(side) or latest.get(side) or {}),
+                    "attempts": attempt_history[side],
+                    "output": (successful.get(side) or {}).get("parsed_json"),
+                }
+                for side in DEBATE_SIDES
+            },
+            "errors": errors,
+        }
+        phase_path = self.output_dir / "debate" / f"{phase}.json"
+        write_json(phase_path, phase_artifact)
+        return phase_artifact, successful
+
+    def run_judge_debate(self) -> dict[str, Any]:
+        spec = load_json(self.output_dir / "judge-review-spec.json")
+        symbols = normalize_symbol_ids(spec.get("symbol_ids"))
+        artifact_path = self.output_dir / "judge-debate.json"
+        if not symbols:
+            artifact = {
+                "schema_version": "1",
+                "run_id": self.run_id,
+                "started_at": self.started_at,
+                "generated_at": now_iso(),
+                "stage": "judge-debate",
+                "status": "success",
+                "skipped": True,
+                "skip_reason": "no selected symbols",
+                "flow": list(DEBATE_PHASES),
+                "session_ids": {},
+                "phases": [],
+                "errors": [],
+            }
+            write_json(artifact_path, artifact)
+            self.add_stage("judge-debate", "skipped", detail="no selected symbols", required=False, path=artifact_path)
+            return artifact
+
+        aggregate: dict[str, Any] = {
+            "schema_version": "1",
+            "run_id": self.run_id,
+            "started_at": self.started_at,
+            "generated_at": now_iso(),
+            "stage": "judge-debate",
+            "status": "running",
+            "skipped": False,
+            "skip_reason": "",
+            "flow": list(DEBATE_PHASES),
+            "symbol_ids": symbols,
+            "session_ids": {},
+            "phases": [],
+            "errors": [],
+        }
+        write_json(artifact_path, aggregate)
+        session_ids: dict[str, str] = {}
+        previous_wrappers: dict[str, dict[str, Any]] = {}
+        for phase in DEBATE_PHASES:
+            phase_artifact, successful = self.run_debate_phase(
+                spec,
+                phase=phase,
+                session_ids=session_ids,
+                previous_wrappers=previous_wrappers,
+            )
+            aggregate["generated_at"] = now_iso()
+            aggregate["session_ids"] = dict(session_ids)
+            aggregate["phases"].append(phase_artifact)
+            aggregate["errors"].extend(phase_artifact.get("errors") or [])
+            if phase_artifact.get("status") != "success":
+                aggregate["status"] = "incomplete"
+                write_json(artifact_path, aggregate)
+                self.add_stage(
+                    f"judge-debate-{phase}",
+                    "partial",
+                    detail="one or both persistent debate sessions failed after retry",
+                    path=self.output_dir / "debate" / f"{phase}.json",
+                )
+                self.add_stage("judge-debate", "partial", detail=f"stopped after incomplete {phase}", path=artifact_path)
+                return aggregate
+            self.add_stage(
+                f"judge-debate-{phase}",
+                "success",
+                detail="bull and bear sessions completed wait_all barrier",
+                path=self.output_dir / "debate" / f"{phase}.json",
+            )
+            previous_wrappers = successful
+            write_json(artifact_path, aggregate)
+        aggregate["status"] = "success"
+        aggregate["generated_at"] = now_iso()
+        write_json(artifact_path, aggregate)
+        self.add_stage("judge-debate", "success", detail="fixed opening/rebuttal-1/rebuttal-2 flow completed", path=artifact_path)
+        return aggregate
+
     def run_judge_review(self) -> None:
         spec_path = self.output_dir / "judge-review-spec.json"
         spec = load_json(spec_path)
@@ -1215,6 +1494,7 @@ class Pipeline:
         item: dict[str, Any],
         context: dict[str, Any],
         candidate_direction: str = "",
+        force_baseline: bool = False,
     ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
         symbol_id = symbol_key(item)
         errors: list[dict[str, Any]] = []
@@ -1257,6 +1537,8 @@ class Pipeline:
             holding_context = item.get("holding_quantity_context") or {}
         expected_qty = as_int(holding_context.get("expected_holding_quantity"))
         baseline_value = Decimal(expected_qty) * price
+        if force_baseline:
+            target_value = baseline_value
         if candidate_direction == "sell" and target_value > baseline_value:
             errors.append(
                 {
@@ -1311,8 +1593,16 @@ class Pipeline:
             "baseline_position_value_krw": decimal_json_value(baseline_value),
             "final_holding_quantity": round_half_up_quantity(target_value, price),
             "relative_attractiveness_rank": as_int(item.get("relative_attractiveness_rank")),
-            "reason_code": safe_name(str(item.get("reason_code") or "hold_neutral")).lower(),
-            "one_line_reason": str(item.get("one_line_reason") or "")[:300],
+            "reason_code": (
+                "hold_debate_incomplete"
+                if force_baseline
+                else safe_name(str(item.get("reason_code") or "hold_neutral")).lower()
+            ),
+            "one_line_reason": (
+                "Bull/Bear 고정 토론이 불완전하여 기준 노출을 유지한다."
+                if force_baseline
+                else str(item.get("one_line_reason") or "")[:300]
+            ),
         }
         if additional_buy_reason:
             normalized["additional_buy_reason"] = additional_buy_reason[:300]
@@ -1324,6 +1614,19 @@ class Pipeline:
         errors = wrapper.get("errors") if isinstance(wrapper.get("errors"), list) else []
         context_by_symbol = self.judge_review_context_by_symbol(wrapper)
         spec = load_json_if_exists(self.output_dir / "judge-review-spec.json") or {}
+        debate = load_json_if_exists(self.output_dir / "judge-debate.json") or {}
+        debate_status = str(debate.get("status") or "")
+        force_baseline = debate_status != "success"
+        if force_baseline:
+            errors.append(
+                {
+                    "stage": "judge-review",
+                    "source": "pipeline",
+                    "code": "debate_incomplete_baseline_forced",
+                    "message": "judge-debate did not complete, so selected symbols are forced to baseline exposure",
+                    "required": False,
+                }
+            )
         candidate_directions = spec.get("candidate_directions") if isinstance(spec.get("candidate_directions"), dict) else {}
         allowed_symbols = set(normalize_symbol_ids(spec.get("symbol_ids"))) if isinstance(spec.get("symbol_ids"), list) else set()
         for item in parsed.get("symbols", []):
@@ -1347,6 +1650,7 @@ class Pipeline:
                 item,
                 context_by_symbol.get(symbol_id, {}),
                 str(candidate_directions.get(symbol_id) or ""),
+                force_baseline=force_baseline,
             )
             errors.extend(item_errors)
             if normalized is None:
@@ -1603,9 +1907,12 @@ class Pipeline:
         candidate_directions = spec.get("candidate_directions") if isinstance(spec.get("candidate_directions"), dict) else {}
         directions = [str(value) for value in candidate_directions.values()]
         analyst_review = load_json_if_exists(self.output_dir / "analyst-review.json") or {}
+        judge_debate = load_json_if_exists(self.output_dir / "judge-debate.json") or {}
         scored_count = len(analyst_review.get("symbols", [])) if isinstance(analyst_review.get("symbols"), list) else 0
         return {
             "status": judge_review.get("status"),
+            "debate_status": judge_debate.get("status"),
+            "debate_phase_count": len(judge_debate.get("phases", [])) if isinstance(judge_debate.get("phases"), list) else 0,
             "symbol_count": len(rows),
             "submitted_order_count": len(submitted),
             "sell_candidate_count": directions.count("sell"),
@@ -1887,6 +2194,7 @@ class Pipeline:
                 f"- 보존된 partial / failed 아티팩트: {sum(1 for item in stages if isinstance(item, dict) and item.get('status') in {'partial', 'failed'})}",
                 f"- pipeline-summary.json: {summary.get('summary_path', '')}",
                 f"- decision-brief.json: {(summary.get('artifacts') or {}).get('decision_brief', '')}",
+                f"- judge-debate.json: {(summary.get('artifacts') or {}).get('judge_debate', '')}",
                 f"- judge-review.json: {(summary.get('artifacts') or {}).get('judge_review', '')}",
                 f"- execution.json: {(summary.get('artifacts') or {}).get('execution', '')}",
                 f"- 총 사용 토큰: {format_number(token_total)}",
@@ -2030,6 +2338,7 @@ class Pipeline:
                 "today_fills": str(self.output_dir / "today-fills.json"),
                 "decision_brief": str(self.output_dir / "decision-brief.json"),
                 "analyst_review": str(self.output_dir / "analyst-review.json"),
+                "judge_debate": str(self.output_dir / "judge-debate.json"),
                 "judge_review": str(self.output_dir / "judge-review.json"),
                 "execution": str(self.output_dir / "execution.json"),
                 "token_summary": str(self.output_dir / "token-summary.json"),
@@ -2162,6 +2471,7 @@ class Pipeline:
             ],
         )
         self.add_stage("second-spec", "success", detail="built judge-review spec", path=self.output_dir / "judge-review-spec.json")
+        self.run_judge_debate()
         self.run_judge_review()
 
         execution = self.run_artifact_command(

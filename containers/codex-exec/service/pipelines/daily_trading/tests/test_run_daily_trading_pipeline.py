@@ -13,6 +13,7 @@ import unittest
 from pathlib import Path
 
 from ..scripts.run_daily_trading_pipeline import (
+    DEBATE_SIDES,
     ORDER_PATH_AUTO,
     STRATEGY_POLICY_CONFIG_ENV,
     STRATEGY_POLICY_CONFIG_FILENAME,
@@ -52,9 +53,22 @@ for index, arg in enumerate(sys.argv):
 if output_path is None:
     print("missing -o", file=sys.stderr)
     sys.exit(2)
+task_name = output_path.name.removesuffix(".raw.txt")
+fail_once_tasks = {value.strip() for value in os.environ.get("FAKE_CODEX_FAIL_ONCE_TASKS", "").split(",") if value.strip()}
+fail_state_dir = Path(os.environ.get("FAKE_CODEX_FAIL_STATE_DIR", output_path.parent))
+fail_marker = fail_state_dir / f"{task_name}.failed-once"
+fail_output = task_name in fail_once_tasks and not fail_marker.exists()
+if fail_output:
+    fail_marker.parent.mkdir(parents=True, exist_ok=True)
+    fail_marker.write_text("failed", encoding="utf-8")
 
 prompt = sys.argv[-1] if sys.argv else ""
-stage = "judge-review" if "stage: judge-review" in prompt else "analyst-review"
+if "stage: judge-debate" in prompt:
+    stage = "judge-debate"
+elif "stage: judge-review" in prompt:
+    stage = "judge-review"
+else:
+    stage = "analyst-review"
 agent_role = ""
 role_match = re.search(r"agent_role:\\s*([^\\n]+)", prompt)
 if role_match:
@@ -63,7 +77,27 @@ match = re.search(r"symbol_ids:\\s*([^\\n]+)", prompt)
 symbols = [item.strip() for item in (match.group(1).split(",") if match else ["005930"]) if item.strip()]
 rows = []
 for index, symbol in enumerate(symbols, start=1):
-    if stage == "judge-review":
+    if stage == "judge-debate":
+        phase = next((value for value in ("opening", "rebuttal-1", "rebuttal-2") if f"debate_phase: {value}" in prompt), "opening")
+        side = "bull" if agent_role == "debate-bull" else "bear"
+        opponent = "bear" if side == "bull" else "bull"
+        target_phase = "opening" if phase == "rebuttal-1" else "rebuttal-1"
+        kind = {"opening": "claim", "rebuttal-1": "rebuttal", "rebuttal-2": "closing"}[phase]
+        rows.append({
+            "symbol_id": symbol,
+            "symbol_name": symbol,
+            "arguments": [{
+                "argument_id": f"{symbol}-{side}-{phase}-1",
+                "kind": kind,
+                "targets": [] if phase == "opening" else [f"{symbol}-{opponent}-{target_phase}-1"],
+                "statement": f"{side} {phase} self-test",
+                "evidence_refs": [f"decision-brief:{symbol}:price"]
+            }],
+            "concessions": [],
+            "unresolved_conflicts": [] if phase != "rebuttal-2" else ["self-test conflict"],
+            "final_position": "" if phase != "rebuttal-2" else f"{side} final position"
+        })
+    elif stage == "judge-review":
         rows.append({
             "symbol_id": symbol,
             "symbol_name": symbol,
@@ -117,10 +151,29 @@ for index, symbol in enumerate(symbols, start=1):
                 "missing_data": []
             })
         rows.append(row)
-payload = {"stage": stage, "agent_id": "fake", "persona": "fake", "human_markdown_path": "", "symbols": rows, "errors": []}
+if stage == "judge-debate":
+    payload = {
+        "stage": stage,
+        "phase": phase,
+        "side": side,
+        "symbols": rows,
+        "errors": []
+    }
+else:
+    payload = {"stage": stage, "agent_id": "fake", "persona": "fake", "human_markdown_path": "", "symbols": rows, "errors": []}
 output_path.parent.mkdir(parents=True, exist_ok=True)
-output_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+output_path.write_text("" if fail_output else json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 if "--json" in sys.argv:
+    if agent_role == "debate-bull":
+        thread_id = "00000000-0000-4000-8000-000000000001"
+    elif agent_role == "debate-bear":
+        thread_id = "00000000-0000-4000-8000-000000000002"
+    else:
+        thread_id = "00000000-0000-4000-8000-000000000099"
+    thread_id_overrides = json.loads(os.environ.get("FAKE_CODEX_THREAD_ID_OVERRIDES", "{}"))
+    if isinstance(thread_id_overrides, dict) and task_name in thread_id_overrides:
+        thread_id = str(thread_id_overrides[task_name])
+    print(json.dumps({"type": "thread.started", "thread_id": thread_id}))
     print(json.dumps({
         "type": "event_msg",
         "payload": {
@@ -677,6 +730,10 @@ def run_self_test() -> int:
                 max_workers=3,
             )
         )
+        write_json(
+            half_up_dir / "judge-debate.json",
+            {"schema_version": "1", "stage": "judge-debate", "status": "success", "phases": []},
+        )
         half_up_pipeline.write_judge_review(
             {
                 "stage": "judge-review",
@@ -709,6 +766,30 @@ def run_self_test() -> int:
         half_up_symbol = (half_up_review.get("symbols") or [{}])[0]
         if half_up_symbol.get("final_holding_quantity") != 2:
             failures.append(f"Decimal ROUND_HALF_UP did not derive 1.5 shares as 2 and ignore judge final quantity: {half_up_symbol}")
+        forced_baseline, forced_errors = half_up_pipeline.derive_judge_final_quantity(
+            {
+                "symbol_id": "005930",
+                "symbol_name": "삼성전자",
+                "target_position_value_krw": 210000,
+                "relative_attractiveness_rank": 1,
+                "reason_code": "increase_target",
+                "one_line_reason": "must be overridden",
+            },
+            {
+                "price": {"current_or_last": 70000},
+                "holding_quantity_context": {"expected_holding_quantity": 1},
+                "today_trade_timeline_context": {"collection_status": "complete", "has_same_day_buy": False},
+            },
+            "buy",
+            force_baseline=True,
+        )
+        if (
+            forced_errors
+            or forced_baseline is None
+            or forced_baseline.get("target_position_value_krw") != 70000
+            or forced_baseline.get("reason_code") != "hold_debate_incomplete"
+        ):
+            failures.append(f"incomplete debate did not force deterministic baseline exposure: {forced_baseline} {forced_errors}")
         same_day_dir = workspace / "reports" / "runs" / "same-day-buy-probe"
         same_day_dir.mkdir(parents=True, exist_ok=True)
         same_day_pipeline = Pipeline(
@@ -729,6 +810,10 @@ def run_self_test() -> int:
                 skip_account=False,
                 max_workers=3,
             )
+        )
+        write_json(
+            same_day_dir / "judge-debate.json",
+            {"schema_version": "1", "stage": "judge-debate", "status": "success", "phases": []},
         )
         same_day_pipeline.write_judge_review(
             {
@@ -815,6 +900,10 @@ def run_self_test() -> int:
                 skip_account=False,
                 max_workers=3,
             )
+        )
+        write_json(
+            invalid_dir / "judge-debate.json",
+            {"schema_version": "1", "stage": "judge-debate", "status": "success", "phases": []},
         )
         invalid_pipeline.write_judge_review(
             {
@@ -959,6 +1048,42 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
             if order_path_selection.get("resolved") != "immediate" or order_path_selection.get("reason") != "auto_regular_session":
                 failures.append(f"pipeline did not resolve auto order path to immediate: {order_path_selection}")
             command_log = load_json(run_dir / "pipeline-command-log.json")
+            debate_artifact = load_json(run_dir / "judge-debate.json")
+            debate_phases = debate_artifact.get("phases") if isinstance(debate_artifact.get("phases"), list) else []
+            if debate_artifact.get("status") != "success" or [item.get("phase") for item in debate_phases] != [
+                "opening",
+                "rebuttal-1",
+                "rebuttal-2",
+            ]:
+                failures.append(f"pipeline did not complete the fixed debate barriers: {debate_artifact}")
+            expected_debate_sessions = {
+                "bull": "00000000-0000-4000-8000-000000000001",
+                "bear": "00000000-0000-4000-8000-000000000002",
+            }
+            if debate_artifact.get("session_ids") != expected_debate_sessions:
+                failures.append(f"pipeline did not preserve opening debate sessions: {debate_artifact.get('session_ids')}")
+            for phase_item in debate_phases:
+                for side in DEBATE_SIDES:
+                    side_item = ((phase_item.get("sides") or {}).get(side) or {})
+                    if (
+                        side_item.get("session_id") != expected_debate_sessions[side]
+                        or not side_item.get("event_log_retained")
+                        or not Path(str(side_item.get("event_log_path") or "")).is_file()
+                    ):
+                        failures.append(f"{phase_item.get('phase')} {side} lost session/audit log continuity: {side_item}")
+                    if phase_item.get("phase") != "opening" and side_item.get("resume_session_id") != expected_debate_sessions[side]:
+                        failures.append(f"{phase_item.get('phase')} {side} did not resume opening session: {side_item}")
+            debate_stage_order = [
+                item.get("stage")
+                for item in command_log.get("commands", [])
+                if isinstance(item, dict) and str(item.get("stage") or "").startswith("judge-debate-")
+            ]
+            if debate_stage_order != [
+                "judge-debate-opening-attempt-01",
+                "judge-debate-rebuttal-1-attempt-01",
+                "judge-debate-rebuttal-2-attempt-01",
+            ]:
+                failures.append(f"debate wait barriers ran out of order or retried unexpectedly: {debate_stage_order}")
             decision_commands = [
                 item.get("command")
                 for item in command_log.get("commands", [])
@@ -985,13 +1110,15 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
                 failures.append(
                     "execution-plan did not fall back to decision-brief price for a new holding with missing account current_price"
                 )
-            if summary["token_usage"]["subagents"]["total_tokens"] != 360:
+            if summary["token_usage"]["subagents"]["total_tokens"] != 1080:
                 failures.append(f"unexpected subagent token total: {summary['token_usage']}")
-            if summary["token_usage"]["main"]["total_tokens"] != 17 or summary["token_usage"]["total"]["total_tokens"] != 377:
+            if summary["token_usage"]["main"]["total_tokens"] != 17 or summary["token_usage"]["total"]["total_tokens"] != 1097:
                 failures.append(f"unexpected pipeline token summary with main events: {summary['token_usage']}")
             review_summary = summary.get("review_summary") if isinstance(summary.get("review_summary"), dict) else {}
             if review_summary.get("symbol_count") != 1 or not review_summary.get("symbols"):
                 failures.append(f"pipeline summary omitted compact review summary: {review_summary}")
+            if review_summary.get("debate_status") != "success" or review_summary.get("debate_phase_count") != 3:
+                failures.append(f"pipeline summary omitted fixed debate status: {review_summary}")
             today_trade_summary = summary.get("today_trade_summary") if isinstance(summary.get("today_trade_summary"), dict) else {}
             if (
                 today_trade_summary.get("collection_status") != "complete"
@@ -1015,6 +1142,8 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
                 failures.append(f"pipeline summary omitted account asset artifact path: {artifacts}")
             if not str(artifacts.get("model_usage", "")).endswith("model-usage.jsonl"):
                 failures.append(f"pipeline summary omitted model usage artifact path: {artifacts}")
+            if not str(artifacts.get("judge_debate", "")).endswith("judge-debate.json"):
+                failures.append(f"pipeline summary omitted judge debate artifact path: {artifacts}")
             run_payload = load_json(run_dir / "run.json")
             if not str(run_payload.get("model_usage", "")).endswith("model-usage.jsonl"):
                 failures.append(f"run.json omitted model usage artifact path: {run_payload}")
@@ -1064,6 +1193,85 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
             read_policy = summary.get("main_agent_read_policy", "")
             if "execution-plan order_price values as the default limit price candidates" not in read_policy:
                 failures.append(f"pipeline summary read policy omitted default order_price guidance: {read_policy}")
+
+            retry_debate_dir = workspace / "reports" / "runs" / "debate-retry-probe"
+            retry_debate_dir.mkdir(parents=True, exist_ok=True)
+            retry_debate_spec = load_json(run_dir / "judge-review-spec.json")
+            retry_debate_spec["run_id"] = "debate-retry-probe"
+            retry_debate_spec["output_dir"] = str(retry_debate_dir)
+            retry_debate_spec["artifact_paths"]["debate_artifact"] = str(retry_debate_dir / "judge-debate.json")
+            write_json(retry_debate_dir / "judge-review-spec.json", retry_debate_spec)
+            retry_debate_pipeline = Pipeline(
+                argparse.Namespace(
+                    command="run",
+                    workspace_dir=str(workspace),
+                    output_dir=str(retry_debate_dir),
+                    run_id="debate-retry-probe",
+                    started_at="2026-06-18T09:00:00+09:00",
+                    env="acct",
+                    request_type="analysis",
+                    portfolio_json=str(portfolio_path),
+                    financial_cache_path="",
+                    news_cache_path="",
+                    main_events="",
+                    date="2026-06-18",
+                    reuse_existing_artifacts=True,
+                    skip_account=False,
+                    max_workers=2,
+                    strategy_policy_config=str(override_policy),
+                )
+            )
+            os.environ["FAKE_CODEX_FAIL_ONCE_TASKS"] = "judge-debate-bear-opening-attempt-01"
+            os.environ["FAKE_CODEX_FAIL_STATE_DIR"] = str(retry_debate_dir / "fake-state")
+            os.environ["FAKE_CODEX_THREAD_ID_OVERRIDES"] = json.dumps(
+                {
+                    "judge-debate-bear-rebuttal-1-attempt-01": "00000000-0000-4000-8000-000000000009",
+                }
+            )
+            try:
+                retry_debate = retry_debate_pipeline.run_judge_debate()
+            finally:
+                os.environ.pop("FAKE_CODEX_FAIL_ONCE_TASKS", None)
+                os.environ.pop("FAKE_CODEX_FAIL_STATE_DIR", None)
+                os.environ.pop("FAKE_CODEX_THREAD_ID_OVERRIDES", None)
+            retry_opening = (retry_debate.get("phases") or [{}])[0]
+            retry_opening_sides = retry_opening.get("sides") if isinstance(retry_opening.get("sides"), dict) else {}
+            if (
+                retry_debate.get("status") != "success"
+                or len((retry_opening_sides.get("bull") or {}).get("attempts") or []) != 1
+                or len((retry_opening_sides.get("bear") or {}).get("attempts") or []) != 2
+            ):
+                failures.append(f"debate retry did not preserve successful bull and retry only bear: {retry_debate}")
+            retry_specs = load_json(retry_debate_dir / "debate" / "opening.attempt-02.specs.json")
+            retry_specs_list = retry_specs.get("specs") if isinstance(retry_specs.get("specs"), list) else []
+            if (
+                len(retry_specs_list) != 1
+                or retry_specs_list[0].get("agent_role") != "debate-bear"
+                or retry_specs_list[0].get("resume_session_id") != "00000000-0000-4000-8000-000000000002"
+            ):
+                failures.append(f"debate retry did not resume only the failed bear session: {retry_specs}")
+            retry_phases = retry_debate.get("phases") if isinstance(retry_debate.get("phases"), list) else []
+            retry_rebuttal = retry_phases[1] if len(retry_phases) > 1 else {}
+            retry_rebuttal_sides = retry_rebuttal.get("sides") if isinstance(retry_rebuttal.get("sides"), dict) else {}
+            retry_bear_rebuttal = retry_rebuttal_sides.get("bear") or {}
+            retry_bear_attempts = retry_bear_rebuttal.get("attempts") or []
+            if (
+                len(retry_bear_attempts) != 2
+                or retry_bear_attempts[0].get("session_id") != "00000000-0000-4000-8000-000000000002"
+                or retry_bear_attempts[0].get("reported_session_id") != "00000000-0000-4000-8000-000000000009"
+            ):
+                failures.append(f"mismatched resumed thread id was not isolated from the persistent session: {retry_bear_rebuttal}")
+            retry_rebuttal_specs = load_json(retry_debate_dir / "debate" / "rebuttal-1.attempt-02.specs.json")
+            retry_rebuttal_specs_list = (
+                retry_rebuttal_specs.get("specs") if isinstance(retry_rebuttal_specs.get("specs"), list) else []
+            )
+            if (
+                len(retry_rebuttal_specs_list) != 1
+                or retry_rebuttal_specs_list[0].get("agent_role") != "debate-bear"
+                or retry_rebuttal_specs_list[0].get("resume_session_id") != "00000000-0000-4000-8000-000000000002"
+            ):
+                failures.append(f"mismatched resumed thread id replaced the opening session: {retry_rebuttal_specs}")
+
             fake_execute_orders = workspace / "fake-execute-orders.py"
             fake_execute_orders.write_text(
                 """#!/usr/bin/env python3

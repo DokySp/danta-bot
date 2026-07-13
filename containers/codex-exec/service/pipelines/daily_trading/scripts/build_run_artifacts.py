@@ -1662,6 +1662,8 @@ def build_second_spec(args: argparse.Namespace) -> dict[str, Any]:
             "review_format": artifact_path(daily_pipeline_dir / "prompts" / "judge-review-format.md", absolute_paths),
             "debate_bull_persona": artifact_path(daily_pipeline_dir / "prompts" / "debate-bull.md", absolute_paths),
             "debate_bear_persona": artifact_path(daily_pipeline_dir / "prompts" / "debate-bear.md", absolute_paths),
+            "debate_format": artifact_path(daily_pipeline_dir / "prompts" / "debate-format.md", absolute_paths),
+            "debate_artifact": artifact_path(output_dir / "judge-debate.json", absolute_paths),
         },
         "symbol_ids": selected,
         "candidate_directions": candidate_directions,

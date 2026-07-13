@@ -946,6 +946,11 @@ symbols:
                 debate_path = str(second_spec.get("artifact_paths", {}).get(debate_key, ""))
                 if debate_path.rsplit("/", 1)[-1] != debate_file or not Path(debate_path).is_file():
                     failures.append(f"judge spec missing readable {debate_key}: {second_spec}")
+            debate_format_path = str(second_spec.get("artifact_paths", {}).get("debate_format", ""))
+            if debate_format_path.rsplit("/", 1)[-1] != "debate-format.md" or not Path(debate_format_path).is_file():
+                failures.append(f"judge spec missing readable debate_format: {second_spec}")
+            if str(second_spec.get("artifact_paths", {}).get("debate_artifact", "")) != str(run_dir / "judge-debate.json"):
+                failures.append(f"judge spec missing deterministic debate_artifact path: {second_spec}")
             threshold_analyst_review = load_json(run_dir / "analyst-review.json")
             for item in threshold_analyst_review.get("symbols", []):
                 if item.get("symbol_id") == "000660":

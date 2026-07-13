@@ -45,6 +45,15 @@ NEWS_PATH_OUTPUT_STAGES = {"news-collection"}
 TEXT_OUTPUT_STAGES = FINANCIAL_PATH_OUTPUT_STAGES | NEWS_PATH_OUTPUT_STAGES
 OPTIONAL_GROUP_FAILURE_STAGES = TEXT_OUTPUT_STAGES
 REVIEW_STAGES = {"analyst-review", "judge-review"}
+DEBATE_STAGE = "judge-debate"
+DEBATE_ROLES = {"debate-bull", "debate-bear"}
+DEBATE_PHASES = {"opening", "rebuttal-1", "rebuttal-2"}
+DEBATE_PHASE_ARGUMENT_KINDS = {
+    "opening": "claim",
+    "rebuttal-1": "rebuttal",
+    "rebuttal-2": "closing",
+}
+AUDIT_LOG_STAGES = {DEBATE_STAGE, "judge-review"}
 SELECTED_ANALYST_REVIEW_ROLES = {
     "analyst-quality-risk",
     "analyst-momentum-news",
@@ -496,6 +505,7 @@ def parse_codex_json_events(stdout: str) -> dict[str, Any]:
     event_count = 0
     last_rate_limits: Any | None = None
     last_message = ""
+    thread_id = ""
     for line in stdout.splitlines():
         line = line.strip()
         if not line:
@@ -504,6 +514,10 @@ def parse_codex_json_events(stdout: str) -> dict[str, Any]:
             item = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if isinstance(item, dict) and item.get("type") == "thread.started":
+            candidate_thread_id = str(item.get("thread_id") or "").strip()
+            if candidate_thread_id:
+                thread_id = candidate_thread_id
         payload = token_count_payload(item)
         if payload is not None:
             info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
@@ -528,6 +542,7 @@ def parse_codex_json_events(stdout: str) -> dict[str, Any]:
         "token_usage_event_count": event_count,
         "rate_limits": last_rate_limits,
         "last_agent_message": last_message,
+        "thread_id": thread_id,
     }
 
 
@@ -979,9 +994,10 @@ def build_analyst_review_slice_payload(payload: Any, symbol_ids: list[str]) -> A
 
 
 def write_review_input_slices(spec: dict[str, Any]) -> dict[str, str]:
-    if not is_compact_review_spec(spec):
-        return {}
     stage = str(spec.get("stage", "")).strip()
+    debate_opening = stage == DEBATE_STAGE and str(spec.get("debate_phase", "")).strip() == "opening"
+    if not is_compact_review_spec(spec) and not (debate_opening and is_compact_debate_spec(spec)):
+        return {}
     artifacts = normalize_artifact_paths(spec.get("artifact_paths"))
     symbols = normalize_symbol_ids(spec.get("symbol_ids") or spec.get("symbols"))
     decision_brief = artifacts.get("decision_brief") or artifacts.get("decision-brief") or artifacts.get("brief")
@@ -995,7 +1011,7 @@ def write_review_input_slices(spec: dict[str, Any]) -> dict[str, str]:
     slice_paths: dict[str, str] = {}
 
     sources = [("decision_brief", decision_brief)]
-    if stage == "judge-review":
+    if stage in {"judge-review", DEBATE_STAGE}:
         sources.append(("analyst_review", artifacts.get("analyst_review") or artifacts.get("analyst-review") or ""))
 
     for artifact_key, source_path_text in sources:
@@ -1007,7 +1023,7 @@ def write_review_input_slices(spec: dict[str, Any]) -> dict[str, str]:
             continue
         if artifact_key == "decision_brief":
             sliced = build_review_core_payload(payload, symbols, str(spec.get("agent_role") or ""))
-            if stage == "judge-review":
+            if stage in {"judge-review", DEBATE_STAGE}:
                 sliced = add_judge_review_holding_context(sliced, output_dir)
             relative_name = "review-core"
             slice_paths["review_core"] = str(slice_dir / f"{task_name}.{relative_name}.json")
@@ -1049,6 +1065,40 @@ def is_compact_review_candidate(spec: dict[str, Any]) -> bool:
         str(spec.get("stage", "")).strip() in REVIEW_STAGES
         and not str(spec.get("prompt", "")).strip()
         and (spec.get("artifact_paths") is not None or spec.get("symbol_ids") is not None or spec.get("symbols") is not None)
+    )
+
+
+def is_compact_debate_spec(spec: dict[str, Any]) -> bool:
+    if str(spec.get("stage", "")).strip() != DEBATE_STAGE:
+        return False
+    if str(spec.get("prompt", "")).strip():
+        return False
+    phase = str(spec.get("debate_phase", "")).strip()
+    artifacts = normalize_artifact_paths(spec.get("artifact_paths"))
+    symbols = normalize_symbol_ids(spec.get("symbol_ids") or spec.get("symbols"))
+    if phase not in DEBATE_PHASES or not symbols:
+        return False
+    if not (artifacts.get("persona") and artifacts.get("debate_format")):
+        return False
+    if phase == "opening":
+        return bool(artifacts.get("decision_brief") and artifacts.get("analyst_review"))
+    return bool(
+        str(spec.get("resume_session_id") or "").strip()
+        and artifacts.get("own_previous_turn")
+        and artifacts.get("opponent_previous_turn")
+    )
+
+
+def is_compact_debate_candidate(spec: dict[str, Any]) -> bool:
+    return (
+        str(spec.get("stage", "")).strip() == DEBATE_STAGE
+        and not str(spec.get("prompt", "")).strip()
+        and (
+            spec.get("artifact_paths") is not None
+            or spec.get("symbol_ids") is not None
+            or spec.get("symbols") is not None
+            or spec.get("debate_phase") is not None
+        )
     )
 
 
@@ -1127,12 +1177,9 @@ def compact_review_prompt(spec: dict[str, Any]) -> str | None:
         sell_below = thresholds.get("sell_below", 4)
         buy_above = thresholds.get("buy_above", 6)
         portfolio_snapshot = spec.get("portfolio_snapshot") if isinstance(spec.get("portfolio_snapshot"), list) else []
-        debate_bull = artifacts.get("debate_bull_persona")
-        debate_bear = artifacts.get("debate_bear_persona")
-        if debate_bull:
-            lines.append(f"debate_bull_persona: {debate_bull}")
-        if debate_bear:
-            lines.append(f"debate_bear_persona: {debate_bear}")
+        debate_artifact = artifacts.get("debate_artifact")
+        if debate_artifact:
+            lines.append(f"debate_artifact: {debate_artifact}")
         lines.extend(
             [
                 "",
@@ -1151,9 +1198,10 @@ def compact_review_prompt(spec: dict[str, Any]) -> str | None:
                 "Treat an empty recent_trade_context.recent_submitted_trades list as confirmed absence only when coverage_status=complete; otherwise recent trade history is unknown and its absence is non-directional.",
                 "For held sell candidates, an intact long-term thesis favors holding despite the low score; sell only when thesis damage, material adverse news/disclosure, or structural deterioration is supported by supplied evidence.",
                 "Use strategy_context and symbol_strategy_context as advisory inputs for target_position_value_krw, not as order allow/block rules.",
-                "Debate sub-agents: spawn the bull/bear debate sub-agents required by the judge persona, passing the debate persona file contents plus the listed input file paths; spawned sub-agents inherit every other restriction.",
-                "Debate procedure: one base round (bull case, bear case, bull rebuttal, bear rebuttal) over all candidates in batch; at most one extra rebuttal round only for symbols you explicitly cannot decide; hard stop after two rounds; if debate agents fail after one retry each, decide without debate using the hold-at-baseline default.",
-                "After the debate, compare each side's strongest argument per symbol; if they balance or evidence is insufficient, hold at the baseline. Reflect the decisive argument (or why both sides cancelled out) in one_line_reason. Do not include debate transcripts in the returned JSON.",
+                "The Python pipeline already completed the fixed bull/bear opening, rebuttal-1, and rebuttal-2 closing turns. Do not spawn or resume debate agents and do not request another round.",
+                "Read debate_artifact and compare each side's explicit claims, rebuttals, concessions, unresolved conflicts, and final position for every symbol.",
+                "If debate_artifact status is incomplete, or if the completed debate remains balanced or directionally insufficient, hold at the baseline.",
+                "Reflect the decisive argument IDs (or why the sides cancelled out) in one_line_reason without returning the debate transcript.",
             ]
         )
         if candidate_directions:
@@ -1176,8 +1224,117 @@ def compact_review_prompt(spec: dict[str, Any]) -> str | None:
     return compact_prompt("\n".join(lines))
 
 
+def compact_debate_prompt(spec: dict[str, Any]) -> str | None:
+    if not is_compact_debate_spec(spec):
+        return None
+    phase = str(spec.get("debate_phase") or "").strip()
+    role = str(spec.get("agent_role") or "").strip()
+    side = "bull" if role == "debate-bull" else "bear"
+    artifacts = normalize_artifact_paths(spec.get("artifact_paths"))
+    symbols = normalize_symbol_ids(spec.get("symbol_ids") or spec.get("symbols"))
+    candidate_directions = spec.get("candidate_directions") if isinstance(spec.get("candidate_directions"), dict) else {}
+    portfolio_snapshot = spec.get("portfolio_snapshot") if isinstance(spec.get("portfolio_snapshot"), list) else []
+    expected_kind = DEBATE_PHASE_ARGUMENT_KINDS[phase]
+
+    lines = [
+        "Daily-trading persistent debate agent.",
+        f"stage: {DEBATE_STAGE}",
+        f"debate_phase: {phase}",
+        f"agent_role: {role}",
+        f"debate_side: {side}",
+        f"task_name: {spec.get('task_name', '')}",
+        f"run_id: {spec.get('run_id', '')}",
+        f"started_at: {spec.get('started_at', '')}",
+        f"workspace_dir: {spec.get('workspace_dir', '')}",
+        "",
+        "Use only the explicitly listed immutable local artifacts and the conversation history in this same Codex session.",
+        "You may use read-only local shell commands such as cat and jq only for the explicitly listed files.",
+        "Do not call KIS, MCP, web, network, account/order APIs, or external data sources.",
+        "Do not write files, emit Markdown, diffs, code fences, or hidden chain-of-thought. Return only the explicit structured arguments required by debate_format.",
+        "Optional evidence marked missing, failed, empty, unavailable, or excluded_from_aggregation is non-directional and must not support any claim or rebuttal.",
+        f"persona: {artifacts['persona']}",
+        f"debate_format: {artifacts['debate_format']}",
+        "symbol_ids: " + ",".join(symbols),
+    ]
+    if phase == "opening":
+        lines.extend(
+            [
+                f"decision_brief: {artifacts['decision_brief']}",
+                f"analyst_review: {artifacts['analyst_review']}",
+                "Opening: independently present the strongest supported case for your assigned side for every symbol.",
+                "Every argument.kind must be claim and every argument.targets list must be empty.",
+                "Use deterministic argument_id values formed as <symbol_id>-<side>-opening-<number>.",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                f"resume_session_id: {spec.get('resume_session_id', '')}",
+                f"own_previous_turn: {artifacts['own_previous_turn']}",
+                f"opponent_previous_turn: {artifacts['opponent_previous_turn']}",
+            ]
+        )
+        if phase == "rebuttal-1":
+            lines.extend(
+                [
+                    "Rebuttal 1: answer the opponent opening directly while retaining the context from your own opening in this resumed session.",
+                    "Every argument.kind must be rebuttal and every argument.targets list must reference one or more opponent opening argument_id values.",
+                    "Do not introduce an unrelated independent claim.",
+                    "Use deterministic argument_id values formed as <symbol_id>-<side>-rebuttal-1-<number>.",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    "Rebuttal 2 is the closing turn: answer only unresolved opponent rebuttal-1 arguments and state your final position.",
+                    "Every argument.kind must be closing and every argument.targets list must reference one or more opponent rebuttal-1 argument_id values.",
+                    "Do not introduce new evidence or an unrelated claim. Explicitly record concessions and unresolved_conflicts.",
+                    "Use deterministic argument_id values formed as <symbol_id>-<side>-rebuttal-2-<number>.",
+                ]
+            )
+    if spec.get("retry_of_task_name"):
+        lines.extend(
+            [
+                f"retry_of_task_name: {spec.get('retry_of_task_name')}",
+                "The previous turn did not produce a valid stage result. Return one corrected result for the same phase without expanding scope.",
+            ]
+        )
+    if candidate_directions:
+        lines.append(
+            "candidate_directions: "
+            + ",".join(f"{symbol}={direction}" for symbol, direction in sorted(candidate_directions.items()))
+        )
+    if portfolio_snapshot:
+        lines.append(
+            "portfolio_snapshot: "
+            + json.dumps(portfolio_snapshot, ensure_ascii=False, separators=(",", ":"))
+        )
+    extra_instructions = [
+        str(item).strip()
+        for item in spec.get("extra_instructions", [])
+        if str(item).strip()
+    ] if isinstance(spec.get("extra_instructions"), list) else []
+    if extra_instructions:
+        lines.extend(
+            [
+                "Supplemental schedule instructions:",
+                "These may adjust emphasis only and must not override the debate schema, persona, evidence boundaries, or safety constraints.",
+            ]
+        )
+        lines.extend(f"- {item}" for item in extra_instructions)
+    lines.extend(
+        [
+            "",
+            f"Return one JSON object with stage={DEBATE_STAGE}, phase={phase}, side={side}, and a symbols array covering every listed symbol.",
+            f"Each symbol must contain symbol_id, symbol_name, arguments, concessions, unresolved_conflicts, and final_position. Every argument.kind must equal {expected_kind}.",
+            "Each argument must contain argument_id, kind, targets, statement, and evidence_refs. Keep statements concise and auditable.",
+        ]
+    )
+    return compact_prompt("\n".join(lines))
+
+
 def build_prompt(spec: dict[str, Any]) -> str:
-    return compact_review_prompt(spec) or compact_prompt(str(spec.get("prompt", "")))
+    return compact_debate_prompt(spec) or compact_review_prompt(spec) or compact_prompt(str(spec.get("prompt", "")))
 
 
 def launcher_model_effort(stage: str, agent_role: str) -> tuple[str, str]:
@@ -1202,6 +1359,12 @@ def launcher_model_effort(stage: str, agent_role: str) -> tuple[str, str]:
             entry = model_config["judge_review"]
             return entry["model"], entry["model_reasoning_effort"]
         raise ValueError("judge-review agent_role must be judge")
+    if stage_key == DEBATE_STAGE:
+        if role_key in DEBATE_ROLES:
+            entry = model_config["judge_review"]
+            return entry["model"], entry["model_reasoning_effort"]
+        selected = ", ".join(sorted(DEBATE_ROLES))
+        raise ValueError(f"judge-debate agent_role must be one of: {selected}")
     raise ValueError(f"unsupported daily-trading sub-agent stage/role: stage={stage!r}, agent_role={agent_role!r}")
 
 
@@ -1209,7 +1372,8 @@ def launcher_model_effort(stage: str, agent_role: str) -> tuple[str, str]:
 def validate_spec(spec: dict[str, Any]) -> None:
     required = REQUIRED_SPEC_FIELDS
     compact_review_requested = is_compact_review_candidate(spec)
-    if compact_review_requested:
+    compact_debate_requested = is_compact_debate_candidate(spec)
+    if compact_review_requested or compact_debate_requested:
         required = REQUIRED_SPEC_FIELDS - {"prompt"}
     missing = sorted(field for field in required if not str(spec.get(field, "")).strip())
     if missing:
@@ -1217,6 +1381,8 @@ def validate_spec(spec: dict[str, Any]) -> None:
     stage = str(spec.get("stage", "")).strip()
     if stage in REVIEW_STAGES and str(spec.get("prompt", "")).strip():
         raise ValueError("review raw prompt fallback is forbidden; use compact artifact_paths and symbol_ids")
+    if stage == DEBATE_STAGE and str(spec.get("prompt", "")).strip():
+        raise ValueError("judge-debate raw prompt fallback is forbidden; use compact artifact_paths and symbol_ids")
     if compact_review_requested:
         artifacts = normalize_artifact_paths(spec.get("artifact_paths"))
         decision_brief = artifacts.get("decision_brief") or artifacts.get("decision-brief") or artifacts.get("brief")
@@ -1226,8 +1392,34 @@ def validate_spec(spec: dict[str, Any]) -> None:
             raise ValueError("compact review spec requires artifact_paths.decision_brief")
         if stage == "judge-review" and not analyst_review:
             raise ValueError("judge-review compact spec requires artifact_paths.analyst_review")
+        if stage == "judge-review" and not artifacts.get("debate_artifact"):
+            raise ValueError("judge-review compact spec requires artifact_paths.debate_artifact")
         if not symbols:
             raise ValueError("compact review spec requires symbol_ids")
+    if compact_debate_requested:
+        artifacts = normalize_artifact_paths(spec.get("artifact_paths"))
+        symbols = normalize_symbol_ids(spec.get("symbol_ids") or spec.get("symbols"))
+        phase = str(spec.get("debate_phase") or "").strip()
+        if phase not in DEBATE_PHASES:
+            raise ValueError("judge-debate compact spec requires debate_phase opening, rebuttal-1, or rebuttal-2")
+        if not artifacts.get("persona"):
+            raise ValueError("judge-debate compact spec requires artifact_paths.persona")
+        if not artifacts.get("debate_format"):
+            raise ValueError("judge-debate compact spec requires artifact_paths.debate_format")
+        if not symbols:
+            raise ValueError("judge-debate compact spec requires symbol_ids")
+        if phase == "opening":
+            if not artifacts.get("decision_brief"):
+                raise ValueError("judge-debate opening requires artifact_paths.decision_brief")
+            if not artifacts.get("analyst_review"):
+                raise ValueError("judge-debate opening requires artifact_paths.analyst_review")
+        else:
+            if not str(spec.get("resume_session_id") or "").strip():
+                raise ValueError("judge-debate rebuttal requires resume_session_id")
+            if not artifacts.get("own_previous_turn"):
+                raise ValueError("judge-debate rebuttal requires artifact_paths.own_previous_turn")
+            if not artifacts.get("opponent_previous_turn"):
+                raise ValueError("judge-debate rebuttal requires artifact_paths.opponent_previous_turn")
     agent_role = safe_name(str(spec.get("agent_role", ""))).lower()
     task_name = safe_name(str(spec.get("task_name", ""))).lower()
     if stage == "analyst-review":
@@ -1243,6 +1435,10 @@ def validate_spec(spec: dict[str, Any]) -> None:
         ]
         if retry_numbers and max(retry_numbers) > 2:
             raise ValueError("judge retry is limited to at most 2 retries")
+    if stage == DEBATE_STAGE:
+        if agent_role not in DEBATE_ROLES:
+            selected = ", ".join(sorted(DEBATE_ROLES))
+            raise ValueError(f"judge-debate agent_role must be one of: {selected}")
 
 
 def parse_json_output(raw: str) -> tuple[Any | None, list[dict[str, Any]]]:
@@ -1429,6 +1625,156 @@ def compact_review_payload_errors(payload: Any, stage: str, agent_role: str = ""
     return errors
 
 
+def debate_argument_ids_by_symbol(payload: Any) -> dict[str, set[str]]:
+    result: dict[str, set[str]] = {}
+    if not isinstance(payload, dict) or not isinstance(payload.get("symbols"), list):
+        return result
+    for symbol in payload["symbols"]:
+        symbol_id = symbol_key(symbol)
+        if not symbol_id or not isinstance(symbol, dict):
+            continue
+        arguments = symbol.get("arguments")
+        if not isinstance(arguments, list):
+            continue
+        result[symbol_id] = {
+            str(argument.get("argument_id") or "").strip()
+            for argument in arguments
+            if isinstance(argument, dict) and str(argument.get("argument_id") or "").strip()
+        }
+    return result
+
+
+def compact_debate_payload_errors(payload: Any, spec: dict[str, Any]) -> list[dict[str, Any]]:
+    errors: list[dict[str, Any]] = []
+    phase = str(spec.get("debate_phase") or "").strip()
+    role = str(spec.get("agent_role") or "").strip()
+    side = "bull" if role == "debate-bull" else "bear"
+    expected_symbols = normalize_symbol_ids(spec.get("symbol_ids") or spec.get("symbols"))
+    expected_kind = DEBATE_PHASE_ARGUMENT_KINDS.get(phase, "")
+    if not isinstance(payload, dict):
+        return [{"code": "invalid_debate_schema", "message": "judge-debate JSON must be an object"}]
+    for field, expected in (("stage", DEBATE_STAGE), ("phase", phase), ("side", side)):
+        if payload.get(field) != expected:
+            errors.append(
+                {
+                    "code": "invalid_debate_schema",
+                    "message": f"judge-debate JSON {field} must be {expected}",
+                }
+            )
+    symbols = payload.get("symbols")
+    if not isinstance(symbols, list):
+        errors.append({"code": "invalid_debate_schema", "message": "judge-debate JSON must include a symbols array"})
+        return errors
+
+    opponent_ids: dict[str, set[str]] = {}
+    if phase != "opening":
+        artifacts = normalize_artifact_paths(spec.get("artifact_paths"))
+        opponent_path = resolve_artifact_path(artifacts.get("opponent_previous_turn", ""), str(spec.get("workspace_dir", "")))
+        try:
+            opponent_payload = read_json_if_exists(opponent_path)
+        except (OSError, json.JSONDecodeError) as exc:
+            opponent_payload = None
+            errors.append(
+                {
+                    "code": "invalid_opponent_debate_artifact",
+                    "message": f"cannot read opponent_previous_turn {opponent_path}: {exc}",
+                }
+            )
+        opponent_ids = debate_argument_ids_by_symbol(opponent_payload)
+
+    seen_symbols: set[str] = set()
+    seen_argument_ids: set[str] = set()
+    phase_id = phase
+    for index, symbol in enumerate(symbols):
+        if not isinstance(symbol, dict):
+            errors.append({"code": "invalid_debate_schema", "message": f"symbols[{index}] must be an object"})
+            continue
+        symbol_id = symbol_key(symbol)
+        if not symbol_id:
+            errors.append({"code": "invalid_debate_schema", "message": f"symbols[{index}] missing symbol_id"})
+            continue
+        if symbol_id in seen_symbols:
+            errors.append({"code": "invalid_debate_schema", "message": f"duplicate debate symbol {symbol_id}"})
+        seen_symbols.add(symbol_id)
+        if symbol_id not in expected_symbols:
+            errors.append({"code": "invalid_debate_schema", "message": f"unexpected debate symbol {symbol_id}"})
+        if not str(symbol.get("symbol_name") or "").strip():
+            errors.append({"code": "invalid_debate_schema", "message": f"{symbol_id} missing symbol_name"})
+        arguments = symbol.get("arguments")
+        if not isinstance(arguments, list) or not arguments:
+            errors.append({"code": "invalid_debate_schema", "message": f"{symbol_id} must include non-empty arguments"})
+            arguments = []
+        for argument_index, argument in enumerate(arguments):
+            if not isinstance(argument, dict):
+                errors.append(
+                    {
+                        "code": "invalid_debate_schema",
+                        "message": f"{symbol_id}.arguments[{argument_index}] must be an object",
+                    }
+                )
+                continue
+            argument_id = str(argument.get("argument_id") or "").strip()
+            expected_prefix = f"{symbol_id}-{side}-{phase_id}-"
+            if not argument_id.startswith(expected_prefix) or not argument_id.removeprefix(expected_prefix).isdigit():
+                errors.append(
+                    {
+                        "code": "invalid_debate_schema",
+                        "message": f"{symbol_id}.arguments[{argument_index}].argument_id must match {expected_prefix}<number>",
+                    }
+                )
+            if argument_id in seen_argument_ids:
+                errors.append({"code": "invalid_debate_schema", "message": f"duplicate argument_id {argument_id}"})
+            seen_argument_ids.add(argument_id)
+            if argument.get("kind") != expected_kind:
+                errors.append(
+                    {
+                        "code": "invalid_debate_schema",
+                        "message": f"{argument_id or symbol_id} kind must be {expected_kind}",
+                    }
+                )
+            targets = argument.get("targets")
+            if not isinstance(targets, list) or not all(isinstance(target, str) and target.strip() for target in targets):
+                errors.append({"code": "invalid_debate_schema", "message": f"{argument_id or symbol_id} targets must be a string array"})
+                targets = []
+            if phase == "opening" and targets:
+                errors.append({"code": "invalid_debate_schema", "message": f"{argument_id or symbol_id} opening targets must be empty"})
+            if phase != "opening":
+                if not targets:
+                    errors.append({"code": "invalid_debate_schema", "message": f"{argument_id or symbol_id} must target an opponent argument"})
+                invalid_targets = sorted(set(targets) - opponent_ids.get(symbol_id, set()))
+                if invalid_targets:
+                    errors.append(
+                        {
+                            "code": "invalid_debate_target",
+                            "message": f"{argument_id or symbol_id} references unknown opponent arguments: {', '.join(invalid_targets)}",
+                        }
+                    )
+            if not str(argument.get("statement") or "").strip():
+                errors.append({"code": "invalid_debate_schema", "message": f"{argument_id or symbol_id} missing statement"})
+            evidence_refs = argument.get("evidence_refs")
+            if not isinstance(evidence_refs, list) or not all(isinstance(ref, str) for ref in evidence_refs):
+                errors.append({"code": "invalid_debate_schema", "message": f"{argument_id or symbol_id} evidence_refs must be a string array"})
+        for list_field in ("concessions", "unresolved_conflicts"):
+            value = symbol.get(list_field)
+            if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                errors.append({"code": "invalid_debate_schema", "message": f"{symbol_id}.{list_field} must be a string array"})
+        final_position = symbol.get("final_position")
+        if not isinstance(final_position, str):
+            errors.append({"code": "invalid_debate_schema", "message": f"{symbol_id}.final_position must be a string"})
+        elif phase == "rebuttal-2" and not final_position.strip():
+            errors.append({"code": "invalid_debate_schema", "message": f"{symbol_id}.final_position is required for closing"})
+
+    missing_symbols = [symbol_id for symbol_id in expected_symbols if symbol_id not in seen_symbols]
+    if missing_symbols:
+        errors.append(
+            {
+                "code": "invalid_debate_schema",
+                "message": "judge-debate output missing symbols: " + ", ".join(missing_symbols),
+            }
+        )
+    return errors
+
+
 def wrapper_paths(spec: dict[str, Any]) -> tuple[Path, Path]:
     output_dir = Path(str(spec["output_dir"]))
     task_name = safe_name(str(spec["task_name"]))
@@ -1460,6 +1806,8 @@ def append_model_usage(
         "stage": str(spec["stage"]),
         "agent_role": str(spec["agent_role"]),
         "task_name": str(spec["task_name"]),
+        "debate_phase": str(spec.get("debate_phase") or ""),
+        "session_id": str(spec.get("resume_session_id") or ""),
         "model": model,
         "model_reasoning_effort": reasoning_effort,
     }
@@ -1543,6 +1891,12 @@ def spec_fingerprint(spec: dict[str, Any]) -> str:
             "artifact_paths",
             "symbol_ids",
             "symbols",
+            "debate_phase",
+            "resume_session_id",
+            "candidate_directions",
+            "portfolio_snapshot",
+            "extra_instructions",
+            "retry_of_task_name",
         )
     }
     relevant["artifact_content_sha256"] = artifact_content_fingerprints(spec)
@@ -1587,7 +1941,12 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
     raw_output_path.parent.mkdir(parents=True, exist_ok=True)
     slice_paths = write_review_input_slices(spec)
     prompt_spec = spec_with_review_slices(spec, slice_paths)
-    prompt_mode = "compact_review" if compact_review_prompt(prompt_spec) else "raw"
+    if compact_debate_prompt(prompt_spec):
+        prompt_mode = "compact_debate"
+    elif compact_review_prompt(prompt_spec):
+        prompt_mode = "compact_review"
+    else:
+        prompt_mode = "raw"
 
     started_at = now_iso()
     started = time.monotonic()
@@ -1597,20 +1956,26 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
         reasoning_effort=effort,
         started_at=started_at,
     )
-    cmd = [
-        os.getenv("CODEX_BIN", "codex"),
-        "exec",
-        "--json",
-        "-m",
-        model,
-        "-c",
-        f'model_reasoning_effort="{effort}"',
-        "--skip-git-repo-check",
-        "-o",
-        str(raw_output_path),
-    ]
+    resume_session_id = str(spec.get("resume_session_id") or "").strip()
+    cmd = [os.getenv("CODEX_BIN", "codex"), "exec"]
+    if resume_session_id:
+        cmd.append("resume")
+    cmd.extend(
+        [
+            "--json",
+            "-m",
+            model,
+            "-c",
+            f'model_reasoning_effort="{effort}"',
+            "--skip-git-repo-check",
+            "-o",
+            str(raw_output_path),
+        ]
+    )
     if env_bool("CODEX_BYPASS_APPROVALS_AND_SANDBOX", True):
         cmd.append("--dangerously-bypass-approvals-and-sandbox")
+    if resume_session_id:
+        cmd.append(resume_session_id)
     cmd.append(build_prompt(prompt_spec))
 
     env = os.environ.copy()
@@ -1637,6 +2002,15 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
         returncode = result.returncode
         stdout = result.stdout or ""
         stderr = result.stderr or ""
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else str(exc.stdout or "")
+        stderr = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else str(exc.stderr or "")
+        errors.append(
+            {
+                "code": "exec_timeout",
+                "message": f"codex exec exceeded the configured timeout after {exc.timeout} seconds",
+            }
+        )
     except Exception as exc:  # noqa: BLE001 - wrapper records sub-agent failures
         errors.append({"code": "exec_failed", "message": str(exc)})
 
@@ -1657,6 +2031,8 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
     parse_errors: list[dict[str, Any]] = []
     text_errors: list[dict[str, Any]] = []
     compact_review_errors: list[dict[str, Any]] = []
+    compact_debate_errors: list[dict[str, Any]] = []
+    session_errors: list[dict[str, Any]] = []
     if stage in TEXT_OUTPUT_STAGES:
         # Collection text stages return cache paths, fixed missing-cache messages,
         # or concise Markdown summaries. The launcher records that text and
@@ -1672,6 +2048,26 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
             parsed_json = normalize_compact_review_payload(parsed_json, stage)
             compact_review_errors = compact_review_payload_errors(parsed_json, stage, str(spec.get("agent_role") or ""))
             errors.extend(compact_review_errors)
+        if stage == DEBATE_STAGE and prompt_mode == "compact_debate" and parsed_json is not None:
+            compact_debate_errors = compact_debate_payload_errors(parsed_json, prompt_spec)
+            errors.extend(compact_debate_errors)
+    event_thread_id = str(event_summary.get("thread_id") or "").strip()
+    session_id = resume_session_id or event_thread_id
+    if stage == DEBATE_STAGE and not session_id:
+        session_errors.append(
+            {
+                "code": "missing_debate_session_id",
+                "message": "judge-debate requires thread.started.thread_id so later turns can resume the same agent",
+            }
+        )
+    if resume_session_id and event_thread_id and event_thread_id != resume_session_id:
+        session_errors.append(
+            {
+                "code": "resumed_session_id_mismatch",
+                "message": f"codex resumed {event_thread_id}, expected {resume_session_id}",
+            }
+        )
+    errors.extend(session_errors)
     if returncode not in (0, None):
         errors.append({"code": "nonzero_returncode", "message": f"codex exec exited with {returncode}"})
     if stderr.strip():
@@ -1682,13 +2078,22 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
     if stage in TEXT_OUTPUT_STAGES:
         status = "success" if returncode == 0 and parsed_text and not text_errors else "failed"
     else:
-        status = "success" if returncode == 0 and parsed_json is not None and not parse_errors and not compact_review_errors else "failed"
-    retention = raw_retention_mode()
+        status = (
+            "success"
+            if returncode == 0
+            and parsed_json is not None
+            and not parse_errors
+            and not compact_review_errors
+            and not compact_debate_errors
+            and not session_errors
+            else "failed"
+        )
+    retention = "always" if stage in AUDIT_LOG_STAGES else raw_retention_mode()
     raw_output_retained = True
     if raw_output_path.exists() and (retention == "never" or (retention == "failed" and status == "success")):
         raw_output_path.unlink()
         raw_output_retained = False
-    event_retention = event_retention_mode()
+    event_retention = "always" if stage in AUDIT_LOG_STAGES else event_retention_mode()
     event_log_retained, event_retention_reason = event_log_retention_decision(event_retention, status, event_diagnostics)
     stderr_retained = event_log_retained
     if not event_log_retained:
@@ -1712,6 +2117,7 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
         "ended_at": ended_at,
         "duration_ms": duration_ms,
         "returncode": returncode,
+        "wrapper_path": str(wrapper_path),
         "raw_output_path": str(raw_output_path),
         "raw_output_retained": raw_output_retained,
         "raw_retention": retention,
@@ -1727,6 +2133,10 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
         "errors": errors,
         "command": [part for part in cmd[:-1]],
         "prompt_mode": prompt_mode,
+        "debate_phase": str(spec.get("debate_phase") or ""),
+        "resume_session_id": resume_session_id,
+        "session_id": session_id,
+        "reported_session_id": event_thread_id,
         "review_input_paths": slice_paths,
         "spec_fingerprint": fingerprint,
         "reused_existing_wrapper": False,
