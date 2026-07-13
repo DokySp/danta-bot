@@ -13,6 +13,7 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV CODEX_HOME=/codex-home
 ENV STATE_DIR=/state
 ENV WORKSPACE_DIR=/workspace
+ENV CODEX_RUNTIME_CONFIG_FILE=/app/config/codex-runtime.yaml
 ENV SCHEDULE_FILE=/app/config/schedules.yaml
 ENV TOUCH_POINT_CONFIG_FILE=/app/config/touch-points.yaml
 ENV PORTFOLIO_FILE=/app/config/portfolio.txt
@@ -52,7 +53,7 @@ RUN set -eux; \
 
 RUN groupadd --gid 1000 app \
   && useradd --uid 1000 --gid app --create-home app \
-  && mkdir -p /app/config /app/codex-config.d /codex-home /state /workspace /tmp/codex-exec /tmp/npm-cache \
+  && mkdir -p /app/config /app/default-config /app/codex-config.d /codex-home /state /workspace /tmp/codex-exec /tmp/npm-cache \
   && chown -R app:app /app /codex-home /state /workspace /tmp/codex-exec /tmp/npm-cache
 
 ARG APP_VERSION
@@ -64,6 +65,7 @@ ENV npm_config_cache=/tmp/npm-cache
 COPY --chown=app:app codex-exec/codex_exec.py /app/codex_exec.py
 COPY --chown=app:app codex-exec/service /app/service
 COPY --chown=app:app codex-exec/profiles/${CODEX_EXEC_PROFILE}/config /app/config
+COPY --chown=app:app codex-exec/profiles/${CODEX_EXEC_PROFILE}/config/codex-runtime.yaml /app/default-config/codex-runtime.yaml
 COPY --chown=app:app codex-exec/runtime/merge-codex-config.sh /app/merge-codex-config.sh
 COPY --chown=app:app codex-exec/runtime/codex_usage.py /app/codex_usage.py
 COPY --chown=app:app codex-exec/shared-skills /app/skills

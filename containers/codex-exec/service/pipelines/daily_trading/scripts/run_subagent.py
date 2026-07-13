@@ -28,8 +28,10 @@ REQUIRED_SPEC_FIELDS = {
     "workspace_dir",
     "output_dir",
 }
-SUBAGENT_MODEL_CONFIG_ENV = "DAILY_TRADING_SUBAGENT_MODEL_CONFIG"
-SUBAGENT_MODEL_CONFIG_FILENAME = "daily-trading-subagents.yaml"
+RUNTIME_CONFIG_ENV = "CODEX_RUNTIME_CONFIG_FILE"
+RUNTIME_CONFIG_FILENAME = "codex-runtime.yaml"
+DEFAULT_RUNTIME_CONFIG_PATH = Path("/app/config") / RUNTIME_CONFIG_FILENAME
+BAKED_RUNTIME_CONFIG_PATH = Path("/app/default-config") / RUNTIME_CONFIG_FILENAME
 DEFAULT_SUBAGENT_MODEL_CONFIG = {
     "collection": {"model": "gpt-5.6-luna", "model_reasoning_effort": "low"},
     "analyst_review": {"model": "gpt-5.6-sol", "model_reasoning_effort": "xhigh"},
@@ -170,15 +172,19 @@ def load_config_payload(path: Path) -> Any:
         return yaml.safe_load(handle)
 
 
-def subagent_model_config_candidates() -> list[Path]:
-    configured = os.getenv(SUBAGENT_MODEL_CONFIG_ENV, "").strip()
+def runtime_config_candidates() -> list[Path]:
+    configured = os.getenv(RUNTIME_CONFIG_ENV, "").strip()
     if configured:
-        return [Path(configured).expanduser()]
+        configured_path = Path(configured).expanduser()
+        if configured_path == DEFAULT_RUNTIME_CONFIG_PATH:
+            return [configured_path, BAKED_RUNTIME_CONFIG_PATH]
+        return [configured_path]
     repo_root = repo_root_from(script_dir())
     return [
-        Path("/app/config") / SUBAGENT_MODEL_CONFIG_FILENAME,
-        repo_root / "containers/codex-exec/profiles/base/config" / SUBAGENT_MODEL_CONFIG_FILENAME,
-        Path("containers/codex-exec/profiles/base/config") / SUBAGENT_MODEL_CONFIG_FILENAME,
+        DEFAULT_RUNTIME_CONFIG_PATH,
+        BAKED_RUNTIME_CONFIG_PATH,
+        repo_root / "containers/codex-exec/profiles/base/config" / RUNTIME_CONFIG_FILENAME,
+        Path("containers/codex-exec/profiles/base/config") / RUNTIME_CONFIG_FILENAME,
     ]
 
 
@@ -209,13 +215,21 @@ def normalize_model_config(payload: Any, source: Path | None) -> dict[str, dict[
 
 
 def load_subagent_model_config() -> dict[str, dict[str, str]]:
-    candidates = subagent_model_config_candidates()
-    explicit = bool(os.getenv(SUBAGENT_MODEL_CONFIG_ENV, "").strip())
+    candidates = runtime_config_candidates()
+    explicit = bool(os.getenv(RUNTIME_CONFIG_ENV, "").strip())
     for path in candidates:
         if path.exists():
-            return normalize_model_config(load_config_payload(path), path)
+            payload = load_config_payload(path)
+            if not isinstance(payload, dict):
+                raise ValueError(f"codex runtime config must be an object: {path}")
+            extra_keys = sorted(str(key) for key in payload if str(key) not in {"defaults", "daily_trading"})
+            if extra_keys:
+                raise ValueError(f"unsupported codex runtime config keys: {', '.join(extra_keys)}")
+            if not isinstance(payload.get("daily_trading"), dict):
+                raise ValueError(f"codex runtime config daily_trading must be an object: {path}")
+            return normalize_model_config(payload["daily_trading"], path)
     if explicit:
-        raise FileNotFoundError(f"{SUBAGENT_MODEL_CONFIG_ENV} does not exist: {candidates[0]}")
+        raise FileNotFoundError(f"{RUNTIME_CONFIG_ENV} does not exist: {candidates[0]}")
     return normalize_model_config(DEFAULT_SUBAGENT_MODEL_CONFIG, None)
 
 

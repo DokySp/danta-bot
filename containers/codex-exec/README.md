@@ -68,15 +68,41 @@ env_file:
   - ./config/codex-exec.env
 ```
 
-`codex-exec.env`에는 Codex 실행 값, 해당 인스턴스의 MCP 연결 값, 그리고 `$check-portfolio` 같은 codex-exec 내부 direct API helper가 쓰는 KIS app key/secret/계좌번호를 함께 둡니다.
+`codex-exec.env`에는 프로세스 실행 값, 해당 인스턴스의 MCP 연결 값, 그리고 `$check-portfolio` 같은 codex-exec 내부 direct API helper가 쓰는 KIS app key/secret/계좌번호를 함께 둡니다.
 실제 `codex-exec.env` 파일은 git에서 무시하고, `codex-exec.env.example`만 추적합니다.
 
 프로필 Compose는 `./config`를 `/app/config`로 writable bind mount합니다. 따라서 호스트의
 `containers/codex-exec/profiles/<name>/config/schedules.yaml`, `portfolio.txt`, `portfolio-except.txt`,
-`touch-points.yaml`, `execute-trade.yaml`을 수정하면 컨테이너 안의 `/app/config`에도 즉시 보이고, 다음 Codex 실행이나
-스케줄러 tick부터 새 내용이 사용됩니다. `codex-exec.env`처럼 프로세스 환경변수로 주입되는 값은
+`touch-points.yaml`, `execute-trade.yaml`, `codex-runtime.yaml`을 수정하면 컨테이너 안의 `/app/config`에도 즉시 보이고,
+다음 Codex 실행이나 스케줄러 tick부터 새 내용이 사용됩니다. `codex-exec.env`처럼 프로세스 환경변수로 주입되는 값은
 컨테이너 시작 시점에만 읽히므로 변경 후 Compose 재생성이 필요합니다. 컨테이너 안의 Codex 스킬이
 config를 수정하려면 호스트 config 파일과 디렉터리가 컨테이너 실행 UID 1000에 쓰기 가능해야 합니다.
+
+일반 Codex 실행 기본값, `/new` 프롬프트, daily-trading sub-agent 모델은 프로필별
+`config/codex-runtime.yaml`에서 함께 관리합니다. 이 파일은 실행 직전에 다시 읽으므로 내용 변경에는
+컨테이너 재시작이나 Compose 재생성이 필요하지 않습니다.
+
+기존 Docker 배포를 새 이미지로 올릴 때 호스트 `config/codex-runtime.yaml`이 아직 없으면 이미지에 포함된
+`/app/default-config/codex-runtime.yaml`을 fallback으로 사용하므로 컨테이너 시작은 유지됩니다. 설정을 직접
+수정하고 hot reload하려면 배포 프로필의 `codex-runtime.yaml`을 호스트 `./config`에도 배치해야 합니다.
+
+```yaml
+defaults:
+  model: gpt-5.6-sol
+  model_reasoning_effort: xhigh
+  new_session_prompt: 새 대화 시작
+
+daily_trading:
+  collection:
+    model: gpt-5.6-luna
+    model_reasoning_effort: low
+  analyst_review:
+    model: gpt-5.6-sol
+    model_reasoning_effort: xhigh
+  judge_review:
+    model: gpt-5.6-sol
+    model_reasoning_effort: xhigh
+```
 
 ## Codex MCP Config
 
@@ -140,10 +166,10 @@ schedules:
 스케줄 작업은 채팅 기본 세션과 독립된 one-off Codex 실행으로 처리됩니다. 단, 항목에
 `daily_trading` 블록이 있으면 Main Codex를 띄우지 않고 codex-exec Python direct runner가
 `run_daily_trading_pipeline.py run`을 직접 실행한 뒤 `telegram-summary.txt`를 전송합니다.
-일반 스케줄 항목의 `model`과 `model_reasoning_effort`는 선택 사항입니다. 생략하면 `CODEX_MODEL`과
-`CODEX_REASONING_EFFORT` 전역 값을 사용하고, 지정하면 해당 스케줄의 Main Codex 실행에만 적용됩니다.
+일반 스케줄 항목의 `model`과 `model_reasoning_effort`는 선택 사항입니다. 생략하면
+`codex-runtime.yaml`의 `defaults` 값을 사용하고, 지정하면 해당 스케줄의 Main Codex 실행에만 적용됩니다.
 `daily_trading` direct runner 항목은 Main Codex를 실행하지 않으므로 이 두 값 대신
-`daily-trading-subagents.yaml`의 sub-agent 모델 설정을 따릅니다.
+`codex-runtime.yaml`의 `daily_trading` sub-agent 모델 설정을 따릅니다.
 스케줄러는 매 tick마다 `SCHEDULE_FILE`을 다시 읽습니다. `$trading-schedule-toggle` 스킬은
 `/app/config/schedules.yaml`의 `daily-{number}` 항목만 on/off로 수정하며, 수정 결과는 컨테이너
 재시작 없이 다음 scheduler tick부터 반영됩니다.

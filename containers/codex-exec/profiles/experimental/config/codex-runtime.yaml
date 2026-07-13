@@ -1,0 +1,16 @@
+defaults:
+  model: gpt-5.6-sol
+  model_reasoning_effort: medium
+  new_session_prompt: >-
+    새 대화 시작. 지금 이 응답에 안녕하세요. 새로운 대화를 시작해볼까요? 라고 간단하게 응답.
+
+daily_trading:
+  collection:
+    model: gpt-5.6-luna
+    model_reasoning_effort: low
+  analyst_review:
+    model: gpt-5.6-sol
+    model_reasoning_effort: xhigh
+  judge_review:
+    model: gpt-5.6-sol
+    model_reasoning_effort: xhigh

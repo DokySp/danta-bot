@@ -87,15 +87,19 @@ class Scheduler:
         reasoning_effort: str | None,
         daily_trading_config: Any,
     ) -> None:
-        logging.info(
-            "running scheduled job id=%s model=%s reasoning_effort=%s",
-            job_id,
-            model or self.config.model,
-            reasoning_effort or self.config.reasoning_effort,
-        )
         chat_id_text = str(chat_id) if chat_id else None
         route_text = str(route) if route else None
         try:
+            if daily_trading_config is None:
+                runtime_defaults = self.runner.runtime_defaults()
+                model = model or runtime_defaults.model
+                reasoning_effort = reasoning_effort or runtime_defaults.model_reasoning_effort
+            logging.info(
+                "running scheduled job id=%s model=%s reasoning_effort=%s",
+                job_id,
+                model or "daily-trading-runtime",
+                reasoning_effort or "daily-trading-runtime",
+            )
             with TypingIndicator(
                 self.gateway,
                 chat_id_text,

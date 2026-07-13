@@ -69,13 +69,11 @@ class Config:
     telegram_gateway_url: str
     telegram_route: str | None
     mcp_trading_env: str
-    model: str
-    reasoning_effort: str
+    codex_runtime_config_file: Path
     codex_timeout_seconds: int
     scheduler_poll_seconds: int
     telegram_typing_interval_seconds: float
     bypass_sandbox: bool
-    new_session_prompt: str
     usage_script: Path
     usage_timeout_seconds: int
     bundled_skills_dir: Path
@@ -111,13 +109,14 @@ class Config:
                 "paper",
                 MCP_TRADING_ENV_VALUES,
             ),
-            model=os.getenv("CODEX_MODEL", "gpt-5.6-sol"),
-            reasoning_effort=os.getenv("CODEX_REASONING_EFFORT", "medium"),
+            codex_runtime_config_file=env_path(
+                "CODEX_RUNTIME_CONFIG_FILE",
+                "/app/config/codex-runtime.yaml",
+            ),
             codex_timeout_seconds=env_int("CODEX_TIMEOUT_SECONDS", 1800),
             scheduler_poll_seconds=env_int("SCHEDULER_POLL_SECONDS", 15),
             telegram_typing_interval_seconds=env_float("TELEGRAM_TYPING_INTERVAL_SECONDS", 4.0),
             bypass_sandbox=env_bool("CODEX_BYPASS_APPROVALS_AND_SANDBOX", True),
-            new_session_prompt=os.getenv("NEW_SESSION_PROMPT", "새 대화 시작"),
             usage_script=Path(os.getenv("CODEX_USAGE_SCRIPT", "/app/codex_usage.py")),
             usage_timeout_seconds=env_int("CODEX_USAGE_TIMEOUT_SECONDS", 20),
             bundled_skills_dir=Path(os.getenv("BUNDLED_SKILLS_DIR", "/app/skills")),

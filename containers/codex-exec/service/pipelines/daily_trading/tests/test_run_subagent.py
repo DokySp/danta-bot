@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from ..scripts.run_subagent import (
-    SUBAGENT_MODEL_CONFIG_ENV,
+    RUNTIME_CONFIG_ENV,
     build_prompt,
     compact_prompt,
     compact_review_payload_errors,
@@ -1097,25 +1097,30 @@ def run_self_test() -> int:
             if Path(default_retention_wrapper["stderr_path"]).exists():
                 failures.append("default anomaly event retention left normal stderr log on disk")
 
-            custom_model_config = tmp / "daily-trading-subagents.yaml"
+            custom_model_config = tmp / "codex-runtime.yaml"
             custom_model_config.write_text(
                 "\n".join(
                     [
-                        "collection:",
-                        "  model: gpt-5.4-mini",
-                        "  model_reasoning_effort: low",
-                        "analyst_review:",
-                        "  model: custom-model",
-                        "  model_reasoning_effort: custom-effort",
-                        "judge_review:",
-                        "  model: gpt-5.5",
+                        "defaults:",
+                        "  model: gpt-5.6-sol",
                         "  model_reasoning_effort: medium",
+                        "  new_session_prompt: new session",
+                        "daily_trading:",
+                        "  collection:",
+                        "    model: gpt-5.4-mini",
+                        "    model_reasoning_effort: low",
+                        "  analyst_review:",
+                        "    model: custom-model",
+                        "    model_reasoning_effort: custom-effort",
+                        "  judge_review:",
+                        "    model: gpt-5.5",
+                        "    model_reasoning_effort: medium",
                         "",
                     ]
                 ),
                 encoding="utf-8",
             )
-            os.environ[SUBAGENT_MODEL_CONFIG_ENV] = str(custom_model_config)
+            os.environ[RUNTIME_CONFIG_ENV] = str(custom_model_config)
             custom_wrapper = run_one(
                 compact_spec(tmp, stage="analyst-review", agent_role="analyst-momentum-news", task_name="first-custom-model")
             )
@@ -1125,7 +1130,7 @@ def run_self_test() -> int:
                 assert_argv(argv_log, model="custom-model", effort="custom-effort")
             except AssertionError as exc:
                 failures.append(str(exc))
-            os.environ.pop(SUBAGENT_MODEL_CONFIG_ENV, None)
+            os.environ.pop(RUNTIME_CONFIG_ENV, None)
 
             write_sample_review_inputs(tmp)
             compact_wrapper = run_one(

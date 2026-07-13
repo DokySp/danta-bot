@@ -10,7 +10,7 @@ def handle_new(worker: Any, task: Any, args: str) -> None:
             task.route,
         )
         return
-    session_id, output = worker.runner.run_new_session(worker.config.new_session_prompt)
+    session_id, output = worker.runner.run_new_session()
     worker.state.set_default_session(session_id)
     logging.info("new default session_id=%s", session_id)
     worker.gateway.send_message(output, task.chat_id, task.route)

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .events import parse_codex_json_events
+from .runtime_config import CodexRuntimeDefaults, load_codex_runtime_defaults
 from .sessions import detect_new_session_id, session_ids
 from .usage import append_token_usage_summary, read_usage_snapshot
 from ..bootstrap.skills import sync_bundled_skills
@@ -39,11 +40,17 @@ class CodexRunner:
         self.tmp_dir = Path(os.getenv("CODEX_EXEC_TMP_DIR", "/tmp/codex-exec"))
         self.tmp_dir.mkdir(parents=True, exist_ok=True)
         self.config.codex_home.mkdir(parents=True, exist_ok=True)
+        self.runtime_defaults()
         sync_bundled_skills(config)
 
-    def run_new_session(self, prompt: str) -> tuple[str, str]:
+    def run_new_session(self, prompt: str | None = None) -> tuple[str, str]:
+        runtime_defaults = self.runtime_defaults()
         before = self._session_ids()
-        output = self._run_codex(["exec"], prompt)
+        output = self._run_codex(
+            ["exec"],
+            prompt if prompt is not None else runtime_defaults.new_session_prompt,
+            runtime_defaults=runtime_defaults,
+        )
         session_id = self._detect_new_session_id(before)
         if not session_id:
             raise RuntimeError("codex finished but new session id was not found")
@@ -101,6 +108,9 @@ class CodexRunner:
             output = "... truncated ...\n" + output[-3500:]
         return f"<b>Codex usage</b>\n<pre>{html.escape(output)}</pre>"
 
+    def runtime_defaults(self) -> CodexRuntimeDefaults:
+        return load_codex_runtime_defaults(self.config.codex_runtime_config_file)
+
     def _build_prompt(self, prompt: str, context, daily_trading_hint: bool) -> str:
         return (
             prompt.rstrip()
@@ -116,13 +126,15 @@ class CodexRunner:
         daily_trading_hint: bool = False,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        runtime_defaults: CodexRuntimeDefaults | None = None,
     ) -> str:
         context = new_codex_run_context()
         output_file = self.tmp_dir / f"{context.run_id}.txt"
         full_prompt = self._build_prompt(prompt, context, daily_trading_hint)
         usage_before = self._read_usage_snapshot()
-        model_value = model or self.config.model
-        reasoning_effort_value = reasoning_effort or self.config.reasoning_effort
+        defaults = runtime_defaults or self.runtime_defaults()
+        model_value = model or defaults.model
+        reasoning_effort_value = reasoning_effort or defaults.model_reasoning_effort
 
         cmd = [
             self.config.codex_bin,
