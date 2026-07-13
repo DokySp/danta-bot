@@ -596,11 +596,47 @@ def weighted_average_price(fills: list[dict[str, Any]], direction: str) -> float
     return round(amount / qty, 2)
 
 
-def today_trade_context(fills: list[dict[str, Any]], current_price: Any) -> dict[str, Any]:
+def today_trade_collection_context(today_fills: Any, *, artifact_exists: bool, symbol_id: str) -> dict[str, Any]:
+    base = {
+        "artifact_status": str(today_fills.get("status") or "") if isinstance(today_fills, dict) else "",
+        "collection_error_count": len(today_fills.get("errors") or []) if isinstance(today_fills, dict) and isinstance(today_fills.get("errors"), list) else 0,
+    }
+    if not artifact_exists:
+        return dict(base, collection_status="unavailable", collection_reason="today_fills_artifact_missing")
+    if not isinstance(today_fills, dict) or today_fills.get("stage") != "today-fills":
+        return dict(base, collection_status="unavailable", collection_reason="today_fills_artifact_invalid")
+    if today_fills.get("skipped") is True:
+        return dict(base, collection_status="unavailable", collection_reason="today_fills_collection_skipped")
+
+    status = str(today_fills.get("status") or "").lower()
+    errors = today_fills.get("errors") if isinstance(today_fills.get("errors"), list) else []
+    covered_symbols = {
+        symbol_key(item)
+        for item in today_fills.get("symbols", [])
+        if isinstance(item, dict) and symbol_key(item)
+    } if isinstance(today_fills.get("symbols"), list) else set()
+    if status == "success":
+        if errors:
+            return dict(base, collection_status="partial", collection_reason="today_fills_collection_incomplete")
+        if symbol_id in covered_symbols:
+            return dict(base, collection_status="complete", collection_reason="")
+        return dict(base, collection_status="unavailable", collection_reason="symbol_not_covered")
+    return dict(base, collection_status="unavailable", collection_reason="today_fills_collection_failed")
+
+
+def today_trade_context(
+    fills: list[dict[str, Any]],
+    current_price: Any,
+    collection_context: dict[str, Any],
+) -> dict[str, Any]:
+    collection_status = str(collection_context.get("collection_status") or "unavailable")
     if not fills:
         return {
-            "has_same_day_trade": False,
+            **collection_context,
+            "has_same_day_trade": False if collection_status == "complete" else None,
+            "has_same_day_buy": False if collection_status == "complete" else None,
             "fills": [],
+            "policy": "has_same_day_trade=false confirms no fills only when collection_status=complete; null means the same-day history is unknown.",
         }
     buy_qty = sum(as_int(item.get("quantity")) for item in fills if item.get("direction") == "buy")
     sell_qty = sum(as_int(item.get("quantity")) for item in fills if item.get("direction") == "sell")
@@ -627,7 +663,9 @@ def today_trade_context(fills: list[dict[str, Any]], current_price: Any) -> dict
     if price is not None and last_price not in (None, 0):
         move_since_last = round(((float(price) - float(last_price)) / float(last_price)) * 100, 2)
     return {
+        **collection_context,
         "has_same_day_trade": True,
+        "has_same_day_buy": True if buy_qty > 0 else False if collection_status == "complete" else None,
         "fill_count": len(fills),
         "buy_quantity": buy_qty,
         "sell_quantity": sell_qty,
@@ -649,7 +687,7 @@ def today_trade_context(fills: list[dict[str, Any]], current_price: Any) -> dict
         "move_since_last_fill_pct": move_since_last,
         "has_intraday_reversal": bool(buy_qty > 0 and sell_qty > 0),
         "fills": fills[:20],
-        "policy": "Use same-day fill timeline as trade-history context; do not treat it as proof that the current command caused those fills.",
+        "policy": "Use confirmed fills as trade-history context; collection_status controls whether missing fill directions are confirmed absent or unknown. Do not treat fills as proof that the current command caused them.",
     }
 
 
@@ -1049,7 +1087,16 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
             required_missing.append("price.current_or_last/observed_at")
         financial_summary = financial_summary_for(financial_cache, symbol_id, args.financial_cache_path)
         etf_summary = etf_summary_for(financial_cache, symbol_id, args.financial_cache_path) if str(item.get("product_type") or "").lower() in {"etf", "etn"} else {}
-        same_day_context = today_trade_context(fills_by_id.get(symbol_id, []), price.get("current_or_last"))
+        same_day_collection = today_trade_collection_context(
+            today_fills,
+            artifact_exists=today_fills_path.exists(),
+            symbol_id=symbol_id,
+        )
+        same_day_context = today_trade_context(
+            fills_by_id.get(symbol_id, []),
+            price.get("current_or_last"),
+            same_day_collection,
+        )
         account_exposure = compact_account_exposure(account_item)
         symbol = {
             "symbol_id": symbol_id,

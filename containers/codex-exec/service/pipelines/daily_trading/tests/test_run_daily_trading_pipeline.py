@@ -233,6 +233,20 @@ def write_self_test_fixtures(workspace: Path, run_dir: Path) -> Path:
             "errors": [],
         },
     )
+    write_json(
+        run_dir / "today-fills.json",
+        {
+            "schema_version": "1",
+            "run_id": "pipeline-self-test",
+            "started_at": "2026-06-18T09:00:00+09:00",
+            "stage": "today-fills",
+            "status": "success",
+            "skipped": False,
+            "symbols": [{"symbol_id": "005930"}, {"symbol_id": "000660"}],
+            "fills": [],
+            "errors": [],
+        },
+    )
     return portfolio_path
 
 
@@ -651,6 +665,12 @@ def run_self_test() -> int:
                             "final_holding_quantity": 99,
                             "price": {"current_or_last": 70000},
                             "holding_quantity_context": {"expected_holding_quantity": 1},
+                            "today_trade_timeline_context": {
+                                "collection_status": "complete",
+                                "has_same_day_trade": False,
+                                "has_same_day_buy": False,
+                                "fills": [],
+                            },
                             "relative_attractiveness_rank": 1,
                             "reason_code": "increase_target",
                             "one_line_reason": "half-up self-test",
@@ -712,6 +732,44 @@ def run_self_test() -> int:
             failures.append(f"same-day increased target without additional_buy_reason was accepted: {same_day_review}")
         if not any(item.get("code") == "missing_additional_buy_reason" for item in same_day_review.get("errors", [])):
             failures.append(f"same-day increased target did not require additional_buy_reason: {same_day_review}")
+        unknown_item = {
+            "symbol_id": "005930",
+            "symbol_name": "삼성전자",
+            "target_position_value_krw": 140000,
+            "price": {"current_or_last": 70000},
+            "holding_quantity_context": {"expected_holding_quantity": 1},
+            "today_trade_timeline_context": {
+                "collection_status": "partial",
+                "has_same_day_trade": None,
+                "has_same_day_buy": None,
+                "fills": [],
+            },
+            "relative_attractiveness_rank": 1,
+            "reason_code": "increase_with_unknown_history",
+            "one_line_reason": "unknown-history self-test",
+        }
+        unknown_normalized, unknown_errors = same_day_pipeline.derive_judge_final_quantity(unknown_item, {}, "buy")
+        if unknown_normalized is not None or not any(
+            item.get("code") == "missing_additional_buy_reason_unknown_same_day_history" for item in unknown_errors
+        ):
+            failures.append(f"unknown same-day history did not require additional_buy_reason: {unknown_normalized} {unknown_errors}")
+        unknown_item["additional_buy_reason"] = "새 가격 돌파와 포트폴리오 여유가 확인됨"
+        reasoned_normalized, reasoned_errors = same_day_pipeline.derive_judge_final_quantity(unknown_item, {}, "buy")
+        if reasoned_normalized is None or reasoned_errors:
+            failures.append(f"unknown same-day history with additional_buy_reason should allow an increase: {reasoned_normalized} {reasoned_errors}")
+        confirmed_absent_item = dict(
+            unknown_item,
+            today_trade_timeline_context={
+                "collection_status": "complete",
+                "has_same_day_trade": False,
+                "has_same_day_buy": False,
+                "fills": [],
+            },
+        )
+        confirmed_absent_item.pop("additional_buy_reason", None)
+        absent_normalized, absent_errors = same_day_pipeline.derive_judge_final_quantity(confirmed_absent_item, {}, "buy")
+        if absent_normalized is None or absent_errors:
+            failures.append(f"complete same-day history with no buy should not require additional_buy_reason: {absent_normalized} {absent_errors}")
         invalid_dir = workspace / "reports" / "runs" / "invalid-final-probe"
         invalid_dir.mkdir(parents=True, exist_ok=True)
         invalid_pipeline = Pipeline(
@@ -905,6 +963,13 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
             review_summary = summary.get("review_summary") if isinstance(summary.get("review_summary"), dict) else {}
             if review_summary.get("symbol_count") != 1 or not review_summary.get("symbols"):
                 failures.append(f"pipeline summary omitted compact review summary: {review_summary}")
+            today_trade_summary = summary.get("today_trade_summary") if isinstance(summary.get("today_trade_summary"), dict) else {}
+            if (
+                today_trade_summary.get("collection_status") != "complete"
+                or today_trade_summary.get("confirmed_no_trade_symbol_count") != 2
+                or today_trade_summary.get("unknown_symbol_count") != 0
+            ):
+                failures.append(f"pipeline summary did not distinguish confirmed empty same-day history: {today_trade_summary}")
             account_display = summary.get("account_display_summary") if isinstance(summary.get("account_display_summary"), dict) else {}
             if "today_buy_amount" in account_display or "today_sell_amount" in account_display:
                 failures.append(f"display account summary should not expose same-day totals as main fields: {account_display}")
@@ -954,6 +1019,8 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
                     failures.append("portfolio report did not preserve active-order gate lookup state")
                 if "주문 전 기존 미체결/예약 주문 미조회" not in report_text:
                     failures.append("portfolio report did not mark unrefreshed active-order adjustment gate")
+                if "수집 상태: complete · 체결 없음 확인 2종목 · 미확인 0종목" not in report_text:
+                    failures.append("portfolio report omitted same-day trade collection coverage")
             execution_summary = summary.get("execution") if isinstance(summary.get("execution"), dict) else {}
             if execution_summary.get("requires_main_agent_order_execution") is not True:
                 failures.append("real-submit pipeline summary did not request submit-order execution")

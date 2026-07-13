@@ -20,6 +20,7 @@ from ..scripts.run_subagent import (
     load_json,
     load_subagent_model_config,
     normalize_compact_review_payload,
+    recent_submitted_trade_context,
     run_group,
     run_one,
     validate_spec,
@@ -403,7 +404,9 @@ def write_sample_review_inputs(tmp: Path) -> None:
                         "move_since_last_fill_pct": -0.14,
                     },
                     "today_trade_timeline_context": {
+                        "collection_status": "complete",
                         "has_same_day_trade": True,
+                        "has_same_day_buy": True,
                         "last_direction": "buy",
                         "net_quantity": 3,
                         "fills": [
@@ -512,6 +515,8 @@ def assert_compact_review_prompt(tmp: Path) -> None:
         "Do not infer safety, risk, favorable news, thesis integrity, or thesis damage from the absence of optional evidence.",
         "target_position_value_krw",
         "No additional buy",
+        "same-day buy history is unknown",
+        "recent trade history is unknown",
     ]
     missing = [part for part in second_required_parts if part not in second_prompt]
     if missing:
@@ -612,6 +617,9 @@ def assert_review_input_slices(tmp: Path) -> None:
             inspected_runs = first_symbol.get("recent_trade_context", {}).get("inspected_run_ids", [])
             if inspected_runs != ["self-test-newer-other", "self-test-prev"]:
                 raise AssertionError(f"review-core inspected wrong recent runs: {first_symbol}")
+            recent_context = first_symbol.get("recent_trade_context", {})
+            if recent_context.get("coverage_status") != "complete" or recent_context.get("inspected_run_count") != 2:
+                raise AssertionError(f"review-core did not mark complete recent-trade coverage: {first_symbol}")
         if key == "analyst_review" and slice_payload.get("slice_type") != "analyst-review-slice":
             raise AssertionError(f"judge-review first slice missing slice_type: {slice_payload}")
         if key == "analyst_review":
@@ -627,6 +635,52 @@ def assert_review_input_slices(tmp: Path) -> None:
             source_scores = source_payload["symbols"][0].get("agent_scores", [])
             if len(source_scores) != 2 or not source_scores[0].get("excluded_from_aggregation"):
                 raise AssertionError(f"judge slice filtering mutated canonical analyst-review: {source_payload}")
+
+    coverage_probe = tmp / "coverage-probe"
+    current_run = coverage_probe / "current"
+    current_run.mkdir(parents=True, exist_ok=True)
+    write_json(
+        coverage_probe / "previous" / "execution.json",
+        {
+            "run_id": "coverage-previous",
+            "started_at": "2026-06-07T09:00:00+09:00",
+            "orders": [],
+        },
+    )
+    partial_context = recent_submitted_trade_context(current_run, "005930", run_limit=2)
+    if partial_context.get("coverage_status") != "partial" or partial_context.get("inspected_run_count") != 1:
+        raise AssertionError(f"one of two requested prior runs should produce partial coverage: {partial_context}")
+    if partial_context.get("recent_submitted_trades") or "only when coverage_status=complete" not in str(partial_context.get("policy")):
+        raise AssertionError(f"partial empty recent-trade history should remain explicitly unknown: {partial_context}")
+    write_json(coverage_probe / "invalid-orders" / "execution.json", {"run_id": "invalid-orders"})
+    malformed_path = coverage_probe / "malformed" / "execution.json"
+    malformed_path.parent.mkdir(parents=True, exist_ok=True)
+    malformed_path.write_text("{invalid", encoding="utf-8")
+    invalid_context = recent_submitted_trade_context(current_run, "005930", run_limit=2)
+    if invalid_context.get("coverage_status") != "partial" or invalid_context.get("invalid_execution_count") != 2:
+        raise AssertionError(f"invalid execution artifacts should prevent complete recent-trade coverage: {invalid_context}")
+
+    complete_probe = tmp / "complete-coverage-probe"
+    complete_current = complete_probe / "current"
+    complete_current.mkdir(parents=True, exist_ok=True)
+    for index in range(2):
+        write_json(
+            complete_probe / f"previous-{index}" / "execution.json",
+            {
+                "run_id": f"complete-previous-{index}",
+                "started_at": f"2026-06-0{index + 6}T09:00:00+09:00",
+                "orders": [],
+            },
+        )
+    complete_context = recent_submitted_trade_context(complete_current, "005930", run_limit=2)
+    if complete_context.get("coverage_status") != "complete" or complete_context.get("recent_submitted_trades"):
+        raise AssertionError(f"two valid empty executions should confirm complete empty recent-trade history: {complete_context}")
+
+    unavailable_probe = tmp / "unavailable-coverage-probe" / "current"
+    unavailable_probe.mkdir(parents=True, exist_ok=True)
+    unavailable_context = recent_submitted_trade_context(unavailable_probe, "005930", run_limit=2)
+    if unavailable_context.get("coverage_status") != "unavailable" or unavailable_context.get("inspected_run_count") != 0:
+        raise AssertionError(f"zero prior executions should produce unavailable recent-trade coverage: {unavailable_context}")
 
 
 def assert_debate_optional_evidence_policy() -> None:
@@ -647,6 +701,8 @@ def assert_debate_optional_evidence_policy() -> None:
     format_text = (prompt_dir / "judge-review-format.md").read_text(encoding="utf-8")
     if "unavailable news is neutral rather than favorable or adverse" not in format_text:
         raise AssertionError("judge-review-format.md missing unavailable-news neutrality policy")
+    if "coverage_status=complete" not in format_text or "same-day buy history is unknown" not in format_text:
+        raise AssertionError("judge-review-format.md missing trade-history coverage policy")
 
 
 def assert_invalid_spec(spec_payload: dict[str, Any], expected: str) -> None:

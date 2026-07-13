@@ -27,6 +27,8 @@ from ..scripts.build_run_artifacts import (
     load_json,
     load_strategy_policy_config,
     pipeline_dir,
+    today_trade_collection_context,
+    today_trade_context,
     write_json,
 )
 
@@ -157,6 +159,8 @@ def run_self_test() -> int:
                 "schema_version": "1",
                 "stage": "today-fills",
                 "status": "success",
+                "skipped": False,
+                "symbols": [{"symbol_id": "005930"}, {"symbol_id": "000660"}],
                 "fills": [
                     {
                         "symbol_id": "005930",
@@ -418,11 +422,72 @@ symbols:
             trade_context = by_symbol["005930"].get("today_trade_timeline_context", {})
             if trade_context.get("last_direction") != "buy" or trade_context.get("has_intraday_reversal") is not True:
                 failures.append(f"same-day trade timeline should be summarized: {by_symbol['005930']}")
+            if trade_context.get("collection_status") != "complete" or trade_context.get("has_same_day_buy") is not True:
+                failures.append(f"same-day trade collection should be complete with a confirmed buy: {trade_context}")
+            no_trade_context = by_symbol["000660"].get("today_trade_timeline_context", {})
+            if no_trade_context.get("collection_status") != "complete" or no_trade_context.get("has_same_day_trade") is not False:
+                failures.append(f"complete same-day collection with zero fills should confirm absence: {no_trade_context}")
             if by_symbol["005930"].get("today_trade_price_context", {}).get("move_since_last_fill_pct") != -0.43:
                 failures.append(f"same-day trade price context should include current-vs-fill move: {by_symbol['005930']}")
             actor_context = by_symbol["005930"].get("today_trade_price_context", {})
             if actor_context.get("bot_net_quantity") != 0 or actor_context.get("manual_net_quantity") != 1 or actor_context.get("manual_fill_count") != 1:
                 failures.append(f"same-day trade context should split bot/manual net quantities: {actor_context}")
+            missing_collection = today_trade_collection_context({}, artifact_exists=False, symbol_id="005930")
+            missing_trade_context = today_trade_context([], 70000, missing_collection)
+            if missing_trade_context.get("collection_status") != "unavailable" or missing_trade_context.get("has_same_day_trade") is not None:
+                failures.append(f"missing today-fills artifact should keep history unknown: {missing_trade_context}")
+            skipped_collection = today_trade_collection_context(
+                {
+                    "stage": "today-fills",
+                    "status": "success",
+                    "skipped": True,
+                    "symbols": [{"symbol_id": "005930"}],
+                    "fills": [],
+                    "errors": [],
+                },
+                artifact_exists=True,
+                symbol_id="005930",
+            )
+            skipped_trade_context = today_trade_context([], 70000, skipped_collection)
+            if skipped_trade_context.get("collection_status") != "unavailable" or skipped_trade_context.get("has_same_day_trade") is not None:
+                failures.append(f"skipped today-fills collection should keep history unavailable: {skipped_trade_context}")
+            partial_collection = today_trade_collection_context(
+                {
+                    "stage": "today-fills",
+                    "status": "success",
+                    "skipped": False,
+                    "symbols": [{"symbol_id": "005930"}],
+                    "fills": [],
+                    "errors": [{"code": "today_fills_query_variant_failed"}],
+                },
+                artifact_exists=True,
+                symbol_id="005930",
+            )
+            partial_trade_context = today_trade_context([], 70000, partial_collection)
+            if partial_trade_context.get("collection_status") != "partial" or partial_trade_context.get("has_same_day_trade") is not None:
+                failures.append(f"partial today-fills collection with zero fills should keep history unknown: {partial_trade_context}")
+            failed_collection = today_trade_collection_context(
+                {
+                    "stage": "today-fills",
+                    "status": "partial",
+                    "skipped": False,
+                    "symbols": [{"symbol_id": "005930"}],
+                    "fills": [],
+                    "errors": [{"code": "today_fills_collection_failed"}],
+                },
+                artifact_exists=True,
+                symbol_id="005930",
+            )
+            failed_trade_context = today_trade_context([], 70000, failed_collection)
+            if failed_trade_context.get("collection_status") != "unavailable" or failed_trade_context.get("has_same_day_trade") is not None:
+                failures.append(f"failed today-fills collection should keep history unavailable: {failed_trade_context}")
+            partial_with_fill = today_trade_context(
+                [{"filled_at": "2026-06-18T09:31:00+09:00", "direction": "buy", "quantity": 1, "price": 70100}],
+                70000,
+                partial_collection,
+            )
+            if partial_with_fill.get("has_same_day_trade") is not True or partial_with_fill.get("has_same_day_buy") is not True:
+                failures.append(f"partial collection should preserve confirmed fill presence: {partial_with_fill}")
             first_specs = build_first_specs(
                 argparse.Namespace(
                     output_dir=run_dir,

@@ -87,6 +87,8 @@ python3 <daily-trading-pipeline>/scripts/run_daily_trading_pipeline.py run \
 - 매수가능 조회
 - 매도가능 조회는 검증된 direct template이 있을 때만 사용하고, 현재 runner는 현재 보유수량에서 active 매도 예약을 뺀 값을 매도 gate로 사용
 
+당일 체결과 최근 제출 거래 이력은 빈 목록만으로 `거래 없음`으로 확정하지 않는다. 당일 체결은 `collection_status`, 최근 제출 거래는 `coverage_status`가 `complete`일 때만 빈 목록을 확인된 부재로 해석하며, `partial`/`unavailable`은 미확인 상태로 유지한다. Judge가 당일 매수 이력이 미확인인 상황에서 기준 목표금액을 늘리려면 새 근거나 실질적으로 바뀐 가격·포트폴리오 맥락을 `additional_buy_reason`에 제시해야 한다.
+
 `scripts/execute_orders.py` 주문 실행 허용 범위:
 
 - 명시 승인과 `execute_orders.py` gate를 통과한 `order_resv`

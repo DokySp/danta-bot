@@ -807,19 +807,38 @@ def run_started_sort_key(run_dir: Path, payload: dict[str, Any]) -> tuple[str, s
 
 
 def recent_submitted_trade_context(output_dir: Path, symbol_id: str, run_limit: int = 2) -> dict[str, Any]:
+    unavailable = {
+        "recent_submitted_trades": [],
+        "inspected_run_ids": [],
+        "coverage_status": "unavailable",
+        "requested_run_count": max(run_limit, 0),
+        "inspected_run_count": 0,
+        "invalid_execution_count": 0,
+        "policy": "An empty recent_submitted_trades list confirms no recent trades only when coverage_status=complete; otherwise history is unknown.",
+    }
     if not symbol_id or run_limit <= 0:
-        return {"recent_submitted_trades": [], "policy": "no recent submitted trade context"}
+        return unavailable
     runs_dir = output_dir.parent
     if not runs_dir.is_dir():
-        return {"recent_submitted_trades": [], "policy": "no recent submitted trade context"}
+        return unavailable
 
     previous_runs: list[tuple[tuple[str, str], Path, dict[str, Any]]] = []
+    invalid_execution_count = 0
     for run_dir in (path for path in runs_dir.iterdir() if path.is_dir()):
         if run_dir.resolve() == output_dir.resolve():
             continue
-        payload = read_json_if_exists(run_dir / "execution.json")
-        if isinstance(payload, dict):
-            previous_runs.append((run_started_sort_key(run_dir, payload), run_dir, payload))
+        execution_path = run_dir / "execution.json"
+        if not execution_path.exists():
+            continue
+        try:
+            payload = read_json_if_exists(execution_path)
+        except (OSError, ValueError):
+            invalid_execution_count += 1
+            continue
+        if not isinstance(payload, dict) or not isinstance(payload.get("orders"), list):
+            invalid_execution_count += 1
+            continue
+        previous_runs.append((run_started_sort_key(run_dir, payload), run_dir, payload))
     previous_runs.sort(key=lambda item: item[0], reverse=True)
 
     trades: list[dict[str, Any]] = []
@@ -852,10 +871,22 @@ def recent_submitted_trade_context(output_dir: Path, symbol_id: str, run_limit: 
                     "reason": str(order.get("reason") or "")[:120],
                 }
             )
+    inspected_run_count = len(inspected_runs)
+    coverage_status = (
+        "complete"
+        if inspected_run_count >= run_limit and invalid_execution_count == 0
+        else "partial"
+        if inspected_run_count
+        else "unavailable"
+    )
     return {
         "recent_submitted_trades": trades,
         "inspected_run_ids": inspected_runs,
-        "policy": "Recent submitted trades are context for sizing within the allowed candidate direction; the score-band direction preconditions still apply.",
+        "coverage_status": coverage_status,
+        "requested_run_count": run_limit,
+        "inspected_run_count": inspected_run_count,
+        "invalid_execution_count": invalid_execution_count,
+        "policy": "Recent submitted trades are context for sizing within the allowed candidate direction; an empty list confirms no recent trades only when coverage_status=complete, and score-band direction preconditions still apply.",
     }
 
 
@@ -1092,7 +1123,8 @@ def compact_review_prompt(spec: dict[str, Any]) -> str | None:
                 "Return target_position_value_krw for every supplied symbol as the target KRW position value after this decision.",
                 "The pipeline derives final_holding_quantity from target_position_value_krw / price.current_or_last with Decimal ROUND_HALF_UP; judge-supplied final_holding_quantity is optional and ignored for sizing.",
                 "No additional buy, no extra exposure, or 추가 확대 없음 means target_position_value_krw must stay at the baseline (holding_quantity_context.expected_holding_quantity * price.current_or_last), not 0.",
-                "If today_trade_timeline_context shows a same-day buy fill and target_position_value_krw exceeds that baseline, include additional_buy_reason with the new evidence or materially changed price/portfolio context.",
+                "If today_trade_timeline_context confirms a same-day buy, or its collection_status is partial/unavailable so same-day buy history is unknown, target_position_value_krw may exceed the baseline only when additional_buy_reason supplies new evidence or materially changed price/portfolio context.",
+                "Treat an empty recent_trade_context.recent_submitted_trades list as confirmed absence only when coverage_status=complete; otherwise recent trade history is unknown and its absence is non-directional.",
                 "For held sell candidates, an intact long-term thesis favors holding despite the low score; sell only when thesis damage, material adverse news/disclosure, or structural deterioration is supported by supplied evidence.",
                 "Use strategy_context and symbol_strategy_context as advisory inputs for target_position_value_krw, not as order allow/block rules.",
                 "Debate sub-agents: spawn the bull/bear debate sub-agents required by the judge persona, passing the debate persona file contents plus the listed input file paths; spawned sub-agents inherit every other restriction.",

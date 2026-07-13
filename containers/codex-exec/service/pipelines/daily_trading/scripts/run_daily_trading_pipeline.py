@@ -1111,14 +1111,24 @@ class Pipeline:
                     result[key] = item
         return result
 
-    def same_day_buy_exists(self, context: dict[str, Any]) -> bool:
+    def same_day_buy_state(self, context: dict[str, Any]) -> str:
         timeline = context.get("today_trade_timeline_context") if isinstance(context.get("today_trade_timeline_context"), dict) else {}
+        if timeline.get("has_same_day_buy") is True:
+            return "present"
         if as_int(timeline.get("buy_fill_count")) > 0 or as_int(timeline.get("buy_quantity")) > 0:
-            return True
+            return "present"
         fills = timeline.get("fills")
         if isinstance(fills, list):
-            return any(isinstance(fill, dict) and str(fill.get("direction") or "").lower() == "buy" for fill in fills)
-        return False
+            if any(isinstance(fill, dict) and str(fill.get("direction") or "").lower() == "buy" for fill in fills):
+                return "present"
+        collection_status = str(timeline.get("collection_status") or "").lower()
+        if collection_status == "complete":
+            return "absent"
+        if not collection_status and (timeline.get("has_same_day_buy") is False or timeline.get("has_same_day_trade") is False):
+            return "absent"
+        if not collection_status and timeline.get("has_same_day_trade") is True and isinstance(fills, list):
+            return "absent"
+        return "unknown"
 
     def derive_judge_final_quantity(
         self,
@@ -1190,13 +1200,25 @@ class Pipeline:
             )
             return None, errors
         additional_buy_reason = str(item.get("additional_buy_reason") or "").strip()
-        if self.same_day_buy_exists(context) and target_value > baseline_value and not additional_buy_reason:
+        same_day_buy_state = self.same_day_buy_state(context)
+        if same_day_buy_state == "present" and target_value > baseline_value and not additional_buy_reason:
             errors.append(
                 {
                     "stage": "judge-review",
                     "source": "pipeline",
                     "code": "missing_additional_buy_reason",
                     "message": f"{symbol_id}: additional_buy_reason is required when increasing target_position_value_krw after a same-day buy",
+                    "required": True,
+                }
+            )
+            return None, errors
+        if same_day_buy_state == "unknown" and target_value > baseline_value and not additional_buy_reason:
+            errors.append(
+                {
+                    "stage": "judge-review",
+                    "source": "pipeline",
+                    "code": "missing_additional_buy_reason_unknown_same_day_history",
+                    "message": f"{symbol_id}: additional_buy_reason is required when increasing target_position_value_krw while same-day buy history is unavailable or incomplete",
                     "required": True,
                 }
             )
@@ -1338,10 +1360,19 @@ class Pipeline:
     def build_today_trade_summary(self, decision_brief: dict[str, Any]) -> dict[str, Any]:
         symbols = decision_brief.get("symbols") if isinstance(decision_brief.get("symbols"), list) else []
         traded: list[dict[str, Any]] = []
+        collection_statuses: list[str] = []
+        confirmed_no_trade_count = 0
+        unknown_count = 0
         for item in symbols:
             if not isinstance(item, dict):
                 continue
             context = item.get("today_trade_timeline_context") if isinstance(item.get("today_trade_timeline_context"), dict) else {}
+            collection_status = str(context.get("collection_status") or "unavailable").lower()
+            collection_statuses.append(collection_status)
+            if context.get("has_same_day_trade") is False:
+                confirmed_no_trade_count += 1
+            elif context.get("has_same_day_trade") is None:
+                unknown_count += 1
             if not context.get("has_same_day_trade"):
                 continue
             traded.append(
@@ -1360,10 +1391,19 @@ class Pipeline:
                     "has_intraday_reversal": bool(context.get("has_intraday_reversal")),
                 }
             )
+        if collection_statuses and all(status == "complete" for status in collection_statuses):
+            collection_status = "complete"
+        elif any(status in {"complete", "partial"} for status in collection_statuses):
+            collection_status = "partial"
+        else:
+            collection_status = "unavailable"
         return {
+            "collection_status": collection_status,
             "symbol_count_with_fills": len(traded),
+            "confirmed_no_trade_symbol_count": confirmed_no_trade_count,
+            "unknown_symbol_count": unknown_count,
             "symbols": traded[:10],
-            "display_policy": "Show as same-day trade timeline context, not as trades newly caused by this command.",
+            "display_policy": "Show as same-day trade timeline context, not as trades newly caused by this command. Empty history is confirmed only when collection_status is complete.",
         }
 
     def build_evidence_summary(self, decision_brief: dict[str, Any], stages: list[dict[str, Any]], symbols: list[str]) -> dict[str, Any]:
@@ -1579,6 +1619,7 @@ class Pipeline:
             [
                 "",
                 "## 2-1. 당일 거래 타임라인 요약",
+                f"- 수집 상태: {today_trade_summary.get('collection_status') or 'unavailable'} · 체결 없음 확인 {as_int(today_trade_summary.get('confirmed_no_trade_symbol_count'))}종목 · 미확인 {as_int(today_trade_summary.get('unknown_symbol_count'))}종목",
                 f"- 당일 체결 타임라인 확인 종목 수: {as_int(today_trade_summary.get('symbol_count_with_fills'))}",
                 "- 누계 금액은 이번 명령 발생 거래로 해석하지 않고, 체결 타임라인은 당일 거래 맥락으로만 사용",
                 "| 종목식별자 | 종목명 | 마지막 방향 | 마지막 체결시각 | 마지막 체결가 | 순수량 | 반대거래 발생 |",
