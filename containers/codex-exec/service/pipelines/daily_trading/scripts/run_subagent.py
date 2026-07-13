@@ -893,11 +893,33 @@ def add_judge_review_holding_context(payload: Any, output_dir: Path | None = Non
     return payload
 
 
+def without_excluded_agent_scores(item: Any) -> Any:
+    if not isinstance(item, dict):
+        return item
+    copied = dict(item)
+    agent_scores = item.get("agent_scores")
+    if isinstance(agent_scores, list):
+        copied["agent_scores"] = [
+            dict(score) if isinstance(score, dict) else score
+            for score in agent_scores
+            if not (isinstance(score, dict) and score.get("excluded_from_aggregation"))
+        ]
+    return copied
+
+
 def build_analyst_review_slice_payload(payload: Any, symbol_ids: list[str]) -> Any:
     filtered = filter_symbols(payload, symbol_ids)
     if not isinstance(filtered, dict):
         return filtered
     sliced = dict(filtered)
+    symbols = filtered.get("symbols")
+    if isinstance(symbols, list):
+        sliced["symbols"] = [without_excluded_agent_scores(item) for item in symbols]
+    elif isinstance(symbols, dict):
+        sliced["symbols"] = {
+            symbol_id: without_excluded_agent_scores(item)
+            for symbol_id, item in symbols.items()
+        }
     sliced["slice_type"] = "analyst-review-slice"
     sliced["source_stage"] = filtered.get("stage") or "analyst-review"
     return sliced
@@ -1060,7 +1082,9 @@ def compact_review_prompt(spec: dict[str, Any]) -> str | None:
         lines.extend(
             [
                 "",
-                "For judge-review, use the lossless selected-symbol analyst-review slice from analyst_review.",
+                "For judge-review, use the selected-symbol analyst-review slice from analyst_review; agent_scores excluded from aggregation are intentionally omitted from this judgment input.",
+                "Optional evidence marked missing, failed, empty, unavailable, or excluded_from_aggregation is non-directional: its absence must not affect debate claims, weaknesses, rebuttals, reason_code, one_line_reason, or target_position_value_krw.",
+                "Do not infer safety, risk, favorable news, thesis integrity, or thesis damage from the absence of optional evidence.",
                 f"The supplied symbols are pre-selected candidates by score band: sell candidates are held symbols with final_first_score <= {sell_below}, buy candidates have final_first_score >= {buy_above}. Symbols between the bands are held by the pipeline and are not yours to decide.",
                 "Direction preconditions are hard constraints: a sell candidate may only be sold (partial or full) or held (target_position_value_krw <= baseline); a buy candidate may only be bought or held (target_position_value_krw >= baseline). Violations are rejected by the pipeline.",
                 "When evidence is insufficient or conflicting, the default decision is hold at the baseline.",
@@ -1091,7 +1115,6 @@ def compact_review_prompt(spec: dict[str, Any]) -> str | None:
             "",
             "Return JSON only in the required compact review format. human_markdown_path is informational; the Main agent creates that sidecar from JSON.",
             "Use short reason_code and one_line_reason fields instead of long rationale, risk, evidence, or prose arrays.",
-            "Optional financial/news absence is context only and must not lower score, final holding quantity, or eligibility by itself.",
         ]
     )
     return compact_prompt("\n".join(lines))

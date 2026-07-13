@@ -438,6 +438,13 @@ def write_sample_review_inputs(tmp: Path) -> None:
                     "score": 7,
                     "agent_scores": [
                         {
+                            "agent_role": "analyst-news-flow",
+                            "score": 5,
+                            "reason_code": "no_news_excluded",
+                            "one_line_reason": "뉴스 정보가 없어 평균에서 제외",
+                            "excluded_from_aggregation": True,
+                        },
+                        {
                             "agent_role": "analyst-risk-allocation",
                             "score": 7,
                             "confidence": 6,
@@ -481,6 +488,8 @@ def assert_compact_review_prompt(tmp: Path) -> None:
     missing = [part for part in required_parts if part not in prompt]
     if missing:
         raise AssertionError(f"compact review prompt missing {missing}: {prompt}")
+    if "Optional evidence marked missing, failed, empty, unavailable" in prompt:
+        raise AssertionError(f"judge-only optional-evidence policy leaked into analyst-review prompt: {prompt}")
 
     second_prompt = build_prompt(
         compact_spec(tmp, stage="judge-review", agent_role="judge", task_name="second")
@@ -488,7 +497,7 @@ def assert_compact_review_prompt(tmp: Path) -> None:
     second_required_parts = [
         "stage: judge-review",
         "analyst_review:",
-        "For judge-review, use the lossless selected-symbol analyst-review slice from analyst_review.",
+        "For judge-review, use the selected-symbol analyst-review slice from analyst_review; agent_scores excluded from aggregation are intentionally omitted from this judgment input.",
         "The supplied symbols are pre-selected candidates by score band: sell candidates are held symbols with final_first_score <= 4, buy candidates have final_first_score >= 6.",
         "Direction preconditions are hard constraints: a sell candidate may only be sold (partial or full) or held (target_position_value_krw <= baseline); a buy candidate may only be bought or held (target_position_value_krw >= baseline).",
         "When evidence is insufficient or conflicting, the default decision is hold at the baseline.",
@@ -499,6 +508,8 @@ def assert_compact_review_prompt(tmp: Path) -> None:
         "Debate procedure: one base round (bull case, bear case, bull rebuttal, bear rebuttal) over all candidates in batch",
         "hard stop after two rounds",
         "if they balance or evidence is insufficient, hold at the baseline",
+        "Optional evidence marked missing, failed, empty, unavailable, or excluded_from_aggregation is non-directional",
+        "Do not infer safety, risk, favorable news, thesis integrity, or thesis damage from the absence of optional evidence.",
         "target_position_value_krw",
         "No additional buy",
     ]
@@ -606,10 +617,36 @@ def assert_review_input_slices(tmp: Path) -> None:
         if key == "analyst_review":
             first_symbol = slice_payload["symbols"][0]
             agent_scores = first_symbol.get("agent_scores", [])
-            if not agent_scores or agent_scores[0].get("one_line_reason") != "full reason should remain":
-                raise AssertionError(f"analyst-review slice dropped agent score reason: {first_symbol}")
+            if len(agent_scores) != 1 or agent_scores[0].get("one_line_reason") != "full reason should remain":
+                raise AssertionError(f"analyst-review slice did not keep only included agent score reasons: {first_symbol}")
+            if any(score.get("excluded_from_aggregation") for score in agent_scores if isinstance(score, dict)):
+                raise AssertionError(f"analyst-review slice kept excluded agent scores: {first_symbol}")
             if first_symbol.get("custom_review_detail") != {"keep": True}:
                 raise AssertionError(f"analyst-review slice dropped custom detail: {first_symbol}")
+            source_payload = load_json(tmp / "reports" / "runs" / "self-test" / "analyst-review.json")
+            source_scores = source_payload["symbols"][0].get("agent_scores", [])
+            if len(source_scores) != 2 or not source_scores[0].get("excluded_from_aggregation"):
+                raise AssertionError(f"judge slice filtering mutated canonical analyst-review: {source_payload}")
+
+
+def assert_debate_optional_evidence_policy() -> None:
+    prompt_dir = Path(__file__).resolve().parents[1] / "prompts"
+    shared_required = [
+        "optional evidence는 주장·약점·반박에 사용하지 않는다",
+        "정보 부재를 위험·안전, 호재·악재, thesis 유지·훼손의 근거로 추론하지 않는다",
+        "지원되는 논거 없음",
+    ]
+    for name in ("debate-bull.md", "debate-bear.md"):
+        text = (prompt_dir / name).read_text(encoding="utf-8")
+        missing = [part for part in shared_required if part not in text]
+        if missing:
+            raise AssertionError(f"{name} missing optional-evidence policy {missing}")
+    judge_text = (prompt_dir / "judge.md").read_text(encoding="utf-8")
+    if "optional evidence 부재는 어느 방향의 논거로도 세지 않는다" not in judge_text:
+        raise AssertionError("judge.md missing non-directional optional-evidence policy")
+    format_text = (prompt_dir / "judge-review-format.md").read_text(encoding="utf-8")
+    if "unavailable news is neutral rather than favorable or adverse" not in format_text:
+        raise AssertionError("judge-review-format.md missing unavailable-news neutrality policy")
 
 
 def assert_invalid_spec(spec_payload: dict[str, Any], expected: str) -> None:
@@ -684,6 +721,7 @@ def run_self_test() -> int:
                 assert_prompt_compaction()
                 assert_compact_review_prompt(tmp)
                 assert_review_input_slices(tmp)
+                assert_debate_optional_evidence_policy()
                 missing_brief = compact_spec(
                     tmp, stage="analyst-review", agent_role="analyst-momentum-news", task_name="missing-brief"
                 )

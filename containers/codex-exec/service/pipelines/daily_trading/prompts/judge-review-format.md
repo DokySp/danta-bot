@@ -82,12 +82,13 @@ Rules:
 - "No additional buy", "no extra exposure", or "추가 확대 없음" is a hold rationale: keep `target_position_value_krw` at the baseline level; do not set it to `0`.
 - If `today_trade_timeline_context` shows a same-day buy fill and `target_position_value_krw` is above the baseline, include `additional_buy_reason` with the new evidence or materially changed price/portfolio context supporting the increase.
 - `reason_code` and `one_line_reason` must describe the same reduce/hold/increase direction implied by `target_position_value_krw` versus the baseline.
-- Consider relative attractiveness, duplicate exposure, current weight, price/chart conditions, `portfolio_snapshot`, and the supplied selected-symbol analyst-review results.
+- Consider relative attractiveness, duplicate exposure, current weight, price/chart conditions, `portfolio_snapshot`, and the supplied selected-symbol analyst-review results that contain usable evidence.
+- Optional evidence marked `missing`, `failed`, `empty`, `unavailable`, or `excluded_from_aggregation` is non-directional. Do not use its absence to justify hold, reduce, or increase decisions, and do not cite it as decisive evidence in `reason_code` or `one_line_reason`.
 - If a symbol's analyst-review score is missing, unavailable, or unusable, hold it at the baseline instead of failing the judgment.
-- For held sell candidates, distinguish `long_term_thesis_intact` from thesis damage: intact thesis favors holding despite the low score; sell when thesis damage, material adverse news/disclosure, or structural deterioration is supported by supplied evidence.
+- For held sell candidates, distinguish `long_term_thesis_intact` from thesis damage using supplied usable evidence: supported intact thesis favors holding despite the low score; sell when thesis damage, material adverse news/disclosure, or structural deterioration is supported by supplied evidence. Lack of damage evidence alone does not establish an intact thesis.
 - Judge long-term thesis from supplied evidence only: core investment rationale, material news/disclosure risk, quality/value deterioration, whether a price shock indicates structural damage or short-term volatility, and portfolio weight/concentration.
-- For buy candidates, increase only when add conditions are satisfied: quality/value advantage, acceptable risk/allocation, weight/concentration room, and no supplied material adverse news/disclosure. Otherwise hold at the baseline.
-- When the evidence is insufficient or conflicting, the default decision is hold at the baseline.
+- For buy candidates, increase only when add conditions are satisfied: quality/value advantage, acceptable risk/allocation, and weight/concentration room. Apply material adverse news/disclosure only when usable news/disclosure evidence is supplied; unavailable news is neutral rather than favorable or adverse. Otherwise hold at the baseline.
+- When usable evidence is insufficient or conflicting, the default decision is hold at the baseline without citing optional evidence absence as the decision reason.
 - No fixed cash ratio or fixed investment ratio.
 - The judge cannot add symbols outside the supplied candidate set.
 - Do not return long `cash_rationale`, `duplicate_exposure_limits`, `price_chart_view`, `rationale`, `risks`, or prose arrays.
