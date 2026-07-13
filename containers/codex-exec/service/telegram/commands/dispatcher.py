@@ -9,6 +9,7 @@ from .portfolio import (
     handle_remove_portfolio_except_ticker,
     handle_remove_portfolio_ticker,
 )
+from .reasoning_effort import handle_reasoning_effort
 from .schedule import handle_schedule_off, handle_schedule_on
 from .touch_point import handle_show_touch_point
 from .version import handle_version
@@ -21,6 +22,7 @@ def handle_telegram_command(worker: Any, task: Any, command: str, args: str) -> 
         "new": handle_new,
         "usage": handle_usage,
         "version": handle_version,
+        "reasoning_effort": handle_reasoning_effort,
         "show-touch-point": handle_show_touch_point,
         "show_touch_point": handle_show_touch_point,
         "add_portfolio_ticker": handle_add_portfolio_ticker,

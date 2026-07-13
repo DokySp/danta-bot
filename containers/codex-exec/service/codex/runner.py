@@ -146,7 +146,7 @@ class CodexRunner:
             "-m",
             model_value,
             "-c",
-            f'model_reasoning_effort="{reasoning_effort_value}"',
+            f"model_reasoning_effort={json.dumps(reasoning_effort_value, ensure_ascii=False)}",
             "--skip-git-repo-check",
             "-o",
             str(output_file),

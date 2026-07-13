@@ -13,6 +13,9 @@ routes:
       - command: version
         description: 배포 버전 확인
         instruction: /version
+      - command: reasoning_effort
+        description: 기본 reasoning effort 확인·변경
+        instruction: /reasoning_effort
       - command: show_touch_point
         description: 가격 터치 지점 그래프
         instruction: /show_touch_point
@@ -49,6 +52,9 @@ routes:
       - command: version
         description: 배포 버전 확인
         instruction: /version
+      - command: reasoning_effort
+        description: 기본 reasoning effort 확인·변경
+        instruction: /reasoning_effort
       - command: add_portfolio_ticker
         description: 포트폴리오 종목 추가
         instruction: /add_portfolio_ticker

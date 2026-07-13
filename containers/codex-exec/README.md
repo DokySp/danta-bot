@@ -86,6 +86,12 @@ config를 수정하려면 호스트 config 파일과 디렉터리가 컨테이�
 `/app/default-config/codex-runtime.yaml`을 fallback으로 사용하므로 컨테이너 시작은 유지됩니다. 설정을 직접
 수정하고 hot reload하려면 배포 프로필의 `codex-runtime.yaml`을 호스트 `./config`에도 배치해야 합니다.
 
+텔레그램의 `/reasoning_effort`는 현재 `defaults.model_reasoning_effort`를 표시하고,
+`/reasoning_effort <값>`은 비어 있지 않은 단일 값을 그대로 저장합니다. 예: `low`, `xhigh`, `max`, `ultra`.
+변경값은 다음 일반 Codex 실행부터 반영되며, 스케줄별 override와 `daily_trading` sub-agent 설정은 바꾸지 않습니다.
+호스트 설정 파일이 없으면 baked fallback을 `/app/config/codex-runtime.yaml`로 생성한 뒤 변경합니다.
+고정 allowlist는 두지 않으며 지원 여부는 실제 Codex CLI와 선택된 모델이 판단합니다.
+
 ```yaml
 defaults:
   model: gpt-5.6-sol

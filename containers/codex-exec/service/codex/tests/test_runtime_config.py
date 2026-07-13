@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from ..runner import CodexRunner
-from ..runtime_config import load_codex_runtime_defaults
+from ..runtime_config import load_codex_runtime_defaults, update_codex_runtime_reasoning_effort
 
 
 def write_runtime_config(path: Path, *, model: str, effort: str, prompt: str = "new session") -> None:
@@ -69,6 +69,80 @@ class RuntimeConfigTest(unittest.TestCase):
 
             self.assertEqual(defaults.model, "baked-model")
 
+    def test_updates_only_defaults_reasoning_effort(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "codex-runtime.yaml"
+            path.write_text(
+                "\n".join(
+                    [
+                        "defaults:",
+                        "  model: model-a",
+                        "  model_reasoning_effort: medium  # general default",
+                        "  new_session_prompt: hello",
+                        "daily_trading:",
+                        "  collection:",
+                        "    model: collection-model",
+                        "    model_reasoning_effort: low",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            result = update_codex_runtime_reasoning_effort(path, "max")
+
+            self.assertTrue(result.changed)
+            self.assertEqual(result.previous_value, "medium")
+            self.assertEqual(result.current_value, "max")
+            updated = path.read_text(encoding="utf-8")
+            self.assertIn('  model_reasoning_effort: "max"  # general default', updated)
+            self.assertIn("    model_reasoning_effort: low", updated)
+
+    def test_accepts_model_defined_reasoning_effort_and_serializes_it_safely(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "codex-runtime.yaml"
+            write_runtime_config(path, model="model-a", effort="medium")
+
+            ultra_result = update_codex_runtime_reasoning_effort(path, "ultra")
+            future_result = update_codex_runtime_reasoning_effort(path, 'future"effort')
+
+            self.assertEqual(ultra_result.current_value, "ultra")
+            self.assertEqual(future_result.current_value, 'future"effort')
+            self.assertEqual(
+                load_codex_runtime_defaults(path).model_reasoning_effort,
+                'future"effort',
+            )
+
+    def test_rejects_empty_reasoning_effort_without_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "codex-runtime.yaml"
+            write_runtime_config(path, model="model-a", effort="medium")
+            original = path.read_text(encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "must not be empty"):
+                update_codex_runtime_reasoning_effort(path, "  ")
+
+            self.assertEqual(path.read_text(encoding="utf-8"), original)
+
+    def test_update_materializes_baked_default_when_primary_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            primary_path = tmp_path / "config" / "codex-runtime.yaml"
+            primary_path.parent.mkdir()
+            baked_path = tmp_path / "default-config" / "codex-runtime.yaml"
+            baked_path.parent.mkdir()
+            write_runtime_config(baked_path, model="baked-model", effort="medium")
+
+            with (
+                patch("service.codex.runtime_config.DEFAULT_RUNTIME_CONFIG_PATH", primary_path),
+                patch("service.codex.runtime_config.BAKED_RUNTIME_CONFIG_PATH", baked_path),
+            ):
+                result = update_codex_runtime_reasoning_effort(primary_path, "high")
+
+            self.assertTrue(result.changed)
+            self.assertTrue(primary_path.exists())
+            self.assertEqual(load_codex_runtime_defaults(primary_path).model_reasoning_effort, "high")
+
     def test_runner_reloads_defaults_before_each_execution(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -103,6 +177,8 @@ class RuntimeConfigTest(unittest.TestCase):
                 runner.run_resume("session-id", "first")
                 write_runtime_config(runtime_path, model="model-b", effort="xhigh")
                 runner.run_resume("session-id", "second")
+                update_codex_runtime_reasoning_effort(runtime_path, 'future"effort')
+                runner.run_resume("session-id", "third")
                 write_runtime_config(runtime_path, model="model-c", effort="medium", prompt="updated prompt")
                 runner.run_new_session()
 
@@ -110,9 +186,11 @@ class RuntimeConfigTest(unittest.TestCase):
             self.assertIn('model_reasoning_effort="low"', commands[0])
             self.assertEqual(commands[1][commands[1].index("-m") + 1], "model-b")
             self.assertIn('model_reasoning_effort="xhigh"', commands[1])
-            self.assertEqual(commands[2][commands[2].index("-m") + 1], "model-c")
-            self.assertIn('model_reasoning_effort="medium"', commands[2])
-            self.assertTrue(commands[2][-1].startswith("updated prompt"))
+            self.assertEqual(commands[2][commands[2].index("-m") + 1], "model-b")
+            self.assertIn('model_reasoning_effort="future\\"effort"', commands[2])
+            self.assertEqual(commands[3][commands[3].index("-m") + 1], "model-c")
+            self.assertIn('model_reasoning_effort="medium"', commands[3])
+            self.assertTrue(commands[3][-1].startswith("updated prompt"))
 
     def test_daily_trading_main_records_model_usage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
