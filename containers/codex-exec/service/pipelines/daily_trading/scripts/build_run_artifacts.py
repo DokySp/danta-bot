@@ -716,7 +716,13 @@ def first_present_from(sources: tuple[dict[str, Any], ...], keys: tuple[str, ...
     return None
 
 
-FINANCIAL_SYMBOL_PAYLOAD_MARKER_KEYS = ("주식현재가 시세", "국내주식 종목추정실적", "국내주식 종목투자의견")
+FINANCIAL_SYMBOL_PAYLOAD_MARKER_KEYS = (
+    "주식현재가 시세",
+    "국내주식 종목추정실적",
+    "국내주식 종목투자의견",
+    "ETF/ETN 현재가",
+    "NAV 비교추이(종목)",
+)
 
 
 def unwrap_financial_symbol_payload(symbol_payload: Any) -> dict[str, Any] | None:
@@ -867,6 +873,13 @@ def etf_summary_for(cache: Any, symbol_id: str, cache_path: str) -> dict[str, An
     if not summary["items"]:
         summary["cache_status"] = "supplied_empty"
     return summary
+
+
+def compact_summary_is_usable(summary: Any) -> bool:
+    if not isinstance(summary, dict) or summary.get("cache_status") != "supplied":
+        return False
+    items = summary.get("items")
+    return isinstance(items, list) and any(str(item or "").strip() for item in items)
 
 
 def news_summary_for(cache: Any, symbol_id: str, cache_path: str) -> list[dict[str, Any]]:
@@ -1085,8 +1098,10 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
         eligible = bool(item.get("eligible_for_review", True)) and usable_price and not required_missing
         if not usable_price and "price.current_or_last/observed_at" not in required_missing:
             required_missing.append("price.current_or_last/observed_at")
+        product_type = str(item.get("product_type") or "stock").lower()
         financial_summary = financial_summary_for(financial_cache, symbol_id, args.financial_cache_path)
-        etf_summary = etf_summary_for(financial_cache, symbol_id, args.financial_cache_path) if str(item.get("product_type") or "").lower() in {"etf", "etn"} else {}
+        etf_summary = etf_summary_for(financial_cache, symbol_id, args.financial_cache_path) if product_type in {"etf", "etn"} else {}
+        quality_value_summary = etf_summary if product_type in {"etf", "etn"} else financial_summary
         same_day_collection = today_trade_collection_context(
             today_fills,
             artifact_exists=today_fills_path.exists(),
@@ -1101,9 +1116,9 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
         symbol = {
             "symbol_id": symbol_id,
             "symbol_name": item.get("symbol_name") or (account_item or {}).get("symbol_name") or symbol_id,
-            "product_type": item.get("product_type") or "stock",
+            "product_type": product_type,
             "eligible_for_review": eligible,
-            "evidence_mode": "full" if financial_summary["cache_status"] == "supplied" else "price_only",
+            "evidence_mode": "full" if compact_summary_is_usable(quality_value_summary) else "price_only",
             "exclusion_reasons": [] if eligible else required_missing,
             "price": {
                 "current_or_last": price.get("current_or_last"),
@@ -1269,7 +1284,7 @@ def write_combined_first_sidecar(
         symbol_name = f"{item.get('symbol_id', '')} {item.get('symbol_name', '')}".strip()
         for score in expanded_first_scores(role, item):
             if symbols_by_id is not None:
-                score = mark_news_flow_excluded_without_news(score, symbols_by_id.get(symbol_key(item), {}))
+                score = mark_optional_view_exclusions(score, symbols_by_id.get(symbol_key(item), {}))
             lines.append(
                 f"| {score.get('agent_role', '')} | {symbol_name} | {as_int(score.get('score'))} | {score.get('one_line_reason', '')} |"
             )
@@ -1375,6 +1390,36 @@ def mark_news_flow_excluded_without_news(score_item: dict[str, Any], brief_symbo
     return normalized
 
 
+def has_usable_quality_value_summary(symbol: dict[str, Any]) -> bool:
+    product_type = str(symbol.get("product_type") or "stock").lower()
+    summary_key = "etf_summary" if product_type in {"etf", "etn"} else "financial_summary"
+    return compact_summary_is_usable(symbol.get(summary_key))
+
+
+def mark_quality_value_excluded_without_financial(score_item: dict[str, Any], brief_symbol: dict[str, Any]) -> dict[str, Any]:
+    if str(score_item.get("agent_role") or "") != "analyst-quality-value" or has_usable_quality_value_summary(brief_symbol):
+        return score_item
+    product_type = str(brief_symbol.get("product_type") or "stock").lower()
+    summary_key = "etf_summary" if product_type in {"etf", "etn"} else "financial_summary"
+    normalized = dict(score_item)
+    normalized["score"] = 5
+    normalized["reason_code"] = "no_financial_excluded"
+    normalized["one_line_reason"] = "ETF 핵심 정보가 없어 평균에서 제외" if summary_key == "etf_summary" else "재무 정보가 없어 평균에서 제외"
+    normalized["excluded_from_aggregation"] = True
+    missing_data = normalized.get("missing_data")
+    if not isinstance(missing_data, list):
+        missing_data = []
+    if summary_key not in missing_data:
+        missing_data = [*missing_data, summary_key]
+    normalized["missing_data"] = missing_data
+    return normalized
+
+
+def mark_optional_view_exclusions(score_item: dict[str, Any], brief_symbol: dict[str, Any]) -> dict[str, Any]:
+    score_item = mark_news_flow_excluded_without_news(score_item, brief_symbol)
+    return mark_quality_value_excluded_without_financial(score_item, brief_symbol)
+
+
 def build_analyst_review(args: argparse.Namespace) -> dict[str, Any]:
     output_dir = Path(args.output_dir)
     decision_brief = load_json(Path(args.decision_brief or output_dir / "decision-brief.json"))
@@ -1407,7 +1452,7 @@ def build_analyst_review(args: argparse.Namespace) -> dict[str, Any]:
             if symbol_id not in agent_scores:
                 continue
             for score_item in expanded_first_scores(role, item):
-                score_item = mark_news_flow_excluded_without_news(score_item, symbols_by_id.get(symbol_id, {}))
+                score_item = mark_optional_view_exclusions(score_item, symbols_by_id.get(symbol_id, {}))
                 expanded_role = str(score_item.get("agent_role") or role)
                 score = clamp_score(score_item.get("score"), 5)
                 excluded_from_aggregation = bool(score_item.get("excluded_from_aggregation"))

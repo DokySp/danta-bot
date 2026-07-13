@@ -24,8 +24,10 @@ from ..scripts.build_run_artifacts import (
     build_symbol_strategy_context,
     build_token_summary,
     default_strategy_policy_config_path,
+    etf_summary_for,
     load_json,
     load_strategy_policy_config,
+    mark_quality_value_excluded_without_financial,
     pipeline_dir,
     today_trade_collection_context,
     today_trade_context,
@@ -581,6 +583,30 @@ symbols:
                 failures.append(f"news-flow without news should be marked excluded from aggregation: {analyst_review}")
             if analyst_review["symbols"][0].get("aggregation_score_count") != 3:
                 failures.append(f"no-news news-flow should be excluded from aggregation count: {analyst_review}")
+            review_by_symbol = {item.get("symbol_id"): item for item in analyst_review.get("symbols", [])}
+            missing_financial_review = review_by_symbol.get("000660", {})
+            missing_financial_scores = [
+                item
+                for item in missing_financial_review.get("agent_scores", [])
+                if item.get("agent_role") == "analyst-quality-value"
+            ]
+            if (
+                not missing_financial_scores
+                or missing_financial_scores[0].get("score") != 5
+                or missing_financial_scores[0].get("reason_code") != "no_financial_excluded"
+                or missing_financial_scores[0].get("excluded_from_aggregation") is not True
+                or "financial_summary" not in missing_financial_scores[0].get("missing_data", [])
+            ):
+                failures.append(f"quality-value without financial summary should be excluded from aggregation: {missing_financial_review}")
+            if missing_financial_review.get("aggregation_score_count") != 2:
+                failures.append(f"missing financial and news views should leave two included scores: {missing_financial_review}")
+            supplied_financial_quality = [
+                item
+                for item in review_by_symbol.get("005930", {}).get("agent_scores", [])
+                if item.get("agent_role") == "analyst-quality-value"
+            ]
+            if not supplied_financial_quality or supplied_financial_quality[0].get("excluded_from_aggregation") is True:
+                failures.append(f"usable partial financial summary should keep quality-value in aggregation: {review_by_symbol.get('005930')}")
             market_news_sidecar = (
                 run_dir
                 / "reviews"
@@ -589,6 +615,171 @@ symbols:
             market_news_text = market_news_sidecar.read_text(encoding="utf-8")
             if "| analyst-news-flow | 005930 삼성전자 | 5 | 뉴스 정보가 없어 평균에서 제외 |" not in market_news_text:
                 failures.append(f"news-flow sidecar should reflect average exclusion: {market_news_text}")
+            quality_sidecar = (
+                run_dir
+                / "reviews"
+                / "analyst-review--analyst-quality-risk--first-analyst-quality-risk.md"
+            )
+            quality_text = quality_sidecar.read_text(encoding="utf-8")
+            if "| analyst-quality-value | 000660 SK하이닉스 | 5 | 재무 정보가 없어 평균에서 제외 |" not in quality_text:
+                failures.append(f"quality-value sidecar should reflect financial exclusion: {quality_text}")
+            nested_etf_summary = etf_summary_for(
+                {
+                    "symbols": {
+                        "069500": {
+                            "KODEX 200": {
+                                "ETF/ETN 현재가": {"응답": [{"nav": "10000"}]},
+                                "NAV 비교추이(종목)": {"NAV 비교 요약": [{"nav": "10000"}]},
+                            }
+                        }
+                    }
+                },
+                "069500",
+                "financial-cache.yaml",
+            )
+            if nested_etf_summary.get("cache_status") != "supplied" or not nested_etf_summary.get("items"):
+                failures.append(f"nested ETF summary should be recognized as usable: {nested_etf_summary}")
+            usable_etf_score = mark_quality_value_excluded_without_financial(
+                {"agent_role": "analyst-quality-value", "score": 7},
+                {"product_type": "etf", "etf_summary": nested_etf_summary},
+            )
+            if usable_etf_score.get("excluded_from_aggregation"):
+                failures.append(f"usable ETF summary should keep quality-value in aggregation: {usable_etf_score}")
+            etf_dir = tmp / "reports" / "runs" / "etf-quality-probe"
+            etf_portfolio_path = tmp / "etf-portfolio.json"
+            write_json(
+                etf_portfolio_path,
+                {"recommanded": [], "specified": ["069500"], "holding": [], "universe": ["069500"]},
+            )
+            write_json(
+                etf_dir / "price-chart.json",
+                {
+                    "run_id": "etf-quality-probe",
+                    "started_at": "2026-06-18T09:00:00+09:00",
+                    "symbols": [
+                        {
+                            "symbol_id": "069500",
+                            "symbol_name": "KODEX 200",
+                            "product_type": "etf",
+                            "eligible_for_review": True,
+                            "price": {"current_or_last": 30000, "observed_at": "2026-06-18T09:00:00+09:00"},
+                            "required_missing": [],
+                            "errors": [],
+                        }
+                    ],
+                },
+            )
+            write_json(
+                etf_dir / "account-before-order.json",
+                {
+                    "run_id": "etf-quality-probe",
+                    "started_at": "2026-06-18T09:00:00+09:00",
+                    "symbols": [{"symbol_id": "069500", "symbol_name": "KODEX 200", "current_live_holding_quantity": 0}],
+                },
+            )
+            write_json(
+                etf_dir / "today-fills.json",
+                {
+                    "stage": "today-fills",
+                    "status": "success",
+                    "skipped": False,
+                    "symbols": [{"symbol_id": "069500"}],
+                    "fills": [],
+                    "errors": [],
+                },
+            )
+            etf_cache_path = tmp / "etf-financial-cache.json"
+            write_json(
+                etf_cache_path,
+                {
+                    "symbols": {
+                        "069500": {
+                            "KODEX 200": {
+                                "ETF/ETN 현재가": {"응답": [{"nav": "30000", "dprt": "0.1"}]},
+                                "NAV 비교추이(종목)": {"NAV 비교 요약": [{"nav": "30000"}]},
+                            }
+                        }
+                    }
+                },
+            )
+            etf_brief = build_decision_brief(
+                argparse.Namespace(
+                    output_dir=etf_dir,
+                    output=etf_dir / "decision-brief.json",
+                    portfolio_json=str(etf_portfolio_path),
+                    price_chart=None,
+                    account_before_order=None,
+                    today_fills=None,
+                    run_id=None,
+                    started_at=None,
+                    financial_cache_path=str(etf_cache_path),
+                    news_cache_path="",
+                    market_index_snapshot_json="",
+                )
+            )
+            etf_brief_symbol = (etf_brief.get("symbols") or [{}])[0]
+            if etf_brief_symbol.get("evidence_mode") != "full" or etf_brief_symbol.get("etf_summary", {}).get("cache_status") != "supplied":
+                failures.append(f"usable ETF summary should produce full evidence mode: {etf_brief_symbol}")
+            etf_subagent_dir = etf_dir / "subagents"
+            for role in ANALYST_REVIEW_SPEC_ROLES:
+                write_json(
+                    etf_subagent_dir / f"first-{role}.wrapper.json",
+                    {
+                        "stage": "analyst-review",
+                        "agent_role": role,
+                        "task_name": f"first-{role}",
+                        "status": "success",
+                        "ended_at": "2026-06-18T00:00:00+00:00",
+                        "parsed_json": {
+                            "stage": "analyst-review",
+                            "symbols": [
+                                {
+                                    "symbol_id": "069500",
+                                    "symbol_name": "KODEX 200",
+                                    "views": {
+                                        view_role: {
+                                            "score": 7,
+                                            "reason_code": "buy_candidate",
+                                            "one_line_reason": f"{view_role} ETF self-test",
+                                            "missing_data": [],
+                                        }
+                                        for view_role in COMBINED_ANALYST_REVIEW_ROLES[role]
+                                    },
+                                }
+                            ],
+                        },
+                    },
+                )
+            etf_review = build_analyst_review(
+                argparse.Namespace(
+                    output_dir=etf_dir,
+                    output=etf_dir / "analyst-review.json",
+                    decision_brief=str(etf_dir / "decision-brief.json"),
+                    symbol_ids="",
+                )
+            )
+            etf_review_symbol = (etf_review.get("symbols") or [{}])[0]
+            etf_quality_scores = [
+                item
+                for item in etf_review_symbol.get("agent_scores", [])
+                if item.get("agent_role") == "analyst-quality-value"
+            ]
+            if (
+                etf_review_symbol.get("aggregation_score_count") != 3
+                or not etf_quality_scores
+                or etf_quality_scores[0].get("excluded_from_aggregation") is True
+            ):
+                failures.append(f"usable ETF quality-value should remain in aggregation: {etf_review_symbol}")
+            missing_etf_score = mark_quality_value_excluded_without_financial(
+                {"agent_role": "analyst-quality-value", "score": 7, "missing_data": []},
+                {"product_type": "etn", "etf_summary": {"cache_status": "missing", "items": []}},
+            )
+            if (
+                missing_etf_score.get("reason_code") != "no_financial_excluded"
+                or missing_etf_score.get("excluded_from_aggregation") is not True
+                or "etf_summary" not in missing_etf_score.get("missing_data", [])
+            ):
+                failures.append(f"ETF without usable summary should be excluded from aggregation: {missing_etf_score}")
             missing_wrapper_path = subagent_dir / "first-analyst-quality-risk.wrapper.json"
             missing_wrapper = load_json(missing_wrapper_path)
             missing_wrapper["parsed_json"]["symbols"][1]["views"].pop("analyst-risk-allocation")

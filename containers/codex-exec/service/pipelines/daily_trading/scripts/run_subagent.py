@@ -96,6 +96,7 @@ ANALYST_REVIEW_ALWAYS_SYMBOL_FIELDS = {
     "code",
     "name",
     "market",
+    "product_type",
     "eligible_for_review",
     "evidence_mode",
     "warnings",

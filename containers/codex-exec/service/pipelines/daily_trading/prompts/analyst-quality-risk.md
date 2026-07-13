@@ -16,6 +16,7 @@
 
 ## `analyst-quality-value` 관점
 
+- 주식은 usable `financial_summary`, ETF/ETN은 usable `etf_summary`가 전혀 없으면 감사용으로 `score=5`, `reason_code=no_financial_excluded`를 반환하고 해당 summary key를 `missing_data`에 넣는다. 일부 지표만 없고 usable summary item이 하나라도 있으면 이 제외 규칙을 적용하지 않는다.
 - 재무 안정성, 이익 성장, 밸류에이션, 현금흐름, 경영 품질을 중심으로 본다.
 - 매출, 영업이익, 순이익 추정
 - PER, PBR, EPS, BPS

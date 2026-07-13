@@ -41,7 +41,7 @@ Review sub-agents receive launcher-created `review-inputs/` slices containing on
 
 Selected analyst-review execution personas produce four canonical independent scores for every eligible symbol. `analyst-quality-risk` runs once and must return two independent views: `analyst-quality-value` and `analyst-risk-allocation`. `analyst-momentum-news` runs once and must return two independent views: `analyst-momentum-cycle` and `analyst-news-flow`.
 
-- `analyst-quality-value` covers financial stability, earnings growth, valuation, and quality/value factors.
+- `analyst-quality-value` covers financial stability, earnings growth, valuation, and quality/value factors. For stocks, if no usable `financial_summary` is supplied, and for ETF/ETN assets, if no usable `etf_summary` is supplied, it must return `score=5` and `reason_code="no_financial_excluded"` for audit; Main helper excludes that row from analyst-review aggregation.
 - `analyst-momentum-cycle` covers price trend, supply/demand, sector cycle, macro sensitivity, theme/event momentum, and earnings momentum.
 - `analyst-risk-allocation` covers volatility, liquidity, stop-loss room, duplicate ETF/index exposure, concentration, and portfolio fit.
 - `analyst-news-flow` covers supplied KIS news/disclosure direction, materiality, freshness, and mixed-news risk. If no usable news/disclosure summary is supplied, it must return `score=5` and `reason_code="no_news_excluded"` for audit; Main helper excludes that row from analyst-review aggregation.
@@ -133,5 +133,5 @@ mean_score = sum(included valid scores) / count(included valid scores)
 final_first_score = mean_score
 ```
 
-In the normal successful path, the aggregation uses four canonical views: `analyst-quality-value`, `analyst-risk-allocation`, `analyst-momentum-cycle`, and `analyst-news-flow`. If `analyst-news-flow` has no usable news/disclosure summary, preserve its row with `excluded_from_aggregation=true` and aggregate the remaining included views only. If any other view score is missing or unusable, keep the valid-score aggregation rule above and surface the missing score as an artifact error.
+In the normal successful path, the aggregation uses four canonical views: `analyst-quality-value`, `analyst-risk-allocation`, `analyst-momentum-cycle`, and `analyst-news-flow`. If `analyst-quality-value` has no usable stock financial summary or ETF/ETN summary, preserve its row with `reason_code="no_financial_excluded"` and `excluded_from_aggregation=true`. If `analyst-news-flow` has no usable news/disclosure summary, preserve its row with `reason_code="no_news_excluded"` and `excluded_from_aggregation=true`. Aggregate the remaining included views only. If any other view score is missing or unusable, keep the valid-score aggregation rule above and surface the missing score as an artifact error.
 If no valid score exists, exclude that symbol from `judge-review` and trading.

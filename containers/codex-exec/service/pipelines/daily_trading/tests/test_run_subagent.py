@@ -371,6 +371,7 @@ def write_sample_review_inputs(tmp: Path) -> None:
                 {
                     "symbol_id": "005930",
                     "symbol_name": "삼성전자",
+                    "product_type": "stock",
                     "price": {
                         "current_or_last": 70000,
                         "observed_at": "2026-06-08T09:00:00+09:00",
@@ -559,6 +560,8 @@ def assert_review_input_slices(tmp: Path) -> None:
     quality_core = load_json(Path(quality_slices["decision_brief"]))
     if quality_core.get("market_index_snapshot", {}).get("indexes", [{}])[0].get("symbol") != "NASDAQ":
         raise AssertionError(f"quality-risk slice dropped market_index_snapshot: {quality_core}")
+    if (quality_core.get("symbols") or [{}])[0].get("product_type") != "stock":
+        raise AssertionError(f"quality-risk slice dropped product_type needed for financial/ETF policy: {quality_core}")
     if "strategy_context" in quality_core:
         raise AssertionError(f"analyst-review slice kept strategy_context: {quality_core}")
     if "symbol_strategy_context" in (quality_core.get("symbols") or [{}])[0]:
@@ -703,6 +706,10 @@ def assert_debate_optional_evidence_policy() -> None:
         raise AssertionError("judge-review-format.md missing unavailable-news neutrality policy")
     if "coverage_status=complete" not in format_text or "same-day buy history is unknown" not in format_text:
         raise AssertionError("judge-review-format.md missing trade-history coverage policy")
+    analyst_format_text = (prompt_dir / "analyst-review-format.md").read_text(encoding="utf-8")
+    quality_text = (prompt_dir / "analyst-quality-risk.md").read_text(encoding="utf-8")
+    if "no_financial_excluded" not in analyst_format_text or "no_financial_excluded" not in quality_text:
+        raise AssertionError("quality-value prompts missing no-financial aggregation exclusion policy")
 
 
 def assert_invalid_spec(spec_payload: dict[str, Any], expected: str) -> None:

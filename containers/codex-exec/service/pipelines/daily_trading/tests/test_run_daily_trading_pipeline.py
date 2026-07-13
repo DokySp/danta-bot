@@ -1009,9 +1009,9 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
                     failures.append(f"portfolio report omitted review sections: {report_path}")
                 if "최종점수(원점수 평균, 0-10)" not in report_text or "role별 점수" not in report_text:
                     failures.append("portfolio report omitted analyst-review score columns")
-                if "| 8.0 | 3 |" not in report_text:
+                if "| 8.0 | 2 |" not in report_text:
                     failures.append("portfolio report omitted analyst-review simple-mean score values")
-                if "analyst-quality-value: 8" not in report_text or "analyst-news-flow: 5(평균 제외)" not in report_text:
+                if "analyst-quality-value: 5(평균 제외)" not in report_text or "analyst-news-flow: 5(평균 제외)" not in report_text:
                     failures.append("portfolio report omitted role-level score details")
                 if "보정 신뢰도" in report_text or "confidence" in report_text:
                     failures.append("portfolio report still contains confidence artifacts")
