@@ -2098,6 +2098,8 @@ class Pipeline:
             str(portfolio_path),
             "--strategy-policy-config",
             str(self.strategy_policy_config_path),
+            "--expected-news-date",
+            self.optional_cache_date(),
         ]
         if financial_cache:
             decision_args.extend(["--financial-cache-path", financial_cache])

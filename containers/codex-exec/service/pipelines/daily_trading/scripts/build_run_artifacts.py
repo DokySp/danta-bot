@@ -14,7 +14,7 @@ import math
 import os
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +73,7 @@ STRATEGY_BIAS_FIELDS = (
     "downside_add_review_bias",
     "index_drop_sell_review_bias",
 )
+KST = timezone(timedelta(hours=9))
 
 
 def now_iso() -> str:
@@ -928,11 +929,25 @@ def normalized_calendar_date(value: Any) -> str:
         return ""
 
 
-def news_summary_for(cache: Any, symbol_id: str, cache_path: str) -> list[dict[str, Any]]:
+def expected_news_calendar_date(expected_date: Any, started_at: Any) -> str:
+    if str(expected_date or "").strip():
+        return normalized_calendar_date(expected_date)
+    text = str(started_at or "").strip()
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return normalized_calendar_date(text)
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(KST)
+    return parsed.date().isoformat()
+
+
+def news_summary_for(cache: Any, symbol_id: str, cache_path: str, expected_date: str) -> list[dict[str, Any]]:
     if not cache_path or not isinstance(cache, dict):
         return []
+    expected_calendar_date = normalized_calendar_date(expected_date)
     cache_date = normalized_calendar_date(cache.get("date"))
-    if not cache_date:
+    if not expected_calendar_date or cache_date != expected_calendar_date:
         return []
     symbols = cache.get("symbols") if isinstance(cache.get("symbols"), dict) else cache
     entries = symbols.get(symbol_id) if isinstance(symbols, dict) else None
@@ -945,7 +960,7 @@ def news_summary_for(cache: Any, symbol_id: str, cache_path: str) -> list[dict[s
         if not isinstance(item, dict):
             continue
         article_date = item.get("article_date") or item.get("date") or ""
-        if normalized_calendar_date(article_date) != cache_date:
+        if normalized_calendar_date(article_date) != expected_calendar_date:
             continue
         content = shorten(item.get("content") or item.get("text") or item.get("title") or "")
         if is_no_news_content(content):
@@ -1102,6 +1117,7 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
     fills_by_id = fills_by_symbol(today_fills)
     run_id = args.run_id or price_chart.get("run_id") or account.get("run_id") or output_dir.name
     started_at = args.started_at or price_chart.get("started_at") or account.get("started_at") or ""
+    expected_news_date = expected_news_calendar_date(getattr(args, "expected_news_date", ""), started_at)
 
     account_by_symbol = indexed_symbols(account.get("symbols"))
     source_artifacts = ["price-chart.json", "account-before-order.json", "check-portfolio JSON"]
@@ -1186,7 +1202,7 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
             "investor_flow_summary": compact_optional_dict(item, "investor_flow_summary"),
             "financial_summary": financial_summary,
             "etf_summary": etf_summary,
-            "news_summary": news_summary_for(news_cache, symbol_id, args.news_cache_path),
+            "news_summary": news_summary_for(news_cache, symbol_id, args.news_cache_path, expected_news_date),
             "account_exposure": account_exposure,
             "symbol_strategy_context": build_symbol_strategy_context(
                 strategy_policy,
@@ -1924,6 +1940,7 @@ def build_parser() -> argparse.ArgumentParser:
     decision.add_argument("--today-fills")
     decision.add_argument("--financial-cache-path", default="")
     decision.add_argument("--news-cache-path", default="")
+    decision.add_argument("--expected-news-date", default="")
     decision.add_argument("--market-index-snapshot-json", default="")
     decision.add_argument("--strategy-policy-config", default="")
     decision.add_argument("--run-id")

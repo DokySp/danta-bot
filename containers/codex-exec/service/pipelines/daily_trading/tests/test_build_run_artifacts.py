@@ -26,6 +26,7 @@ from ..scripts.build_run_artifacts import (
     compact_summary_is_usable,
     default_strategy_policy_config_path,
     etf_summary_for,
+    expected_news_calendar_date,
     financial_summary_for,
     load_json,
     load_strategy_policy_config,
@@ -374,6 +375,7 @@ symbols:
                 },
                 "005930",
                 "news-cache.yaml",
+                "2026-06-18",
             )
             if len(freshness_filtered_news) != 1 or freshness_filtered_news[0].get("content") != "fresh":
                 failures.append(f"news summary should keep matching-date articles after filtering stale leading rows: {freshness_filtered_news}")
@@ -381,8 +383,27 @@ symbols:
                 {"symbols": {"005930": [{"article_date": "2026-06-18", "content": "undated cache"}]}},
                 "005930",
                 "news-cache.yaml",
+                "2026-06-18",
             ):
                 failures.append("news summary without a verifiable cache date should not be usable")
+            if news_summary_for(
+                {
+                    "date": "2020-01-01",
+                    "symbols": {
+                        "005930": {
+                            "articles": [
+                                {"article_date": "2020-01-01T09:30:00+09:00", "content": "old cache article"}
+                            ]
+                        }
+                    },
+                },
+                "005930",
+                "old-news-cache.yaml",
+                "2026-06-18",
+            ):
+                failures.append("news cache and article dates matching each other should still be rejected when they differ from the run date")
+            if expected_news_calendar_date("", "2026-06-17T15:30:00+00:00") != "2026-06-18":
+                failures.append("decision-brief started_at fallback should derive the expected news date in KST")
             if (brief.get("market_index_snapshot") or {}).get("indexes", [{}])[0].get("symbol") != "KOSPI":
                 failures.append(f"decision brief should include compact market index snapshot: {brief.get('market_index_snapshot')}")
             strategy = brief.get("strategy_context") if isinstance(brief.get("strategy_context"), dict) else {}

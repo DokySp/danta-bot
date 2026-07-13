@@ -964,8 +964,12 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
                 for item in command_log.get("commands", [])
                 if isinstance(item, dict) and item.get("stage") == "decision-brief"
             ]
-            if not decision_commands or "--strategy-policy-config" not in decision_commands[-1]:
+            decision_command = decision_commands[-1] if decision_commands else []
+            if "--strategy-policy-config" not in decision_command:
                 failures.append(f"decision-brief command should receive strategy policy config: {decision_commands}")
+            expected_news_date_index = decision_command.index("--expected-news-date") if "--expected-news-date" in decision_command else -1
+            if expected_news_date_index < 0 or decision_command[expected_news_date_index + 1 : expected_news_date_index + 2] != ["2026-06-18"]:
+                failures.append(f"decision-brief command should receive the run news date: {decision_commands}")
             execution_commands = [
                 item.get("command")
                 for item in command_log.get("commands", [])
