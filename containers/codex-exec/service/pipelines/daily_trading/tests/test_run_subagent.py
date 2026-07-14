@@ -17,6 +17,7 @@ from ..scripts.run_subagent import (
     build_prompt,
     compact_prompt,
     compact_review_payload_errors,
+    debate_final_decision_issues,
     launcher_model_effort,
     load_json,
     load_subagent_model_config,
@@ -165,7 +166,12 @@ else:
                         ],
                         "concessions": [],
                         "unresolved_conflicts": [] if phase != "rebuttal-2" else ["self-test conflict"],
-                        "final_position": "" if phase != "rebuttal-2" else f"{side} final position",
+                        "final_position": "" if phase == "opening" else f"{side} final position",
+                        **(
+                            {"recommended_action": "hold", "target_holding_quantity": 0}
+                            if phase != "opening"
+                            else {}
+                        ),
                     }
                     for symbol in symbols
                 ],
@@ -622,7 +628,7 @@ def assert_compact_review_prompt(tmp: Path) -> None:
         "For held sell candidates, an intact long-term thesis favors holding despite the low score",
         "Use strategy_context and symbol_strategy_context as advisory inputs for target_position_value_krw, not as order allow/block rules.",
         "debate_artifact:",
-        "The Python pipeline already completed the fixed bull/bear opening, rebuttal-1, and rebuttal-2 closing turns.",
+        "The Python pipeline already completed bull/bear opening and rebuttal-1 final arguments, then ran rebuttal-2 only when the recorded gate required it.",
         "Do not spawn or resume debate agents and do not request another round.",
         "If debate_artifact status is incomplete, or if the completed debate remains balanced or directionally insufficient, hold at the baseline.",
         "Optional evidence marked missing, failed, empty, unavailable, or excluded_from_aggregation is non-directional",
@@ -668,7 +674,12 @@ def assert_compact_review_prompt(tmp: Path) -> None:
             session_id="00000000-0000-4000-8000-000000000001",
         )
     )
-    if "resume_session_id: 00000000-0000-4000-8000-000000000001" not in rebuttal_prompt or "Every argument.kind must be rebuttal" not in rebuttal_prompt:
+    if (
+        "resume_session_id: 00000000-0000-4000-8000-000000000001" not in rebuttal_prompt
+        or "Every argument.kind must be rebuttal" not in rebuttal_prompt
+        or "recommended_action must be buy|hold|sell" not in rebuttal_prompt
+        or "target_holding_quantity must be a non-negative integer" not in rebuttal_prompt
+    ):
         raise AssertionError(f"compact resumed rebuttal prompt missing session contract: {rebuttal_prompt}")
     banded_spec = compact_spec(tmp, stage="judge-review", agent_role="judge", task_name="second-banded")
     banded_spec["candidate_directions"] = {"005930": "sell", "000660": "buy"}
@@ -1554,3 +1565,44 @@ class RunSubagentSelfTest(unittest.TestCase):
         self.assertEqual(dependencies[0]["dependency_id"], "mcp:kis-trading")
         self.assertEqual(dependencies[0]["server_identifier_source"], "stderr")
         self.assertEqual(dependencies[0]["http_status"], 503)
+
+    def test_rebuttal_final_decision_issues_validate_action_and_quantity(self) -> None:
+        spec = {
+            "debate_phase": "rebuttal-1",
+            "symbol_ids": ["005930"],
+            "candidate_directions": {"005930": "buy"},
+            "portfolio_snapshot": [
+                {"symbol_id": "005930", "current_live_holding_quantity": 2}
+            ],
+        }
+        payload = {
+            "symbols": [
+                {
+                    "symbol_id": "005930",
+                    "arguments": [{"evidence_refs": ["decision-brief:005930:price"]}],
+                    "final_position": "hold",
+                    "recommended_action": "hold",
+                    "target_holding_quantity": 2,
+                }
+            ]
+        }
+        self.assertEqual(debate_final_decision_issues(payload, spec), [])
+
+        payload["symbols"][0]["target_holding_quantity"] = "2"
+        self.assertIn(
+            "invalid_debate_target_holding_quantity",
+            {item["code"] for item in debate_final_decision_issues(payload, spec)},
+        )
+
+        payload["symbols"][0]["recommended_action"] = "buy"
+        payload["symbols"][0]["target_holding_quantity"] = 1
+        payload["symbols"][0]["arguments"][0]["evidence_refs"] = []
+        codes = {item["code"] for item in debate_final_decision_issues(payload, spec)}
+        self.assertEqual(
+            codes,
+            {
+                "inconsistent_debate_action_quantity",
+                "invalid_debate_candidate_direction",
+                "missing_debate_evidence_refs",
+            },
+        )

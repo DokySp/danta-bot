@@ -53,6 +53,7 @@ DEBATE_PHASE_ARGUMENT_KINDS = {
     "rebuttal-1": "rebuttal",
     "rebuttal-2": "closing",
 }
+DEBATE_FINAL_ACTIONS = {"buy", "hold", "sell"}
 AUDIT_LOG_STAGES = {DEBATE_STAGE, "judge-review"}
 SELECTED_ANALYST_REVIEW_ROLES = {
     "analyst-quality-risk",
@@ -1247,8 +1248,8 @@ def compact_review_prompt(spec: dict[str, Any]) -> str | None:
                 "Treat an empty recent_trade_context.recent_submitted_trades list as confirmed absence only when coverage_status=complete; otherwise recent trade history is unknown and its absence is non-directional.",
                 "For held sell candidates, an intact long-term thesis favors holding despite the low score; sell only when thesis damage, material adverse news/disclosure, or structural deterioration is supported by supplied evidence.",
                 "Use strategy_context and symbol_strategy_context as advisory inputs for target_position_value_krw, not as order allow/block rules.",
-                "The Python pipeline already completed the fixed bull/bear opening, rebuttal-1, and rebuttal-2 closing turns. Do not spawn or resume debate agents and do not request another round.",
-                "Read debate_artifact and compare each side's explicit claims, rebuttals, concessions, unresolved conflicts, and final position for every symbol.",
+                "The Python pipeline already completed bull/bear opening and rebuttal-1 final arguments, then ran rebuttal-2 only when the recorded gate required it. Do not spawn or resume debate agents and do not request another round.",
+                "Read debate_artifact.final_phase and compare each side's explicit claims, rebuttals, concessions, unresolved conflicts, final position, recommended action, and target holding quantity for every symbol.",
                 "If debate_artifact status is incomplete, or if the completed debate remains balanced or directionally insufficient, hold at the baseline.",
                 "Reflect the decisive argument IDs (or why the sides cancelled out) in one_line_reason without returning the debate transcript.",
             ]
@@ -1326,7 +1327,8 @@ def compact_debate_prompt(spec: dict[str, Any]) -> str | None:
         if phase == "rebuttal-1":
             lines.extend(
                 [
-                    "Rebuttal 1: answer the opponent opening directly while retaining the context from your own opening in this resumed session.",
+                    "Rebuttal 1 is also your final argument unless the pipeline detects an incomplete or materially conflicting result and requests rebuttal-2.",
+                    "Answer the opponent opening directly while retaining the context from your own opening in this resumed session, then finalize your position, recommended action, and target holding quantity.",
                     "Every argument.kind must be rebuttal and every argument.targets list must reference one or more opponent opening argument_id values.",
                     "Do not introduce an unrelated independent claim.",
                     "Use deterministic argument_id values formed as <symbol_id>-<side>-rebuttal-1-<number>.",
@@ -1337,7 +1339,7 @@ def compact_debate_prompt(spec: dict[str, Any]) -> str | None:
                 [
                     "Rebuttal 2 is the closing turn: answer only unresolved opponent rebuttal-1 arguments and state your final position.",
                     "Every argument.kind must be closing and every argument.targets list must reference one or more opponent rebuttal-1 argument_id values.",
-                    "Do not introduce new evidence or an unrelated claim. Explicitly record concessions and unresolved_conflicts.",
+                    "Do not introduce new evidence or an unrelated claim. Explicitly record concessions, unresolved_conflicts, recommended_action, and target_holding_quantity.",
                     "Use deterministic argument_id values formed as <symbol_id>-<side>-rebuttal-2-<number>.",
                 ]
             )
@@ -1358,6 +1360,15 @@ def compact_debate_prompt(spec: dict[str, Any]) -> str | None:
             "portfolio_snapshot: "
             + json.dumps(portfolio_snapshot, ensure_ascii=False, separators=(",", ":"))
         )
+    if phase in {"rebuttal-1", "rebuttal-2"}:
+        lines.extend(
+            [
+                "For every symbol, final_position must be non-empty, recommended_action must be buy|hold|sell, and target_holding_quantity must be a non-negative integer.",
+                "recommended_action must match target_holding_quantity relative to portfolio_snapshot.current_live_holding_quantity; a missing snapshot means baseline quantity 0.",
+                "Respect candidate_directions: buy candidates may buy or hold, and sell candidates may sell or hold.",
+                "If usable evidence does not support a quantity change, use recommended_action=hold and the baseline target_holding_quantity.",
+            ]
+        )
     extra_instructions = [
         str(item).strip()
         for item in spec.get("extra_instructions", [])
@@ -1371,11 +1382,16 @@ def compact_debate_prompt(spec: dict[str, Any]) -> str | None:
             ]
         )
         lines.extend(f"- {item}" for item in extra_instructions)
+    decision_fields = (
+        ", recommended_action, and target_holding_quantity"
+        if phase in {"rebuttal-1", "rebuttal-2"}
+        else ""
+    )
     lines.extend(
         [
             "",
             f"Return one JSON object with stage={DEBATE_STAGE}, phase={phase}, side={side}, and a symbols array covering every listed symbol.",
-            f"Each symbol must contain symbol_id, symbol_name, arguments, concessions, unresolved_conflicts, and final_position. Every argument.kind must equal {expected_kind}.",
+            f"Each symbol must contain symbol_id, symbol_name, arguments, concessions, unresolved_conflicts, and final_position{decision_fields}. Every argument.kind must equal {expected_kind}.",
             "Each argument must contain argument_id, kind, targets, statement, and evidence_refs. Keep statements concise and auditable.",
         ]
     )
@@ -1693,6 +1709,130 @@ def debate_argument_ids_by_symbol(payload: Any) -> dict[str, set[str]]:
     return result
 
 
+def debate_baseline_quantities(spec: dict[str, Any]) -> dict[str, int]:
+    quantities = {
+        symbol_id: 0
+        for symbol_id in normalize_symbol_ids(spec.get("symbol_ids") or spec.get("symbols"))
+    }
+    snapshot = spec.get("portfolio_snapshot")
+    if not isinstance(snapshot, list):
+        return quantities
+    for item in snapshot:
+        symbol_id = symbol_key(item)
+        if symbol_id not in quantities:
+            continue
+        quantity = non_negative_int_value(item.get("current_live_holding_quantity"))
+        if quantity is not None:
+            quantities[symbol_id] = quantity
+    return quantities
+
+
+def debate_final_decision_issues(payload: Any, spec: dict[str, Any]) -> list[dict[str, Any]]:
+    phase = str(spec.get("debate_phase") or "").strip()
+    if phase not in {"rebuttal-1", "rebuttal-2"} or not isinstance(payload, dict):
+        return []
+    symbols = payload.get("symbols")
+    if not isinstance(symbols, list):
+        return []
+
+    issues: list[dict[str, Any]] = []
+    baselines = debate_baseline_quantities(spec)
+    candidate_directions = (
+        spec.get("candidate_directions")
+        if isinstance(spec.get("candidate_directions"), dict)
+        else {}
+    )
+    for symbol in symbols:
+        if not isinstance(symbol, dict):
+            continue
+        symbol_id = symbol_key(symbol)
+        if not symbol_id:
+            continue
+        final_position = symbol.get("final_position")
+        if not isinstance(final_position, str) or not final_position.strip():
+            issues.append(
+                {
+                    "code": "incomplete_debate_final_position",
+                    "message": f"{symbol_id}.final_position is required after rebuttal-1",
+                    "symbol_id": symbol_id,
+                }
+            )
+        action = str(symbol.get("recommended_action") or "").strip().lower()
+        if action not in DEBATE_FINAL_ACTIONS:
+            issues.append(
+                {
+                    "code": "invalid_debate_recommended_action",
+                    "message": f"{symbol_id}.recommended_action must be buy, hold, or sell",
+                    "symbol_id": symbol_id,
+                }
+            )
+        raw_target_quantity = symbol.get("target_holding_quantity")
+        target_quantity = (
+            raw_target_quantity
+            if isinstance(raw_target_quantity, int)
+            and not isinstance(raw_target_quantity, bool)
+            and raw_target_quantity >= 0
+            else None
+        )
+        if target_quantity is None:
+            issues.append(
+                {
+                    "code": "invalid_debate_target_holding_quantity",
+                    "message": f"{symbol_id}.target_holding_quantity must be a non-negative integer",
+                    "symbol_id": symbol_id,
+                }
+            )
+        if action in DEBATE_FINAL_ACTIONS and target_quantity is not None:
+            baseline = baselines.get(symbol_id, 0)
+            expected_action = "buy" if target_quantity > baseline else "sell" if target_quantity < baseline else "hold"
+            if action != expected_action:
+                issues.append(
+                    {
+                        "code": "inconsistent_debate_action_quantity",
+                        "message": (
+                            f"{symbol_id}.recommended_action={action} does not match "
+                            f"baseline={baseline} and target_holding_quantity={target_quantity}"
+                        ),
+                        "symbol_id": symbol_id,
+                    }
+                )
+            candidate_direction = str(candidate_directions.get(symbol_id) or "").strip().lower()
+            if candidate_direction == "buy" and target_quantity < baseline:
+                issues.append(
+                    {
+                        "code": "invalid_debate_candidate_direction",
+                        "message": f"{symbol_id}: buy candidate target cannot be below baseline {baseline}",
+                        "symbol_id": symbol_id,
+                    }
+                )
+            if candidate_direction == "sell" and target_quantity > baseline:
+                issues.append(
+                    {
+                        "code": "invalid_debate_candidate_direction",
+                        "message": f"{symbol_id}: sell candidate target cannot exceed baseline {baseline}",
+                        "symbol_id": symbol_id,
+                    }
+                )
+        arguments = symbol.get("arguments")
+        if isinstance(arguments, list):
+            for argument in arguments:
+                if not isinstance(argument, dict):
+                    continue
+                refs = argument.get("evidence_refs")
+                if not isinstance(refs, list) or not refs or not all(
+                    isinstance(ref, str) and ref.strip() for ref in refs
+                ):
+                    issues.append(
+                        {
+                            "code": "missing_debate_evidence_refs",
+                            "message": f"{symbol_id}: every final-debate argument requires evidence_refs",
+                            "symbol_id": symbol_id,
+                        }
+                    )
+                    break
+    return issues
+
+
 def compact_debate_payload_errors(payload: Any, spec: dict[str, Any]) -> list[dict[str, Any]]:
     errors: list[dict[str, Any]] = []
     phase = str(spec.get("debate_phase") or "").strip()
@@ -1808,10 +1948,8 @@ def compact_debate_payload_errors(payload: Any, spec: dict[str, Any]) -> list[di
             if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
                 errors.append({"code": "invalid_debate_schema", "message": f"{symbol_id}.{list_field} must be a string array"})
         final_position = symbol.get("final_position")
-        if not isinstance(final_position, str):
+        if phase == "opening" and not isinstance(final_position, str):
             errors.append({"code": "invalid_debate_schema", "message": f"{symbol_id}.final_position must be a string"})
-        elif phase == "rebuttal-2" and not final_position.strip():
-            errors.append({"code": "invalid_debate_schema", "message": f"{symbol_id}.final_position is required for closing"})
 
     missing_symbols = [symbol_id for symbol_id in expected_symbols if symbol_id not in seen_symbols]
     if missing_symbols:
@@ -2085,6 +2223,7 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
     text_errors: list[dict[str, Any]] = []
     compact_review_errors: list[dict[str, Any]] = []
     compact_debate_errors: list[dict[str, Any]] = []
+    debate_decision_issues: list[dict[str, Any]] = []
     session_errors: list[dict[str, Any]] = []
     if stage in TEXT_OUTPUT_STAGES:
         # Collection text stages return cache paths, fixed missing-cache messages,
@@ -2103,6 +2242,9 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
             errors.extend(compact_review_errors)
         if stage == DEBATE_STAGE and prompt_mode == "compact_debate" and parsed_json is not None:
             compact_debate_errors = compact_debate_payload_errors(parsed_json, prompt_spec)
+            debate_decision_issues = debate_final_decision_issues(parsed_json, prompt_spec)
+            if str(prompt_spec.get("debate_phase") or "") == "rebuttal-2":
+                compact_debate_errors.extend(debate_decision_issues)
             errors.extend(compact_debate_errors)
     event_thread_id = str(event_summary.get("thread_id") or "").strip()
     session_id = resume_session_id or event_thread_id
@@ -2184,6 +2326,8 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
         "degraded_dependencies": degraded_dependencies,
         "parsed_json": parsed_json,
         "parsed_text": parsed_text,
+        "debate_decision_issues": debate_decision_issues,
+        "debate_final_decision_ready": not debate_decision_issues,
         "errors": errors,
         "command": [part for part in cmd[:-1]],
         "prompt_mode": prompt_mode,
