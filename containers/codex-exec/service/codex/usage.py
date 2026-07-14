@@ -14,6 +14,11 @@ TOKEN_USAGE_FIELDS = (
     "total_tokens",
 )
 
+QUOTA_WINDOW_SPECS = {
+    "5h": ("primary", 300),
+    "weekly": ("secondary", 10080),
+}
+
 
 def zero_token_usage() -> dict[str, int]:
     return {field: 0 for field in TOKEN_USAGE_FIELDS}
@@ -93,8 +98,8 @@ def append_token_usage_summary(
             return output
         summary = "\n".join(
             [
-                f"<b>5h: {format_percent_delta(usage_before, usage_after, 'primary')}</b>",
-                f"<b>weekly: {format_percent_delta(usage_before, usage_after, 'secondary')}</b>",
+                f"<b>5h: {format_percent_delta(usage_before, usage_after, '5h')}</b>",
+                f"<b>weekly: {format_percent_delta(usage_before, usage_after, 'weekly')}</b>",
             ]
         )
         return f"{output.rstrip()}\n\n{summary}"
@@ -109,8 +114,8 @@ def append_token_usage_summary(
     summary = "\n".join(
         [
             f"<b>총 사용 토큰: {format_token_count(total_usage['total_tokens'], has_usage)}</b>",
-            f"<b>5h: {format_percent_delta(usage_before, usage_after, 'primary')}</b>",
-            f"<b>weekly: {format_percent_delta(usage_before, usage_after, 'secondary')}</b>",
+            f"<b>5h: {format_percent_delta(usage_before, usage_after, '5h')}</b>",
+            f"<b>weekly: {format_percent_delta(usage_before, usage_after, 'weekly')}</b>",
         ]
     )
     return f"{output.rstrip()}\n\n{summary}"
@@ -148,26 +153,52 @@ def parse_percent(value: Any) -> float | None:
         return None
 
 
-def usage_window(snapshot: Any, key: str) -> dict[str, Any] | None:
+def parse_window_duration(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def usage_window(snapshot: Any, period: str) -> dict[str, Any] | None:
     if not isinstance(snapshot, dict):
         return None
     limits = snapshot.get("rateLimits")
     if not isinstance(limits, dict):
         return None
-    window = limits.get(key)
-    return window if isinstance(window, dict) else None
+    spec = QUOTA_WINDOW_SPECS.get(period)
+    if spec is None:
+        return None
+    fallback_key, expected_duration = spec
+
+    for key in ("primary", "secondary"):
+        window = limits.get(key)
+        if not isinstance(window, dict):
+            continue
+        if parse_window_duration(window.get("windowDurationMins")) == expected_duration:
+            return window
+
+    fallback = limits.get(fallback_key)
+    if not isinstance(fallback, dict):
+        return None
+    fallback_duration = parse_window_duration(fallback.get("windowDurationMins"))
+    if fallback_duration is None:
+        return fallback
+    return None
 
 
-def used_percent(snapshot: Any, key: str) -> float | None:
-    window = usage_window(snapshot, key)
+def used_percent(snapshot: Any, period: str) -> float | None:
+    window = usage_window(snapshot, period)
     if not window:
         return None
     return parse_percent(window.get("usedPercent"))
 
 
-def format_percent_delta(before: Any, after: Any, key: str) -> str:
-    before_used = used_percent(before, key)
-    after_used = used_percent(after, key)
+def format_percent_delta(before: Any, after: Any, period: str) -> str:
+    before_used = used_percent(before, period)
+    after_used = used_percent(after, period)
     if before_used is None or after_used is None or after_used < before_used:
         return "n/a"
     delta = max(0.0, after_used - before_used)

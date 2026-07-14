@@ -9,6 +9,12 @@ import sys
 import time
 
 
+QUOTA_WINDOW_SPECS = {
+    "5h": ("primary", 300),
+    "weekly": ("secondary", 10080),
+}
+
+
 def send(proc, message):
     proc.stdin.write(json.dumps(message, separators=(",", ":")) + "\n")
     proc.stdin.flush()
@@ -99,6 +105,39 @@ def format_remaining_percent(used_percent):
     return f"{remaining:.1f}".rstrip("0").rstrip(".")
 
 
+def parse_window_duration(value):
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def select_window(limits, period):
+    if not isinstance(limits, dict):
+        return None
+    spec = QUOTA_WINDOW_SPECS.get(period)
+    if spec is None:
+        return None
+    fallback_key, expected_duration = spec
+
+    for key in ("primary", "secondary"):
+        window = limits.get(key)
+        if not isinstance(window, dict):
+            continue
+        if parse_window_duration(window.get("windowDurationMins")) == expected_duration:
+            return window
+
+    fallback = limits.get(fallback_key)
+    if not isinstance(fallback, dict):
+        return None
+    fallback_duration = parse_window_duration(fallback.get("windowDurationMins"))
+    if fallback_duration is None:
+        return fallback
+    return None
+
+
 def print_window(label, window):
     if not window:
         print(f"{label}: n/a")
@@ -123,8 +162,8 @@ def main():
     limits = result["rateLimits"]
     print("plan:", limits.get("planType"))
     print("limit:", limits.get("limitId") or "default")
-    print_window("5h", limits.get("primary"))
-    print_window("week", limits.get("secondary"))
+    print_window("5h", select_window(limits, "5h"))
+    print_window("weekly", select_window(limits, "weekly"))
 
     credits = limits.get("credits")
     if credits:
