@@ -153,7 +153,7 @@ class CodexRunner:
         ]
         if self.config.bypass_sandbox:
             cmd.append("--dangerously-bypass-approvals-and-sandbox")
-        cmd.append(full_prompt)
+        cmd.extend(["--", full_prompt])
 
         env = os.environ.copy()
         env["CODEX_HOME"] = str(self.config.codex_home)
