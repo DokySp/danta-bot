@@ -20,6 +20,7 @@ from ..scripts.run_subagent import (
     launcher_model_effort,
     load_json,
     load_subagent_model_config,
+    mcp_degraded_dependencies,
     normalize_compact_review_payload,
     recent_submitted_trade_context,
     run_group,
@@ -272,6 +273,8 @@ if "--json" in sys.argv:
                 "secondary": {"used_percent": 2.0}
             }
         }))
+if os.environ.get("FAKE_CODEX_MCP_INIT_ERROR"):
+    print(os.environ["FAKE_CODEX_MCP_INIT_ERROR"], file=sys.stderr)
 sys.exit(int(os.environ.get("FAKE_CODEX_EXIT", "0")))
 """,
         encoding="utf-8",
@@ -1254,6 +1257,31 @@ def run_self_test() -> int:
             if Path(default_retention_wrapper["stderr_path"]).exists():
                 failures.append("default anomaly event retention left normal stderr log on disk")
 
+            os.environ["FAKE_CODEX_MCP_INIT_ERROR"] = (
+                "2026-07-14T03:00:44Z ERROR rmcp::transport::worker: worker quit with fatal: "
+                "unexpected server response: HTTP 500, when send initialized notification"
+            )
+            try:
+                degraded_wrapper = run_one(
+                    compact_spec(
+                        tmp,
+                        stage="analyst-review",
+                        agent_role="analyst-momentum-news",
+                        task_name="mcp-degraded",
+                    )
+                )
+            finally:
+                os.environ.pop("FAKE_CODEX_MCP_INIT_ERROR", None)
+            if degraded_wrapper.get("status") != "success":
+                failures.append(f"MCP degradation incorrectly failed wrapper: {degraded_wrapper}")
+            degraded = degraded_wrapper.get("degraded_dependencies")
+            if not isinstance(degraded, list) or not degraded or degraded[0].get("dependency_id") != "mcp:unknown":
+                failures.append(f"MCP degradation missing from wrapper: {degraded_wrapper}")
+            if degraded_wrapper.get("event_diagnostics", {}).get("degraded_dependency_count") != 1:
+                failures.append(f"MCP degraded count missing from diagnostics: {degraded_wrapper}")
+            if degraded_wrapper.get("event_retention_reason") != "anomaly":
+                failures.append(f"MCP degradation did not retain diagnostics: {degraded_wrapper}")
+
             custom_model_config = tmp / "codex-runtime.yaml"
             custom_model_config.write_text(
                 "\n".join(
@@ -1516,3 +1544,13 @@ def run_self_test() -> int:
 class RunSubagentSelfTest(unittest.TestCase):
     def test_self_test_suite(self) -> None:
         self.assertEqual(run_self_test(), 0)
+
+    def test_named_mcp_server_is_preserved_in_degraded_dependency(self) -> None:
+        dependencies = mcp_degraded_dependencies(
+            "MCP server 'kis-trading' failed during initialization: HTTP 503"
+        )
+
+        self.assertEqual(len(dependencies), 1)
+        self.assertEqual(dependencies[0]["dependency_id"], "mcp:kis-trading")
+        self.assertEqual(dependencies[0]["server_identifier_source"], "stderr")
+        self.assertEqual(dependencies[0]["http_status"], 503)

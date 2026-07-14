@@ -222,7 +222,7 @@ Run 아티팩트는 `reports/runs/<run_id>/` 아래에 둔다.
 - `pipeline-summary.json`은 service output을 위한 compact diagnostic source다.
 - `telegram-summary.txt`는 `pipeline-summary.json`에서 렌더링한 고정 user-facing 응답이며, service code는 raw artifact에서 새 summary를 재구성하지 않는다.
 - `subagents/<task>.raw.txt`는 `codex exec -o`가 쓴 최종 sub-agent output이다.
-- `subagents/<task>.events.jsonl`과 `subagents/<task>.stderr.txt`는 토큰 spike 디버깅용 raw `codex exec --json` 이벤트/표준에러다. wrapper의 additive `event_diagnostics`는 event type, usage event sequence, tool call/result 크기, 반복 command/file-read fingerprint를 content-light로 요약해 큰 prompt/artifact 입력, 큰 tool result, 반복 tool loop, usage event 중복/누적 집계를 구분하게 한다.
+- `subagents/<task>.events.jsonl`과 `subagents/<task>.stderr.txt`는 토큰 spike 디버깅용 raw `codex exec --json` 이벤트/표준에러다. wrapper의 additive `event_diagnostics`는 event type, usage event sequence, tool call/result 크기, 반복 command/file-read fingerprint를 content-light로 요약해 큰 prompt/artifact 입력, 큰 tool result, 반복 tool loop, usage event 중복/누적 집계를 구분하게 한다. MCP 초기화 오류는 성공 wrapper도 실패로 바꾸지 않고 `degraded_dependencies`에 서버 식별자(없으면 `mcp:unknown`), phase, HTTP status를 기록하며 anomaly retention 대상으로 보존한다.
 - Raw event/stderr debug artifact는 경로, 명령, tool 출력 등 민감한 운영 정보를 포함할 수 있으므로 retention 정책에 따라 제한 보존하고, portfolio report/Telegram summary/user-facing 응답이나 execution truth로 사용하지 않는다.
 
 ### Review 계약

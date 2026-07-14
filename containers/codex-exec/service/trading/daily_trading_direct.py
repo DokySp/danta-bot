@@ -112,3 +112,11 @@ def format_direct_runner_error(job_id: str, exc: Exception) -> str:
         f"<code>{html.escape(job_id)}</code>\n"
         f"<pre>{html.escape(str(exc))}</pre>"
     )
+
+
+def format_direct_delivery_error(job_id: str, exc: Exception) -> str:
+    return (
+        f"<b>daily-trading 거래 실행 성공 / Telegram 전송 실패</b>\n"
+        f"<code>{html.escape(job_id)}</code>\n"
+        f"<pre>{html.escape(str(exc))}</pre>"
+    )

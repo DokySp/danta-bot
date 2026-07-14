@@ -9,7 +9,11 @@ from ..config import Config
 from ..errors import UserFacingError
 from ..telegram.gateway import TelegramGateway, TypingIndicator
 from ..trading.daily_trading import error_message_with_run_context, is_daily_trading_schedule
-from ..trading.daily_trading_direct import DailyTradingDirectRunner, format_direct_runner_error
+from ..trading.daily_trading_direct import (
+    DailyTradingDirectRunner,
+    format_direct_delivery_error,
+    format_direct_runner_error,
+)
 from ..pipelines.deferred_buy_retry.pipeline import run_due_deferred_buy_retries
 from .config import parse_yaml_schedule
 from .cron import cron_matches
@@ -89,6 +93,7 @@ class Scheduler:
     ) -> None:
         chat_id_text = str(chat_id) if chat_id else None
         route_text = str(route) if route else None
+        output_ready = False
         try:
             if daily_trading_config is None:
                 runtime_defaults = self.runner.runtime_defaults()
@@ -115,9 +120,13 @@ class Scheduler:
                         model=model,
                         reasoning_effort=reasoning_effort,
                     )
+            output_ready = True
             self.gateway.send_message(output, chat_id_text, route_text)
         except Exception as exc:  # noqa: BLE001 - report schedule failures to Telegram
-            if isinstance(exc, UserFacingError):
+            delivery_failed = daily_trading_config is not None and output_ready
+            if delivery_failed:
+                logging.exception("scheduled daily-trading Telegram delivery failed id=%s", job_id)
+            elif isinstance(exc, UserFacingError):
                 logging.warning("scheduled job failed id=%s: %s", job_id, exc)
             else:
                 logging.exception("scheduled job failed id=%s", job_id)
@@ -126,7 +135,11 @@ class Scheduler:
                 f"<pre>{html.escape(str(exc))}</pre>"
             )
             if daily_trading_config is not None:
-                fallback = format_direct_runner_error(job_id, exc)
+                fallback = (
+                    format_direct_delivery_error(job_id, exc)
+                    if delivery_failed
+                    else format_direct_runner_error(job_id, exc)
+                )
             message = error_message_with_run_context(exc, fallback)
             self.gateway.send_message(
                 message,

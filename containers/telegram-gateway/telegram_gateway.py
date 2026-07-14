@@ -26,6 +26,7 @@ import yaml
 MARKDOWN_V2_SPECIALS = r"_*[]()~`>#+-=|{}.!"
 BOT_COMMAND_RE = re.compile(r"^[a-z0-9_]{1,32}$")
 KST = timezone(timedelta(hours=9), "KST")
+TELEGRAM_MESSAGE_BREAK = "<!--telegram-message-break-->"
 
 
 def env_int(name: str, default: int) -> int:
@@ -170,6 +171,114 @@ def split_telegram_text(text: str, limit: int = 4096) -> list[str]:
     while start < len(text):
         chunks.append(text[start : start + limit])
         start += limit
+    return chunks
+
+
+class TelegramHtmlTokenizer(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self.tokens: list[tuple[str, str, str]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        del attrs
+        self.tokens.append(("start", self.get_starttag_text() or f"<{tag}>", tag.lower()))
+
+    def handle_endtag(self, tag: str) -> None:
+        self.tokens.append(("end", f"</{tag.lower()}>", tag.lower()))
+
+    def handle_data(self, data: str) -> None:
+        if data:
+            self.tokens.append(("data", data, ""))
+
+    def handle_entityref(self, name: str) -> None:
+        self.tokens.append(("entity", f"&{name};", ""))
+
+    def handle_charref(self, name: str) -> None:
+        self.tokens.append(("entity", f"&#{name};", ""))
+
+
+def split_telegram_html(text: str, limit: int = 4096) -> list[str]:
+    if limit <= 0:
+        raise ValueError("Telegram message limit must be positive")
+    if len(text) <= limit:
+        return [text]
+
+    tokenizer = TelegramHtmlTokenizer()
+    tokenizer.feed(text)
+    tokenizer.close()
+
+    chunks: list[str] = []
+    open_tags: list[tuple[str, str]] = []
+    parts: list[str] = []
+    has_content = False
+
+    def closing_text(tags: list[tuple[str, str]] | None = None) -> str:
+        active = open_tags if tags is None else tags
+        return "".join(f"</{tag}>" for tag, _start_text in reversed(active))
+
+    def current_length(tags: list[tuple[str, str]] | None = None) -> int:
+        return sum(len(part) for part in parts) + len(closing_text(tags))
+
+    def flush() -> None:
+        nonlocal parts, has_content
+        if not has_content:
+            return
+        chunks.append("".join(parts) + closing_text())
+        parts = [start_text for _tag, start_text in open_tags]
+        has_content = False
+
+    for kind, value, tag in tokenizer.tokens:
+        if kind == "start":
+            next_tags = [*open_tags, (tag, value)]
+            if current_length(next_tags) + len(value) > limit:
+                flush()
+            if current_length(next_tags) + len(value) > limit:
+                raise ValueError("Telegram HTML tag nesting exceeds the message limit")
+            parts.append(value)
+            open_tags.append((tag, value))
+            continue
+
+        if kind == "end":
+            if not open_tags or open_tags[-1][0] != tag:
+                continue
+            parts.append(value)
+            open_tags.pop()
+            continue
+
+        if kind == "entity":
+            if current_length() + len(value) > limit:
+                flush()
+            if current_length() + len(value) > limit:
+                raise ValueError("Telegram HTML entity exceeds the message limit")
+            parts.append(value)
+            has_content = True
+            continue
+
+        remaining = value
+        while remaining:
+            available = limit - current_length()
+            if available <= 0:
+                flush()
+                available = limit - current_length()
+            if available <= 0:
+                raise ValueError("Telegram HTML formatting leaves no room for message text")
+            take = min(len(remaining), available)
+            parts.append(remaining[:take])
+            has_content = True
+            remaining = remaining[take:]
+            if remaining:
+                flush()
+
+    flush()
+    return chunks
+
+
+def telegram_html_chunks(text: str, limit: int = 4096) -> list[str]:
+    chunks: list[str] = []
+    for section in text.split(TELEGRAM_MESSAGE_BREAK):
+        sanitized = sanitize_telegram_html(section)
+        if sanitized:
+            chunks.extend(split_telegram_html(sanitized, limit))
     return chunks
 
 
@@ -800,9 +909,11 @@ class TelegramClient:
         mode = parse_mode if parse_mode is not None else self.route.parse_mode
         outbound_text = escape_markdown_v2(text) if escape and mode == "MarkdownV2" else text
         if mode and mode.lower() == "html":
-            outbound_text = sanitize_telegram_html(outbound_text)
+            chunks = telegram_html_chunks(outbound_text)
+        else:
+            chunks = split_telegram_text(outbound_text)
 
-        for chunk in split_telegram_text(outbound_text):
+        for chunk in chunks:
             payload: dict[str, Any] = {"chat_id": chat_id, "text": chunk}
             if mode:
                 payload["parse_mode"] = mode

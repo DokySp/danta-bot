@@ -67,6 +67,7 @@ Allowed access path:
 
 Do not use MCP for this skill's holdings lookup.
 Use the shared `kis-token` helper for OAuth token caching. Do not create or read a check-portfolio-specific token cache for new code.
+Retry diagnostics record every failed attempt and the eventual recovered-success attempt in the configured attempt JSONL. HTTP error metadata may retain only allowlisted KIS result codes/messages and request/transaction IDs after redaction; never retain raw response bodies, request parameters, account identifiers, credentials, or authorization headers.
 
 ## Workflow
 

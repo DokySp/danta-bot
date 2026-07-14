@@ -22,6 +22,8 @@ from zoneinfo import ZoneInfo
 KST = ZoneInfo("Asia/Seoul")
 KIS_BASE_URL = "https://openapi.koreainvestment.com:9443"
 BALANCE_PATH = "/uapi/domestic-stock/v1/trading/inquire-balance"
+SAFE_RESPONSE_REQUEST_ID_HEADERS = ("x-request-id", "x-correlation-id", "gt_uid")
+SAFE_RESPONSE_TRANSACTION_ID_HEADERS = ("tr_id",)
 
 
 def find_repo_root(start: Path | None = None) -> Path | None:
@@ -158,6 +160,69 @@ def safe_exception_message(exc: Exception) -> str:
     return exc.__class__.__name__
 
 
+def safe_diagnostic_text(value: Any, limit: int = 200) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    text = re.sub(
+        r"(?i)\b(authorization|appkey|appsecret|cano|acnt_prdt_cd)\b\s*[:=]\s*(?:bearer\s+)?[^,;\s]+",
+        "<redacted>",
+        text,
+    )
+    text = re.sub(r"(?i)\bbearer\s+[^,;\s]+", "<redacted>", text)
+    text = re.sub(r"\b\d{8,}\b", "<redacted-number>", text)
+    return text[:limit]
+
+
+def normalized_response_headers(raw_headers: Any) -> dict[str, str]:
+    if raw_headers is None:
+        return {}
+    try:
+        return {str(key).lower(): str(value) for key, value in raw_headers.items()}
+    except (AttributeError, TypeError, ValueError):
+        return {}
+
+
+def safe_response_header_fields(raw_headers: Any) -> dict[str, str]:
+    headers = normalized_response_headers(raw_headers)
+    fields: dict[str, str] = {}
+    for header in SAFE_RESPONSE_REQUEST_ID_HEADERS:
+        value = safe_diagnostic_text(headers.get(header), 120)
+        if value:
+            fields["response_request_id"] = value
+            break
+    for header in SAFE_RESPONSE_TRANSACTION_ID_HEADERS:
+        value = safe_diagnostic_text(headers.get(header), 120)
+        if value:
+            fields["response_transaction_id"] = value
+            break
+    return fields
+
+
+def safe_http_error_fields(exc: HTTPError) -> dict[str, str]:
+    fields = safe_response_header_fields(exc.headers)
+    try:
+        raw_body = exc.read(8192)
+    except (OSError, ValueError):
+        return fields
+    if not raw_body:
+        return fields
+    try:
+        parsed = json.loads(raw_body.decode("utf-8", errors="replace"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return fields
+    if not isinstance(parsed, dict):
+        return fields
+    mappings = {
+        "rt_cd": "response_rt_cd",
+        "msg_cd": "response_kis_code",
+        "msg1": "response_message",
+    }
+    for source, target in mappings.items():
+        value = safe_diagnostic_text(parsed.get(source))
+        if value:
+            fields[target] = value
+    return fields
+
+
 def request_failure_event(
     *,
     path: str,
@@ -167,10 +232,11 @@ def request_failure_event(
     next_delay_seconds: int | None,
     exc: Exception,
 ) -> dict[str, Any]:
-    return {
+    event = {
         "timestamp": datetime.now(KST).isoformat(),
         "api": "direct_kis.inquire_balance" if path == BALANCE_PATH else "direct_kis.request",
         "path": path,
+        "outcome": "failed",
         "attempt": attempt,
         "max_attempts": max_attempts,
         "will_retry": will_retry,
@@ -179,27 +245,56 @@ def request_failure_event(
         "http_status": exc.code if isinstance(exc, HTTPError) else None,
         "error": safe_exception_message(exc),
     }
+    if isinstance(exc, HTTPError):
+        event.update(safe_http_error_fields(exc))
+    return event
 
 
-def kis_response_failure_event(*, path: str, message: str, code: str = "") -> dict[str, Any]:
+def request_success_event(
+    *,
+    path: str,
+    attempt: int,
+    max_attempts: int,
+    response_headers: dict[str, str],
+) -> dict[str, Any]:
     return {
         "timestamp": datetime.now(KST).isoformat(),
         "api": "direct_kis.inquire_balance" if path == BALANCE_PATH else "direct_kis.request",
         "path": path,
+        "outcome": "success",
+        "attempt": attempt,
+        "max_attempts": max_attempts,
+        "recovered_after_failures": attempt - 1,
+        **safe_response_header_fields(response_headers),
+    }
+
+
+def kis_response_failure_event(*, path: str, message: str, code: str = "") -> dict[str, Any]:
+    event = {
+        "timestamp": datetime.now(KST).isoformat(),
+        "api": "direct_kis.inquire_balance" if path == BALANCE_PATH else "direct_kis.request",
+        "path": path,
+        "outcome": "failed",
         "attempt": None,
         "max_attempts": None,
         "will_retry": False,
         "next_delay_seconds": None,
         "exception_class": "KisResponseError",
         "http_status": None,
-        "kis_code": code,
-        "error": message[:200],
     }
+    safe_code = safe_diagnostic_text(code, 120)
+    safe_message = safe_diagnostic_text(message)
+    if safe_code:
+        event["response_kis_code"] = safe_code
+    if safe_message:
+        event["response_message"] = safe_message
+    return event
 
 
 def append_attempt_log(event: dict[str, Any]) -> None:
     line = json.dumps(event, ensure_ascii=False, sort_keys=True)
-    print(f"check-portfolio KIS request failure: {line}", file=sys.stderr)
+    label = "recovery" if event.get("outcome") == "success" else "failure"
+    print(f"check-portfolio KIS request {label}: {line}", file=sys.stderr)
     path = attempt_log_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -247,7 +342,17 @@ def retry_json(
     max_attempts = retries + 1
     for attempt_index in range(max_attempts):
         try:
-            return request_json(method, path, headers=headers, payload=payload, params=params)
+            response, response_headers = request_json(method, path, headers=headers, payload=payload, params=params)
+            if attempt_index > 0:
+                append_attempt_log(
+                    request_success_event(
+                        path=path,
+                        attempt=attempt_index + 1,
+                        max_attempts=max_attempts,
+                        response_headers=response_headers,
+                    )
+                )
+            return response, response_headers
         except HTTPError as exc:
             last_error = exc
             if exc.code in {400, 401, 403, 404}:

@@ -122,6 +122,10 @@ EVENT_RETENTION_VALUES = {"always", "anomaly", "failed", "never"}
 DEFAULT_EVENT_TOKEN_THRESHOLD = 1_000_000
 MAX_USAGE_EVENT_SUMMARY_ITEMS = 50
 MAX_REPEATED_TOOL_FINGERPRINTS = 20
+MCP_SERVER_NAME_PATTERNS = (
+    re.compile(r"\bmcp server\s+[`'\"]?(?P<name>[A-Za-z0-9_.-]+)", re.IGNORECASE),
+    re.compile(r"\bmcp[_-]?server(?:_name)?\s*[:=]\s*[`'\"]?(?P<name>[A-Za-z0-9_.-]+)", re.IGNORECASE),
+)
 TOKEN_USAGE_FIELDS = (
     "input_tokens",
     "cached_input_tokens",
@@ -498,6 +502,51 @@ def summarize_codex_event_stream(stdout: str, token_usage: dict[str, int]) -> di
         "anomaly_detected": anomaly_detected,
         "anomaly_token_threshold": token_threshold,
     }
+
+
+def mcp_degraded_dependencies(stderr: str) -> list[dict[str, Any]]:
+    dependencies: list[dict[str, Any]] = []
+    seen: set[tuple[str, int | None, str]] = set()
+    for raw_line in stderr.splitlines():
+        line = raw_line.strip()
+        lowered = line.lower()
+        if not line or "mcp" not in lowered:
+            continue
+        initialization_failure = (
+            "initialized notification" in lowered
+            or "initialization" in lowered
+            or "initialize" in lowered
+        ) and any(word in lowered for word in ("error", "failed", "fatal", "unexpected server response"))
+        if not initialization_failure:
+            continue
+        status_match = re.search(r"\bHTTP\s+([45][0-9]{2})\b", line, re.IGNORECASE)
+        http_status = int(status_match.group(1)) if status_match else None
+        server_name = ""
+        for pattern in MCP_SERVER_NAME_PATTERNS:
+            match = pattern.search(line)
+            if match:
+                server_name = match.group("name")
+                break
+        dependency_id = f"mcp:{server_name}" if server_name else "mcp:unknown"
+        component = "rmcp::transport::worker" if "rmcp::transport::worker" in lowered else "codex-mcp"
+        key = (dependency_id, http_status, component)
+        if key in seen:
+            continue
+        seen.add(key)
+        dependencies.append(
+            {
+                "dependency_type": "mcp",
+                "dependency_id": dependency_id,
+                "server_name": server_name or "unknown",
+                "server_identifier_source": "stderr" if server_name else "unavailable",
+                "component": component,
+                "phase": "initialize",
+                "status": "degraded",
+                "error_code": "mcp_initialization_http_error" if http_status else "mcp_initialization_error",
+                "http_status": http_status,
+            }
+        )
+    return dependencies
 
 
 def parse_codex_json_events(stdout: str) -> dict[str, Any]:
@@ -2019,6 +2068,10 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
     event_summary = parse_codex_json_events(stdout)
     event_diagnostics = summarize_codex_event_stream(stdout, event_summary["token_usage"])
     event_diagnostics["stderr_bytes"] = len(stderr.encode("utf-8", errors="replace"))
+    degraded_dependencies = mcp_degraded_dependencies(stderr)
+    event_diagnostics["degraded_dependency_count"] = len(degraded_dependencies)
+    if degraded_dependencies:
+        event_diagnostics["anomaly_detected"] = True
     if raw_output_path.exists():
         raw_output = raw_output_path.read_text(encoding="utf-8", errors="replace")
     else:
@@ -2128,6 +2181,7 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
         "stderr_path": str(stderr_path),
         "stderr_retained": stderr_retained,
         "event_diagnostics": event_diagnostics,
+        "degraded_dependencies": degraded_dependencies,
         "parsed_json": parsed_json,
         "parsed_text": parsed_text,
         "errors": errors,
@@ -2189,6 +2243,15 @@ def run_group(specs: list[dict[str, Any]], max_workers: int | None = None) -> di
         status = "partial"
     else:
         status = "success"
+    degraded_dependencies = [
+        {
+            "task_name": str(wrapper.get("task_name") or ""),
+            **dependency,
+        }
+        for wrapper in wrappers
+        for dependency in wrapper.get("degraded_dependencies", [])
+        if isinstance(dependency, dict)
+    ]
     return {
         "schema_version": "1",
         "status": status,
@@ -2196,6 +2259,8 @@ def run_group(specs: list[dict[str, Any]], max_workers: int | None = None) -> di
         "failed_count": len(failed),
         "required_failed_count": len(required_failed),
         "optional_failed_count": len(optional_failed),
+        "degraded_dependency_count": len(degraded_dependencies),
+        "degraded_dependencies": degraded_dependencies,
         "wrappers": wrappers,
     }
 
