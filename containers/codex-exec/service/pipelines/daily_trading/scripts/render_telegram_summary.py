@@ -187,7 +187,7 @@ def render(summary: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            f"<b>당일 누계</b> 매수 {money(today_buy)} · 매도 {money(today_sell)} · 체결 {fill_count_text}",
+            f"<b>당일 누계</b>(이번 run 주문 전 기준) 매수 {money(today_buy)} · 매도 {money(today_sell)} · 체결 {fill_count_text}",
             "",
             f"<b>이번 run</b> {esc(execution.get('request_type') or '-')} · 제출 {submitted_count} · 차단·실패 {blocked_failed_count} · 스킵 {skipped_count}",
         ]
@@ -198,9 +198,21 @@ def render(summary: dict[str, Any]) -> str:
         lines.append(order_line(item))
     if len(submitted_or_blocked) > 3:
         lines.append(f"- 외 {len(submitted_or_blocked) - 3}건")
-    if any(key in review for key in ("sell_candidate_count", "buy_candidate_count", "hold_symbol_count")):
+    if any(key in review for key in ("final_sell_count", "final_buy_count", "final_hold_count")):
+        final_line = (
+            f"- 최종 결정: 매도 {as_int(review.get('final_sell_count'))}"
+            f" · 매수 {as_int(review.get('final_buy_count'))}"
+            f" · 유지 {as_int(review.get('final_hold_count'))}"
+        )
+        unresolved = as_int(review.get("unresolved_candidate_count"))
+        if unresolved > 0:
+            final_line += f" · 미결 {unresolved}"
+        lines.append(final_line)
+    elif any(key in review for key in ("sell_candidate_count", "buy_candidate_count", "hold_symbol_count")):
         lines.append(
-            f"- 평결: 매도 {as_int(review.get('sell_candidate_count'))} · 매수 {as_int(review.get('buy_candidate_count'))} · 유지 {as_int(review.get('hold_symbol_count'))}"
+            f"- Judge 검토: 매도 후보 {as_int(review.get('sell_candidate_count'))}"
+            f" · 매수 후보 {as_int(review.get('buy_candidate_count'))}"
+            f" · 미선정 {as_int(review.get('hold_symbol_count'))}"
         )
     data_issues = sum(
         1

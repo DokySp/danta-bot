@@ -1638,3 +1638,63 @@ class RunDailyTradingPipelineSelfTest(unittest.TestCase):
         ]
         gate = evaluate_rebuttal_2_gate(artifact, ["005930"])
         self.assertIn("incomplete_debate_final_position", gate["reason_codes"])
+
+    def test_build_review_summary_reports_final_decisions_not_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            run_dir = workspace / "reports" / "runs" / "review-summary-probe"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            pipeline = Pipeline(
+                argparse.Namespace(
+                    command="summarize",
+                    workspace_dir=str(workspace),
+                    output_dir=str(run_dir),
+                    run_id="review-summary-probe",
+                    started_at="2026-06-18T09:00:00+09:00",
+                )
+            )
+            write_json(
+                run_dir / "judge-debate.json",
+                {"schema_version": "1", "stage": "judge-debate", "status": "success", "phases": []},
+            )
+            write_json(
+                run_dir / "analyst-review.json",
+                {"symbols": [{"symbol_id": symbol_id} for symbol_id in ("005930", "000660", "035720", "402340")]},
+            )
+            # 402340 is a buy candidate whose judge decision is invalid, so it must stay unresolved.
+            write_json(
+                run_dir / "judge-review-spec.json",
+                {"candidate_directions": {"005930": "buy", "000660": "sell", "402340": "buy"}},
+            )
+            write_json(
+                run_dir / "judge-review.json",
+                {
+                    "status": "success",
+                    "symbols": [
+                        {"symbol_id": "005930", "final_holding_quantity": 2},   # 0 -> 2 매수
+                        {"symbol_id": "000660", "final_holding_quantity": 0},   # 3 -> 0 매도
+                        {"symbol_id": "035720", "final_holding_quantity": 5},   # 5 -> 5 유지 (후보 아님)
+                        {"symbol_id": "402340", "final_holding_quantity": -1},  # 무효 최종수량 -> 미결
+                    ],
+                },
+            )
+            account = {
+                "symbols": [
+                    {"symbol_id": "005930", "current_live_holding_quantity": 0},
+                    {"symbol_id": "000660", "current_live_holding_quantity": 3},
+                    {"symbol_id": "035720", "current_live_holding_quantity": 5},
+                    {"symbol_id": "402340", "current_live_holding_quantity": 0},
+                ]
+            }
+            review = pipeline.build_review_summary(account, {"orders": []})
+            # Final decisions come from the current->final holding-quantity direction of resolved rows.
+            self.assertEqual(review["final_buy_count"], 1)
+            self.assertEqual(review["final_sell_count"], 1)
+            # The invalid candidate (402340) is not silently folded into 유지: naive scored-minus-directions
+            # would report 2 holds, but the delta-derived count is 1 (only 035720).
+            self.assertEqual(review["final_hold_count"], 1)
+            self.assertEqual(review["unresolved_candidate_count"], 1)
+            self.assertNotIn("402340", {row["symbol_id"] for row in review["symbols"]})
+            # Judge candidate counts remain for diagnostics but are no longer the reported verdict.
+            self.assertEqual(review["buy_candidate_count"], 2)
+            self.assertEqual(review["sell_candidate_count"], 1)

@@ -79,6 +79,11 @@ def self_test() -> int:
             ],
         },
         "review_summary": {
+            # 최종 결정 카운트(현재→최종 보유수량 방향)와 진단용 Judge 후보 카운트가 함께 온 정상 신규 run.
+            "final_sell_count": 0,
+            "final_buy_count": 1,
+            "final_hold_count": 0,
+            "unresolved_candidate_count": 2,
             "sell_candidate_count": 1,
             "buy_candidate_count": 2,
             "hold_symbol_count": 28,
@@ -138,6 +143,11 @@ def self_test() -> int:
             ],
         },
         "review_summary": {
+            # 미결 후보가 없는 정상 run: 최종 결정 라인만 표시하고 `미결`은 붙지 않는다.
+            "final_sell_count": 1,
+            "final_buy_count": 0,
+            "final_hold_count": 0,
+            "unresolved_candidate_count": 0,
             "symbols": [
                 {
                     "symbol_id": "402340",
@@ -151,8 +161,24 @@ def self_test() -> int:
         },
         "token_usage": {"total": {"total_tokens": 456}},
     }
+    legacy_payload = {
+        # 최종 결정 카운트가 없는 구버전 summary: Judge 후보로만 표기하고 최종 평결로 오인하지 않는다.
+        "run_id": "self-test-legacy",
+        "status": "success",
+        "account_display_summary": {},
+        "evidence_summary": {"financial": {}, "news": {}},
+        "today_fills_summary": {"status": "success", "skipped": False, "fill_count": 0},
+        "execution": {"request_type": "analysis", "status": "success", "orders": []},
+        "review_summary": {
+            "sell_candidate_count": 2,
+            "buy_candidate_count": 3,
+            "hold_symbol_count": 25,
+        },
+        "token_usage": {"total": {"total_tokens": 0}},
+    }
     submitted_rendered = render(submitted_payload)
     blocked_rendered = render(blocked_payload)
+    legacy_rendered = render(legacy_payload)
     checks = [
         (
             "submitted",
@@ -162,14 +188,14 @@ def self_test() -> int:
                 "<code>self-test</code>",
                 "<b>계좌</b> 총평가 3,000원 · 평가손익 -10원",
                 "- 주문가능 1,043,015원 · 주식평가 2,000원",
-                "<b>당일 누계</b> 매수 100원 · 매도 0원 · 체결 7건",
+                "<b>당일 누계</b>(이번 run 주문 전 기준) 매수 100원 · 매도 0원 · 체결 7건",
                 "<b>이번 run</b> real-submit · 제출 1 · 차단·실패 0 · 스킵 0",
                 "- <code>005930</code> 삼성전자: 매수 3주→1주 · 제출(접수, 조정=매수가능수량으로 축소) / <code>r1</code>",
-                "- 평결: 매도 1 · 매수 2 · 유지 28",
+                "- 최종 결정: 매도 0 · 매수 1 · 유지 0 · 미결 2",
                 "상세 리포트: <code>daily-trading-report.html</code> 첨부",
                 "토큰: 123",
             ],
-            ["<b>근거</b>", "<b>당일 체결 타임라인</b>", "테스트 &lt;근거&gt;", "데이터 확인 필요", "/workspace/reports"],
+            ["<b>근거</b>", "<b>당일 체결 타임라인</b>", "테스트 &lt;근거&gt;", "데이터 확인 필요", "/workspace/reports", "평결:", "Judge 후보", "Judge 검토", "미선정"],
         ),
         (
             "blocked-with-skips",
@@ -177,13 +203,25 @@ def self_test() -> int:
             [
                 "<b>daily-trading ⚠️ 부분 완료</b>",
                 "<b>계좌</b> 총평가 조회 실패 · 평가손익 조회 실패",
-                "<b>당일 누계</b> 매수 조회 실패 · 매도 조회 실패 · 체결 조회 실패",
+                "<b>당일 누계</b>(이번 run 주문 전 기준) 매수 조회 실패 · 매도 조회 실패 · 체결 조회 실패",
                 "<b>이번 run</b> real-submit · 제출 0 · 차단·실패 2 · 스킵 6",
                 "- <code>402340</code> SK스퀘어: 매도 1주 · 차단(매도가능수량 초과) / <code>0028360200</code>",
                 "- <code>000660</code> SK하이닉스: - 0주 · 차단(제외 종목 차단)",
+                "- 최종 결정: 매도 1 · 매수 0 · 유지 0",
                 "상세 리포트: 생성 실패 또는 미첨부",
             ],
-            ["스킵종목1", "청산 목표", "final_equals_expected_holding_quantity", "sell_quantity_exceeds_order_available_quantity"],
+            ["스킵종목1", "청산 목표", "final_equals_expected_holding_quantity", "sell_quantity_exceeds_order_available_quantity", "미결", "평결:", "Judge 후보", "Judge 검토", "미선정"],
+        ),
+        (
+            "legacy-candidate-only",
+            legacy_rendered,
+            [
+                "<b>당일 누계</b>(이번 run 주문 전 기준) 매수 조회 실패 · 매도 조회 실패 · 체결 0건",
+                # hold_symbol_count(=scored_count - len(candidate_directions))는 Judge의 보유 판단이 아니라
+                # 후보로 선정되지 않은 scored 종목 수이므로 "유지"가 아닌 "미선정"으로 표기해야 한다.
+                "- Judge 검토: 매도 후보 2 · 매수 후보 3 · 미선정 25",
+            ],
+            ["최종 결정", "미결", "평결:", "Judge 후보", "유지"],
         ),
     ]
     failures = []

@@ -1863,7 +1863,7 @@ class Pipeline:
             "today_trade_amounts": {
                 "buy_amount": account_summary.get("today_buy_amount"),
                 "sell_amount": account_summary.get("today_sell_amount"),
-                "display_policy": "Do not mix these cumulative same-day amounts into the main account state; show only if explicitly useful as 당일 거래 누계.",
+                "display_policy": "Do not mix these cumulative same-day amounts into the main account state; show only if explicitly useful as 당일 거래 누계. These are the this-run pre-order snapshot captured from account-before-order.json, not values current at Telegram delivery time.",
             },
         }
 
@@ -2055,6 +2055,18 @@ class Pipeline:
         spec = load_json_if_exists(self.output_dir / "judge-review-spec.json") or {}
         candidate_directions = spec.get("candidate_directions") if isinstance(spec.get("candidate_directions"), dict) else {}
         directions = [str(value) for value in candidate_directions.values()]
+        # Final decisions are derived from the actual current->final holding quantity direction of the
+        # rows that resolved to a valid final_holding_quantity, so unresolved/invalid Judge candidates are
+        # never silently folded into 유지(hold). Judge candidate counts below are kept only for diagnostics.
+        final_sell_count = sum(1 for row in rows if row["delta_quantity"] < 0)
+        final_buy_count = sum(1 for row in rows if row["delta_quantity"] > 0)
+        final_hold_count = sum(1 for row in rows if row["delta_quantity"] == 0)
+        resolved_symbol_ids = {str(row.get("symbol_id") or "") for row in rows}
+        unresolved_candidate_count = sum(
+            1
+            for symbol_id in candidate_directions
+            if str(symbol_id).strip() and str(symbol_id).strip() not in resolved_symbol_ids
+        )
         analyst_review = load_json_if_exists(self.output_dir / "analyst-review.json") or {}
         judge_debate = load_json_if_exists(self.output_dir / "judge-debate.json") or {}
         scored_count = len(analyst_review.get("symbols", [])) if isinstance(analyst_review.get("symbols"), list) else 0
@@ -2074,6 +2086,10 @@ class Pipeline:
             "rebuttal_2_status": rebuttal_2.get("status") or "",
             "symbol_count": len(rows),
             "submitted_order_count": len(submitted),
+            "final_sell_count": final_sell_count,
+            "final_buy_count": final_buy_count,
+            "final_hold_count": final_hold_count,
+            "unresolved_candidate_count": unresolved_candidate_count,
             "sell_candidate_count": directions.count("sell"),
             "buy_candidate_count": directions.count("buy"),
             "hold_symbol_count": max(0, scored_count - len(directions)),
@@ -2517,10 +2533,10 @@ class Pipeline:
                     "total_evaluation_amount",
                     "total_pnl_amount",
                 ],
-                "today_trade_amount_policy": "Show today_buy_amount/today_sell_amount only under a separate 당일 거래 누계 label when relevant; never present them as newly caused by this command unless execution.json confirms submitted orders.",
+                "today_trade_amount_policy": "Show today_buy_amount/today_sell_amount and today_fills_summary.fill_count only under a separate 당일 거래 누계 label when relevant, explicitly marked as this run's pre-order snapshot (account-before-order.json / collection-time today-fills.json), never as values current at Telegram delivery time; never present them as newly caused by this command unless execution.json confirms submitted orders.",
                 "gate_label": "주문 전 기존 미체결/예약 주문",
                 "evidence_policy": "Report evidence_summary.financial.display_text and evidence_summary.news.display_text, distinguishing missing cache from cache_exists_zero_usable_articles.",
-                "review_policy": "Mention judge/judge-review outcome and submitted or final-quantity-changed symbols, including final holding quantity and one_line_reason when available.",
+                "review_policy": "Mention judge/judge-review outcome using review_summary.final_sell_count/final_buy_count/final_hold_count (final decisions derived from current->final holding quantity direction) and unresolved_candidate_count; never present sell_candidate_count/buy_candidate_count/hold_symbol_count as final verdicts. Highlight submitted or final-quantity-changed symbols, including final holding quantity and one_line_reason when available.",
             },
             "artifacts": {
                 "check_portfolio": str(self.output_dir / "check-portfolio.json"),
