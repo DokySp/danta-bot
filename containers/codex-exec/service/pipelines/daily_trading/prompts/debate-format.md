@@ -1,11 +1,11 @@
 # Judge Debate Output Format
 
-Bull/Bear는 Python pipeline이 관리하는 동일 Codex session에서 `opening` → `rebuttal-1`까지 항상 응답한다. `rebuttal-2`는 1차 반박의 최종 결론이 불완전하거나 양측의 행동·목표 수량이 다를 때만 이어진다. 각 turn은 JSON object 하나만 반환한다.
+Bull/Bear는 Python pipeline이 관리하는 동일 Codex session에서 `opening` → `rebuttal-1`까지 응답한다. 각 turn은 JSON object 하나만 반환한다.
 
 ```json
 {
   "stage": "judge-debate",
-  "phase": "opening|rebuttal-1|rebuttal-2",
+  "phase": "opening|rebuttal-1",
   "side": "bull|bear",
   "symbols": [
     {
@@ -14,7 +14,7 @@ Bull/Bear는 Python pipeline이 관리하는 동일 Codex session에서 `opening
       "arguments": [
         {
           "argument_id": "005930-bull-opening-1",
-          "kind": "claim|rebuttal|closing",
+          "kind": "claim|rebuttal",
           "targets": [],
           "statement": "짧고 검증 가능한 명시적 논거",
           "evidence_refs": ["analyst-review:005930:analyst-quality-value"]
@@ -37,7 +37,6 @@ Bull/Bear는 Python pipeline이 관리하는 동일 Codex session에서 `opening
 - `argument_id`는 같은 run에서 유일하고 phase별 고정 접두사를 사용한다.
   - opening: `<symbol_id>-<side>-opening-<number>`
   - rebuttal-1: `<symbol_id>-<side>-rebuttal-1-<number>`
-  - rebuttal-2: `<symbol_id>-<side>-rebuttal-2-<number>`
 - `statement`에는 사후 분석 가능한 명시적 판단 근거만 쓴다. 숨은 사고과정이나 장문의 독백을 반환하지 않는다.
 - `evidence_refs`에는 제공된 artifact에서 확인 가능한 field 또는 analyst view 식별자를 적는다. 외부 자료나 optional evidence 부재를 참조하지 않는다.
 - `concessions`와 `unresolved_conflicts`는 항상 string array로 반환한다.
@@ -46,7 +45,6 @@ Bull/Bear는 Python pipeline이 관리하는 동일 Codex session에서 `opening
 ## Phase 규칙
 
 - `opening`: `kind=claim`, `targets=[]`. 독립적인 핵심 주장과 스스로 인정하는 약점을 명시한다.
-- `rebuttal-1`: `kind=rebuttal`. 각 `targets`는 상대 opening의 `argument_id`를 하나 이상 참조한다. 상대와 무관한 새 주장을 만들지 않는다. 이 단계가 기본 최종 단계이므로 `final_position`, `recommended_action`, `target_holding_quantity`를 반드시 완성한다.
-- `rebuttal-2`: pipeline gate가 1차 반박의 불완전한 결론, 행동 불일치 또는 목표 수량 불일치를 기록한 경우에만 실행한다. `kind=closing`이고 각 `targets`는 상대 `rebuttal-1`의 `argument_id`를 하나 이상 참조한다. 새로운 evidence나 독립 주장을 추가하지 않고 양보, 남은 충돌과 세 최종 필드를 다시 확정한다.
+- `rebuttal-1`: `kind=rebuttal`. 각 `targets`는 상대 opening의 `argument_id`를 하나 이상 참조한다. 상대와 무관한 새 주장을 만들지 않고 `final_position`, `recommended_action`, `target_holding_quantity`를 반드시 완성한다.
 - `recommended_action`은 `portfolio_snapshot.current_live_holding_quantity`와 `target_holding_quantity`의 차이에 따라 `buy`, `hold`, `sell` 중 하나로 일치시킨다. snapshot이 없으면 기준 수량은 0이다.
 - `target_holding_quantity`는 0 이상의 정수다. 매수 후보는 기준 수량보다 줄일 수 없고 매도 후보는 기준 수량보다 늘릴 수 없다. 근거가 부족하면 기준 수량을 유지하고 `hold`를 반환한다.

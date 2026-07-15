@@ -21,7 +21,6 @@ ROLE_LABELS = {
 PHASE_LABELS = {
     "opening": "Opening",
     "rebuttal-1": "Rebuttal 1",
-    "rebuttal-2": "Rebuttal 2",
 }
 SIDE_LABELS = {"bull": "Bull", "bear": "Bear"}
 REGIME_LABELS = {

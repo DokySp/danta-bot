@@ -11,7 +11,7 @@
 
 후보 종목이 1개 이상이면 Python pipeline이 먼저 낙관/비관 토론을 완료하고 `debate_artifact`를 제공한다.
 
-- 토론은 동일 Bull/Bear session에서 `opening → rebuttal-1`까지 항상 진행하고, 1차 반박의 결론이 불완전하거나 양측의 추천 행동·목표 수량이 다를 때만 `rebuttal-2(closing)`를 실행한 상태다. 실제 최종 단계는 `debate_artifact.final_phase`를 따른다.
+- 토론은 동일 Bull/Bear session에서 `opening → rebuttal-1`까지 진행한 상태다.
 - judge는 sub-agent를 생성·재개하거나 추가 토론을 요청하지 않는다. 최종 판단은 한 번만 수행한다.
 - 종목별로 양측의 명시적 claim, rebuttal, concession, unresolved conflict, final position, recommended action과 target holding quantity를 비교한다.
 - optional evidence 부재는 어느 방향의 논거로도 세지 않는다. Optional 영역의 충족 개수나 coverage 완전성을 usable evidence의 충분성 기준으로 삼지 않는다.

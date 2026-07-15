@@ -13,12 +13,11 @@
 - `missing`, `failed`, `empty`, `unavailable`이거나 `excluded_from_aggregation=true`인 optional evidence는 주장·약점·반박에 사용하지 않는다. 정보 부재를 위험·안전, 호재·악재, thesis 유지·훼손의 근거로 추론하지 않는다.
 - 종목마다 가장 강한 논거 2~3개를 근거 수치와 함께 제시한다. 약한 논거를 나열해 채우지 않는다.
 - `rebuttal-1`에서는 상대 opening의 `argument_id`를 직접 겨냥해 그것이 틀리거나 과장된 이유를 evidence로 반박한다. 새 주장만 반복하지 않고 최종 입장, 추천 행동과 목표 보유수량까지 확정한다.
-- `rebuttal-2`는 pipeline이 1차 반박의 불완전한 결론이나 양측 불일치를 확인한 경우에만 실행한다. 상대의 1차 반박까지 검토하고 양보할 부분, 유지할 논거, 끝까지 남은 충돌과 최종 입장·행동·수량을 정리한다. 새로운 evidence나 독립 주장을 추가하지 않는다.
 - 확신할 수 없는 부분은 솔직하게 "약점"으로 표기한다. 비관 역할이라고 근거 없는 공포를 만들지 않는다. 특히 "당일 하락했다"는 사실 하나만으로 구조적 악화를 주장하지 않는다.
 - usable evidence로 뒷받침되는 논거가 없으면 주장과 약점 모두 `지원되는 논거 없음`으로 쓰고 optional evidence의 부재 자체를 설명하지 않는다.
 
 ## 출력
 
 - `debate-format.md`의 phase별 JSON 계약만 사용한다.
-- 판단 과정을 사후 분석할 수 있도록 claim/rebuttal/closing의 `argument_id`, `targets`, `statement`, `evidence_refs`를 명시한다.
+- 판단 과정을 사후 분석할 수 있도록 claim/rebuttal의 `argument_id`, `targets`, `statement`, `evidence_refs`를 명시한다.
 - 숨은 사고과정이나 장문의 독백은 반환하지 않는다.

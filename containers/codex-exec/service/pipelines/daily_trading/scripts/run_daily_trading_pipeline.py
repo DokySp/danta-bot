@@ -35,9 +35,8 @@ ANALYST_REVIEW_ROLES = (
     "analyst-momentum-news",
 )
 DEBATE_SIDES = ("bull", "bear")
-DEBATE_PHASES = ("opening", "rebuttal-1", "rebuttal-2")
+DEBATE_PHASES = ("opening", "rebuttal-1")
 DEBATE_MAX_ATTEMPTS = 2
-DEBATE_TARGET_QUANTITY_GAP_THRESHOLD = 1
 COMMAND_OUTPUT_LIMIT = 2000
 ORDER_PATH_AUTO = "auto"
 REGULAR_ORDER_START_MINUTE = 9 * 60
@@ -95,6 +94,15 @@ def write_json(path: Path, payload: Any) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     with tmp.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+        handle.write("\n")
+    tmp.replace(path)
+
+
+def write_compact_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
         handle.write("\n")
     tmp.replace(path)
 
@@ -356,79 +364,32 @@ def symbol_key(item: Any) -> str:
     return str(item.get("symbol_id") or item.get("symbol") or item.get("code") or "").strip()
 
 
-def evaluate_rebuttal_2_gate(
-    rebuttal_1_artifact: dict[str, Any],
-    symbol_ids: list[str],
-) -> dict[str, Any]:
-    sides = rebuttal_1_artifact.get("sides") if isinstance(rebuttal_1_artifact.get("sides"), dict) else {}
-    decisions: dict[str, dict[str, dict[str, Any]]] = {}
-    issues_by_side_symbol: dict[str, dict[str, set[str]]] = {}
-    for side in DEBATE_SIDES:
-        side_item = sides.get(side) if isinstance(sides.get(side), dict) else {}
-        output = side_item.get("output") if isinstance(side_item.get("output"), dict) else {}
-        rows = output.get("symbols") if isinstance(output.get("symbols"), list) else []
-        decisions[side] = {
-            symbol_key(row): {
-                "recommended_action": str(row.get("recommended_action") or "").strip().lower(),
-                "target_holding_quantity": (
-                    row.get("target_holding_quantity")
-                    if isinstance(row.get("target_holding_quantity"), int)
-                    and not isinstance(row.get("target_holding_quantity"), bool)
-                    and row.get("target_holding_quantity") >= 0
-                    else None
-                ),
-            }
-            for row in rows
-            if isinstance(row, dict) and symbol_key(row)
-        }
-        issues_by_side_symbol[side] = {}
-        for issue in side_item.get("debate_decision_issues") or []:
-            if not isinstance(issue, dict):
-                continue
-            symbol_id = str(issue.get("symbol_id") or "").strip()
-            code = str(issue.get("code") or "invalid_rebuttal_1_decision").strip()
-            if symbol_id:
-                issues_by_side_symbol[side].setdefault(symbol_id, set()).add(code)
-
+def compact_opening_context(payload: Any) -> dict[str, Any]:
+    source = payload if isinstance(payload, dict) else {}
     symbols: list[dict[str, Any]] = []
-    all_reason_codes: set[str] = set()
-    for symbol_id in symbol_ids:
-        reason_codes: set[str] = set()
-        for side in DEBATE_SIDES:
-            if symbol_id not in decisions[side]:
-                reason_codes.add(f"missing_{side}_rebuttal_1_decision")
-            reason_codes.update(issues_by_side_symbol[side].get(symbol_id, set()))
-        bull = decisions["bull"].get(symbol_id, {})
-        bear = decisions["bear"].get(symbol_id, {})
-        bull_action = str(bull.get("recommended_action") or "")
-        bear_action = str(bear.get("recommended_action") or "")
-        bull_quantity = bull.get("target_holding_quantity")
-        bear_quantity = bear.get("target_holding_quantity")
-        if bull and bear and not reason_codes:
-            if bull_action != bear_action:
-                reason_codes.add("recommended_action_disagreement")
-            if (
-                isinstance(bull_quantity, int)
-                and isinstance(bear_quantity, int)
-                and abs(bull_quantity - bear_quantity) >= DEBATE_TARGET_QUANTITY_GAP_THRESHOLD
-            ):
-                reason_codes.add("target_holding_quantity_gap")
-        all_reason_codes.update(reason_codes)
+    for item in source.get("symbols") if isinstance(source.get("symbols"), list) else []:
+        if not isinstance(item, dict) or not symbol_key(item):
+            continue
+        arguments = item.get("arguments") if isinstance(item.get("arguments"), list) else []
         symbols.append(
             {
-                "symbol_id": symbol_id,
-                "required": bool(reason_codes),
-                "reason_codes": sorted(reason_codes),
-                "bull": bull,
-                "bear": bear,
+                "symbol_id": symbol_key(item),
+                "arguments": [
+                    {
+                        "argument_id": str(argument.get("argument_id") or ""),
+                        "statement": str(argument.get("statement") or ""),
+                        "evidence_refs": list(argument.get("evidence_refs") or []),
+                    }
+                    for argument in arguments
+                    if isinstance(argument, dict)
+                ],
+                "concessions": list(item.get("concessions") or []),
+                "final_position": str(item.get("final_position") or ""),
             }
         )
-    required = bool(all_reason_codes)
     return {
-        "status": "required" if required else "skipped",
-        "required": required,
-        "quantity_gap_threshold": DEBATE_TARGET_QUANTITY_GAP_THRESHOLD,
-        "reason_codes": sorted(all_reason_codes),
+        "phase": "opening",
+        "side": str(source.get("side") or ""),
         "symbols": symbols,
     }
 
@@ -1241,8 +1202,7 @@ class Pipeline:
         phase: str,
         attempt: int,
         session_id: str = "",
-        own_previous: dict[str, Any] | None = None,
-        opponent_previous: dict[str, Any] | None = None,
+        opponent_opening: dict[str, Any] | None = None,
         retry_of_task_name: str = "",
     ) -> dict[str, Any]:
         judge_artifacts = judge_spec.get("artifact_paths") if isinstance(judge_spec.get("artifact_paths"), dict) else {}
@@ -1261,8 +1221,7 @@ class Pipeline:
         else:
             artifacts.update(
                 {
-                    "own_previous_turn": str((own_previous or {}).get("raw_output_path") or ""),
-                    "opponent_previous_turn": str((opponent_previous or {}).get("raw_output_path") or ""),
+                    "opponent_opening": str((opponent_opening or {}).get("compact_output_path") or ""),
                 }
             )
         task_name = f"judge-debate-{side}-{phase}-attempt-{attempt:02d}"
@@ -1299,6 +1258,7 @@ class Pipeline:
             "reported_session_id": str(wrapper.get("reported_session_id") or ""),
             "wrapper_path": str(wrapper.get("wrapper_path") or ""),
             "raw_output_path": str(wrapper.get("raw_output_path") or ""),
+            "compact_output_path": str(wrapper.get("compact_output_path") or ""),
             "event_log_path": str(wrapper.get("event_log_path") or ""),
             "event_log_retained": bool(wrapper.get("event_log_retained")),
             "spec_fingerprint": str(wrapper.get("spec_fingerprint") or ""),
@@ -1338,8 +1298,7 @@ class Pipeline:
                         phase=phase,
                         attempt=attempt,
                         session_id=session_ids.get(side, ""),
-                        own_previous=previous_wrappers.get(side),
-                        opponent_previous=previous_wrappers.get(opponent),
+                        opponent_opening=previous_wrappers.get(opponent),
                         retry_of_task_name=retry_of.get(side, ""),
                     )
                 )
@@ -1415,6 +1374,12 @@ class Pipeline:
                     "required": False,
                 }
             )
+        if phase == "opening":
+            for side, wrapper in successful.items():
+                compact_path = self.output_dir / "debate" / f"opening-{side}-compact.json"
+                write_compact_json(compact_path, compact_opening_context(wrapper.get("parsed_json")))
+                wrapper["compact_output_path"] = str(compact_path)
+
         phase_artifact = {
             "schema_version": "1",
             "run_id": self.run_id,
@@ -1455,12 +1420,6 @@ class Pipeline:
                 "flow": list(DEBATE_PHASES),
                 "executed_flow": [],
                 "final_phase": "",
-                "rebuttal_2_gate": {
-                    "status": "skipped",
-                    "required": False,
-                    "reason_codes": ["no_selected_symbols"],
-                    "symbols": [],
-                },
                 "session_ids": {},
                 "phases": [],
                 "errors": [],
@@ -1481,7 +1440,6 @@ class Pipeline:
             "flow": list(DEBATE_PHASES),
             "executed_flow": [],
             "final_phase": "",
-            "rebuttal_2_gate": {},
             "symbol_ids": symbols,
             "session_ids": {},
             "phases": [],
@@ -1491,52 +1449,12 @@ class Pipeline:
         session_ids: dict[str, str] = {}
         previous_wrappers: dict[str, dict[str, Any]] = {}
         for phase in DEBATE_PHASES:
-            if phase == "rebuttal-2":
-                gate = evaluate_rebuttal_2_gate(aggregate["phases"][-1], symbols)
-                aggregate["rebuttal_2_gate"] = gate
-                if not gate["required"]:
-                    phase_artifact = {
-                        "schema_version": "1",
-                        "run_id": self.run_id,
-                        "started_at": self.started_at,
-                        "generated_at": now_iso(),
-                        "stage": "judge-debate",
-                        "phase": phase,
-                        "status": "skipped",
-                        "skipped": True,
-                        "skip_reason": "rebuttal-1 final decisions agree",
-                        "gate": gate,
-                        "session_ids": dict(session_ids),
-                        "sides": {},
-                        "errors": [],
-                    }
-                    phase_path = self.output_dir / "debate" / f"{phase}.json"
-                    write_json(phase_path, phase_artifact)
-                    aggregate["phases"].append(phase_artifact)
-                    aggregate["executed_flow"] = [
-                        item.get("phase")
-                        for item in aggregate["phases"]
-                        if isinstance(item, dict) and item.get("status") == "success"
-                    ]
-                    aggregate["final_phase"] = "rebuttal-1"
-                    self.add_stage(
-                        "judge-debate-rebuttal-2",
-                        "skipped",
-                        detail="rebuttal-1 final decisions agree",
-                        required=False,
-                        path=phase_path,
-                    )
-                    write_json(artifact_path, aggregate)
-                    break
             phase_artifact, successful = self.run_debate_phase(
                 spec,
                 phase=phase,
                 session_ids=session_ids,
                 previous_wrappers=previous_wrappers,
             )
-            if phase == "rebuttal-2":
-                phase_artifact["gate"] = aggregate["rebuttal_2_gate"]
-                write_json(self.output_dir / "debate" / f"{phase}.json", phase_artifact)
             aggregate["generated_at"] = now_iso()
             aggregate["session_ids"] = dict(session_ids)
             aggregate["phases"].append(phase_artifact)
@@ -1572,7 +1490,7 @@ class Pipeline:
         self.add_stage(
             "judge-debate",
             "success",
-            detail=f"conditional debate completed at {aggregate['final_phase']}",
+            detail=f"debate completed at {aggregate['final_phase']}",
             path=artifact_path,
         )
         return aggregate
@@ -1785,7 +1703,7 @@ class Pipeline:
                 else safe_name(str(item.get("reason_code") or "hold_neutral")).lower()
             ),
             "one_line_reason": (
-                "Bull/Bear 조건부 토론이 불완전하여 기준 노출을 유지한다."
+                "Bull/Bear 토론이 불완전하여 기준 노출을 유지한다."
                 if force_baseline
                 else str(item.get("one_line_reason") or "")[:300]
             ),
@@ -2111,10 +2029,6 @@ class Pipeline:
         judge_debate = load_json_if_exists(self.output_dir / "judge-debate.json") or {}
         scored_count = len(analyst_review.get("symbols", [])) if isinstance(analyst_review.get("symbols"), list) else 0
         debate_phases = judge_debate.get("phases") if isinstance(judge_debate.get("phases"), list) else []
-        rebuttal_2 = next(
-            (item for item in debate_phases if isinstance(item, dict) and item.get("phase") == "rebuttal-2"),
-            {},
-        )
         return {
             "status": judge_review.get("status"),
             "debate_status": judge_debate.get("status"),
@@ -2123,7 +2037,6 @@ class Pipeline:
                 [item for item in debate_phases if isinstance(item, dict) and item.get("status") == "success"]
             ),
             "debate_final_phase": judge_debate.get("final_phase") or "",
-            "rebuttal_2_status": rebuttal_2.get("status") or "",
             "symbol_count": len(rows),
             "submitted_order_count": len(submitted),
             "final_sell_count": final_sell_count,

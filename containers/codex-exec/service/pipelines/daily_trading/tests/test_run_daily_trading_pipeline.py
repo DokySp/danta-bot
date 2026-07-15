@@ -21,7 +21,7 @@ from ..scripts.run_daily_trading_pipeline import (
     as_int,
     cache_coverage,
     cache_evidence_counts,
-    evaluate_rebuttal_2_gate,
+    compact_opening_context,
     file_sha256,
     load_json,
     load_json_if_exists,
@@ -56,9 +56,9 @@ if output_path is None:
     sys.exit(2)
 task_name = output_path.name.removesuffix(".raw.txt")
 fail_once_tasks = {value.strip() for value in os.environ.get("FAKE_CODEX_FAIL_ONCE_TASKS", "").split(",") if value.strip()}
-invalid_rebuttal_2_tasks = {
+invalid_rebuttal_1_tasks = {
     value.strip()
-    for value in os.environ.get("FAKE_CODEX_INVALID_REBUTTAL_2_TASKS", "").split(",")
+    for value in os.environ.get("FAKE_CODEX_INVALID_REBUTTAL_1_TASKS", "").split(",")
     if value.strip()
 }
 fail_state_dir = Path(os.environ.get("FAKE_CODEX_FAIL_STATE_DIR", output_path.parent))
@@ -84,23 +84,19 @@ symbols = [item.strip() for item in (match.group(1).split(",") if match else ["0
 rows = []
 for index, symbol in enumerate(symbols, start=1):
     if stage == "judge-debate":
-        phase = next((value for value in ("opening", "rebuttal-1", "rebuttal-2") if f"debate_phase: {value}" in prompt), "opening")
+        phase = next((value for value in ("opening", "rebuttal-1") if f"debate_phase: {value}" in prompt), "opening")
         side = "bull" if agent_role == "debate-bull" else "bear"
         opponent = "bear" if side == "bull" else "bull"
-        target_phase = "opening" if phase == "rebuttal-1" else "rebuttal-1"
-        kind = {"opening": "claim", "rebuttal-1": "rebuttal", "rebuttal-2": "closing"}[phase]
+        kind = {"opening": "claim", "rebuttal-1": "rebuttal"}[phase]
         decision = {}
         if phase != "opening":
             action = "hold"
             target_quantity = 0
-            if os.environ.get("FAKE_CODEX_REBUTTAL_1_CONFLICT") == "1" and side == "bull":
-                action = "buy"
-                target_quantity = 1
             decision = {
                 "recommended_action": action,
                 "target_holding_quantity": target_quantity
             }
-            if phase == "rebuttal-2" and task_name in invalid_rebuttal_2_tasks:
+            if phase == "rebuttal-1" and task_name in invalid_rebuttal_1_tasks:
                 decision.pop("recommended_action", None)
         rows.append({
             "symbol_id": symbol,
@@ -108,12 +104,12 @@ for index, symbol in enumerate(symbols, start=1):
             "arguments": [{
                 "argument_id": f"{symbol}-{side}-{phase}-1",
                 "kind": kind,
-                "targets": [] if phase == "opening" else [f"{symbol}-{opponent}-{target_phase}-1"],
+                "targets": [] if phase == "opening" else [f"{symbol}-{opponent}-opening-1"],
                 "statement": f"{side} {phase} self-test",
                 "evidence_refs": [f"decision-brief:{symbol}:price"]
             }],
             "concessions": [],
-            "unresolved_conflicts": [] if phase != "rebuttal-2" else ["self-test conflict"],
+            "unresolved_conflicts": [],
             "final_position": "" if phase == "opening" else f"{side} final position",
             **decision
         })
@@ -1074,16 +1070,25 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
             if debate_artifact.get("status") != "success" or [item.get("phase") for item in debate_phases] != [
                 "opening",
                 "rebuttal-1",
-                "rebuttal-2",
             ]:
-                failures.append(f"pipeline did not record the conditional debate phases: {debate_artifact}")
+                failures.append(f"pipeline did not record the two debate phases: {debate_artifact}")
             if (
                 debate_artifact.get("executed_flow") != ["opening", "rebuttal-1"]
                 or debate_artifact.get("final_phase") != "rebuttal-1"
-                or (debate_artifact.get("rebuttal_2_gate") or {}).get("required") is not False
-                or (debate_phases[-1] if debate_phases else {}).get("status") != "skipped"
             ):
-                failures.append(f"pipeline did not skip an unnecessary rebuttal-2: {debate_artifact}")
+                failures.append(f"pipeline did not finish at rebuttal-1: {debate_artifact}")
+            for side in DEBATE_SIDES:
+                compact_path = run_dir / "debate" / f"opening-{side}-compact.json"
+                compact_payload = load_json_if_exists(compact_path) or {}
+                compact_symbols = compact_payload.get("symbols") if isinstance(compact_payload.get("symbols"), list) else []
+                if (
+                    compact_payload.get("phase") != "opening"
+                    or compact_payload.get("side") != side
+                    or not compact_symbols
+                    or "symbol_name" in compact_symbols[0]
+                    or "unresolved_conflicts" in compact_symbols[0]
+                ):
+                    failures.append(f"pipeline did not write compact {side} opening context: {compact_payload}")
             expected_debate_sessions = {
                 "bull": "00000000-0000-4000-8000-000000000001",
                 "bear": "00000000-0000-4000-8000-000000000002",
@@ -1146,12 +1151,11 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
                 failures.append(f"pipeline summary omitted compact review summary: {review_summary}")
             if (
                 review_summary.get("debate_status") != "success"
-                or review_summary.get("debate_phase_count") != 3
+                or review_summary.get("debate_phase_count") != 2
                 or review_summary.get("debate_executed_phase_count") != 2
                 or review_summary.get("debate_final_phase") != "rebuttal-1"
-                or review_summary.get("rebuttal_2_status") != "skipped"
             ):
-                failures.append(f"pipeline summary omitted conditional debate status: {review_summary}")
+                failures.append(f"pipeline summary omitted two-phase debate status: {review_summary}")
             today_trade_summary = summary.get("today_trade_summary") if isinstance(summary.get("today_trade_summary"), dict) else {}
             if (
                 today_trade_summary.get("collection_status") != "complete"
@@ -1269,9 +1273,8 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
             )
             os.environ["FAKE_CODEX_FAIL_ONCE_TASKS"] = "judge-debate-bear-opening-attempt-01"
             os.environ["FAKE_CODEX_FAIL_STATE_DIR"] = str(retry_debate_dir / "fake-state")
-            os.environ["FAKE_CODEX_REBUTTAL_1_CONFLICT"] = "1"
-            os.environ["FAKE_CODEX_INVALID_REBUTTAL_2_TASKS"] = (
-                "judge-debate-bear-rebuttal-2-attempt-01"
+            os.environ["FAKE_CODEX_INVALID_REBUTTAL_1_TASKS"] = (
+                "judge-debate-bear-rebuttal-1-attempt-01"
             )
             os.environ["FAKE_CODEX_THREAD_ID_OVERRIDES"] = json.dumps(
                 {
@@ -1283,8 +1286,7 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
             finally:
                 os.environ.pop("FAKE_CODEX_FAIL_ONCE_TASKS", None)
                 os.environ.pop("FAKE_CODEX_FAIL_STATE_DIR", None)
-                os.environ.pop("FAKE_CODEX_REBUTTAL_1_CONFLICT", None)
-                os.environ.pop("FAKE_CODEX_INVALID_REBUTTAL_2_TASKS", None)
+                os.environ.pop("FAKE_CODEX_INVALID_REBUTTAL_1_TASKS", None)
                 os.environ.pop("FAKE_CODEX_THREAD_ID_OVERRIDES", None)
             retry_opening = (retry_debate.get("phases") or [{}])[0]
             retry_opening_sides = retry_opening.get("sides") if isinstance(retry_opening.get("sides"), dict) else {}
@@ -1304,12 +1306,11 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
                 failures.append(f"debate retry did not resume only the failed bear session: {retry_specs}")
             retry_phases = retry_debate.get("phases") if isinstance(retry_debate.get("phases"), list) else []
             if (
-                retry_debate.get("final_phase") != "rebuttal-2"
-                or (retry_debate.get("rebuttal_2_gate") or {}).get("required") is not True
-                or len(retry_phases) != 3
+                retry_debate.get("final_phase") != "rebuttal-1"
+                or len(retry_phases) != 2
                 or retry_phases[-1].get("status") != "success"
             ):
-                failures.append(f"debate conflict did not require rebuttal-2: {retry_debate}")
+                failures.append(f"debate retry did not finish at rebuttal-1: {retry_debate}")
             retry_rebuttal = retry_phases[1] if len(retry_phases) > 1 else {}
             retry_rebuttal_sides = retry_rebuttal.get("sides") if isinstance(retry_rebuttal.get("sides"), dict) else {}
             retry_bear_rebuttal = retry_rebuttal_sides.get("bear") or {}
@@ -1318,8 +1319,10 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
                 len(retry_bear_attempts) != 2
                 or retry_bear_attempts[0].get("session_id") != "00000000-0000-4000-8000-000000000002"
                 or retry_bear_attempts[0].get("reported_session_id") != "00000000-0000-4000-8000-000000000009"
+                or "invalid_debate_recommended_action"
+                not in {item.get("code") for item in retry_bear_attempts[0].get("errors") or []}
             ):
-                failures.append(f"mismatched resumed thread id was not isolated from the persistent session: {retry_bear_rebuttal}")
+                failures.append(f"invalid rebuttal-1 did not retry in the persistent session: {retry_bear_rebuttal}")
             retry_rebuttal_specs = load_json(retry_debate_dir / "debate" / "rebuttal-1.attempt-02.specs.json")
             retry_rebuttal_specs_list = (
                 retry_rebuttal_specs.get("specs") if isinstance(retry_rebuttal_specs.get("specs"), list) else []
@@ -1328,31 +1331,10 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
                 len(retry_rebuttal_specs_list) != 1
                 or retry_rebuttal_specs_list[0].get("agent_role") != "debate-bear"
                 or retry_rebuttal_specs_list[0].get("resume_session_id") != "00000000-0000-4000-8000-000000000002"
+                or "own_previous_turn" in retry_rebuttal_specs_list[0].get("artifact_paths", {})
+                or not str((retry_rebuttal_specs_list[0].get("artifact_paths") or {}).get("opponent_opening") or "").endswith("opening-bull-compact.json")
             ):
-                failures.append(f"mismatched resumed thread id replaced the opening session: {retry_rebuttal_specs}")
-            retry_closing = retry_phases[2] if len(retry_phases) > 2 else {}
-            retry_closing_sides = retry_closing.get("sides") if isinstance(retry_closing.get("sides"), dict) else {}
-            retry_bull_closing = retry_closing_sides.get("bull") or {}
-            retry_bear_closing = retry_closing_sides.get("bear") or {}
-            if (
-                len(retry_bull_closing.get("attempts") or []) != 1
-                or len(retry_bear_closing.get("attempts") or []) != 2
-                or retry_bear_closing.get("session_id") != "00000000-0000-4000-8000-000000000002"
-            ):
-                failures.append(
-                    f"invalid rebuttal-2 did not retry only bear in the persistent session: {retry_closing}"
-                )
-            retry_closing_specs = load_json(retry_debate_dir / "debate" / "rebuttal-2.attempt-02.specs.json")
-            retry_closing_specs_list = (
-                retry_closing_specs.get("specs") if isinstance(retry_closing_specs.get("specs"), list) else []
-            )
-            if (
-                len(retry_closing_specs_list) != 1
-                or retry_closing_specs_list[0].get("agent_role") != "debate-bear"
-                or retry_closing_specs_list[0].get("resume_session_id")
-                != "00000000-0000-4000-8000-000000000002"
-            ):
-                failures.append(f"invalid rebuttal-2 retry lost the bear session: {retry_closing_specs}")
+                failures.append(f"rebuttal-1 retry lost compact-resume inputs: {retry_rebuttal_specs}")
 
             fake_execute_orders = workspace / "fake-execute-orders.py"
             fake_execute_orders.write_text(
@@ -1624,46 +1606,43 @@ class RunDailyTradingPipelineSelfTest(unittest.TestCase):
     def test_self_test_suite(self) -> None:
         self.assertEqual(run_self_test(), 0)
 
-    def test_rebuttal_2_gate_skips_agreement_and_runs_for_conflict(self) -> None:
-        artifact = {
-            "sides": {
-                side: {
-                    "debate_decision_issues": [],
-                    "output": {
-                        "symbols": [
-                            {
-                                "symbol_id": "005930",
-                                "recommended_action": "hold",
-                                "target_holding_quantity": 2,
-                            }
-                        ]
-                    },
-                }
-                for side in DEBATE_SIDES
-            }
-        }
-        gate = evaluate_rebuttal_2_gate(artifact, ["005930"])
-        self.assertFalse(gate["required"])
-        self.assertEqual(gate["status"], "skipped")
-
-        artifact["sides"]["bear"]["output"]["symbols"][0].update(
-            {"recommended_action": "buy", "target_holding_quantity": 3}
-        )
-        gate = evaluate_rebuttal_2_gate(artifact, ["005930"])
-        self.assertTrue(gate["required"])
-        self.assertEqual(
-            set(gate["reason_codes"]),
-            {"recommended_action_disagreement", "target_holding_quantity_gap"},
-        )
-
-        artifact["sides"]["bear"]["debate_decision_issues"] = [
+    def test_compact_opening_context_keeps_only_rebuttal_inputs(self) -> None:
+        compact = compact_opening_context(
             {
-                "symbol_id": "005930",
-                "code": "incomplete_debate_final_position",
+                "stage": "judge-debate",
+                "phase": "opening",
+                "side": "bear",
+                "symbols": [
+                    {
+                        "symbol_id": "005930",
+                        "symbol_name": "삼성전자",
+                        "arguments": [
+                            {
+                                "argument_id": "005930-bear-opening-1",
+                                "kind": "claim",
+                                "targets": [],
+                                "statement": "valuation risk",
+                                "evidence_refs": ["analyst-review:005930:quality"],
+                            }
+                        ],
+                        "concessions": ["momentum remains positive"],
+                        "unresolved_conflicts": ["position size"],
+                        "final_position": "hold",
+                    }
+                ],
+                "errors": [],
             }
-        ]
-        gate = evaluate_rebuttal_2_gate(artifact, ["005930"])
-        self.assertIn("incomplete_debate_final_position", gate["reason_codes"])
+        )
+        self.assertEqual(compact["phase"], "opening")
+        self.assertEqual(compact["side"], "bear")
+        self.assertEqual(
+            set(compact["symbols"][0]),
+            {"symbol_id", "arguments", "concessions", "final_position"},
+        )
+        self.assertEqual(
+            set(compact["symbols"][0]["arguments"][0]),
+            {"argument_id", "statement", "evidence_refs"},
+        )
 
     def test_build_review_summary_reports_final_decisions_not_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

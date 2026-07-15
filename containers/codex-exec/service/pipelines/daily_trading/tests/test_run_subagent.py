@@ -140,13 +140,12 @@ else:
     else:
         prompt = sys.argv[-1] if sys.argv else ""
         if "stage: judge-debate" in prompt:
-            phase = next((value for value in ("opening", "rebuttal-1", "rebuttal-2") if f"debate_phase: {value}" in prompt), "opening")
+            phase = next((value for value in ("opening", "rebuttal-1") if f"debate_phase: {value}" in prompt), "opening")
             side = "bull" if "debate_side: bull" in prompt else "bear"
             opponent = "bear" if side == "bull" else "bull"
             symbol_line = next((line for line in prompt.splitlines() if line.startswith("symbol_ids: ")), "symbol_ids: 005930")
             symbols = [value.strip() for value in symbol_line.split(":", 1)[1].split(",") if value.strip()]
-            target_phase = "opening" if phase == "rebuttal-1" else "rebuttal-1"
-            kind = {"opening": "claim", "rebuttal-1": "rebuttal", "rebuttal-2": "closing"}[phase]
+            kind = {"opening": "claim", "rebuttal-1": "rebuttal"}[phase]
             payload = {
                 "stage": "judge-debate",
                 "phase": phase,
@@ -159,13 +158,13 @@ else:
                             {
                                 "argument_id": f"{symbol}-{side}-{phase}-1",
                                 "kind": kind,
-                                "targets": [] if phase == "opening" else [f"{symbol}-{opponent}-{target_phase}-1"],
+                                "targets": [] if phase == "opening" else [f"{symbol}-{opponent}-opening-1"],
                                 "statement": f"{side} {phase} self-test",
                                 "evidence_refs": [f"decision-brief:{symbol}:price"],
                             }
                         ],
                         "concessions": [],
-                        "unresolved_conflicts": [] if phase != "rebuttal-2" else ["self-test conflict"],
+                        "unresolved_conflicts": [],
                         "final_position": "" if phase == "opening" else f"{side} final position",
                         **(
                             {"recommended_action": "hold", "target_holding_quantity": 0}
@@ -352,12 +351,10 @@ def compact_debate_spec(
         )
     else:
         opponent = "bear" if side == "bull" else "bull"
-        previous_phase = "opening" if phase == "rebuttal-1" else "rebuttal-1"
         payload["resume_session_id"] = session_id
         payload["artifact_paths"].update(
             {
-                "own_previous_turn": str(run_dir / "subagents" / f"debate-{side}-{previous_phase}.raw.txt"),
-                "opponent_previous_turn": str(run_dir / "subagents" / f"debate-{opponent}-{previous_phase}.raw.txt"),
+                "opponent_opening": str(run_dir / "debate" / f"opening-{opponent}-compact.json"),
             }
         )
     return payload
@@ -628,7 +625,7 @@ def assert_compact_review_prompt(tmp: Path) -> None:
         "For held sell candidates, an intact long-term thesis favors holding despite the low score",
         "Use strategy_context and symbol_strategy_context as advisory inputs for target_position_value_krw, not as order allow/block rules.",
         "debate_artifact:",
-        "The Python pipeline already completed bull/bear opening and rebuttal-1 final arguments, then ran rebuttal-2 only when the recorded gate required it.",
+        "The Python pipeline already completed bull/bear opening and rebuttal-1 final arguments.",
         "Do not spawn or resume debate agents and do not request another round.",
         "If debate_artifact status is incomplete, or if the completed debate remains balanced or directionally insufficient, hold at the baseline.",
         "Optional evidence marked missing, failed, empty, unavailable, or excluded_from_aggregation is non-directional",
@@ -676,6 +673,8 @@ def assert_compact_review_prompt(tmp: Path) -> None:
     )
     if (
         "resume_session_id: 00000000-0000-4000-8000-000000000001" not in rebuttal_prompt
+        or "opponent_opening:" not in rebuttal_prompt
+        or "own_previous_turn" in rebuttal_prompt
         or "Every argument.kind must be rebuttal" not in rebuttal_prompt
         or "recommended_action must be buy|hold|sell" not in rebuttal_prompt
         or "target_holding_quantity must be a non-negative integer" not in rebuttal_prompt
@@ -977,6 +976,15 @@ def run_self_test() -> int:
                     task_name="missing-resume",
                 )
                 assert_invalid_spec(missing_resume, "resume_session_id")
+                missing_opponent_opening = compact_debate_spec(
+                    tmp,
+                    side="bull",
+                    phase="rebuttal-1",
+                    task_name="missing-opponent-opening",
+                    session_id="00000000-0000-4000-8000-000000000001",
+                )
+                missing_opponent_opening["artifact_paths"].pop("opponent_opening")
+                assert_invalid_spec(missing_opponent_opening, "artifact_paths.opponent_opening")
                 assert_invalid_spec(
                     compact_spec(
                         tmp,
@@ -1379,8 +1387,12 @@ def run_self_test() -> int:
             }
             if {side: wrapper.get("session_id") for side, wrapper in opening_by_side.items()} != expected_session_ids:
                 failures.append(f"opening did not capture stable debate session ids: {opening_by_side}")
-            previous_by_side = opening_by_side
-            for phase in ("rebuttal-1", "rebuttal-2"):
+            for side, wrapper in opening_by_side.items():
+                write_json(
+                    tmp / "reports" / "runs" / "self-test" / "debate" / f"opening-{side}-compact.json",
+                    wrapper["parsed_json"],
+                )
+            for phase in ("rebuttal-1",):
                 phase_specs = []
                 for side in ("bull", "bear"):
                     opponent = "bear" if side == "bull" else "bull"
@@ -1391,8 +1403,9 @@ def run_self_test() -> int:
                         task_name=f"debate-{side}-{phase}",
                         session_id=expected_session_ids[side],
                     )
-                    phase_spec["artifact_paths"]["own_previous_turn"] = previous_by_side[side]["raw_output_path"]
-                    phase_spec["artifact_paths"]["opponent_previous_turn"] = previous_by_side[opponent]["raw_output_path"]
+                    phase_spec["artifact_paths"]["opponent_opening"] = str(
+                        tmp / "reports" / "runs" / "self-test" / "debate" / f"opening-{opponent}-compact.json"
+                    )
                     phase_specs.append(phase_spec)
                 phase_group = run_group(phase_specs, max_workers=2)
                 if phase_group.get("status") != "success":
@@ -1410,15 +1423,14 @@ def run_self_test() -> int:
                     for side, wrapper in phase_by_side.items()
                 ):
                     failures.append(f"{phase} did not resume and retain the original sessions: {phase_by_side}")
-                previous_by_side = phase_by_side
             debate_argv = [
                 json.loads(line)
                 for line in argv_log.read_text(encoding="utf-8").splitlines()
                 if "stage: judge-debate" in line
             ]
             resume_argv = [argv for argv in debate_argv if "resume" in argv]
-            if len(debate_argv) != 6 or len(resume_argv) != 4:
-                failures.append(f"fixed debate should use 2 openings and 4 resumed turns: {debate_argv}")
+            if len(debate_argv) != 4 or len(resume_argv) != 2:
+                failures.append(f"fixed debate should use 2 openings and 2 resumed turns: {debate_argv}")
 
             write_sample_review_inputs(tmp)
             compact_wrapper = run_one(

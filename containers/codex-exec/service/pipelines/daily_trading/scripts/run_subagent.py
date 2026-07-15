@@ -47,11 +47,10 @@ OPTIONAL_GROUP_FAILURE_STAGES = TEXT_OUTPUT_STAGES
 REVIEW_STAGES = {"analyst-review", "judge-review"}
 DEBATE_STAGE = "judge-debate"
 DEBATE_ROLES = {"debate-bull", "debate-bear"}
-DEBATE_PHASES = {"opening", "rebuttal-1", "rebuttal-2"}
+DEBATE_PHASES = {"opening", "rebuttal-1"}
 DEBATE_PHASE_ARGUMENT_KINDS = {
     "opening": "claim",
     "rebuttal-1": "rebuttal",
-    "rebuttal-2": "closing",
 }
 DEBATE_FINAL_ACTIONS = {"buy", "hold", "sell"}
 AUDIT_LOG_STAGES = {DEBATE_STAGE, "judge-review"}
@@ -1161,8 +1160,7 @@ def is_compact_debate_spec(spec: dict[str, Any]) -> bool:
         return bool(artifacts.get("decision_brief") and artifacts.get("analyst_review"))
     return bool(
         str(spec.get("resume_session_id") or "").strip()
-        and artifacts.get("own_previous_turn")
-        and artifacts.get("opponent_previous_turn")
+        and artifacts.get("opponent_opening")
     )
 
 
@@ -1275,8 +1273,8 @@ def compact_review_prompt(spec: dict[str, Any]) -> str | None:
                 "Treat an empty recent_trade_context.recent_submitted_trades list as confirmed absence only when coverage_status=complete; otherwise recent trade history is unknown and its absence is non-directional.",
                 "For held sell candidates, an intact long-term thesis favors holding despite the low score; sell only when thesis damage, material adverse news/disclosure, or structural deterioration is supported by supplied evidence.",
                 "Use strategy_context and symbol_strategy_context as advisory inputs for target_position_value_krw, not as order allow/block rules.",
-                "The Python pipeline already completed bull/bear opening and rebuttal-1 final arguments, then ran rebuttal-2 only when the recorded gate required it. Do not spawn or resume debate agents and do not request another round.",
-                "Read debate_artifact.final_phase and compare each side's explicit claims, rebuttals, concessions, unresolved conflicts, final position, recommended action, and target holding quantity for every symbol.",
+                "The Python pipeline already completed bull/bear opening and rebuttal-1 final arguments. Do not spawn or resume debate agents and do not request another round.",
+                "Compare each side's explicit claims, rebuttals, concessions, unresolved conflicts, final position, recommended action, and target holding quantity for every symbol.",
                 "If debate_artifact status is incomplete, or if the completed debate remains balanced or directionally insufficient, hold at the baseline.",
                 "Reflect the decisive argument IDs (or why the sides cancelled out) in one_line_reason without returning the debate transcript.",
             ]
@@ -1347,29 +1345,14 @@ def compact_debate_prompt(spec: dict[str, Any]) -> str | None:
         lines.extend(
             [
                 f"resume_session_id: {spec.get('resume_session_id', '')}",
-                f"own_previous_turn: {artifacts['own_previous_turn']}",
-                f"opponent_previous_turn: {artifacts['opponent_previous_turn']}",
+                f"opponent_opening: {artifacts['opponent_opening']}",
+                "Your own opening is already present in this resumed session; do not reload or restate it.",
+                "Read only the compact opponent_opening artifact, answer its argument_id values directly, and finalize your position, recommended action, and target holding quantity.",
+                "Every argument.kind must be rebuttal and every argument.targets list must reference one or more opponent opening argument_id values.",
+                "Do not introduce an unrelated independent claim.",
+                "Use deterministic argument_id values formed as <symbol_id>-<side>-rebuttal-1-<number>.",
             ]
         )
-        if phase == "rebuttal-1":
-            lines.extend(
-                [
-                    "Rebuttal 1 is also your final argument unless the pipeline detects an incomplete or materially conflicting result and requests rebuttal-2.",
-                    "Answer the opponent opening directly while retaining the context from your own opening in this resumed session, then finalize your position, recommended action, and target holding quantity.",
-                    "Every argument.kind must be rebuttal and every argument.targets list must reference one or more opponent opening argument_id values.",
-                    "Do not introduce an unrelated independent claim.",
-                    "Use deterministic argument_id values formed as <symbol_id>-<side>-rebuttal-1-<number>.",
-                ]
-            )
-        else:
-            lines.extend(
-                [
-                    "Rebuttal 2 is the closing turn: answer only unresolved opponent rebuttal-1 arguments and state your final position.",
-                    "Every argument.kind must be closing and every argument.targets list must reference one or more opponent rebuttal-1 argument_id values.",
-                    "Do not introduce new evidence or an unrelated claim. Explicitly record concessions, unresolved_conflicts, recommended_action, and target_holding_quantity.",
-                    "Use deterministic argument_id values formed as <symbol_id>-<side>-rebuttal-2-<number>.",
-                ]
-            )
     if spec.get("retry_of_task_name"):
         lines.extend(
             [
@@ -1387,7 +1370,7 @@ def compact_debate_prompt(spec: dict[str, Any]) -> str | None:
             "portfolio_snapshot: "
             + json.dumps(portfolio_snapshot, ensure_ascii=False, separators=(",", ":"))
         )
-    if phase in {"rebuttal-1", "rebuttal-2"}:
+    if phase == "rebuttal-1":
         lines.extend(
             [
                 "For every symbol, final_position must be non-empty, recommended_action must be buy|hold|sell, and target_holding_quantity must be a non-negative integer.",
@@ -1411,7 +1394,7 @@ def compact_debate_prompt(spec: dict[str, Any]) -> str | None:
         lines.extend(f"- {item}" for item in extra_instructions)
     decision_fields = (
         ", recommended_action, and target_holding_quantity"
-        if phase in {"rebuttal-1", "rebuttal-2"}
+        if phase == "rebuttal-1"
         else ""
     )
     lines.extend(
@@ -1493,7 +1476,7 @@ def validate_spec(spec: dict[str, Any]) -> None:
         symbols = normalize_symbol_ids(spec.get("symbol_ids") or spec.get("symbols"))
         phase = str(spec.get("debate_phase") or "").strip()
         if phase not in DEBATE_PHASES:
-            raise ValueError("judge-debate compact spec requires debate_phase opening, rebuttal-1, or rebuttal-2")
+            raise ValueError("judge-debate compact spec requires debate_phase opening or rebuttal-1")
         if not artifacts.get("persona"):
             raise ValueError("judge-debate compact spec requires artifact_paths.persona")
         if not artifacts.get("debate_format"):
@@ -1508,10 +1491,8 @@ def validate_spec(spec: dict[str, Any]) -> None:
         else:
             if not str(spec.get("resume_session_id") or "").strip():
                 raise ValueError("judge-debate rebuttal requires resume_session_id")
-            if not artifacts.get("own_previous_turn"):
-                raise ValueError("judge-debate rebuttal requires artifact_paths.own_previous_turn")
-            if not artifacts.get("opponent_previous_turn"):
-                raise ValueError("judge-debate rebuttal requires artifact_paths.opponent_previous_turn")
+            if not artifacts.get("opponent_opening"):
+                raise ValueError("judge-debate rebuttal requires artifact_paths.opponent_opening")
     agent_role = safe_name(str(spec.get("agent_role", ""))).lower()
     task_name = safe_name(str(spec.get("task_name", ""))).lower()
     if stage == "analyst-review":
@@ -1756,7 +1737,7 @@ def debate_baseline_quantities(spec: dict[str, Any]) -> dict[str, int]:
 
 def debate_final_decision_issues(payload: Any, spec: dict[str, Any]) -> list[dict[str, Any]]:
     phase = str(spec.get("debate_phase") or "").strip()
-    if phase not in {"rebuttal-1", "rebuttal-2"} or not isinstance(payload, dict):
+    if phase != "rebuttal-1" or not isinstance(payload, dict):
         return []
     symbols = payload.get("symbols")
     if not isinstance(symbols, list):
@@ -1885,7 +1866,7 @@ def compact_debate_payload_errors(payload: Any, spec: dict[str, Any]) -> list[di
     opponent_ids: dict[str, set[str]] = {}
     if phase != "opening":
         artifacts = normalize_artifact_paths(spec.get("artifact_paths"))
-        opponent_path = resolve_artifact_path(artifacts.get("opponent_previous_turn", ""), str(spec.get("workspace_dir", "")))
+        opponent_path = resolve_artifact_path(artifacts.get("opponent_opening", ""), str(spec.get("workspace_dir", "")))
         try:
             opponent_payload = read_json_if_exists(opponent_path)
         except (OSError, json.JSONDecodeError) as exc:
@@ -1893,7 +1874,7 @@ def compact_debate_payload_errors(payload: Any, spec: dict[str, Any]) -> list[di
             errors.append(
                 {
                     "code": "invalid_opponent_debate_artifact",
-                    "message": f"cannot read opponent_previous_turn {opponent_path}: {exc}",
+                    "message": f"cannot read opponent_opening {opponent_path}: {exc}",
                 }
             )
         opponent_ids = debate_argument_ids_by_symbol(opponent_payload)
@@ -2270,8 +2251,7 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
         if stage == DEBATE_STAGE and prompt_mode == "compact_debate" and parsed_json is not None:
             compact_debate_errors = compact_debate_payload_errors(parsed_json, prompt_spec)
             debate_decision_issues = debate_final_decision_issues(parsed_json, prompt_spec)
-            if str(prompt_spec.get("debate_phase") or "") == "rebuttal-2":
-                compact_debate_errors.extend(debate_decision_issues)
+            compact_debate_errors.extend(debate_decision_issues)
             errors.extend(compact_debate_errors)
     event_thread_id = str(event_summary.get("thread_id") or "").strip()
     session_id = resume_session_id or event_thread_id
