@@ -11,6 +11,7 @@ from ..telegram.gateway import TelegramGateway, TypingIndicator
 from ..trading.daily_trading import error_message_with_run_context, is_daily_trading_schedule
 from ..trading.daily_trading_direct import (
     DailyTradingDirectRunner,
+    daily_trading_report_attachment_filename,
     format_direct_delivery_error,
     format_direct_runner_error,
 )
@@ -131,6 +132,7 @@ class Scheduler:
                     "<b>daily-trading 당일 누적 상세 리포트</b>",
                     chat_id_text,
                     route_text,
+                    filename=daily_trading_report_attachment_filename(html_report_path),
                 )
         except Exception as exc:  # noqa: BLE001 - report schedule failures to Telegram
             delivery_failed = daily_trading_config is not None and output_ready

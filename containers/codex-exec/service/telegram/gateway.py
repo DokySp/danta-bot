@@ -73,8 +73,10 @@ class TelegramGateway:
         caption: str | None = None,
         chat_id: str | None = None,
         route: str | None = None,
+        *,
+        filename: str | None = None,
     ) -> None:
-        self._send_binary_file("/sendDocument", path, caption, chat_id, route)
+        self._send_binary_file("/sendDocument", path, caption, chat_id, route, filename=filename)
 
     def _send_binary_file(
         self,
@@ -83,9 +85,11 @@ class TelegramGateway:
         caption: str | None,
         chat_id: str | None,
         route: str | None,
+        *,
+        filename: str | None = None,
     ) -> None:
         payload: dict[str, Any] = {
-            "filename": path.name,
+            "filename": filename or path.name,
             "content_base64": base64.b64encode(path.read_bytes()).decode("ascii"),
             "parse_mode": "HTML",
         }

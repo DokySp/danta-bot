@@ -13,6 +13,7 @@ from ..state import StateStore
 from ..trading.daily_trading import error_message_with_run_context
 from ..trading.daily_trading_direct import (
     DailyTradingDirectRunner,
+    daily_trading_report_attachment_filename,
     format_direct_delivery_error,
     is_execute_trade_direct_request,
     load_execute_trade_config,
@@ -92,6 +93,7 @@ class TelegramWorker:
                         "<b>daily-trading 당일 누적 상세 리포트</b>",
                         task.chat_id,
                         task.route,
+                        filename=daily_trading_report_attachment_filename(result.html_report_path),
                     )
             except Exception as exc:  # noqa: BLE001 - trade succeeded; classify delivery separately
                 logging.exception("daily-trading Telegram delivery failed command=$execute-trade")

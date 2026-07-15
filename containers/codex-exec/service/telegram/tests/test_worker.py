@@ -22,7 +22,7 @@ class TelegramWorkerDailyTradingAttachmentTest(unittest.TestCase):
     @patch("service.telegram.worker.TypingIndicator", return_value=nullcontext())
     def test_execute_trade_sends_summary_then_html(self, _typing: Mock, _load_config: Mock) -> None:
         worker = self.worker()
-        report_path = Path("/tmp/daily-trading-report.html")
+        report_path = Path("/tmp/reports/runs/run-20260715/daily-trading-report.html")
         worker.daily_trading_direct_runner.run.return_value = DailyTradingDirectResult(
             output="short summary",
             html_report_path=report_path,
@@ -36,6 +36,7 @@ class TelegramWorkerDailyTradingAttachmentTest(unittest.TestCase):
             "<b>daily-trading 당일 누적 상세 리포트</b>",
             "chat",
             "route",
+            filename="daily-trading-report-run-20260715.html",
         )
 
     @patch("service.telegram.worker.load_execute_trade_config", return_value={})

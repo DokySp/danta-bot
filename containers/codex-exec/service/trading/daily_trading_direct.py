@@ -34,6 +34,13 @@ class DailyTradingDirectResult:
     html_report_path: Path | None
 
 
+def daily_trading_report_attachment_filename(path: Path) -> str:
+    run_id = path.parent.name.strip()
+    if not run_id:
+        return path.name
+    return f"{path.stem}-{run_id}{path.suffix}"
+
+
 class DailyTradingDirectRunner:
     def __init__(self, config: Config, codex_runner: CodexRunner) -> None:
         self.config = config

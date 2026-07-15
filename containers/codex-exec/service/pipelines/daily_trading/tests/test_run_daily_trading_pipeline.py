@@ -264,7 +264,11 @@ def write_self_test_fixtures(workspace: Path, run_dir: Path) -> Path:
             "status": "success",
             "active_order_lookup_performed": False,
             "order_available_lookup_performed": False,
-            "account_summary": {"cash_amount": 1000000, "total_evaluation_amount": 1500000},
+            "account_summary": {
+                "cash_amount": 1000000,
+                "orderable_cash_amount": 900000,
+                "total_evaluation_amount": 1500000,
+            },
             "active_orders": [],
             "symbols": [
                 {"symbol_id": "005930", "symbol_name": "삼성전자", "current_live_holding_quantity": 0, "current_price": None},
@@ -1149,6 +1153,8 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
             review_summary = summary.get("review_summary") if isinstance(summary.get("review_summary"), dict) else {}
             if review_summary.get("symbol_count") != 1 or not review_summary.get("symbols"):
                 failures.append(f"pipeline summary omitted compact review summary: {review_summary}")
+            elif review_summary["symbols"][0].get("target_position_value_krw") != 70000:
+                failures.append(f"pipeline summary omitted judge target position value: {review_summary}")
             if (
                 review_summary.get("debate_status") != "success"
                 or review_summary.get("debate_phase_count") != 2
@@ -1228,6 +1234,10 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
                     failures.append("portfolio report omitted role-level score details")
                 if "보정 신뢰도" in report_text or "confidence" in report_text:
                     failures.append("portfolio report still contains confidence artifacts")
+                if "- 주문가능금액: 900,000원" not in report_text:
+                    failures.append("portfolio report did not use orderable_cash_amount")
+                if "| 005930 | 005930 | 0 | 70,000 | 1 |" not in report_text:
+                    failures.append("portfolio report omitted judge target position value")
                 if "주문 전 기존 미체결/예약 주문 조회: no" not in report_text or "주문 전 기존 미체결/예약 주문: 미조회" not in report_text:
                     failures.append("portfolio report did not preserve active-order gate lookup state")
                 if "주문 전 기존 미체결/예약 주문 미조회" not in report_text:
