@@ -49,6 +49,9 @@ REASON_LABELS = {
     "sell_blocked_score_band": "점수 밴드 매도 차단",
     "buy_blocked_score_band": "점수 밴드 매수 차단",
     "score_band_value_missing": "점수 확인 불가 차단",
+    "holding_state_not_verified": "보유수량 상태 불일치",
+    "stale_active_order_requires_cancellation": "이전 미체결 주문 정리 필요",
+    "unverified_holding_requires_active_order_cancellation": "수량 불일치로 기존 미체결 주문 취소 필요",
 }
 BROKER_STATUS_LABELS = {
     "filled": "KIS 체결",
@@ -176,6 +179,7 @@ def render(summary: dict[str, Any]) -> str:
     news = evidence.get("news") if isinstance(evidence.get("news"), dict) else {}
     today_fills = summary.get("today_fills_summary") if isinstance(summary.get("today_fills_summary"), dict) else {}
     execution = summary.get("execution") if isinstance(summary.get("execution"), dict) else {}
+    lifecycle = summary.get("order_lifecycle") if isinstance(summary.get("order_lifecycle"), dict) else {}
     broker_summary = execution.get("broker_reconciliation") if isinstance(execution.get("broker_reconciliation"), dict) else {}
     review = summary.get("review_summary") if isinstance(summary.get("review_summary"), dict) else {}
     tokens = summary.get("token_usage") if isinstance(summary.get("token_usage"), dict) else {}
@@ -223,6 +227,12 @@ def render(summary: dict[str, Any]) -> str:
             f"- KIS 확인: 체결 {as_int(broker_summary.get('filled_order_count'))}"
             f" · 거절 {as_int(broker_summary.get('rejected_order_count'))}"
             f" · 대기·기타 {unresolved_count}"
+        )
+    if lifecycle.get("status") not in {None, "", "not_run"}:
+        lines.append(
+            f"- 사전 주문상태: 미체결 {as_int(lifecycle.get('active_order_count'))}"
+            f" · 이전 제출 {as_int(lifecycle.get('previous_submitted_cash_order_count'))}"
+            f" · 수량 확인 필요 {as_int(lifecycle.get('holding_state_issue_count'))}"
         )
     if execution.get("requires_main_agent_order_execution"):
         lines.append("- 주문 제출 단계가 아직 완료되지 않았습니다.")

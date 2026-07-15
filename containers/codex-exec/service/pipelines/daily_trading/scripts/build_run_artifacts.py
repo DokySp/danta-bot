@@ -375,12 +375,25 @@ def compact_account_exposure(item: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(item, dict):
         return {
             "current_live_holding_quantity": 0,
+            "pending_and_reserved_buy_quantity": 0,
+            "pending_and_reserved_sell_quantity": 0,
+            "expected_holding_quantity": 0,
+            "holding_state_status": "unconfirmed",
+            "holding_state_reasons": ["account_symbol_missing"],
             "valuation_amount": 0,
             "pnl_amount": 0,
             "pnl_rate": None,
         }
+    current = as_int(item.get("current_live_holding_quantity"))
+    pending_buy = as_int(item.get("pending_and_reserved_buy_quantity"))
+    pending_sell = as_int(item.get("pending_and_reserved_sell_quantity"))
     return {
-        "current_live_holding_quantity": as_int(item.get("current_live_holding_quantity")),
+        "current_live_holding_quantity": current,
+        "pending_and_reserved_buy_quantity": pending_buy,
+        "pending_and_reserved_sell_quantity": pending_sell,
+        "expected_holding_quantity": current + pending_buy - pending_sell,
+        "holding_state_status": item.get("holding_state_status") or "",
+        "holding_state_reasons": list(item.get("holding_state_reasons") or []),
         "valuation_amount": as_number(item.get("valuation_amount")) or 0,
         "pnl_amount": as_number(item.get("pnl_amount")) or 0,
         "pnl_rate": as_number(item.get("pnl_rate")),
@@ -1729,14 +1742,15 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
         }
     )
 
-    gate_missing = account.get("active_order_lookup_performed") is not True or account.get("order_available_lookup_performed") is not True
     blocked_any = False
     invalid_final_quantity = False
     refreshable_gate_blocked = False
+    judge_symbol_ids: set[str] = set()
     for item in judge_review.get("symbols", []):
         if not isinstance(item, dict):
             continue
         symbol_id = symbol_key(item)
+        judge_symbol_ids.add(symbol_id)
         account_item = account_by_symbol.get(symbol_id, {})
         brief_item = brief_by_symbol.get(symbol_id, {})
         active_item = active.get(symbol_id, {"buy": 0, "sell": 0})
@@ -1772,8 +1786,30 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
 
         result = "skipped"
         reason = "final_equals_expected_holding_quantity"
-        if direction != "none":
-            if args.request_type in {"demo-submit", "real-submit", "prepare"} and gate_missing:
+        holding_state_status = str(account_item.get("holding_state_status") or "").strip()
+        active_order_reconciliation_required = bool(buy_qty or sell_qty) and delta != 0
+        active_cancel_only = active_order_reconciliation_required and final_qty == current_qty
+        reconciliation_only = False
+        judge_final_qty = final_qty
+        if holding_state_status in {"inconsistent", "unconfirmed"}:
+            if buy_qty or sell_qty:
+                final_qty = current_qty
+                delta = final_qty - expected_qty
+                direction = "buy" if delta > 0 else "sell" if delta < 0 else "none"
+                active_order_reconciliation_required = True
+                active_cancel_only = True
+                reconciliation_only = True
+                reason = "unverified_holding_requires_active_order_cancellation"
+            else:
+                direction = "none"
+                result = "blocked"
+                reason = "holding_state_not_verified"
+                blocked_any = True
+        elif direction != "none":
+            row_gate_missing = account.get("active_order_lookup_performed") is not True or (
+                account.get("order_available_lookup_performed") is not True and not active_cancel_only
+            )
+            if args.request_type in {"demo-submit", "real-submit", "prepare"} and row_gate_missing:
                 result = "blocked"
                 reason = "active_order_or_order_available_gate_missing"
                 blocked_any = True
@@ -1795,24 +1831,91 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
                 "symbol_name": item.get("symbol_name") or account_item.get("symbol_name") or symbol_id,
                 "direction": direction,
                 "final_first_score": scores_by_symbol.get(symbol_id),
+                "holding_state_status": holding_state_status,
+                "holding_state_reasons": list(account_item.get("holding_state_reasons") or []),
                 "current_live_holding_quantity": current_qty,
                 "pending_and_reserved_buy_quantity": buy_qty,
                 "pending_and_reserved_sell_quantity": sell_qty,
                 "expected_holding_quantity": expected_qty,
+                "judge_final_holding_quantity": judge_final_qty,
                 "final_holding_quantity": final_qty,
                 "additional_required_quantity": delta,
                 "validated_order_quantity": abs(delta),
                 "order_price": order_price,
                 "order_path": order_path,
                 "order_api": order_api,
+                "active_order_reconciliation_required": active_order_reconciliation_required,
+                "active_cancel_only": active_cancel_only,
+                "reconciliation_only": reconciliation_only,
                 "result": result,
                 "reason": reason,
                 "order_or_reservation_id": "",
                 "attempts": [],
             }
         )
+
+    for symbol_id, active_item in active.items():
+        if symbol_id in judge_symbol_ids or not (active_item.get("buy", 0) or active_item.get("sell", 0)):
+            continue
+        account_item = account_by_symbol.get(symbol_id, {})
+        active_rows = [
+            row
+            for row in account.get("active_orders", [])
+            if isinstance(row, dict) and symbol_key(row) == symbol_id and row.get("active_status") == "active"
+        ]
+        current_qty = as_int(account_item.get("current_live_holding_quantity"))
+        buy_qty = active_item.get("buy", 0)
+        sell_qty = active_item.get("sell", 0)
+        expected_qty = current_qty + buy_qty - sell_qty
+        delta = current_qty - expected_qty
+        direction = "buy" if delta > 0 else "sell" if delta < 0 else "none"
+        holding_state_status = str(account_item.get("holding_state_status") or "").strip()
+        order_price = (
+            as_number(account_item.get("current_price"))
+            or next((as_number(row.get("order_price")) for row in active_rows if as_number(row.get("order_price"))), 0)
+            or 0
+        )
+        active_path = str(next((row.get("order_path") for row in active_rows if row.get("order_path")), order_path))
+        active_api = str(next((row.get("order_api") for row in active_rows if row.get("order_api")), order_api))
+        artifact["orders"].append(
+            {
+                "symbol_id": symbol_id,
+                "symbol_name": account_item.get("symbol_name") or next(
+                    (row.get("symbol_name") for row in active_rows if row.get("symbol_name")),
+                    symbol_id,
+                ),
+                "direction": direction,
+                "final_first_score": None,
+                "holding_state_status": holding_state_status,
+                "holding_state_reasons": list(account_item.get("holding_state_reasons") or []),
+                "current_live_holding_quantity": current_qty,
+                "pending_and_reserved_buy_quantity": buy_qty,
+                "pending_and_reserved_sell_quantity": sell_qty,
+                "expected_holding_quantity": expected_qty,
+                "final_holding_quantity": current_qty,
+                "additional_required_quantity": delta,
+                "validated_order_quantity": abs(delta),
+                "order_price": order_price,
+                "order_path": active_path,
+                "order_api": active_api,
+                "active_order_reconciliation_required": True,
+                "active_cancel_only": True,
+                "reconciliation_only": True,
+                "result": "skipped",
+                "reason": (
+                    "unverified_holding_requires_active_order_cancellation"
+                    if holding_state_status in {"inconsistent", "unconfirmed"}
+                    else "stale_active_order_requires_cancellation"
+                ),
+                "order_or_reservation_id": "",
+                "attempts": [],
+            }
+        )
     artifact["symbols"] = [item["symbol_id"] for item in artifact["orders"]]
-    if args.request_type in {"demo-submit", "real-submit"} and any(item.get("direction") != "none" for item in artifact["orders"]):
+    if args.request_type in {"demo-submit", "real-submit"} and any(
+        item.get("direction") != "none" or item.get("active_order_reconciliation_required") is True
+        for item in artifact["orders"]
+    ):
         artifact["requires_main_agent_order_execution"] = True
         if refreshable_gate_blocked:
             artifact["required_main_agent_actions"] = [

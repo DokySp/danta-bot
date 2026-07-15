@@ -87,6 +87,60 @@ class HoldingHistoryTest(unittest.TestCase):
             self.assertEqual((rows[1]["old_quantity"], rows[1]["new_quantity"]), ("3", "2"))
             self.assertEqual(rows[1]["submitted_quantity"], "1")
 
+    def test_later_lifecycle_confirmation_backfills_previous_run_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            context = SimpleNamespace(run_id="run-2", started_at="2026-07-15T13:00:00+09:00")
+            run_dir = workspace / "reports" / "runs" / context.run_id
+            run_dir.mkdir(parents=True)
+            (run_dir / "execution.json").write_text(
+                json.dumps({"request_type": "real-submit", "orders": []}),
+                encoding="utf-8",
+            )
+            (run_dir / "order-lifecycle.json").write_text(
+                json.dumps(
+                    {
+                        "previous_submitted_cash_orders": [
+                            {
+                                "run_id": "run-1",
+                                "started_at": "2026-07-15T12:00:00+09:00",
+                                "symbol_id": "161890",
+                                "symbol_name": "한국콜마",
+                                "direction": "buy",
+                                "order_id": "late-fill-1",
+                                "row_id": "0",
+                                "current_live_holding_quantity": 10,
+                                "broker_reconciliation": {
+                                    "status": "filled",
+                                    "filled_quantity": 1,
+                                },
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            csv_path = workspace / "holding-changes.csv"
+            previous = os.environ.get("HOLDING_HISTORY_CSV")
+            os.environ["HOLDING_HISTORY_CSV"] = str(csv_path)
+            try:
+                first_written = append_holding_history_from_run(workspace, context)
+                second_written = append_holding_history_from_run(workspace, context)
+            finally:
+                if previous is None:
+                    os.environ.pop("HOLDING_HISTORY_CSV", None)
+                else:
+                    os.environ["HOLDING_HISTORY_CSV"] = previous
+
+            self.assertEqual((first_written, second_written), (1, 0))
+            with csv_path.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(rows[0]["run_id"], "run-1")
+            self.assertEqual(rows[0]["order_or_reservation_id"], "late-fill-1")
+            self.assertEqual((rows[0]["old_quantity"], rows[0]["new_quantity"]), ("10", "11"))
+            self.assertTrue(rows[0]["source_artifact"].endswith("run-2/order-lifecycle.json"))
+
 
 if __name__ == "__main__":
     unittest.main()

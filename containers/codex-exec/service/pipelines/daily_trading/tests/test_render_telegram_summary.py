@@ -196,6 +196,12 @@ def self_test() -> int:
         "rejected_quantity": 1,
         "remaining_quantity": 0,
     }
+    rejected_payload["order_lifecycle"] = {
+        "status": "partial",
+        "active_order_count": 1,
+        "previous_submitted_cash_order_count": 2,
+        "holding_state_issue_count": 1,
+    }
     submitted_rendered = render(submitted_payload)
     blocked_rendered = render(blocked_payload)
     legacy_rendered = render(legacy_payload)
@@ -250,6 +256,7 @@ def self_test() -> int:
             [
                 "<b>daily-trading ⚠️ 부분 완료</b> · 09:00",
                 "- KIS 확인: 체결 0 · 거절 1 · 대기·기타 0",
+                "- 사전 주문상태: 미체결 1 · 이전 제출 2 · 수량 확인 필요 1",
                 "- <code>005930</code> 삼성전자: 매수 3주→1주 · 제출(접수, 조정=매수가능수량으로 축소) · KIS 거절 / <code>r1</code>",
             ],
             ["KIS 체결", "KIS 상태 미확인"],

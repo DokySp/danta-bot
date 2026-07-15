@@ -1023,6 +1023,43 @@ class Pipeline:
         self.add_stage("main-evidence", "failed", detail="required price/account collection failed", path=self.command_log_path)
         raise RuntimeError("main evidence collection failed")
 
+    def run_order_lifecycle_preflight(self) -> dict[str, Any]:
+        lifecycle_path = self.output_dir / "order-lifecycle.json"
+        result = self.run_cmd(
+            "order-lifecycle-preflight",
+            [
+                sys.executable,
+                self.order_execution_script(),
+                "preflight",
+                "--output-dir",
+                str(self.output_dir),
+                "--env",
+                self.args.env,
+            ],
+        )
+        lifecycle = load_json_if_exists(lifecycle_path) or {}
+        status = str(lifecycle.get("status") or "failed")
+        if result.returncode != 0 or status == "failed":
+            self.add_stage(
+                "order-lifecycle-preflight",
+                "failed",
+                detail=compact_text(result.stderr or result.stdout) or f"status={status}",
+                path=lifecycle_path,
+            )
+            raise RuntimeError("order lifecycle preflight failed")
+        stage_status = "partial" if status == "partial" else "success"
+        self.add_stage(
+            "order-lifecycle-preflight",
+            stage_status,
+            detail=(
+                f"active={lifecycle.get('active_order_count', 0)}, "
+                f"prior_submitted={lifecycle.get('previous_submitted_cash_order_count', 0)}, "
+                f"holding_issues={lifecycle.get('holding_state_issue_count', 0)}"
+            ),
+            path=lifecycle_path,
+        )
+        return lifecycle
+
     def collect_optional_cache(self, domain: str, symbols: list[str]) -> str:
         configured = self.args.financial_cache_path if domain == "financial" else self.args.news_cache_path
         candidate_paths: list[Path] = []
@@ -2439,6 +2476,7 @@ class Pipeline:
         account = load_json_if_exists(self.output_dir / "account-before-order.json") or {}
         account_asset_snapshot = load_json_if_exists(self.output_dir / "account-asset-snapshot.json") or {}
         today_fills = load_json_if_exists(self.output_dir / "today-fills.json") or {}
+        order_lifecycle = load_json_if_exists(self.output_dir / "order-lifecycle.json") or {}
         decision_brief = load_json_if_exists(self.output_dir / "decision-brief.json") or {}
         orders = []
         for item in execution.get("orders", []) if isinstance(execution, dict) else []:
@@ -2509,6 +2547,18 @@ class Pipeline:
                 "fill_count": len(today_fills.get("fills", [])) if isinstance(today_fills.get("fills"), list) else 0,
             },
             "today_trade_summary": today_trade_summary,
+            "order_lifecycle": {
+                "status": order_lifecycle.get("status") or "not_run",
+                "lookup_complete": bool(order_lifecycle.get("lookup_complete")),
+                "active_order_count": int(order_lifecycle.get("active_order_count") or 0),
+                "previous_submitted_cash_order_count": int(
+                    order_lifecycle.get("previous_submitted_cash_order_count") or 0
+                ),
+                "holding_state_issue_count": int(order_lifecycle.get("holding_state_issue_count") or 0),
+                "holding_state_issues": order_lifecycle.get("holding_state_issues", [])[:5]
+                if isinstance(order_lifecycle.get("holding_state_issues"), list)
+                else [],
+            },
             "evidence_summary": evidence_summary,
             "execution": {
                 "status": execution.get("status"),
@@ -2553,6 +2603,7 @@ class Pipeline:
                 "account_before_order": str(self.output_dir / "account-before-order.json"),
                 "account_asset_snapshot": str(self.output_dir / "account-asset-snapshot.json"),
                 "today_fills": str(self.output_dir / "today-fills.json"),
+                "order_lifecycle": str(self.output_dir / "order-lifecycle.json"),
                 "decision_brief": str(self.output_dir / "decision-brief.json"),
                 "analyst_review": str(self.output_dir / "analyst-review.json"),
                 "judge_debate": str(self.output_dir / "judge-debate.json"),
@@ -2620,6 +2671,8 @@ class Pipeline:
         self.add_stage("portfolio-universe", "success", detail=f"{len(symbols)} symbols", path=portfolio_path)
 
         self.collect_main_evidence(symbols)
+        if getattr(self.args, "submit_orders", False) and self.args.request_type in {"demo-submit", "real-submit"}:
+            self.run_order_lifecycle_preflight()
         financial_cache = self.collect_optional_cache("financial", symbols)
         news_cache = self.collect_optional_cache("news", symbols)
         market_index_snapshot = self.collect_market_index_snapshot()

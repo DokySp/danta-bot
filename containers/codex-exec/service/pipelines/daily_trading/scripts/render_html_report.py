@@ -102,11 +102,41 @@ def find_runs(runs_root: Path, target_started_at: str) -> list[dict[str, Any]]:
                 "path": path,
                 "summary": summary,
                 "execution": load_json(path / "execution.json"),
+                "lifecycle": load_json(path / "order-lifecycle.json"),
                 "decision": load_json(path / "decision-brief.json"),
                 "market": load_json(path / "market-index-snapshot.json"),
             }
         )
-    return sorted(runs, key=lambda item: str(item["summary"].get("started_at") or ""))
+    ordered_runs = sorted(runs, key=lambda item: str(item["summary"].get("started_at") or ""))
+    latest_broker_by_order_id: dict[str, dict[str, Any]] = {}
+    for run in ordered_runs:
+        lifecycle_orders = run["lifecycle"].get("previous_submitted_cash_orders", [])
+        for item in lifecycle_orders if isinstance(lifecycle_orders, list) else []:
+            if not isinstance(item, dict):
+                continue
+            order_id = str(item.get("order_id") or "").strip()
+            broker = item.get("broker_reconciliation")
+            if order_id and isinstance(broker, dict):
+                latest_broker_by_order_id[order_id] = broker
+    for run in ordered_runs:
+        execution = run["execution"]
+        orders = execution.get("orders") if isinstance(execution, dict) else None
+        if not isinstance(orders, list):
+            continue
+        execution["orders"] = [
+            {
+                **item,
+                **(
+                    {"broker_reconciliation": latest_broker_by_order_id[str(item.get("order_or_reservation_id") or "").strip()]}
+                    if str(item.get("order_or_reservation_id") or "").strip() in latest_broker_by_order_id
+                    else {}
+                ),
+            }
+            if isinstance(item, dict)
+            else item
+            for item in orders
+        ]
+    return ordered_runs
 
 
 def execution_counts(execution: dict[str, Any]) -> tuple[int, int, int]:
@@ -850,6 +880,7 @@ def render_market_and_quality(target_dir: Path, summary: dict[str, Any]) -> str:
     news = evidence.get("news") if isinstance(evidence.get("news"), dict) else {}
     financial_counts = financial.get("cache_counts") if isinstance(financial.get("cache_counts"), dict) else {}
     news_counts = news.get("cache_counts") if isinstance(news.get("cache_counts"), dict) else {}
+    lifecycle = summary.get("order_lifecycle") if isinstance(summary.get("order_lifecycle"), dict) else {}
     partial_stages = [item for item in summary.get("stages", []) if isinstance(item, dict) and item.get("status") != "success"]
     stage_rows = "".join(
         f"<tr><td>{esc(item.get('stage'))}</td><td>{status_badge(item.get('status'))}</td><td>{esc(item.get('detail'))}</td></tr>"
@@ -864,6 +895,14 @@ def render_market_and_quality(target_dir: Path, summary: dict[str, Any]) -> str:
     if financial.get("status") not in normal_evidence_statuses:
         warnings.append(
             f'<div class="warning"><strong>재무 수집 {esc(financial.get("status"))}</strong><p>{esc(financial.get("display_text") or "일부 재무 근거를 사용할 수 없습니다.")}</p></div>'
+        )
+    if lifecycle.get("status") not in {None, "", "not_run"}:
+        issue_count = number(lifecycle.get("holding_state_issue_count"))
+        warning_class = "warning bad-border" if int(lifecycle.get("holding_state_issue_count") or 0) > 0 else "warning"
+        warnings.append(
+            f'<div class="{warning_class}"><strong>주문 생명주기 사전조회 {esc(lifecycle.get("status"))}</strong>'
+            f'<p>현재 미체결 {number(lifecycle.get("active_order_count"))}건 · 같은 날 이전 제출 '
+            f'{number(lifecycle.get("previous_submitted_cash_order_count"))}건 · 보유수량 확인 필요 {issue_count}건</p></div>'
         )
     if partial_stages:
         warnings.append(

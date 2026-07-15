@@ -1566,6 +1566,57 @@ class RunSubagentSelfTest(unittest.TestCase):
         self.assertEqual(dependencies[0]["server_identifier_source"], "stderr")
         self.assertEqual(dependencies[0]["http_status"], 503)
 
+    def test_recent_trade_context_uses_current_lifecycle_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            runs_dir = Path(tmp_name) / "runs"
+            previous = runs_dir / "previous"
+            current = runs_dir / "current"
+            previous.mkdir(parents=True)
+            current.mkdir(parents=True)
+            write_json(
+                previous / "execution.json",
+                {
+                    "run_id": "previous",
+                    "started_at": "2026-07-15T14:30:00+09:00",
+                    "orders": [
+                        {
+                            "symbol_id": "042660",
+                            "direction": "buy",
+                            "result": "submitted",
+                            "order_path": "immediate",
+                            "order_api": "order_cash",
+                            "validated_order_quantity": 1,
+                            "order_or_reservation_id": "reject-1",
+                            "broker_reconciliation": {"status": "unconfirmed"},
+                        }
+                    ],
+                },
+            )
+            write_json(
+                current / "order-lifecycle.json",
+                {
+                    "previous_submitted_cash_orders": [
+                        {
+                            "order_id": "reject-1",
+                            "broker_reconciliation": {
+                                "status": "rejected",
+                                "terminal": True,
+                                "filled_quantity": 0,
+                                "rejected_quantity": 1,
+                                "remaining_quantity": 0,
+                            },
+                        }
+                    ]
+                },
+            )
+
+            context = recent_submitted_trade_context(current, "042660", run_limit=1)
+
+            trade = context["recent_submitted_trades"][0]
+            self.assertEqual(trade["broker_status"], "rejected")
+            self.assertTrue(trade["broker_terminal"])
+            self.assertEqual(trade["broker_rejected_quantity"], 1)
+
     def test_rebuttal_final_decision_issues_validate_action_and_quantity(self) -> None:
         spec = {
             "debate_phase": "rebuttal-1",

@@ -581,7 +581,18 @@ def normalize_broker_reconciliation(
     ordered = as_int(first(row, ("ord_qty", "ORD_QTY")), requested_quantity) or requested_quantity
     filled = as_int(first(row, ("tot_ccld_qty", "TOT_CCLD_QTY")))
     rejected = as_int(first(row, ("rjct_qty", "RJCT_QTY")))
-    canceled = as_int(first(row, ("cnc_cfrm_qty", "CNC_CFRM_QTY")))
+    canceled = as_int(
+        first(
+            row,
+            (
+                "cncl_cfrm_qty",
+                "CNCL_CFRM_QTY",
+                # Retain the old alias for previously captured fixtures.
+                "cnc_cfrm_qty",
+                "CNC_CFRM_QTY",
+            ),
+        )
+    )
     remaining = as_int(first(row, ("rmn_qty", "RMN_QTY")))
     filled_price = as_int(first(row, ("avg_prvs", "AVG_PRVS", "avg_ccld_prc", "AVG_CCLD_PRC")))
 
@@ -781,6 +792,315 @@ def reconcile_submitted_cash_orders(
     if summary_status != "success" and execution.get("status") == "success":
         execution["status"] = "partial"
     return summary
+
+
+def previous_submitted_cash_orders(output_dir: Path, day: str) -> list[dict[str, Any]]:
+    """Return unique same-day cash submissions from earlier pipeline runs."""
+    runs_dir = output_dir.parent
+    if not runs_dir.is_dir():
+        return []
+    result: list[dict[str, Any]] = []
+    seen_order_ids: set[str] = set()
+    candidates: list[tuple[str, Path, dict[str, Any]]] = []
+    for run_dir in runs_dir.iterdir():
+        if not run_dir.is_dir():
+            continue
+        execution_path = run_dir / "execution.json"
+        if not execution_path.is_file():
+            continue
+        try:
+            execution = load_json(execution_path)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(execution, dict) or execution_order_day(execution) != day:
+            continue
+        candidates.append((str(execution.get("started_at") or run_dir.name), run_dir, execution))
+    candidates.sort(key=lambda item: (item[0], item[1].name), reverse=True)
+
+    for _, run_dir, execution in candidates:
+        for row_index, order in enumerate(execution.get("orders", [])):
+            if not isinstance(order, dict):
+                continue
+            order_id = str(order.get("order_or_reservation_id") or "").strip()
+            if (
+                not order_id
+                or order_id in seen_order_ids
+                or order.get("order_path") != "immediate"
+                or str(order.get("result") or "").lower() != "submitted"
+                or str(order.get("direction") or "").lower() not in {"buy", "sell"}
+            ):
+                continue
+            seen_order_ids.add(order_id)
+            result.append(
+                {
+                    "run_id": execution.get("run_id") or run_dir.name,
+                    "started_at": execution.get("started_at") or "",
+                    "symbol_id": symbol_key(order),
+                    "symbol_name": order.get("symbol_name") or symbol_key(order),
+                    "direction": str(order.get("direction") or "").lower(),
+                    "order_id": order_id,
+                    "requested_quantity": as_int(order.get("validated_order_quantity")),
+                    "current_live_holding_quantity": as_int(order.get("current_live_holding_quantity")),
+                    "row_id": str(row_index),
+                    "order_path": "immediate",
+                    "order_api": "order_cash",
+                }
+            )
+    return result
+
+
+def reconcile_previous_cash_orders(
+    previous_orders: list[dict[str, Any]],
+    broker_rows: list[dict[str, Any]],
+    active_orders: list[dict[str, Any]],
+    *,
+    observed_at: str,
+) -> list[dict[str, Any]]:
+    rows_by_id = {broker_order_id(row): row for row in broker_rows if broker_order_id(row)}
+    active_by_id = {
+        str(item.get("order_id") or "").strip(): item
+        for item in active_orders
+        if isinstance(item, dict) and str(item.get("order_id") or "").strip()
+    }
+    reconciled: list[dict[str, Any]] = []
+    for order in previous_orders:
+        order_id = str(order.get("order_id") or "").strip()
+        status = normalize_broker_reconciliation(
+            rows_by_id.get(order_id),
+            requested_quantity=as_int(order.get("requested_quantity")),
+            observed_at=observed_at,
+        )
+        active = active_by_id.get(order_id)
+        if active and active.get("active_status") == "active" and status.get("status") in {"unconfirmed", "accepted"}:
+            remaining = as_int(active.get("remaining_quantity"))
+            status.update(
+                {
+                    "status": "pending",
+                    "terminal": False,
+                    "remaining_quantity": remaining,
+                    "ordered_quantity": max(as_int(status.get("ordered_quantity")), remaining),
+                    "source_api": "inquire_psbl_rvsecncl",
+                }
+            )
+        reconciled.append({**order, "broker_reconciliation": status})
+    return reconciled
+
+
+def apply_order_lifecycle_to_account(
+    account: dict[str, Any],
+    active_orders: list[dict[str, Any]],
+    reconciled_orders: list[dict[str, Any]],
+    *,
+    lookup_complete: bool,
+    observed_fills: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    active_qty = active_quantities(active_orders)
+    symbols = [item for item in account.get("symbols", []) if isinstance(item, dict)]
+    by_symbol = {symbol_key(item): item for item in symbols if symbol_key(item)}
+    for active in active_orders:
+        symbol_id = symbol_key(active)
+        if not symbol_id or symbol_id in by_symbol:
+            continue
+        synthetic = {
+            "symbol_id": symbol_id,
+            "symbol_name": active.get("symbol_name") or symbol_id,
+            "current_live_holding_quantity": 0,
+            "current_price": as_int(active.get("order_price")),
+            "today_buy_quantity": 0,
+            "today_sell_quantity": 0,
+            "lifecycle_only": True,
+        }
+        symbols.append(synthetic)
+        by_symbol[symbol_id] = synthetic
+    for previous in reconciled_orders:
+        symbol_id = symbol_key(previous)
+        if not symbol_id or symbol_id in by_symbol:
+            continue
+        synthetic = {
+            "symbol_id": symbol_id,
+            "symbol_name": previous.get("symbol_name") or symbol_id,
+            "current_live_holding_quantity": 0,
+            "current_price": 0,
+            "today_buy_quantity": 0,
+            "today_sell_quantity": 0,
+            "lifecycle_only": True,
+        }
+        symbols.append(synthetic)
+        by_symbol[symbol_id] = synthetic
+
+    confirmed: dict[str, dict[str, int]] = {}
+    observed: dict[str, dict[str, int]] = {}
+    for fill in observed_fills or []:
+        if not isinstance(fill, dict):
+            continue
+        symbol_id = symbol_key(fill)
+        side = str(fill.get("direction") or "")
+        if symbol_id and side in {"buy", "sell"}:
+            observed.setdefault(symbol_id, {"buy": 0, "sell": 0})[side] += as_int(
+                fill.get("filled_quantity")
+            )
+    unconfirmed_symbols: set[str] = set()
+    for order in reconciled_orders:
+        symbol_id = symbol_key(order)
+        side = str(order.get("direction") or "")
+        status = order.get("broker_reconciliation") if isinstance(order.get("broker_reconciliation"), dict) else {}
+        if not symbol_id or side not in {"buy", "sell"}:
+            continue
+        confirmed.setdefault(symbol_id, {"buy": 0, "sell": 0})[side] += as_int(status.get("filled_quantity"))
+        if status.get("status") == "unconfirmed":
+            unconfirmed_symbols.add(symbol_id)
+
+    inconsistencies: list[dict[str, Any]] = []
+    for symbol_id, item in by_symbol.items():
+        pending = active_qty.get(symbol_id, {"buy": 0, "sell": 0})
+        item["pending_and_reserved_buy_quantity"] = pending["buy"]
+        item["pending_and_reserved_sell_quantity"] = pending["sell"]
+        reasons: list[str] = []
+        local = confirmed.get(symbol_id, {"buy": 0, "sell": 0})
+        observed_item = observed.get(symbol_id, {"buy": 0, "sell": 0})
+        account_buy = max(as_int(item.get("today_buy_quantity")), observed_item["buy"])
+        account_sell = max(as_int(item.get("today_sell_quantity")), observed_item["sell"])
+        if local["buy"] > account_buy:
+            reasons.append("confirmed_local_buy_fill_exceeds_account_today_buy_quantity")
+        if local["sell"] > account_sell:
+            reasons.append("confirmed_local_sell_fill_exceeds_account_today_sell_quantity")
+        if symbol_id in unconfirmed_symbols:
+            reasons.append("previous_submitted_order_status_unconfirmed")
+        if not lookup_complete:
+            reasons.append("order_lifecycle_lookup_incomplete")
+        if any(reason.startswith("confirmed_local_") for reason in reasons):
+            state = "inconsistent"
+        elif reasons:
+            state = "unconfirmed"
+        else:
+            state = "consistent"
+        item["holding_state_status"] = state
+        item["holding_state_reasons"] = reasons
+        if state != "consistent":
+            inconsistencies.append(
+                {
+                    "symbol_id": symbol_id,
+                    "symbol_name": item.get("symbol_name") or symbol_id,
+                    "status": state,
+                    "reasons": reasons,
+                    "confirmed_local_buy_quantity": local["buy"],
+                    "confirmed_local_sell_quantity": local["sell"],
+                    "account_today_buy_quantity": account_buy,
+                    "account_today_sell_quantity": account_sell,
+                }
+            )
+    account["symbols"] = symbols
+    return inconsistencies
+
+
+def order_lifecycle_preflight(args: argparse.Namespace, *, kis: Kis | None = None) -> dict[str, Any]:
+    output_dir = Path(args.output_dir)
+    account_path = Path(args.account_before_order or output_dir / "account-before-order.json")
+    account = load_json(account_path)
+    observed_at = now_iso()
+    day = execution_order_day({"started_at": account.get("started_at") or ""})
+    environment = env_dv(args.env or account.get("execution_environment"))
+    errors: list[dict[str, Any]] = []
+    client = kis
+    if client is None:
+        try:
+            client = Kis(environment, args.retries)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(lifecycle_error("kis_client_initialization_failed", redact(exc)))
+    start_date, end_date = args.reservation_start_date, args.reservation_end_date
+    if not start_date or not end_date:
+        start_date, end_date = default_date_range()
+
+    active_orders: list[dict[str, Any]] = []
+    if client is not None:
+        try:
+            active_orders.extend(fetch_reservations(client, start_date, end_date))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(lifecycle_error("reservation_lookup_failed", redact(exc)))
+        try:
+            active_orders.extend(fetch_pending_orders(client))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(lifecycle_error("pending_order_lookup_failed", redact(exc)))
+
+    previous_orders = previous_submitted_cash_orders(output_dir, day)
+    today_fills_path = output_dir / "today-fills.json"
+    today_fills = load_json(today_fills_path) if today_fills_path.is_file() else {}
+    observed_fills = today_fills.get("fills", []) if isinstance(today_fills, dict) else []
+    broker_rows: list[dict[str, Any]] = []
+    if client is not None:
+        try:
+            broker_rows = fetch_cash_order_status_rows(client, day)
+            found_ids = {broker_order_id(row) for row in broker_rows}
+            for order in previous_orders:
+                order_id = str(order.get("order_id") or "").strip()
+                if not order_id or order_id in found_ids:
+                    continue
+                for row in fetch_cash_order_status_rows(client, day, order_id):
+                    if broker_order_id(row) == order_id:
+                        broker_rows.append(row)
+                        found_ids.add(order_id)
+                        break
+        except Exception as exc:  # noqa: BLE001
+            errors.append(lifecycle_error("cash_order_status_lookup_failed", redact(exc)))
+
+    lookup_complete = not errors
+    reconciled_orders = reconcile_previous_cash_orders(
+        previous_orders,
+        broker_rows,
+        active_orders,
+        observed_at=observed_at,
+    )
+    inconsistencies = apply_order_lifecycle_to_account(
+        account,
+        active_orders,
+        reconciled_orders,
+        lookup_complete=lookup_complete,
+        observed_fills=observed_fills if isinstance(observed_fills, list) else [],
+    )
+    active_count = len([item for item in active_orders if item.get("active_status") == "active"])
+    account["active_order_lookup_performed"] = lookup_complete
+    account["active_orders"] = active_orders
+    account.setdefault("active_order_checks", {})["order_lifecycle_preflight"] = f"{active_count} active"
+    warnings = [
+        item
+        for item in account.get("warnings", [])
+        if item not in {"active_order_lookup_not_performed", "order_lifecycle_lookup_incomplete"}
+    ]
+    if not lookup_complete:
+        warnings.append("order_lifecycle_lookup_incomplete")
+    account["warnings"] = warnings
+    status = "failed" if errors else "partial" if inconsistencies else "success"
+    lifecycle = {
+        "schema_version": "1",
+        "run_id": account.get("run_id") or output_dir.name,
+        "started_at": account.get("started_at") or "",
+        "generated_at": observed_at,
+        "stage": "order-lifecycle-preflight",
+        "status": status,
+        "execution_environment": environment,
+        "lookup_complete": lookup_complete,
+        "active_order_count": active_count,
+        "active_orders": active_orders,
+        "previous_submitted_cash_order_count": len(previous_orders),
+        "previous_submitted_cash_orders": reconciled_orders,
+        "holding_state_issue_count": len(inconsistencies),
+        "holding_state_issues": inconsistencies,
+        "errors": errors,
+    }
+    account["order_lifecycle"] = {
+        key: lifecycle[key]
+        for key in (
+            "status",
+            "generated_at",
+            "lookup_complete",
+            "active_order_count",
+            "previous_submitted_cash_order_count",
+            "holding_state_issue_count",
+        )
+    }
+    write_json(account_path, account)
+    write_json(Path(args.output or output_dir / "order-lifecycle.json"), lifecycle)
+    return lifecycle
 
 
 def normalize_execution_order_prices(execution: dict[str, Any]) -> None:
@@ -1108,6 +1428,16 @@ def error(code: str, message: str) -> dict[str, Any]:
     return {"stage": "order-execution", "source": "execute_orders", "code": code, "message": message, "required": True}
 
 
+def lifecycle_error(code: str, message: str) -> dict[str, Any]:
+    return {
+        "stage": "order-lifecycle-preflight",
+        "source": "execute_orders",
+        "code": code,
+        "message": message,
+        "required": True,
+    }
+
+
 def adjustment_row(active: dict[str, Any], *, action: str, reason: str, result: str) -> dict[str, Any]:
     order_api = active.get("order_api", "")
     order_path = active.get("order_path", "")
@@ -1241,6 +1571,8 @@ def refresh_gates(args: argparse.Namespace, account: dict[str, Any], execution: 
         price = as_price(item.get("order_price"))
         if not symbol:
             continue
+        if item.get("active_cancel_only") is True or item.get("reconciliation_only") is True:
+            continue
         if item.get("direction") == "buy" and price > 0:
             try:
                 capacities[symbol] = buy_capacity(kis, symbol, price)
@@ -1276,6 +1608,36 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
         active_item = active_qty.get(symbol, {"buy": 0, "sell": 0})
         current = as_int(account_item.get("current_live_holding_quantity"), as_int(order.get("current_live_holding_quantity")))
         expected = current + active_item["buy"] - active_item["sell"]
+        holding_state_status = str(
+            order.get("holding_state_status") or account_item.get("holding_state_status") or ""
+        ).strip()
+        lifecycle_cancel_only = order.get("reconciliation_only") is True and order.get("active_cancel_only") is True
+        if holding_state_status in {"inconsistent", "unconfirmed"} and not lifecycle_cancel_only:
+            order.update(
+                {
+                    "symbol_id": symbol,
+                    "direction": "none",
+                    "current_live_holding_quantity": current,
+                    "pending_and_reserved_buy_quantity": active_item["buy"],
+                    "pending_and_reserved_sell_quantity": active_item["sell"],
+                    "expected_holding_quantity": expected,
+                    "additional_required_quantity": 0,
+                    "validated_order_quantity": 0,
+                    "result": "blocked",
+                    "reason": "holding_state_not_verified",
+                    "attempts": order.get("attempts") if isinstance(order.get("attempts"), list) else [],
+                }
+            )
+            order["attempts"].append(
+                attempt(
+                    "order-lifecycle-preflight",
+                    "blocked",
+                    f"holding_state_status={holding_state_status}",
+                    "holding_state_not_verified",
+                )
+            )
+            blocked += 1
+            continue
         if symbol in portfolio_except:
             order.update(
                 {
@@ -1911,6 +2273,14 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--retries", type=int, default=2)
     run.add_argument("--reservation-start-date", default="")
     run.add_argument("--reservation-end-date", default="")
+    preflight = sub.add_parser("preflight", help="Refresh active and prior cash-order lifecycle before Judge review.")
+    preflight.add_argument("--output-dir", required=True)
+    preflight.add_argument("--account-before-order", default="")
+    preflight.add_argument("--output", default="")
+    preflight.add_argument("--env", default=os.environ.get("CODEX_MCP_TRADING_ENV", "acct"))
+    preflight.add_argument("--retries", type=int, default=2)
+    preflight.add_argument("--reservation-start-date", default="")
+    preflight.add_argument("--reservation-end-date", default="")
     probe = sub.add_parser("probe-api", help="Run read-only KIS order/account API probes.")
     probe.add_argument("--env", default=os.environ.get("CODEX_MCP_TRADING_ENV", "acct"))
     probe.add_argument("--symbol", default="")
@@ -1928,6 +2298,10 @@ def main(argv: list[str] | None = None) -> int:
         return self_test()
     if args.command == "probe-api":
         return probe_api(args)
+    if args.command == "preflight":
+        payload = order_lifecycle_preflight(args)
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0 if payload.get("status") != "failed" else 1
     payload = execute(args)
     print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if payload.get("status") != "failed" else 1

@@ -22,6 +22,7 @@ from ..scripts.execute_orders import (
     normalize_broker_reconciliation,
     normalize_reservation,
     now_iso,
+    order_lifecycle_preflight,
     reconcile,
     reconcile_submitted_cash_orders,
     write_json,
@@ -1178,3 +1179,207 @@ class ExecuteOrdersSelfTest(unittest.TestCase):
         self.assertEqual(pending["status"], "pending")
         self.assertFalse(pending["terminal"])
         self.assertEqual(pending["remaining_quantity"], 2)
+
+    def test_broker_reconciliation_reads_kis_cancel_confirm_quantity(self) -> None:
+        canceled = normalize_broker_reconciliation(
+            {
+                "ord_qty": "2",
+                "tot_ccld_qty": "1",
+                "cncl_cfrm_qty": "1",
+                "rmn_qty": "0",
+            },
+            requested_quantity=2,
+            observed_at="2026-07-15T06:00:00+00:00",
+        )
+
+        self.assertEqual(canceled["status"], "partially_filled_canceled")
+        self.assertEqual(canceled["canceled_quantity"], 1)
+
+    def test_preflight_carries_pending_and_blocks_lagging_filled_holding(self) -> None:
+        import tempfile
+
+        class FakeLifecycleKis:
+            env = "real"
+            cano = "12345678"
+            product = "01"
+
+            def call(
+                self,
+                name: str,
+                *,
+                params: dict[str, str] | None = None,
+                payload: dict[str, Any] | None = None,
+            ) -> dict[str, Any]:
+                if name == "order_resv_ccnl":
+                    return {"output1": []}
+                if name == "inquire_psbl_rvsecncl":
+                    return {
+                        "output1": [
+                            {
+                                "pdno": "005930",
+                                "prdt_name": "삼성전자",
+                                "odno": "pending-1",
+                                "ord_uncc_qty": "1",
+                                "ord_unpr": "70000",
+                                "sll_buy_dvsn_cd": "02",
+                                "ord_dvsn": "00",
+                            }
+                        ]
+                    }
+                if name == "inquire_daily_ccld":
+                    order_id = str((params or {}).get("ODNO") or "")
+                    rows = [
+                        {
+                            "pdno": "005930",
+                            "odno": "pending-1",
+                            "ord_qty": "1",
+                            "tot_ccld_qty": "0",
+                            "rmn_qty": "1",
+                        },
+                        {
+                            "pdno": "042660",
+                            "odno": "filled-1",
+                            "ord_qty": "1",
+                            "tot_ccld_qty": "1",
+                            "rmn_qty": "0",
+                        },
+                    ]
+                    return {"output1": [row for row in rows if not order_id or row["odno"] == order_id]}
+                raise AssertionError(name)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runs_dir = Path(tmp) / "runs"
+            previous_dir = runs_dir / "previous"
+            current_dir = runs_dir / "current"
+            previous_dir.mkdir(parents=True)
+            current_dir.mkdir(parents=True)
+            write_json(
+                previous_dir / "execution.json",
+                {
+                    "run_id": "previous",
+                    "started_at": "2026-07-15T12:00:00+09:00",
+                    "orders": [
+                        {
+                            "symbol_id": "005930",
+                            "symbol_name": "삼성전자",
+                            "direction": "buy",
+                            "result": "submitted",
+                            "order_path": "immediate",
+                            "validated_order_quantity": 1,
+                            "order_or_reservation_id": "pending-1",
+                        },
+                        {
+                            "symbol_id": "042660",
+                            "symbol_name": "한화오션",
+                            "direction": "buy",
+                            "result": "submitted",
+                            "order_path": "immediate",
+                            "validated_order_quantity": 1,
+                            "order_or_reservation_id": "filled-1",
+                        },
+                    ],
+                },
+            )
+            write_json(
+                current_dir / "account-before-order.json",
+                {
+                    "run_id": "current",
+                    "started_at": "2026-07-15T12:30:00+09:00",
+                    "execution_environment": "real",
+                    "warnings": ["active_order_lookup_not_performed"],
+                    "symbols": [
+                        {
+                            "symbol_id": "005930",
+                            "symbol_name": "삼성전자",
+                            "current_live_holding_quantity": 10,
+                            "today_buy_quantity": 0,
+                            "today_sell_quantity": 0,
+                        },
+                        {
+                            "symbol_id": "042660",
+                            "symbol_name": "한화오션",
+                            "current_live_holding_quantity": 0,
+                            "today_buy_quantity": 0,
+                            "today_sell_quantity": 0,
+                        },
+                    ],
+                },
+            )
+            lifecycle = order_lifecycle_preflight(
+                argparse.Namespace(
+                    output_dir=str(current_dir),
+                    account_before_order="",
+                    output="",
+                    env="real",
+                    retries=0,
+                    reservation_start_date="",
+                    reservation_end_date="",
+                ),
+                kis=FakeLifecycleKis(),
+            )
+
+            account = load_json(current_dir / "account-before-order.json")
+            by_symbol = {item["symbol_id"]: item for item in account["symbols"]}
+            statuses = {
+                item["order_id"]: item["broker_reconciliation"]["status"]
+                for item in lifecycle["previous_submitted_cash_orders"]
+            }
+            self.assertEqual(lifecycle["status"], "partial")
+            self.assertEqual(lifecycle["active_order_count"], 1)
+            self.assertEqual(statuses, {"pending-1": "pending", "filled-1": "filled"})
+            self.assertEqual(by_symbol["005930"]["pending_and_reserved_buy_quantity"], 1)
+            self.assertEqual(by_symbol["005930"]["holding_state_status"], "consistent")
+            self.assertEqual(by_symbol["042660"]["holding_state_status"], "inconsistent")
+
+    def test_unverified_holding_still_allows_cancel_only_reconciliation(self) -> None:
+        execution = {
+            "orders": [
+                {
+                    "symbol_id": "005930",
+                    "symbol_name": "삼성전자",
+                    "final_holding_quantity": 10,
+                    "order_price": 70000,
+                    "order_path": "immediate",
+                    "reconciliation_only": True,
+                    "active_cancel_only": True,
+                    "holding_state_status": "unconfirmed",
+                }
+            ]
+        }
+        active = [
+            {
+                "symbol_id": "005930",
+                "symbol_name": "삼성전자",
+                "order_id": "active-1",
+                "order_kind": "pending",
+                "direction": "buy",
+                "remaining_quantity": 1,
+                "order_price": 70000,
+                "active_status": "active",
+                "order_api": "order_cash",
+                "order_path": "immediate",
+                "execution_environment": "real",
+                "observed_at": now_iso(),
+            }
+        ]
+
+        reconcile(
+            {
+                "account_summary": {"cash_amount": 1_000_000},
+                "symbols": [
+                    {
+                        "symbol_id": "005930",
+                        "current_live_holding_quantity": 10,
+                        "holding_state_status": "unconfirmed",
+                    }
+                ],
+            },
+            execution,
+            active,
+            {},
+            {},
+            submit=False,
+            kis=None,
+        )
+
+        self.assertEqual(execution["orders"][0]["reason"], "active_order_adjustment_required")

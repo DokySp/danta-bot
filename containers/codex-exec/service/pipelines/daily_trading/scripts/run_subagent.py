@@ -908,6 +908,17 @@ def recent_submitted_trade_context(output_dir: Path, symbol_id: str, run_limit: 
     runs_dir = output_dir.parent
     if not runs_dir.is_dir():
         return unavailable
+    lifecycle = read_json_if_exists(output_dir / "order-lifecycle.json")
+    lifecycle_orders = (
+        lifecycle.get("previous_submitted_cash_orders", [])
+        if isinstance(lifecycle, dict)
+        else []
+    )
+    lifecycle_by_order_id = {
+        str(item.get("order_id") or "").strip(): item
+        for item in lifecycle_orders
+        if isinstance(item, dict) and str(item.get("order_id") or "").strip()
+    }
 
     previous_runs: list[tuple[tuple[str, str], Path, dict[str, Any]]] = []
     invalid_execution_count = 0
@@ -942,6 +953,15 @@ def recent_submitted_trade_context(output_dir: Path, symbol_id: str, run_limit: 
             result = str(order.get("result", "")).lower()
             if direction not in {"buy", "sell"} or not result.startswith("submitted"):
                 continue
+            order_id = str(order.get("order_or_reservation_id") or "").strip()
+            lifecycle_order = lifecycle_by_order_id.get(order_id, {})
+            broker = (
+                lifecycle_order.get("broker_reconciliation")
+                if isinstance(lifecycle_order.get("broker_reconciliation"), dict)
+                else order.get("broker_reconciliation")
+                if isinstance(order.get("broker_reconciliation"), dict)
+                else {}
+            )
             trades.append(
                 {
                     "run_id": payload.get("run_id") or run_dir.name,
@@ -955,6 +975,13 @@ def recent_submitted_trade_context(output_dir: Path, symbol_id: str, run_limit: 
                     "additional_required_quantity": int_or_zero(order.get("additional_required_quantity")),
                     "order_path": order.get("order_path") or "",
                     "order_api": order.get("order_api") or "",
+                    "order_id": order_id,
+                    "broker_status": broker.get("status") or "unconfirmed",
+                    "broker_terminal": bool(broker.get("terminal")),
+                    "broker_filled_quantity": int_or_zero(broker.get("filled_quantity")),
+                    "broker_rejected_quantity": int_or_zero(broker.get("rejected_quantity")),
+                    "broker_canceled_quantity": int_or_zero(broker.get("canceled_quantity")),
+                    "broker_remaining_quantity": int_or_zero(broker.get("remaining_quantity")),
                     "reason": str(order.get("reason") or "")[:120],
                 }
             )

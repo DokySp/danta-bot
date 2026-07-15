@@ -97,6 +97,51 @@ def append_holding_history_from_run(workspace_dir: Path, context: Any) -> int:
                 "source_artifact": str(execution_path.relative_to(workspace_dir)),
             }
         )
+
+    lifecycle_path = run_dir / "order-lifecycle.json"
+    try:
+        lifecycle = json.loads(lifecycle_path.read_text()) if lifecycle_path.is_file() else {}
+    except (OSError, json.JSONDecodeError):
+        logging.exception("failed to read order lifecycle artifact path=%s", lifecycle_path)
+        lifecycle = {}
+    previous_orders = (
+        lifecycle.get("previous_submitted_cash_orders", [])
+        if isinstance(lifecycle, dict)
+        else []
+    )
+    for order in previous_orders:
+        if not isinstance(order, dict):
+            continue
+        direction = str(order.get("direction") or "").lower()
+        broker = order.get("broker_reconciliation")
+        if direction not in {"buy", "sell"} or not isinstance(broker, dict):
+            continue
+        broker_status = str(broker.get("status") or "").lower()
+        if broker_status not in {"filled", "partially_filled", "partially_filled_rejected", "partially_filled_canceled"}:
+            continue
+        quantity = int_value(broker.get("filled_quantity"))
+        if quantity <= 0:
+            continue
+        current_quantity = int_value(order.get("current_live_holding_quantity"))
+        delta = quantity if direction == "buy" else -quantity
+        started_at = str(order.get("started_at") or context.started_at)
+        rows.append(
+            {
+                "timestamp_kst": started_at,
+                "date": started_at[:10],
+                "run_id": str(order.get("run_id") or context.run_id),
+                "symbol_id": str(order.get("symbol_id") or "").strip(),
+                "symbol_name": str(order.get("symbol_name") or "").strip(),
+                "direction": direction,
+                "old_quantity": str(current_quantity),
+                "new_quantity": str(current_quantity + delta),
+                "delta_quantity": str(delta),
+                "submitted_quantity": str(quantity),
+                "order_or_reservation_id": str(order.get("order_id") or "").strip(),
+                "row_id": str(order.get("row_id") or "0"),
+                "source_artifact": str(lifecycle_path.relative_to(workspace_dir)),
+            }
+        )
     if not rows:
         return 0
 

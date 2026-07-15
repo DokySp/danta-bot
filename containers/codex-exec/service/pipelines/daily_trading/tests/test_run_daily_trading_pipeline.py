@@ -1364,6 +1364,28 @@ from pathlib import Path
 output_dir = Path(sys.argv[sys.argv.index("--output-dir") + 1])
 execution_path = output_dir / "execution.json"
 account_path = output_dir / "account-before-order.json"
+if "preflight" in sys.argv:
+    account = json.loads(account_path.read_text(encoding="utf-8"))
+    account["active_order_lookup_performed"] = True
+    account["active_orders"] = []
+    for item in account.get("symbols", []):
+        if isinstance(item, dict):
+            item["pending_and_reserved_buy_quantity"] = 0
+            item["pending_and_reserved_sell_quantity"] = 0
+            item["holding_state_status"] = "consistent"
+            item["holding_state_reasons"] = []
+    lifecycle = {
+        "status": "success",
+        "lookup_complete": True,
+        "active_order_count": 0,
+        "previous_submitted_cash_order_count": 0,
+        "holding_state_issue_count": 0,
+        "holding_state_issues": [],
+    }
+    account_path.write_text(json.dumps(account, ensure_ascii=False, indent=2), encoding="utf-8")
+    (output_dir / "order-lifecycle.json").write_text(json.dumps(lifecycle, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(json.dumps(lifecycle, ensure_ascii=False))
+    raise SystemExit(0)
 execution = json.loads(execution_path.read_text(encoding="utf-8"))
 account = json.loads(account_path.read_text(encoding="utf-8"))
 account["active_order_lookup_performed"] = True
@@ -1417,6 +1439,10 @@ print(json.dumps(execution, ensure_ascii=False))
             )
             submit_summary = submit_pipeline.run()
             submit_stages = [item.get("stage") for item in load_json(submit_run_dir / "run.json").get("stages", []) if isinstance(item, dict)]
+            if "order-lifecycle-preflight" not in submit_stages:
+                failures.append(f"submit-orders pipeline did not run lifecycle preflight: {submit_stages}")
+            elif submit_stages.index("order-lifecycle-preflight") > submit_stages.index("decision-brief"):
+                failures.append(f"lifecycle preflight did not run before Judge inputs: {submit_stages}")
             if "order-execution" not in submit_stages:
                 failures.append(f"submit-orders pipeline did not run order-execution stage: {submit_stages}")
             if submit_summary.get("status") != "success":

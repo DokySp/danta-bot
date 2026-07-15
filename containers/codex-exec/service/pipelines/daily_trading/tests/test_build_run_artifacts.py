@@ -1139,3 +1139,121 @@ symbols:
 class BuildRunArtifactsSelfTest(unittest.TestCase):
     def test_self_test_suite(self) -> None:
         self.assertEqual(run_self_test(), 0)
+
+    def test_execution_plan_reconciles_orphan_active_order_and_blocks_unverified_holding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            run_dir = Path(tmp_name) / "run"
+            run_dir.mkdir()
+            write_json(
+                run_dir / "account-before-order.json",
+                {
+                    "run_id": "lifecycle-plan",
+                    "started_at": "2026-07-15T15:00:00+09:00",
+                    "active_order_lookup_performed": True,
+                    "order_available_lookup_performed": False,
+                    "active_orders": [
+                        {
+                            "symbol_id": "005930",
+                            "symbol_name": "삼성전자",
+                            "order_id": "active-1",
+                            "direction": "buy",
+                            "remaining_quantity": 1,
+                            "order_price": 70000,
+                            "order_path": "immediate",
+                            "order_api": "order_cash",
+                            "active_status": "active",
+                        },
+                        {
+                            "symbol_id": "000660",
+                            "symbol_name": "SK하이닉스",
+                            "order_id": "active-2",
+                            "direction": "sell",
+                            "remaining_quantity": 1,
+                            "order_price": 200000,
+                            "order_path": "immediate",
+                            "order_api": "order_cash",
+                            "active_status": "active",
+                        },
+                    ],
+                    "symbols": [
+                        {
+                            "symbol_id": "005930",
+                            "symbol_name": "삼성전자",
+                            "current_live_holding_quantity": 10,
+                            "current_price": 70000,
+                            "holding_state_status": "consistent",
+                        },
+                        {
+                            "symbol_id": "042660",
+                            "symbol_name": "한화오션",
+                            "current_live_holding_quantity": 0,
+                            "current_price": 100000,
+                            "holding_state_status": "inconsistent",
+                            "holding_state_reasons": [
+                                "confirmed_local_buy_fill_exceeds_account_today_buy_quantity"
+                            ],
+                        },
+                        {
+                            "symbol_id": "000660",
+                            "symbol_name": "SK하이닉스",
+                            "current_live_holding_quantity": 3,
+                            "current_price": 200000,
+                            "holding_state_status": "unconfirmed",
+                            "holding_state_reasons": ["previous_submitted_order_status_unconfirmed"],
+                        },
+                    ],
+                },
+            )
+            write_json(
+                run_dir / "judge-review.json",
+                {
+                    "run_id": "lifecycle-plan",
+                    "started_at": "2026-07-15T15:00:00+09:00",
+                    "symbols": [
+                        {
+                            "symbol_id": "042660",
+                            "symbol_name": "한화오션",
+                            "final_holding_quantity": 1,
+                        }
+                    ],
+                },
+            )
+            write_json(
+                run_dir / "decision-brief.json",
+                {
+                    "symbols": [
+                        {"symbol_id": "005930", "price": {"current_or_last": 70000}},
+                        {"symbol_id": "042660", "price": {"current_or_last": 100000}},
+                        {"symbol_id": "000660", "price": {"current_or_last": 200000}},
+                    ]
+                },
+            )
+            execution = build_execution_plan(
+                argparse.Namespace(
+                    output_dir=run_dir,
+                    output=run_dir / "execution.json",
+                    judge_review="",
+                    account_before_order="",
+                    decision_brief="",
+                    analyst_review="",
+                    run_id=None,
+                    started_at=None,
+                    request_type="real-submit",
+                    order_path="immediate",
+                )
+            )
+
+            by_symbol = {item["symbol_id"]: item for item in execution["orders"]}
+            self.assertTrue(execution["requires_main_agent_order_execution"])
+            self.assertEqual(by_symbol["042660"]["reason"], "holding_state_not_verified")
+            self.assertEqual(by_symbol["042660"]["direction"], "none")
+            self.assertTrue(by_symbol["005930"]["reconciliation_only"])
+            self.assertTrue(by_symbol["005930"]["active_cancel_only"])
+            self.assertEqual(by_symbol["005930"]["direction"], "sell")
+            self.assertEqual(by_symbol["005930"]["reason"], "stale_active_order_requires_cancellation")
+            self.assertTrue(by_symbol["000660"]["reconciliation_only"])
+            self.assertEqual(by_symbol["000660"]["direction"], "buy")
+            self.assertEqual(
+                by_symbol["000660"]["reason"],
+                "unverified_holding_requires_active_order_cancellation",
+            )

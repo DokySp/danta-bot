@@ -47,6 +47,13 @@ def make_run(runs_root: Path, run_id: str, started_at: str, *, target: bool) -> 
         "token_usage": {"total": {"total_tokens": 123}},
         "stages": [{"stage": "execution-plan", "status": "success", "detail": "status=success"}],
     }
+    if target:
+        summary["order_lifecycle"] = {
+            "status": "partial",
+            "active_order_count": 1,
+            "previous_submitted_cash_order_count": 2,
+            "holding_state_issue_count": 1,
+        }
     orders = []
     if target:
         orders.append(
@@ -228,6 +235,22 @@ def make_run(runs_root: Path, run_id: str, started_at: str, *, target: bool) -> 
         run_dir / "today-fills.json",
         {"status": "success", "skipped": False, "fill_scope": "account", "fills": fills},
     )
+    if target:
+        write_json(
+            run_dir / "order-lifecycle.json",
+            {
+                "previous_submitted_cash_orders": [
+                    {
+                        "order_id": "order-1",
+                        "broker_reconciliation": {
+                            "status": "rejected",
+                            "rejected_quantity": 1,
+                            "filled_quantity": 0,
+                        },
+                    }
+                ]
+            },
+        )
     return run_dir
 
 
@@ -262,6 +285,9 @@ def self_test() -> int:
             "regime&quot;:&quot;risk_on",
             "KIS 총자산",
             "같은 업종 종목은 같은 색상",
+            "주문 생명주기 사전조회 partial",
+            "현재 미체결 1건 · 같은 날 이전 제출 2건 · 보유수량 확인 필요 1건",
+            "KIS 거절 1주",
             "row.textContent = value",
         ]
         forbidden = [
