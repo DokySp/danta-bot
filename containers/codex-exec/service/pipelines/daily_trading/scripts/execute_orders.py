@@ -2146,6 +2146,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
     account = load_json(account_path)
     request_type = str(execution.get("request_type") or "")
     if args.submit and args.offline:
+        account["order_gate_status"] = "failed"
         execution["status"] = "failed"
         execution["errors"] = [item for item in execution.get("errors", []) if isinstance(item, dict)] + [
             error("submit_requires_live_kis_client", "offline mode cannot submit or mark submitted orders")
@@ -2153,9 +2154,11 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         execution["requires_main_agent_order_execution"] = False
         execution["required_main_agent_actions"] = []
         execution["order_execution_mode"] = "submit-blocked"
+        write_json(account_path, account)
         write_json(execution_path, execution)
         return execution
     if args.submit and request_type not in {"demo-submit", "real-submit"}:
+        account["order_gate_status"] = "failed"
         execution["status"] = "failed"
         execution["errors"] = [item for item in execution.get("errors", []) if isinstance(item, dict)] + [
             error("submit_requires_explicit_execution_request", f"request_type={request_type or '<missing>'}")
@@ -2163,12 +2166,14 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         execution["requires_main_agent_order_execution"] = False
         execution["required_main_agent_actions"] = []
         execution["order_execution_mode"] = "submit-blocked"
+        write_json(account_path, account)
         write_json(execution_path, execution)
         return execution
     normalize_execution_order_prices(execution)
     active, capacities, sell_capacities, gate_errors, kis = refresh_gates(args, account, execution)
     account["active_order_lookup_performed"] = True
     account["order_available_lookup_performed"] = not bool(gate_errors)
+    account["order_gate_status"] = "failed" if gate_errors else "success"
     account["active_orders"] = active
     account.setdefault("active_order_checks", {})["order_resv_ccnl"] = f"{len([item for item in active if item.get('active_status') == 'active'])} active"
     account["warnings"] = [item for item in account.get("warnings", []) if item not in {"active_order_lookup_not_performed", "order_available_lookup_not_performed"}]

@@ -57,14 +57,18 @@ ENDPOINTS = {
         "path": "/uapi/domestic-stock/v1/quotations/inquire-ccnl",
         "tr_id": "FHKST01010300",
     },
-    "inquire_investor": {
-        "path": "/uapi/domestic-stock/v1/quotations/inquire-investor",
-        "tr_id": "FHKST01010900",
+    "investor_trend_estimate": {
+        "path": "/uapi/domestic-stock/v1/quotations/investor-trend-estimate",
+        "tr_id": "HHPTJ04160200",
     },
     "inquire_balance": {
         "path": "/uapi/domestic-stock/v1/trading/inquire-balance",
         "tr_id_real": "TTTC8434R",
         "tr_id_demo": "VTTC8434R",
+    },
+    "inquire_account_balance": {
+        "path": "/uapi/domestic-stock/v1/trading/inquire-account-balance",
+        "tr_id": "CTRP6548R",
     },
     "inquire_daily_ccld": {
         "path": "/uapi/domestic-stock/v1/trading/inquire-daily-ccld",
@@ -458,16 +462,25 @@ def summarize_trade_flow(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def summarize_investor_flow(row: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "foreign_net_buy_quantity": parse_int(first_present(row, ("frgn_ntby_qty", "frgn_ntby_vol"))),
-        "institution_net_buy_quantity": parse_int(first_present(row, ("orgn_ntby_qty", "orgn_ntby_vol"))),
-        "foreign_net_buy_value": parse_int(first_present(row, ("frgn_ntby_tr_pbmn", "frgn_ntby_tr_pbmn"))),
-        "institution_net_buy_value": parse_int(first_present(row, ("orgn_ntby_tr_pbmn", "orgn_ntby_tr_pbmn"))),
-        "foreign_buy_volume": parse_int(first_present(row, ("frgn_shnu_vol",))),
-        "foreign_sell_volume": parse_int(first_present(row, ("frgn_seln_vol",))),
-        "institution_buy_volume": parse_int(first_present(row, ("orgn_shnu_vol",))),
-        "institution_sell_volume": parse_int(first_present(row, ("orgn_seln_vol",))),
+    summary = {
+        "estimate_time_code": text_first(row, ("bsop_hour_gb",)),
+        "foreign_net_buy_quantity": parse_int(first_present(row, ("frgn_fake_ntby_qty",))),
+        "institution_net_buy_quantity": parse_int(first_present(row, ("orgn_fake_ntby_qty",))),
+        "combined_net_buy_quantity": parse_int(first_present(row, ("sum_fake_ntby_qty",))),
     }
+    quantity_keys = (
+        "foreign_net_buy_quantity",
+        "institution_net_buy_quantity",
+        "combined_net_buy_quantity",
+    )
+    if not any(summary.get(key) is not None for key in quantity_keys):
+        return {}
+    return summary
+
+
+def latest_investor_flow_row(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    usable_rows = [row for row in rows if summarize_investor_flow(row)]
+    return max(usable_rows, key=lambda row: parse_int(row.get("bsop_hour_gb")) or -1) if usable_rows else {}
 
 
 def build_price_row(
@@ -531,7 +544,7 @@ def build_price_row(
     if trade_flow:
         sources.append({"api": "direct_kis.inquire_ccnl", "env_dv": env_dv, "market": market})
     if investor_flow:
-        sources.append({"api": "direct_kis.inquire_investor", "env_dv": env_dv, "market": market})
+        sources.append({"api": "direct_kis.investor_trend_estimate", "env_dv": env_dv, "market": market})
     return {
         "schema_version": "1",
         "symbol_id": symbol,
@@ -680,16 +693,16 @@ def collect_trade_flow_summary(symbol: str, *, market: str, app_key: str, app_se
 
 def collect_investor_flow_summary(symbol: str, *, market: str, app_key: str, app_secret: str, token: str, retries: int, env_dv: str) -> dict[str, Any]:
     body, _headers = call_endpoint(
-        "inquire_investor",
-        {"FID_COND_MRKT_DIV_CODE": market, "FID_INPUT_ISCD": symbol},
+        "investor_trend_estimate",
+        {"MKSC_SHRN_ISCD": symbol},
         app_key,
         app_secret,
         token,
         retries,
         env_dv=env_dv,
     )
-    rows = output_rows_from_body(body, "output")
-    return summarize_investor_flow(rows[0]) if rows else {}
+    rows = output_rows_from_body(body, "output2")
+    return summarize_investor_flow(latest_investor_flow_row(rows))
 
 
 def collect_extended_market_evidence(
@@ -730,7 +743,7 @@ def collect_extended_market_evidence(
         ("direct_kis.inquire_time_itemchartprice", "intraday_chart_failed", lambda: collect_intraday_chart(symbol, market=market, app_key=app_key, app_secret=app_secret, token=token, retries=retries, env_dv=env_dv, end_at=end_at)),
         ("direct_kis.inquire_asking_price_exp_ccn", "orderbook_failed", lambda: collect_orderbook_summary(symbol, market=market, app_key=app_key, app_secret=app_secret, token=token, retries=retries, env_dv=env_dv)),
         ("direct_kis.inquire_ccnl", "trade_flow_failed", lambda: collect_trade_flow_summary(symbol, market=market, app_key=app_key, app_secret=app_secret, token=token, retries=retries, env_dv=env_dv)),
-        ("direct_kis.inquire_investor", "investor_flow_failed", lambda: collect_investor_flow_summary(symbol, market=market, app_key=app_key, app_secret=app_secret, token=token, retries=retries, env_dv=env_dv)),
+        ("direct_kis.investor_trend_estimate", "investor_flow_failed", lambda: collect_investor_flow_summary(symbol, market=market, app_key=app_key, app_secret=app_secret, token=token, retries=retries, env_dv=env_dv)),
     ):
         try:
             value = collector()
@@ -742,6 +755,17 @@ def collect_extended_market_evidence(
                 trade_flow = value
             elif code == "investor_flow_failed":
                 investor_flow = value
+                if not investor_flow:
+                    errors.append(
+                        safe_error(
+                            "investor trend estimate returned no usable quantities",
+                            code="investor_flow_unavailable",
+                            stage="price-chart",
+                            symbol_id=symbol,
+                            source=source,
+                            required=False,
+                        )
+                    )
         except Exception as exc:  # noqa: BLE001 - extended evidence is non-blocking
             errors.append(safe_error(exc, code=code, stage="price-chart", symbol_id=symbol, source=source, required=False))
 
@@ -880,6 +904,15 @@ def balance_params(cano: str, product_code: str, ctx_fk100: str = "", ctx_nk100:
         "PRCS_DVSN": "00",
         "CTX_AREA_FK100": ctx_fk100,
         "CTX_AREA_NK100": ctx_nk100,
+    }
+
+
+def account_asset_params(cano: str, product_code: str) -> dict[str, str]:
+    return {
+        "CANO": cano,
+        "ACNT_PRDT_CD": product_code,
+        "INQR_DVSN_1": "",
+        "BSPR_BF_DT_APLY_YN": "",
     }
 
 
@@ -1268,7 +1301,7 @@ def account_asset_summary_from_row(row: dict[str, Any]) -> dict[str, Any]:
     purchase = parse_int(first_present(row, ("pchs_amt_smtl",)))
     pnl = parse_int(first_present(row, ("evlu_pfls_amt_smtl",)))
     return {
-        "source_api": "inquire_balance",
+        "source_api": "inquire_account_balance",
         "observed_at": row.get("observed_at"),
         "total_asset_amount": parse_int(first_present(row, ("tot_asst_amt",))),
         "cash_deposit_amount": parse_int(first_present(row, ("tot_dncl_amt",))),
@@ -1322,8 +1355,8 @@ def collect_account_asset_snapshot(
     observed_at = now_kst_iso()
     cano, product_code = account_parts(env_dv)
     body, _headers = call_endpoint(
-        "inquire_balance",
-        balance_params(cano, product_code),
+        "inquire_account_balance",
+        account_asset_params(cano, product_code),
         app_key,
         app_secret,
         token,
@@ -1341,7 +1374,7 @@ def collect_account_asset_snapshot(
         "status": "success",
         "skipped": False,
         "skip_reason": "",
-        "source_api": "inquire_balance",
+        "source_api": "inquire_account_balance",
         "execution_environment": env_dv,
         "errors": [],
     }
@@ -1355,7 +1388,7 @@ def collect_account_asset_snapshot(
                 "missing tot_asst_amt in allowlisted account asset response",
                 code="missing_total_asset_amount",
                 stage="account-asset-snapshot",
-                source="direct_kis.inquire_balance",
+                source="direct_kis.inquire_account_balance",
                 required=False,
             )
         ]
@@ -1373,7 +1406,7 @@ def skipped_account_asset_snapshot(*, run_id: str, started_at: str, env_dv: str,
         "status": "success",
         "skipped": True,
         "skip_reason": reason,
-        "source_api": "inquire_balance",
+        "source_api": "inquire_account_balance",
         "execution_environment": env_dv,
         "errors": [],
         "account_asset_summary": {},
@@ -1391,7 +1424,7 @@ def failed_account_asset_snapshot(*, run_id: str, started_at: str, env_dv: str, 
         "status": "failed",
         "skipped": False,
         "skip_reason": "",
-        "source_api": "inquire_balance",
+        "source_api": "inquire_account_balance",
         "execution_environment": env_dv,
         "errors": [error],
         "account_asset_summary": {},
@@ -1435,11 +1468,7 @@ def collect_account_artifact(symbols: list[str], *, run_id: str, started_at: str
             )
         )
 
-    warnings = [
-        "active_order_lookup_not_performed",
-        "order_available_lookup_not_performed",
-    ]
-    status = "failed" if errors else "partial"
+    status = "failed" if errors else "success"
     return {
         "schema_version": "1",
         "run_id": run_id,
@@ -1452,9 +1481,10 @@ def collect_account_artifact(symbols: list[str], *, run_id: str, started_at: str
         "request_type": request_type,
         "execution_environment": env_dv,
         "account_summary": build_account_summary(summary),
+        "order_gate_status": "not_run",
         "active_order_lookup_performed": False,
         "order_available_lookup_performed": False,
-        "warnings": warnings,
+        "warnings": [],
         "active_orders": [],
         "non_universe_account_positions": non_universe,
         "errors": errors,
@@ -1475,6 +1505,7 @@ def skipped_account_artifact(symbols: list[str], *, run_id: str, started_at: str
         "request_type": request_type,
         "execution_environment": env_dv,
         "account_summary": {},
+        "order_gate_status": "not_required",
         "active_order_lookup_performed": False,
         "order_available_lookup_performed": False,
         "warnings": [],
@@ -1498,6 +1529,7 @@ def failed_account_artifact(symbols: list[str], *, run_id: str, started_at: str,
         "request_type": request_type,
         "execution_environment": env_dv,
         "account_summary": {},
+        "order_gate_status": "not_run",
         "active_order_lookup_performed": False,
         "order_available_lookup_performed": False,
         "warnings": [],
@@ -1697,7 +1729,7 @@ def command_collect(args: argparse.Namespace) -> int:
                 run_id=args.run_id,
                 started_at=started_at,
                 env_dv=env_dv,
-                error=safe_error(exc, code="account_asset_snapshot_failed", stage="account-asset-snapshot", source="direct_kis.inquire_balance", required=False),
+                error=safe_error(exc, code="account_asset_snapshot_failed", stage="account-asset-snapshot", source="direct_kis.inquire_account_balance", required=False),
             )
         if account_asset_snapshot.get("status") == "success" and not account_asset_snapshot.get("skipped"):
             try:

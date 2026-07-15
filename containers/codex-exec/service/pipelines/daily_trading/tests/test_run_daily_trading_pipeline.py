@@ -238,6 +238,12 @@ def write_self_test_fixtures(workspace: Path, run_dir: Path) -> Path:
                     "product_type": "stock",
                     "eligible_for_review": True,
                     "price": {"current_or_last": 70000, "observed_at": "2026-06-18T09:00:00+09:00", "snapshot_mode": "live"},
+                    "investor_flow_summary": {
+                        "estimate_time_code": "5",
+                        "foreign_net_buy_quantity": 1000,
+                        "institution_net_buy_quantity": -100,
+                        "combined_net_buy_quantity": 900,
+                    },
                     "local_signals": [],
                     "required_missing": [],
                     "errors": [],
@@ -262,6 +268,7 @@ def write_self_test_fixtures(workspace: Path, run_dir: Path) -> Path:
             "run_id": "pipeline-self-test",
             "started_at": "2026-06-18T09:00:00+09:00",
             "status": "success",
+            "order_gate_status": "not_run",
             "active_order_lookup_performed": False,
             "order_available_lookup_performed": False,
             "account_summary": {
@@ -287,7 +294,7 @@ def write_self_test_fixtures(workspace: Path, run_dir: Path) -> Path:
             "stage": "account-asset-snapshot",
             "status": "success",
             "skipped": False,
-            "source_api": "inquire_balance",
+            "source_api": "inquire_account_balance",
             "tot_asst_amt": 20000000,
             "tot_dncl_amt": 1000000,
             "evlu_amt_smtl": 19000000,
@@ -295,7 +302,7 @@ def write_self_test_fixtures(workspace: Path, run_dir: Path) -> Path:
             "evlu_pfls_amt_smtl": 1000000,
             "ovrs_stck_evlu_amt1": 0,
             "account_asset_summary": {
-                "source_api": "inquire_balance",
+                "source_api": "inquire_account_balance",
                 "observed_at": "2026-06-18T09:00:05+09:00",
                 "total_asset_amount": 20000000,
                 "cash_deposit_amount": 1000000,
@@ -1051,6 +1058,11 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
             summary = pipeline.run()
             if summary["status"] != "partial":
                 failures.append(f"real-submit summary should remain partial before submit-order execution: {summary['status']}")
+            if summary.get("account_collection_status") != "success" or summary.get("order_gate_status") != "not_run":
+                failures.append(
+                    "pipeline summary mixed account collection and pending order gate states: "
+                    f"collection={summary.get('account_collection_status')}, gate={summary.get('order_gate_status')}"
+                )
             run_stage_names = [item.get("stage") for item in load_json(run_dir / "run.json").get("stages", []) if isinstance(item, dict)]
             if "market-index-snapshot" not in run_stage_names or not (run_dir / "market-index-snapshot.json").exists():
                 failures.append(f"pipeline did not record optional market-index-snapshot stage: {run_stage_names}")
@@ -1198,6 +1210,13 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
             evidence_summary = summary.get("evidence_summary") if isinstance(summary.get("evidence_summary"), dict) else {}
             if not isinstance(evidence_summary.get("news"), dict) or "display_text" not in evidence_summary.get("news", {}):
                 failures.append(f"pipeline summary omitted displayable news evidence status: {evidence_summary}")
+            investor_flow_summary = evidence_summary.get("investor_flow") if isinstance(evidence_summary.get("investor_flow"), dict) else {}
+            if (
+                investor_flow_summary.get("status") != "partial"
+                or investor_flow_summary.get("usable_symbol_count") != 1
+                or investor_flow_summary.get("missing_usable_symbol_count") != 1
+            ):
+                failures.append(f"pipeline summary omitted investor flow coverage: {investor_flow_summary}")
             telegram_policy = summary.get("telegram_response_policy") if isinstance(summary.get("telegram_response_policy"), dict) else {}
             if telegram_policy.get("gate_label") != "주문 전 기존 미체결/예약 주문":
                 failures.append(f"telegram response policy omitted explicit gate label: {telegram_policy}")

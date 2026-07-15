@@ -9,6 +9,7 @@ import os
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 from ..scripts import execute_orders as execute_orders_module
 from ..scripts.execute_orders import (
@@ -40,6 +41,7 @@ def self_test() -> int:
             "schema_version": "1",
             "execution_environment": "real",
             "account_summary": {"cash_amount": 500000},
+            "order_gate_status": "not_run",
             "active_order_lookup_performed": False,
             "order_available_lookup_performed": False,
             "warnings": ["active_order_lookup_not_performed", "order_available_lookup_not_performed"],
@@ -74,6 +76,8 @@ def self_test() -> int:
         account_after = load_json(root / "account-before-order.json")
         if account_after.get("active_order_lookup_performed") is not True or account_after.get("order_available_lookup_performed") is not True:
             failures.append("account gates not refreshed")
+        if account_after.get("order_gate_status") != "success":
+            failures.append(f"successful gate refresh was not recorded: {account_after.get('order_gate_status')}")
         write_json(root / "execution.json", {**execution, "orders": [{"symbol_id": "005930", "symbol_name": "삼성전자", "order_price": 70000, "direction": "sell", "final_first_score": 3.5, "result": "blocked"}]})
         invalid_final_payload = execute(argparse.Namespace(output_dir=str(root), execution_json="", account_before_order="", env="real", submit=False, offline=True, retries=0, reservation_start_date="", reservation_end_date=""))
         invalid_final_order = invalid_final_payload["orders"][0]
@@ -1025,6 +1029,56 @@ def self_test() -> int:
 class ExecuteOrdersSelfTest(unittest.TestCase):
     def test_self_test_suite(self) -> None:
         self.assertEqual(self_test(), 0)
+
+    def test_gate_lookup_failure_is_recorded_separately_from_account_collection(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_json(
+                root / "account-before-order.json",
+                {
+                    "schema_version": "1",
+                    "status": "success",
+                    "execution_environment": "real",
+                    "order_gate_status": "not_run",
+                    "account_summary": {},
+                    "warnings": [],
+                    "symbols": [],
+                },
+            )
+            write_json(
+                root / "execution.json",
+                {
+                    "schema_version": "1",
+                    "request_type": "real-submit",
+                    "status": "success",
+                    "requires_main_agent_order_execution": True,
+                    "required_main_agent_actions": ["continue_order_execution"],
+                    "errors": [],
+                    "orders": [],
+                },
+            )
+            gate_error = {"code": "order_available_lookup_failed", "message": "masked"}
+            with patch.object(execute_orders_module, "refresh_gates", return_value=([], {}, {}, [gate_error], None)):
+                execution = execute(
+                    argparse.Namespace(
+                        output_dir=str(root),
+                        execution_json="",
+                        account_before_order="",
+                        env="real",
+                        submit=False,
+                        offline=False,
+                        retries=0,
+                        reservation_start_date="",
+                        reservation_end_date="",
+                    )
+                )
+
+            account = load_json(root / "account-before-order.json")
+            self.assertEqual(account["status"], "success")
+            self.assertEqual(account["order_gate_status"], "failed")
+            self.assertEqual(execution["status"], "failed")
 
     def test_broker_reconciliation_distinguishes_fill_and_rejection(self) -> None:
         class FakeBrokerKis:

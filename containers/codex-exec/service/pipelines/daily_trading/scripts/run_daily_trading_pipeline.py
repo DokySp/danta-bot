@@ -1557,6 +1557,21 @@ class Pipeline:
             raise RuntimeError("order-execution failed")
         return execution
 
+    def finalize_account_order_gate_status(self, execution: dict[str, Any]) -> str:
+        account_path = self.output_dir / "account-before-order.json"
+        account = load_json_if_exists(account_path) or {}
+        current = str(account.get("order_gate_status") or "").strip()
+        if current in {"success", "failed"}:
+            return current
+        requires_gate = (
+            str(execution.get("request_type") or self.args.request_type) in {"demo-submit", "real-submit"}
+            and bool(execution.get("requires_main_agent_order_execution"))
+        )
+        status = "not_run" if requires_gate else "not_required"
+        account["order_gate_status"] = status
+        write_json(account_path, account)
+        return status
+
     def judge_review_context_by_symbol(self, wrapper: dict[str, Any]) -> dict[str, dict[str, Any]]:
         paths = wrapper.get("review_input_paths") if isinstance(wrapper.get("review_input_paths"), dict) else {}
         review_core_path = paths.get("review_core")
@@ -1834,7 +1849,7 @@ class Pipeline:
         purchase = as_int(snapshot.get("pchs_amt_smtl"))
         pnl = as_int(snapshot.get("evlu_pfls_amt_smtl"))
         return {
-            "source_api": snapshot.get("source_api") or "inquire_balance",
+            "source_api": snapshot.get("source_api") or "inquire_account_balance",
             "observed_at": snapshot.get("observed_at"),
             "total_asset_amount": total_asset,
             "cash_deposit_amount": as_int(snapshot.get("tot_dncl_amt")),
@@ -1899,6 +1914,7 @@ class Pipeline:
         decision_symbols = decision_brief.get("symbols") if isinstance(decision_brief.get("symbols"), list) else []
         financial_supplied = 0
         news_with_articles = 0
+        investor_flow_usable = 0
         price_only = 0
         for item in decision_symbols:
             if not isinstance(item, dict):
@@ -1909,6 +1925,16 @@ class Pipeline:
             news_summary = item.get("news_summary") if isinstance(item.get("news_summary"), list) else []
             if news_summary:
                 news_with_articles += 1
+            investor_flow = item.get("investor_flow_summary") if isinstance(item.get("investor_flow_summary"), dict) else {}
+            if any(
+                investor_flow.get(key) is not None
+                for key in (
+                    "foreign_net_buy_quantity",
+                    "institution_net_buy_quantity",
+                    "combined_net_buy_quantity",
+                )
+            ):
+                investor_flow_usable += 1
             if item.get("evidence_mode") == "price-only":
                 price_only += 1
 
@@ -1924,6 +1950,24 @@ class Pipeline:
                 "status": "supplied" if news_with_articles else "not_supplied",
                 "symbol_count_with_articles": news_with_articles,
                 "display_text": f"뉴스: {news_with_articles}개 종목 기사 반영" if news_with_articles else "뉴스: 반영된 기사 없음",
+            },
+            "investor_flow": {
+                "status": (
+                    "supplied"
+                    if investor_flow_usable == len(symbols) and symbols
+                    else "partial"
+                    if investor_flow_usable
+                    else "not_supplied"
+                ),
+                "usable_symbol_count": investor_flow_usable,
+                "missing_usable_symbol_count": max(0, len(symbols) - investor_flow_usable),
+                "display_text": (
+                    f"장중 수급: {investor_flow_usable}개 종목 추정치 반영"
+                    if investor_flow_usable == len(symbols) and symbols
+                    else f"장중 수급: {investor_flow_usable}개 종목 추정치 반영, 일부 종목 수급 없음"
+                    if investor_flow_usable
+                    else "장중 수급: 반영된 추정치 없음"
+                ),
             },
         }
         for domain in ("financial", "news"):
@@ -2418,6 +2462,15 @@ class Pipeline:
         symbols = normalize_symbol_ids(portfolio.get("universe"))
         account_summary = account.get("account_summary") if isinstance(account.get("account_summary"), dict) else {}
         account_display_summary = self.build_account_display_summary(account_summary)
+        account_collection_status = str(account.get("status") or "unavailable")
+        order_gate_status = str(account.get("order_gate_status") or "").strip()
+        if order_gate_status not in {"not_run", "success", "failed", "not_required"}:
+            if account.get("active_order_lookup_performed") is True and account.get("order_available_lookup_performed") is True:
+                order_gate_status = "success"
+            elif str(execution.get("request_type") or "") in {"demo-submit", "real-submit"} and execution.get("requires_main_agent_order_execution"):
+                order_gate_status = "not_run"
+            else:
+                order_gate_status = "not_required"
         account_asset_summary = self.build_account_asset_summary(account_asset_snapshot if isinstance(account_asset_snapshot, dict) else {})
         today_trade_summary = self.build_today_trade_summary(decision_brief if isinstance(decision_brief, dict) else {})
         evidence_summary = self.build_evidence_summary(decision_brief, stages, symbols)
@@ -2451,6 +2504,8 @@ class Pipeline:
                 "error_count": len(decision_brief.get("errors", [])) if isinstance(decision_brief.get("errors"), list) else 0,
             },
             "review_summary": review_summary,
+            "account_collection_status": account_collection_status,
+            "order_gate_status": order_gate_status,
             "account_summary": account_summary,
             "account_display_summary": account_display_summary,
             "account_asset_summary": account_asset_summary,
@@ -2508,7 +2563,7 @@ class Pipeline:
                 ],
                 "today_trade_amount_policy": "Show today_buy_amount/today_sell_amount and today_fills_summary.fill_count only under a separate 당일 거래 누계 label when relevant, explicitly marked as this run's pre-order snapshot (account-before-order.json / collection-time today-fills.json), never as values current at Telegram delivery time; never present them as newly caused by this command unless execution.json confirms submitted orders.",
                 "gate_label": "주문 전 기존 미체결/예약 주문",
-                "evidence_policy": "Report evidence_summary.financial.display_text and evidence_summary.news.display_text, distinguishing missing cache from cache_exists_zero_usable_articles.",
+                "evidence_policy": "Report evidence_summary.financial.display_text, evidence_summary.news.display_text, and evidence_summary.investor_flow.display_text; distinguish missing cache from cache_exists_zero_usable_articles.",
                 "review_policy": "Mention judge/judge-review outcome using review_summary.final_sell_count/final_buy_count/final_hold_count (final decisions derived from current->final holding quantity direction) and unresolved_candidate_count; never present sell_candidate_count/buy_candidate_count/hold_symbol_count as final verdicts. Highlight submitted or final-quantity-changed symbols, including final holding quantity and one_line_reason when available.",
             },
             "artifacts": {
@@ -2684,6 +2739,9 @@ class Pipeline:
             and bool((execution or {}).get("requires_main_agent_order_execution"))
         ):
             execution = self.run_order_execution()
+
+        if isinstance(execution, dict):
+            self.finalize_account_order_gate_status(execution)
 
         token_args = ["token-summary", "--run-dir", str(self.output_dir)]
         if self.args.main_events:

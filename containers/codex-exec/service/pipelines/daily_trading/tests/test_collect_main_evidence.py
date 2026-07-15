@@ -11,12 +11,17 @@ from pathlib import Path
 from unittest.mock import patch
 
 from ..scripts.collect_main_evidence import (
+    account_asset_params,
     account_asset_summary_from_row,
     append_account_asset_history,
     build_account_summary,
     build_collection_summary,
     build_price_row,
+    collect_account_artifact,
+    collect_account_asset_snapshot,
+    collect_extended_market_evidence,
     collect_today_fills_artifact,
+    latest_investor_flow_row,
     merge_duplicate_fills,
     normalize_fill,
     normalize_holding,
@@ -26,6 +31,7 @@ from ..scripts.collect_main_evidence import (
     parse_symbols,
     safe_error,
     skipped_account_asset_snapshot,
+    summarize_investor_flow,
     summarize_orderbook,
 )
 
@@ -126,7 +132,14 @@ def command_self_test(_args: argparse.Namespace) -> int:
         }
     )
     assert asset_summary["total_asset_amount"] == 20000000
+    assert asset_summary["source_api"] == "inquire_account_balance"
     assert asset_summary["evaluation_pnl_rate"] == 1000000 / 18000000
+    assert account_asset_params("account", "01") == {
+        "CANO": "account",
+        "ACNT_PRDT_CD": "01",
+        "INQR_DVSN_1": "",
+        "BSPR_BF_DT_APLY_YN": "",
+    }
     skipped_asset = skipped_account_asset_snapshot(run_id="self-test", started_at="2026-06-18T09:00:00+09:00", env_dv="real", reason="skip-account option")
     assert skipped_asset["skipped"] and skipped_asset["status"] == "success"
     summary = build_collection_summary(
@@ -168,7 +181,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
             "observed_at": "2026-06-18T09:01:00+09:00",
             "generated_at": "2026-06-18T09:01:00+09:00",
             "status": "success",
-            "source_api": "inquire_balance",
+            "source_api": "inquire_account_balance",
             "execution_environment": "real",
             "tot_asst_amt": 20000000,
             "tot_dncl_amt": 1000000,
@@ -191,6 +204,103 @@ def command_self_test(_args: argparse.Namespace) -> int:
 class CollectMainEvidenceSelfTest(unittest.TestCase):
     def test_self_test_suite(self) -> None:
         self.assertEqual(command_self_test(argparse.Namespace()), 0)
+
+    def test_account_asset_snapshot_uses_dedicated_account_balance_api(self) -> None:
+        calls: list[tuple[str, dict[str, str]]] = []
+
+        def fake_call_endpoint(endpoint_name: str, params: dict[str, str], *_args: object, **_kwargs: object) -> tuple[dict[str, object], dict[str, str]]:
+            calls.append((endpoint_name, params))
+            return (
+                {
+                    "output2": {
+                        "tot_asst_amt": "20000000",
+                        "tot_dncl_amt": "1000000",
+                        "evlu_amt_smtl": "19000000",
+                        "pchs_amt_smtl": "18000000",
+                        "evlu_pfls_amt_smtl": "1000000",
+                        "ovrs_stck_evlu_amt1": "0",
+                    }
+                },
+                {},
+            )
+
+        with (
+            patch("service.pipelines.daily_trading.scripts.collect_main_evidence.account_parts", return_value=("account", "01")),
+            patch("service.pipelines.daily_trading.scripts.collect_main_evidence.call_endpoint", side_effect=fake_call_endpoint),
+        ):
+            snapshot = collect_account_asset_snapshot(
+                run_id="asset-api",
+                started_at="2026-07-15T09:00:00+09:00",
+                env_dv="real",
+                app_key="masked",
+                app_secret="masked",
+                token="masked",
+                retries=0,
+            )
+
+        self.assertEqual(calls[0][0], "inquire_account_balance")
+        self.assertEqual(calls[0][1]["INQR_DVSN_1"], "")
+        self.assertEqual(snapshot["status"], "success")
+        self.assertEqual(snapshot["source_api"], "inquire_account_balance")
+        self.assertEqual(snapshot["tot_asst_amt"], 20000000)
+
+    def test_investor_flow_uses_latest_usable_estimate(self) -> None:
+        rows = [
+            {"bsop_hour_gb": "3", "frgn_fake_ntby_qty": "100", "orgn_fake_ntby_qty": "-20", "sum_fake_ntby_qty": "80"},
+            {"bsop_hour_gb": "5"},
+            {"bsop_hour_gb": "4", "frgn_fake_ntby_qty": "200", "orgn_fake_ntby_qty": "10", "sum_fake_ntby_qty": "210"},
+        ]
+
+        summary = summarize_investor_flow(latest_investor_flow_row(rows))
+
+        self.assertEqual(summary["estimate_time_code"], "4")
+        self.assertEqual(summary["foreign_net_buy_quantity"], 200)
+        self.assertEqual(summary["institution_net_buy_quantity"], 10)
+        self.assertEqual(summary["combined_net_buy_quantity"], 210)
+        self.assertEqual(summarize_investor_flow({"bsop_hour_gb": "5"}), {})
+
+    def test_empty_investor_flow_is_recorded_as_optional_unavailable(self) -> None:
+        with (
+            patch("service.pipelines.daily_trading.scripts.collect_main_evidence.collect_period_chart", return_value=[]),
+            patch("service.pipelines.daily_trading.scripts.collect_main_evidence.collect_intraday_chart", return_value=[]),
+            patch("service.pipelines.daily_trading.scripts.collect_main_evidence.collect_orderbook_summary", return_value={}),
+            patch("service.pipelines.daily_trading.scripts.collect_main_evidence.collect_trade_flow_summary", return_value={}),
+            patch("service.pipelines.daily_trading.scripts.collect_main_evidence.collect_investor_flow_summary", return_value={}),
+        ):
+            *_evidence, errors = collect_extended_market_evidence(
+                "005930",
+                market="J",
+                app_key="masked",
+                app_secret="masked",
+                token="masked",
+                retries=0,
+                env_dv="real",
+            )
+
+        self.assertIn("investor_flow_unavailable", {item.get("code") for item in errors})
+        self.assertTrue(all(item.get("required") is False for item in errors))
+
+    def test_account_collection_success_does_not_require_order_gates(self) -> None:
+        with patch(
+            "service.pipelines.daily_trading.scripts.collect_main_evidence.fetch_account_balance",
+            return_value=([], {"dnca_tot_amt": "1000", "tot_evlu_amt": "2000"}, []),
+        ):
+            artifact = collect_account_artifact(
+                ["005930"],
+                run_id="account-status",
+                started_at="2026-07-15T09:00:00+09:00",
+                env_dv="real",
+                app_key="masked",
+                app_secret="masked",
+                token="masked",
+                retries=0,
+                max_pages=1,
+                request_type="analysis",
+            )
+
+        self.assertEqual(artifact["status"], "success")
+        self.assertEqual(artifact["order_gate_status"], "not_run")
+        self.assertEqual(artifact["warnings"], [])
 
     def test_today_fills_preserve_account_wide_symbols(self) -> None:
         outside_universe_row = {
