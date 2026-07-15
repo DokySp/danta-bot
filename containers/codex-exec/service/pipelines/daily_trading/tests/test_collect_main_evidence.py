@@ -8,6 +8,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from ..scripts.collect_main_evidence import (
     account_asset_summary_from_row,
@@ -15,6 +16,7 @@ from ..scripts.collect_main_evidence import (
     build_account_summary,
     build_collection_summary,
     build_price_row,
+    collect_today_fills_artifact,
     merge_duplicate_fills,
     normalize_fill,
     normalize_holding,
@@ -189,3 +191,42 @@ def command_self_test(_args: argparse.Namespace) -> int:
 class CollectMainEvidenceSelfTest(unittest.TestCase):
     def test_self_test_suite(self) -> None:
         self.assertEqual(command_self_test(argparse.Namespace()), 0)
+
+    def test_today_fills_preserve_account_wide_symbols(self) -> None:
+        outside_universe_row = {
+            "pdno": "999999",
+            "prdt_name": "Outside Universe",
+            "sll_buy_dvsn_cd": "01",
+            "tot_ccld_qty": "2",
+            "avg_prvs": "12000",
+            "ord_dt": "20260618",
+            "ord_tmd": "101500",
+            "odno": "outside-1",
+        }
+        with (
+            patch(
+                "service.pipelines.daily_trading.scripts.collect_main_evidence.account_parts",
+                return_value=("account", "product"),
+            ),
+            patch(
+                "service.pipelines.daily_trading.scripts.collect_main_evidence.daily_ccld_query_variants",
+                return_value=[("default", {})],
+            ),
+            patch(
+                "service.pipelines.daily_trading.scripts.collect_main_evidence.fetch_daily_ccld_rows",
+                return_value=[outside_universe_row],
+            ),
+        ):
+            artifact = collect_today_fills_artifact(
+                ["005930"],
+                run_id="account-wide-fills",
+                started_at="2026-06-18T10:30:00+09:00",
+                env_dv="real",
+                app_key="masked",
+                app_secret="masked",
+                token="masked",
+                retries=0,
+            )
+
+        self.assertEqual(artifact["fill_scope"], "account")
+        self.assertEqual([item["symbol_id"] for item in artifact["fills"]], ["999999"])

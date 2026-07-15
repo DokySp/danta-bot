@@ -1186,7 +1186,6 @@ def collect_today_fills_artifact(
             )
             if query_name == "default":
                 raise
-    wanted = {normalize_symbol_key(symbol) for symbol in symbols}
     observed_at = now_kst_iso()
     fills = [
         fill
@@ -1197,7 +1196,7 @@ def collect_today_fills_artifact(
             )
             for row in raw_rows
         )
-        if fill.get("symbol_id") in wanted and fill.get("direction") in {"buy", "sell"} and fill.get("filled_quantity", 0) > 0
+        if fill.get("symbol_id") and fill.get("direction") in {"buy", "sell"} and fill.get("filled_quantity", 0) > 0
     ]
     fills = merge_duplicate_fills(fills)
     fills.sort(key=lambda item: (str(item.get("filled_at") or ""), str(item.get("order_id") or "")))
@@ -1207,11 +1206,12 @@ def collect_today_fills_artifact(
         "started_at": started_at,
         "generated_at": now_kst_iso(),
         "stage": "today-fills",
-        "status": "success",
+        "status": "partial" if errors else "success",
         "skipped": False,
         "skip_reason": "",
         "execution_environment": env_dv,
         "source_api": "direct_kis.inquire_daily_ccld",
+        "fill_scope": "account",
         "source_queries": [name for name, _ in daily_ccld_query_variants()],
         "symbols": [{"symbol_id": symbol} for symbol in symbols],
         "fills": fills,
@@ -1231,6 +1231,7 @@ def skipped_today_fills_artifact(symbols: list[str], *, run_id: str, started_at:
         "skip_reason": reason,
         "execution_environment": env_dv,
         "source_api": "direct_kis.inquire_daily_ccld",
+        "fill_scope": "account",
         "symbols": [{"symbol_id": symbol} for symbol in symbols],
         "fills": [],
         "errors": [],
@@ -1249,6 +1250,7 @@ def failed_today_fills_artifact(symbols: list[str], *, run_id: str, started_at: 
         "skip_reason": "",
         "execution_environment": env_dv,
         "source_api": "direct_kis.inquire_daily_ccld",
+        "fill_scope": "account",
         "symbols": [{"symbol_id": symbol} for symbol in symbols],
         "fills": [],
         "errors": [error],

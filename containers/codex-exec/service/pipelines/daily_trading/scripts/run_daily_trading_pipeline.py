@@ -758,6 +758,9 @@ class Pipeline:
     def telegram_summary_script(self) -> str:
         return str(script_dir() / "render_telegram_summary.py")
 
+    def html_report_script(self) -> str:
+        return str(script_dir() / "render_html_report.py")
+
     def portfolio_script_candidates(self) -> list[Path]:
         return [
             self.repo_root / "containers/codex-exec/profiles/base/skills/check-portfolio/scripts/read_portfolio.sh",
@@ -2387,11 +2390,36 @@ class Pipeline:
             self.add_stage("telegram-summary", "success", required=False, detail="rendered telegram-summary.txt", path=path)
         return path
 
+    def write_html_report(self) -> Path:
+        path = self.output_dir / "daily-trading-report.html"
+        result = self.run_cmd(
+            "html-report",
+            [
+                sys.executable,
+                self.html_report_script(),
+                "--runs-root",
+                str(self.output_dir.parent),
+                "--target-run",
+                self.output_dir.name,
+                "--output",
+                str(path),
+            ],
+            required=False,
+        )
+        self.stages = [item for item in self.stages if item.get("stage") != "html-report"]
+        if result.returncode != 0:
+            path.unlink(missing_ok=True)
+            self.add_stage("html-report", "partial", required=False, detail=compact_text(result.stderr or result.stdout), path=path)
+        else:
+            self.add_stage("html-report", "success", required=False, detail="rendered daily-trading-report.html", path=path)
+        return path
+
     def build_summary(self, portfolio: dict[str, Any]) -> dict[str, Any]:
         token_summary = load_json_if_exists(self.output_dir / "token-summary.json") or {}
         execution = load_json_if_exists(self.output_dir / "execution.json") or {}
         account = load_json_if_exists(self.output_dir / "account-before-order.json") or {}
         account_asset_snapshot = load_json_if_exists(self.output_dir / "account-asset-snapshot.json") or {}
+        today_fills = load_json_if_exists(self.output_dir / "today-fills.json") or {}
         decision_brief = load_json_if_exists(self.output_dir / "decision-brief.json") or {}
         orders = []
         for item in execution.get("orders", []) if isinstance(execution, dict) else []:
@@ -2421,6 +2449,7 @@ class Pipeline:
         evidence_summary = self.build_evidence_summary(decision_brief, stages, symbols)
         report_path = self.report_path()
         telegram_summary_path = self.output_dir / "telegram-summary.txt"
+        html_report_path = self.output_dir / "daily-trading-report.html"
         summary = {
             "schema_version": "1",
             "run_id": self.run_id,
@@ -2431,6 +2460,7 @@ class Pipeline:
             "command_log_path": str(self.command_log_path),
             "report_path": str(report_path),
             "telegram_summary_path": str(telegram_summary_path),
+            "html_report_path": str(html_report_path),
             "daily_trading_config": self.daily_trading_config_summary(),
             "stages": stages,
             "portfolio_except": normalize_symbol_ids(portfolio.get("portfolio_except")),
@@ -2450,6 +2480,12 @@ class Pipeline:
             "account_summary": account_summary,
             "account_display_summary": account_display_summary,
             "account_asset_summary": account_asset_summary,
+            "today_fills_summary": {
+                "status": today_fills.get("status"),
+                "skipped": bool(today_fills.get("skipped")),
+                "fill_scope": today_fills.get("fill_scope") or "universe",
+                "fill_count": len(today_fills.get("fills", [])) if isinstance(today_fills.get("fills"), list) else 0,
+            },
             "today_trade_summary": today_trade_summary,
             "evidence_summary": evidence_summary,
             "execution": {
@@ -2474,7 +2510,7 @@ class Pipeline:
                 "total": (token_summary.get("total") or {}).get("token_usage", zero_usage()),
             },
             "telegram_response_policy": {
-                "source": "Use telegram-summary.txt as the fixed Telegram response. Regenerate it from pipeline-summary.json with render_telegram_summary.py.",
+                "source": "Send telegram-summary.txt as the short Telegram message and attach daily-trading-report.html when html_report_available is true.",
                 "account_state_fields": [
                     "cash_amount",
                     "securities_valuation_amount",
@@ -2501,6 +2537,7 @@ class Pipeline:
                 "model_usage": str(self.model_usage_path),
                 "portfolio_report": str(report_path),
                 "telegram_summary": str(telegram_summary_path),
+                "html_report": str(html_report_path),
             },
             "main_agent_read_policy": (
                 "Read pipeline-summary.json first. For explicit demo-submit or real-submit runs, pass --submit-orders so execute_orders.py refreshes "
@@ -2511,6 +2548,10 @@ class Pipeline:
             ),
         }
         self.write_portfolio_report(summary)
+        write_json(self.summary_path, summary)
+        self.write_html_report()
+        summary["stages"] = self.load_summary_stages()
+        summary["html_report_available"] = html_report_path.is_file()
         write_json(self.summary_path, summary)
         self.write_telegram_summary()
         summary["stages"] = self.load_summary_stages()

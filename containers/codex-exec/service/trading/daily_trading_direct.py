@@ -3,6 +3,7 @@ import logging
 import os
 import shlex
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -27,12 +28,23 @@ def is_execute_trade_direct_request(text: str) -> bool:
     return text.strip() == "$execute-trade"
 
 
+@dataclass(frozen=True)
+class DailyTradingDirectResult:
+    output: str
+    html_report_path: Path | None
+
+
 class DailyTradingDirectRunner:
     def __init__(self, config: Config, codex_runner: CodexRunner) -> None:
         self.config = config
         self.codex_runner = codex_runner
 
-    def run(self, raw_config: Any, chat_id: str | None = None, route: str | None = None) -> str:
+    def run(
+        self,
+        raw_config: Any,
+        chat_id: str | None = None,
+        route: str | None = None,
+    ) -> DailyTradingDirectResult:
         context = new_codex_run_context()
         run_dir = self.config.workspace_dir / "reports" / "runs" / context.run_id
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -80,13 +92,18 @@ class DailyTradingDirectRunner:
             output = f"{output}\n\n후속 매수 재시도: {len(retry_paths)}건 예약됨"
         output = append_daily_trading_started_at(output, context)
         usage_after = read_usage_snapshot(self.config)
-        return append_token_usage_summary(
+        output = append_token_usage_summary(
             output,
             self.config.workspace_dir,
             context,
             parse_codex_json_events(""),
             usage_before,
             usage_after,
+        )
+        html_report_path = run_dir / "daily-trading-report.html"
+        return DailyTradingDirectResult(
+            output=output,
+            html_report_path=html_report_path if html_report_path.is_file() else None,
         )
 
     def read_telegram_summary(self, run_dir: Path) -> str:

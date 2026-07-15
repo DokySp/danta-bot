@@ -13,6 +13,7 @@ from ..state import StateStore
 from ..trading.daily_trading import error_message_with_run_context
 from ..trading.daily_trading_direct import (
     DailyTradingDirectRunner,
+    format_direct_delivery_error,
     is_execute_trade_direct_request,
     load_execute_trade_config,
 )
@@ -82,8 +83,23 @@ class TelegramWorker:
                 task.route,
                 self.config.telegram_typing_interval_seconds,
             ):
-                output = self.daily_trading_direct_runner.run(load_execute_trade_config(self.config))
-            self.gateway.send_message(output, task.chat_id, task.route)
+                result = self.daily_trading_direct_runner.run(load_execute_trade_config(self.config))
+            try:
+                self.gateway.send_message(result.output, task.chat_id, task.route)
+                if result.html_report_path is not None:
+                    self.gateway.send_document(
+                        result.html_report_path,
+                        "<b>daily-trading 당일 누적 상세 리포트</b>",
+                        task.chat_id,
+                        task.route,
+                    )
+            except Exception as exc:  # noqa: BLE001 - trade succeeded; classify delivery separately
+                logging.exception("daily-trading Telegram delivery failed command=$execute-trade")
+                self.gateway.send_message(
+                    format_direct_delivery_error("$execute-trade", exc),
+                    task.chat_id,
+                    task.route,
+                )
             return
 
         holding_history_days = parse_show_holding_history_command(text)

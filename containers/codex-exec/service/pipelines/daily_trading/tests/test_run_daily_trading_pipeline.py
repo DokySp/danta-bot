@@ -317,6 +317,7 @@ def write_self_test_fixtures(workspace: Path, run_dir: Path) -> Path:
             "stage": "today-fills",
             "status": "success",
             "skipped": False,
+            "fill_scope": "account",
             "symbols": [{"symbol_id": "005930"}, {"symbol_id": "000660"}],
             "fills": [],
             "errors": [],
@@ -1158,6 +1159,9 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
                 or today_trade_summary.get("unknown_symbol_count") != 0
             ):
                 failures.append(f"pipeline summary did not distinguish confirmed empty same-day history: {today_trade_summary}")
+            today_fills_summary = summary.get("today_fills_summary") if isinstance(summary.get("today_fills_summary"), dict) else {}
+            if today_fills_summary.get("status") != "success" or today_fills_summary.get("fill_count") != 0:
+                failures.append(f"pipeline summary omitted account fill collection status: {today_fills_summary}")
             account_display = summary.get("account_display_summary") if isinstance(summary.get("account_display_summary"), dict) else {}
             if "today_buy_amount" in account_display or "today_sell_amount" in account_display:
                 failures.append(f"display account summary should not expose same-day totals as main fields: {account_display}")
@@ -1176,6 +1180,8 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
                 failures.append(f"pipeline summary omitted model usage artifact path: {artifacts}")
             if not str(artifacts.get("judge_debate", "")).endswith("judge-debate.json"):
                 failures.append(f"pipeline summary omitted judge debate artifact path: {artifacts}")
+            if not str(artifacts.get("html_report", "")).endswith("daily-trading-report.html"):
+                failures.append(f"pipeline summary omitted HTML report artifact path: {artifacts}")
             run_payload = load_json(run_dir / "run.json")
             if not str(run_payload.get("model_usage", "")).endswith("model-usage.jsonl"):
                 failures.append(f"run.json omitted model usage artifact path: {run_payload}")
@@ -1192,9 +1198,17 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
                 failures.append(f"telegram summary was not written: {telegram_summary_path}")
             else:
                 telegram_text = telegram_summary_path.read_text(encoding="utf-8")
-                for required_text in ("<b>daily-trading", "<b>계좌</b>", "<b>주문</b>", "<b>평결</b>", "토큰:"):
+                for required_text in ("<b>daily-trading", "<b>계좌</b>", "<b>이번 run</b>", "상세 리포트:", "토큰:"):
                     if required_text not in telegram_text:
                         failures.append(f"telegram summary omitted {required_text}: {telegram_summary_path}")
+            html_report_path = Path(str(summary.get("html_report_path") or ""))
+            if not summary.get("html_report_available") or not html_report_path.exists():
+                failures.append(f"HTML report was not written: {html_report_path}")
+            else:
+                html_text = html_report_path.read_text(encoding="utf-8")
+                for required_text in ("당일 누적 거래·판단 리포트", "계좌·시장 통합 추이", "시간대별 거래·전체 종목 판단"):
+                    if required_text not in html_text:
+                        failures.append(f"HTML report omitted {required_text}: {html_report_path}")
             report_path = Path(str(summary.get("report_path") or ""))
             if not report_path.exists():
                 failures.append(f"portfolio report was not written: {report_path}")
@@ -1467,6 +1481,9 @@ print(json.dumps(execution, ensure_ascii=False))
             summarized_telegram = Path(str(summarized.get("telegram_summary_path") or ""))
             if not summarized_telegram.exists() or "selftest-resv-1" not in summarized_telegram.read_text(encoding="utf-8"):
                 failures.append("summarize did not refresh telegram summary with submitted order evidence")
+            summarized_html = Path(str(summarized.get("html_report_path") or ""))
+            if not summarized.get("html_report_available") or not summarized_html.exists():
+                failures.append("summarize did not refresh the cumulative HTML report")
             final_report = Path(str(summarized.get("report_path") or ""))
             final_report_text = final_report.read_text(encoding="utf-8") if final_report.exists() else ""
             if "selftest-resv-1" not in final_report_text or "submitted" not in final_report_text:

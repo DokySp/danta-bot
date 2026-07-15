@@ -94,6 +94,7 @@ class Scheduler:
         chat_id_text = str(chat_id) if chat_id else None
         route_text = str(route) if route else None
         output_ready = False
+        html_report_path = None
         try:
             if daily_trading_config is None:
                 runtime_defaults = self.runner.runtime_defaults()
@@ -112,7 +113,9 @@ class Scheduler:
                 self.config.telegram_typing_interval_seconds,
             ):
                 if daily_trading_config is not None:
-                    output = self.daily_trading_direct_runner.run(daily_trading_config, chat_id_text, route_text)
+                    result = self.daily_trading_direct_runner.run(daily_trading_config, chat_id_text, route_text)
+                    output = result.output
+                    html_report_path = result.html_report_path
                 else:
                     output = self.runner.run_once(
                         message,
@@ -122,6 +125,13 @@ class Scheduler:
                     )
             output_ready = True
             self.gateway.send_message(output, chat_id_text, route_text)
+            if html_report_path is not None:
+                self.gateway.send_document(
+                    html_report_path,
+                    "<b>daily-trading 당일 누적 상세 리포트</b>",
+                    chat_id_text,
+                    route_text,
+                )
         except Exception as exc:  # noqa: BLE001 - report schedule failures to Telegram
             delivery_failed = daily_trading_config is not None and output_ready
             if delivery_failed:

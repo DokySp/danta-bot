@@ -150,141 +150,70 @@ def order_line(item: dict[str, Any]) -> str:
     return f"- {symbol_html(item)}: {direction} {quantity_text} · {result}({reason}{adjustment_suffix}){suffix}"
 
 
-def review_line(item: dict[str, Any]) -> str:
-    current_qty = as_int(item.get("current_live_holding_quantity"))
-    final_qty = as_int(item.get("final_holding_quantity"))
-    reason = esc(item.get("one_line_reason") or item.get("reason_code") or "-")
-    order_result = text(item.get("order_result") or "")
-    order_suffix = f" (주문={result_label(order_result)})" if order_result else ""
-    return f"- {symbol_html(item)}: {current_qty}주→{final_qty}주 · {reason}{order_suffix}"
-
-
-def timeline_line(item: dict[str, Any]) -> str:
-    fill_time = clock(item.get("last_fill_at"))
-    time_prefix = f"{fill_time} " if fill_time else ""
-    net_quantity = as_int(item.get("net_quantity"))
-    actor_parts = []
-    bot_net = item.get("bot_net_quantity")
-    manual_net = item.get("manual_net_quantity")
-    if bot_net is not None and as_int(bot_net) != 0:
-        actor_parts.append(f"봇 {as_int(bot_net):+d}")
-    if manual_net is not None and as_int(manual_net) != 0:
-        actor_parts.append(f"수동 {as_int(manual_net):+d}")
-    actor_suffix = f" ({', '.join(actor_parts)})" if actor_parts else ""
-    return (
-        f"- {symbol_html(item)}: {time_prefix}마지막 {direction_label(item.get('last_direction'))} "
-        f"{money(item.get('last_fill_price'))} · 순수량 {net_quantity:+d}{actor_suffix}"
-    )
-
-
-def evidence_line(payload: dict[str, Any], fallback_label: str) -> str:
-    display = text(payload.get("display_text"))
-    if not display:
-        return f"- {fallback_label}: -"
-    return f"- {esc(display)}"
-
-
 def render(summary: dict[str, Any]) -> str:
     account = summary.get("account_display_summary") if isinstance(summary.get("account_display_summary"), dict) else {}
     evidence = summary.get("evidence_summary") if isinstance(summary.get("evidence_summary"), dict) else {}
     financial = evidence.get("financial") if isinstance(evidence.get("financial"), dict) else {}
     news = evidence.get("news") if isinstance(evidence.get("news"), dict) else {}
-    today_timeline = summary.get("today_trade_summary") if isinstance(summary.get("today_trade_summary"), dict) else {}
+    today_fills = summary.get("today_fills_summary") if isinstance(summary.get("today_fills_summary"), dict) else {}
     execution = summary.get("execution") if isinstance(summary.get("execution"), dict) else {}
     review = summary.get("review_summary") if isinstance(summary.get("review_summary"), dict) else {}
     tokens = summary.get("token_usage") if isinstance(summary.get("token_usage"), dict) else {}
     total_tokens = ((tokens.get("total") or {}).get("total_tokens")) if isinstance(tokens.get("total"), dict) else 0
-    portfolio_except = [text(item) for item in summary.get("portfolio_except", []) if text(item)] if isinstance(summary.get("portfolio_except"), list) else []
     orders = [item for item in execution.get("orders", []) if isinstance(item, dict)]
     submitted_or_blocked = [item for item in orders if item.get("result") in {"submitted", "blocked", "failed"}]
     submitted_count = len([item for item in orders if item.get("result") == "submitted"])
     blocked_failed_count = len([item for item in orders if item.get("result") in {"blocked", "failed"}])
     skipped_count = len([item for item in orders if item.get("result") == "skipped"])
-    review_symbols = [item for item in review.get("symbols", []) if isinstance(item, dict)]
-    changed = [
-        item
-        for item in review_symbols
-        if as_int(item.get("current_live_holding_quantity")) != as_int(item.get("final_holding_quantity"))
-        or item.get("order_result") in {"submitted", "blocked", "failed"}
-    ]
+    started_at = text(summary.get("started_at"))
+    time_suffix = f" · {esc(clock(started_at))}" if clock(started_at) else ""
     lines = [
-        f"<b>daily-trading {status_label(summary.get('status'))}</b>",
+        f"<b>daily-trading {status_label(summary.get('status'))}</b>{time_suffix}",
         f"<code>{esc(summary.get('run_id') or '-')}</code>",
         "",
-        "<b>계좌</b>",
-        f"- 예수금 총액: {money(account.get('cash_amount'))}",
+        f"<b>계좌</b> 총평가 {money(account.get('total_evaluation_amount'))} · 평가손익 {signed_money(account.get('total_pnl_amount'))}",
+        f"- 주문가능 {money(account.get('orderable_cash_amount'))} · 주식평가 {money(account.get('securities_valuation_amount'))}",
     ]
-    if account.get("orderable_cash_amount") is not None:
-        lines.append(f"- 주문가능(D+2): {money(account.get('orderable_cash_amount'))}")
-    lines.extend(
-        [
-            f"- 주식평가: {money(account.get('securities_valuation_amount'))}",
-            f"- 총평가: {money(account.get('total_evaluation_amount'))}",
-            f"- 평가손익(매입가 대비): {signed_money(account.get('total_pnl_amount'))}",
-        ]
-    )
     today = account.get("today_trade_amounts") if isinstance(account.get("today_trade_amounts"), dict) else {}
-    today_buy = as_int(today.get("buy_amount", today.get("today_buy_amount")))
-    today_sell = as_int(today.get("sell_amount", today.get("today_sell_amount")))
-    if today_buy or today_sell:
-        lines.extend(
-            [
-                "",
-                "<b>당일 거래 누계</b>",
-                f"- 매수 {money(today_buy)} · 매도 {money(today_sell)}",
-            ]
-        )
-    timeline_symbols = today_timeline.get("symbols") if isinstance(today_timeline.get("symbols"), list) else []
-    timeline_symbols = [item for item in timeline_symbols if isinstance(item, dict)]
-    if timeline_symbols:
-        lines.extend(["", "<b>당일 체결 타임라인</b>"])
-        for item in timeline_symbols[:5]:
-            lines.append(timeline_line(item))
-        if len(timeline_symbols) > 5:
-            lines.append(f"- 외 {len(timeline_symbols) - 5}종목")
+    today_buy = today.get("buy_amount", today.get("today_buy_amount"))
+    today_sell = today.get("sell_amount", today.get("today_sell_amount"))
+    fill_count = today_fills.get("fill_count")
+    if today_fills.get("status") == "success" and not today_fills.get("skipped"):
+        fill_count_text = f"{as_int(fill_count)}건"
+    elif as_int(fill_count) > 0:
+        fill_count_text = f"확인 {as_int(fill_count)}건 ({esc(today_fills.get('status') or 'partial')})"
+    else:
+        fill_count_text = "조회 실패"
     lines.extend(
         [
             "",
-            "<b>근거</b>",
-            evidence_line(financial, "재무"),
-            evidence_line(news, "뉴스"),
+            f"<b>당일 누계</b> 매수 {money(today_buy)} · 매도 {money(today_sell)} · 체결 {fill_count_text}",
             "",
-            f"<b>주문</b> {esc(execution.get('request_type') or '-')} · {status_label(execution.get('status'))}",
-            f"- 계획 {len(orders)}건 · 제출 {submitted_count} · 차단·실패 {blocked_failed_count} · 스킵 {skipped_count}",
+            f"<b>이번 run</b> {esc(execution.get('request_type') or '-')} · 제출 {submitted_count} · 차단·실패 {blocked_failed_count} · 스킵 {skipped_count}",
         ]
     )
-    if portfolio_except:
-        codes = " ".join(f"<code>{esc(code)}</code>" for code in portfolio_except)
-        lines.append(f"- 제외 종목: {codes}")
     if execution.get("requires_main_agent_order_execution"):
-        actions = execution.get("required_main_agent_actions") if isinstance(execution.get("required_main_agent_actions"), list) else []
-        lines.append(f"- 추가 실행 필요: {esc(', '.join(text(item) for item in actions)) or 'yes'}")
-    for item in submitted_or_blocked[:5]:
+        lines.append("- 주문 제출 단계가 아직 완료되지 않았습니다.")
+    for item in submitted_or_blocked[:3]:
         lines.append(order_line(item))
-    if len(submitted_or_blocked) > 5:
-        lines.append(f"- 외 {len(submitted_or_blocked) - 5}건")
-    lines.extend(["", "<b>평결</b>"])
+    if len(submitted_or_blocked) > 3:
+        lines.append(f"- 외 {len(submitted_or_blocked) - 3}건")
     if any(key in review for key in ("sell_candidate_count", "buy_candidate_count", "hold_symbol_count")):
         lines.append(
-            f"- 후보: 매도 {as_int(review.get('sell_candidate_count'))} · 매수 {as_int(review.get('buy_candidate_count'))} · 유지 {as_int(review.get('hold_symbol_count'))}"
+            f"- 평결: 매도 {as_int(review.get('sell_candidate_count'))} · 매수 {as_int(review.get('buy_candidate_count'))} · 유지 {as_int(review.get('hold_symbol_count'))}"
         )
-    for item in changed[:5]:
-        lines.append(review_line(item))
-    if not changed:
-        lines.append("- 최종수량 변경 또는 제출 주문 없음")
-    if len(changed) > 5:
-        lines.append(f"- 외 {len(changed) - 5}건")
-    errors = execution.get("errors") if isinstance(execution.get("errors"), list) else []
-    if errors:
-        lines.extend(["", "<b>오류/보류</b>"])
-        for item in errors[:3]:
-            if isinstance(item, dict):
-                lines.append(f"- {esc(item.get('code') or '-')}: {esc(item.get('message') or '-')}")
-    report_name = Path(text(summary.get("report_path"))).name if text(summary.get("report_path")) else "-"
+    data_issues = sum(
+        1
+        for payload in (financial, news)
+        if text(payload.get("status")) not in {"", "success", "complete", "supplied"}
+    )
+    if data_issues:
+        lines.append(f"- 데이터 확인 필요 {data_issues}개 영역")
+    report_name = Path(text(summary.get("html_report_path"))).name if summary.get("html_report_available") else ""
     lines.extend(
         [
             "",
-            f"보고서: <code>{esc(report_name)}</code>",
+            f"상세 리포트: <code>{esc(report_name)}</code> 첨부" if report_name else "상세 리포트: 생성 실패 또는 미첨부",
             f"토큰: {token_count(total_tokens)}",
         ]
     )
