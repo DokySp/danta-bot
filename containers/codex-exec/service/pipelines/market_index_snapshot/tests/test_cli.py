@@ -9,6 +9,7 @@ from ..cli import (
     collect_market_index_snapshot,
     render_markdown,
 )
+from ..collector import parse_google_finance_quote
 
 
 def command_self_test() -> int:
@@ -67,3 +68,34 @@ def command_self_test() -> int:
 class MarketIndexSnapshotSelfTest(unittest.TestCase):
     def test_self_test_suite(self) -> None:
         self.assertEqual(command_self_test(), 0)
+
+    def test_google_quote_uses_symbol_scoped_structured_data(self) -> None:
+        body = """
+        <style>.chart { transform: translateY(-50%); }</style>
+        <script>
+        AF_initDataCallback({data:[["/m/016yss",[".INX","INDEXSP"],
+        "S\\u0026P 500",1,null,[7548.25,4.6601562,0.061778475,2,2,2],null,7543.59]]});
+        </script>
+        """
+
+        self.assertEqual(parse_google_finance_quote(body, "SP500"), (7548.25, 0.061778475))
+
+    def test_google_quote_explicit_attributes_ignore_unrelated_percentages(self) -> None:
+        body = """
+        <style>.chart { transform: translateY(-50%); }</style>
+        <div data-exchange="INDEXSP" data-last-price="7543.59"
+             data-last-price-change-percent="+0.38%"></div>
+        <div data-exchange="INDEXNASDAQ" data-last-price="26281.50"
+             data-last-price-change-percent="+0.67%"></div>
+        """
+
+        self.assertEqual(parse_google_finance_quote(body, "NASDAQ"), (26281.5, 0.67))
+
+    def test_google_quote_does_not_fall_back_to_unscoped_percentage(self) -> None:
+        body = """
+        <style>.chart { transform: translateY(-50%); }</style>
+        <div data-last-price="52508.27"></div>
+        <div>(-12.34%)</div>
+        """
+
+        self.assertEqual(parse_google_finance_quote(body, "DOW"), (52508.27, None))

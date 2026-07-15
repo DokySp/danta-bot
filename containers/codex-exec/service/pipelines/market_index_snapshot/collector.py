@@ -16,6 +16,11 @@ GOOGLE_FINANCE_URLS = {
     "NASDAQ": "https://www.google.com/finance/quote/.IXIC:INDEXNASDAQ",
     "DOW": "https://www.google.com/finance/quote/.DJI:INDEXDJX",
 }
+GOOGLE_FINANCE_QUOTE_KEYS = {
+    "SP500": (".INX", "INDEXSP"),
+    "NASDAQ": (".IXIC", "INDEXNASDAQ"),
+    "DOW": (".DJI", "INDEXDJX"),
+}
 DISPLAY_NAMES = {
     "SP500": "S&P 500",
     "NASDAQ": "Nasdaq",
@@ -76,6 +81,39 @@ def google_observed_at(raw: str) -> str:
         return now_iso()
 
 
+def parse_google_finance_quote(body: str, symbol: str) -> tuple[float | None, float | None]:
+    normalized = symbol.upper()
+    ticker, exchange = GOOGLE_FINANCE_QUOTE_KEYS[normalized]
+    number = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
+    structured_quote = re.search(
+        rf'\[\s*"[^"]+"\s*,\s*\[\s*"{re.escape(ticker)}"\s*,\s*'
+        rf'"{re.escape(exchange)}"\s*\]\s*,\s*"[^"]+"\s*,\s*\d+\s*,\s*'
+        rf'(?:null|"[^"]*")\s*,\s*\[\s*({number})\s*,\s*({number})\s*,\s*({number})\s*,',
+        body,
+    )
+    if structured_quote:
+        return parse_float(structured_quote.group(1)), parse_float(structured_quote.group(3))
+
+    quote_tags = re.findall(r'<[^>]*\bdata-last-price="[^"]+"[^>]*>', body, flags=re.S)
+    partial_value: float | None = None
+    for require_exchange in (True, False):
+        for quote_tag in quote_tags:
+            quote_exchange = first_match(quote_tag, (r'data-exchange="([^"]+)"',))
+            if require_exchange and quote_exchange != exchange:
+                continue
+            if not require_exchange and quote_exchange:
+                continue
+            value = parse_float(first_match(quote_tag, (r'data-last-price="([^"]+)"',)))
+            change_percent = parse_float(
+                first_match(quote_tag, (r'data-last-price-change-percent="([^"]+)"',))
+            )
+            if value is not None and partial_value is None:
+                partial_value = value
+            if value is not None and change_percent is not None:
+                return value, change_percent
+    return partial_value, None
+
+
 def fetch_google_finance_index(symbol: str) -> IndexQuote:
     normalized = symbol.upper()
     url = GOOGLE_FINANCE_URLS[normalized]
@@ -88,28 +126,11 @@ def fetch_google_finance_index(symbol: str) -> IndexQuote:
     except URLError as exc:
         raise RuntimeError(f"Google Finance quote failed: {exc}") from exc
 
-    value = parse_float(
-        first_match(
-            body,
-            (
-                r'data-last-price="([^"]+)"',
-                r'"last_price":\s*"([^"]+)"',
-                r'\bYMlKec fxKbKc">([^<]+)<',
-            ),
-        )
-    )
+    value, change_percent = parse_google_finance_quote(body, normalized)
     if value is None:
         raise RuntimeError(f"Google Finance quote did not include a numeric price for {normalized}")
-    change_percent = parse_float(
-        first_match(
-            body,
-            (
-                r'data-last-price-change-percent="([^"]+)"',
-                r'"last_price_change_percent":\s*"([^"]+)"',
-                r'\(([-+\u2212]?[0-9.,]+%)\)',
-            ),
-        )
-    )
+    if change_percent is None:
+        raise RuntimeError(f"Google Finance quote did not include a numeric change percent for {normalized}")
     observed_at = google_observed_at(
         first_match(
             body,
@@ -245,4 +266,3 @@ def render_markdown(payload: dict[str, Any]) -> str:
             ]
         )
     return "\n".join(lines).rstrip() + "\n"
-
