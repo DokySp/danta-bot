@@ -117,6 +117,74 @@ def execution_counts(execution: dict[str, Any]) -> tuple[int, int, int]:
     return submitted, blocked, skipped
 
 
+def broker_reconciliation(order: dict[str, Any]) -> dict[str, Any]:
+    value = order.get("broker_reconciliation")
+    return value if isinstance(value, dict) else {}
+
+
+def broker_status_text(order: dict[str, Any]) -> str:
+    broker = broker_reconciliation(order)
+    status = str(broker.get("status") or "")
+    if status == "filled":
+        return f"KIS 체결 {number(broker.get('filled_quantity'))}주"
+    if status == "partially_filled":
+        return f"KIS 일부 체결 {number(broker.get('filled_quantity'))}주 · 잔량 {number(broker.get('remaining_quantity'))}주"
+    if status == "partially_filled_rejected":
+        return f"KIS 일부 체결 {number(broker.get('filled_quantity'))}주 · 잔여 거절"
+    if status == "partially_filled_canceled":
+        return f"KIS 일부 체결 {number(broker.get('filled_quantity'))}주 · 잔여 취소"
+    if status == "rejected":
+        return f"KIS 거절 {number(broker.get('rejected_quantity'))}주"
+    if status == "canceled":
+        return f"KIS 취소 {number(broker.get('canceled_quantity'))}주"
+    if status in {"pending", "accepted"}:
+        return f"KIS 미체결 · 잔량 {number(broker.get('remaining_quantity'))}주"
+    if status == "unconfirmed":
+        return "KIS 상태 미확인"
+    return ""
+
+
+ADVERSE_TERMINAL_BROKER_STATUSES = {
+    "rejected",
+    "canceled",
+    "partially_filled_rejected",
+    "partially_filled_canceled",
+}
+
+
+def requested_order_quantity(order: dict[str, Any]) -> int:
+    return int(order.get("validated_order_quantity") or order.get("quantity") or 0)
+
+
+def fill_is_complete(order: dict[str, Any], fill: dict[str, Any] | None) -> bool:
+    if not fill:
+        return False
+    requested_quantity = requested_order_quantity(order)
+    filled_quantity = int(fill.get("filled_quantity") or 0)
+    return requested_quantity > 0 and filled_quantity >= requested_quantity
+
+
+def order_status_text(order: dict[str, Any], fill: dict[str, Any] | None = None) -> str:
+    broker_status = str(broker_reconciliation(order).get("status") or "")
+    if broker_status in ADVERSE_TERMINAL_BROKER_STATUSES:
+        return broker_status_text(order)
+    if fill:
+        if fill_is_complete(order, fill):
+            return f"체결 {time_text(fill.get('filled_at'))}"
+        requested_quantity = requested_order_quantity(order)
+        filled_quantity = int(fill.get("filled_quantity") or 0)
+        if requested_quantity > 0:
+            return f"일부 체결 {number(filled_quantity)}/{number(requested_quantity)}주 · {time_text(fill.get('filled_at'))}"
+    return broker_status_text(order) or "주문 제출 · 체결 미확인"
+
+
+def order_status_badge(order: dict[str, Any], fill: dict[str, Any] | None = None) -> str:
+    broker_status = str(broker_reconciliation(order).get("status") or "")
+    is_complete = fill_is_complete(order, fill) or (not fill and broker_status == "filled")
+    css = "ok" if is_complete and broker_status not in ADVERSE_TERMINAL_BROKER_STATUSES else "warn"
+    return f'<span class="badge {css}">{esc(order_status_text(order, fill))}</span>'
+
+
 def index_map(market: dict[str, Any]) -> dict[str, dict[str, Any]]:
     rows = market.get("indexes") if isinstance(market.get("indexes"), list) else []
     return {str(item.get("symbol")): item for item in rows if isinstance(item, dict)}
@@ -221,10 +289,7 @@ def render_trade_ledger(
     order_rows = []
     for item in submitted_orders:
         fill = item.get("fill") if isinstance(item.get("fill"), dict) else None
-        if fill:
-            result = f'<span class="badge ok">체결 {time_text(fill.get("filled_at"))}</span>'
-        else:
-            result = '<span class="badge warn">제출 · 체결 미확인</span>'
+        result = order_status_badge(item, fill)
         direction = "매수" if item.get("direction") == "buy" else "매도"
         order_rows.append(
             f"<tr><td>{time_text(item.get('run_started_at'))} run</td>"
@@ -340,14 +405,15 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
             direction = "매수" if order.get("direction") == "buy" else "매도"
             order_id = str(order.get("order_or_reservation_id") or "")
             fill = fill_by_order.get(order_id)
-            if fill:
+            if fill_is_complete(order, fill) and str(broker_reconciliation(order).get("status") or "") not in ADVERSE_TERMINAL_BROKER_STATUSES:
                 activity_cards.append(
                     f"<article class=\"activity-card filled\"><span>주문 후 체결</span><strong>{esc(order.get('symbol_name'))} {esc(direction)} {number(fill.get('filled_quantity'))}주</strong>"
                     f"<small>주문 {run_time} · {number(order.get('order_price'))}원 → 체결 {time_text(fill.get('filled_at'))} · {number(fill.get('filled_price'))}원 · <code>{esc(order_id)}</code></small></article>"
                 )
             else:
+                status_text = order_status_text(order, fill)
                 activity_cards.append(
-                    f"<article class=\"activity-card order\"><span>주문 제출 · 체결 미확인</span><strong>{esc(order.get('symbol_name'))} {esc(direction)} {number(order.get('validated_order_quantity') or order.get('quantity'))}주</strong>"
+                    f"<article class=\"activity-card order\"><span>{esc(status_text)}</span><strong>{esc(order.get('symbol_name'))} {esc(direction)} {number(order.get('validated_order_quantity') or order.get('quantity'))}주</strong>"
                     f"<small>주문 {run_time} · {number(order.get('order_price'))}원 · <code>{esc(order_id)}</code></small></article>"
                 )
         for fill in unmatched_fills:
@@ -442,13 +508,13 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
                 direction = "매수" if order.get("direction") == "buy" else "매도"
                 order_id = str(order.get("order_or_reservation_id") or "")
                 fill = fill_by_order.get(order_id)
-                if fill:
+                if fill_is_complete(order, fill) and str(broker_reconciliation(order).get("status") or "") not in ADVERSE_TERMINAL_BROKER_STATUSES:
                     trade_notes.append(
                         f"{run_time} 봇 {direction} 주문 · {time_text(fill.get('filled_at'))} {number(fill.get('filled_quantity'))}주 체결"
                     )
                 else:
                     trade_notes.append(
-                        f"{run_time} 봇 {direction} {number(order.get('validated_order_quantity') or order.get('quantity'))}주 주문 제출 · 체결 미확인"
+                        f"{run_time} 봇 {direction} {number(order.get('validated_order_quantity') or order.get('quantity'))}주 주문 제출 · {order_status_text(order, fill)}"
                     )
             for fill in related_fills:
                 if str(fill.get("order_id") or "") in related_order_ids:

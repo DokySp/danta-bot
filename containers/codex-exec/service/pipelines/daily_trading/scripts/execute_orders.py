@@ -31,8 +31,18 @@ ENDPOINTS = {
     "inquire_psbl_order": ("/uapi/domestic-stock/v1/trading/inquire-psbl-order", "GET", "TTTC8908R", "VTTC8908R"),
     "inquire_psbl_sell": ("/uapi/domestic-stock/v1/trading/inquire-psbl-sell", "GET", "TTTC8408R", "VTTC8408R"),
     "inquire_psbl_rvsecncl": ("/uapi/domestic-stock/v1/trading/inquire-psbl-rvsecncl", "GET", "TTTC0084R", "VTTC0084R"),
+    "inquire_daily_ccld": ("/uapi/domestic-stock/v1/trading/inquire-daily-ccld", "GET", "TTTC0081R", "VTTC0081R"),
     "order_resv": ("/uapi/domestic-stock/v1/trading/order-resv", "POST", "CTSC0008U", "VTSC0008U"),
     "order_resv_ccnl": ("/uapi/domestic-stock/v1/trading/order-resv-ccnl", "GET", "CTSC0004R", "VTSC0004R"),
+}
+
+BROKER_RECONCILIATION_POLL_DELAYS = (0.5, 1.0, 2.0)
+BROKER_TERMINAL_STATUSES = {
+    "filled",
+    "rejected",
+    "partially_filled_rejected",
+    "canceled",
+    "partially_filled_canceled",
 }
 
 SENSITIVE_KEYS = {
@@ -542,6 +552,235 @@ def fetch_pending_orders(kis: Kis) -> list[dict[str, Any]]:
     for item in normalized:
         item["execution_environment"] = kis.env
     return normalized
+
+
+def broker_order_id(row: dict[str, Any]) -> str:
+    return str(first(row, ("odno", "ord_no", "ODNO", "ORD_NO")) or "").strip()
+
+
+def normalize_broker_reconciliation(
+    row: dict[str, Any] | None,
+    *,
+    requested_quantity: int,
+    observed_at: str,
+) -> dict[str, Any]:
+    if row is None:
+        return {
+            "status": "unconfirmed",
+            "terminal": False,
+            "ordered_quantity": requested_quantity,
+            "filled_quantity": 0,
+            "rejected_quantity": 0,
+            "canceled_quantity": 0,
+            "remaining_quantity": requested_quantity,
+            "filled_price": 0,
+            "observed_at": observed_at,
+            "source_api": "inquire_daily_ccld",
+        }
+
+    ordered = as_int(first(row, ("ord_qty", "ORD_QTY")), requested_quantity) or requested_quantity
+    filled = as_int(first(row, ("tot_ccld_qty", "TOT_CCLD_QTY")))
+    rejected = as_int(first(row, ("rjct_qty", "RJCT_QTY")))
+    canceled = as_int(first(row, ("cnc_cfrm_qty", "CNC_CFRM_QTY")))
+    remaining = as_int(first(row, ("rmn_qty", "RMN_QTY")))
+    filled_price = as_int(first(row, ("avg_prvs", "AVG_PRVS", "avg_ccld_prc", "AVG_CCLD_PRC")))
+
+    if rejected > 0 and filled > 0:
+        status = "partially_filled_rejected"
+    elif rejected > 0:
+        status = "rejected"
+    elif canceled > 0 and filled > 0:
+        status = "partially_filled_canceled"
+    elif canceled > 0:
+        status = "canceled"
+    elif ordered > 0 and filled >= ordered:
+        status = "filled"
+    elif filled > 0:
+        status = "partially_filled"
+    elif remaining > 0:
+        status = "pending"
+    else:
+        status = "accepted"
+
+    return {
+        "status": status,
+        "terminal": status in BROKER_TERMINAL_STATUSES,
+        "ordered_quantity": ordered,
+        "filled_quantity": filled,
+        "rejected_quantity": rejected,
+        "canceled_quantity": canceled,
+        "remaining_quantity": remaining,
+        "filled_price": filled_price,
+        "observed_at": observed_at,
+        "source_api": "inquire_daily_ccld",
+    }
+
+
+def execution_order_day(execution: dict[str, Any]) -> str:
+    started_at = str(execution.get("started_at") or "").strip()
+    if started_at:
+        try:
+            return datetime.fromisoformat(started_at).astimezone(KST).strftime("%Y%m%d")
+        except ValueError:
+            pass
+    return datetime.now(KST).strftime("%Y%m%d")
+
+
+def fetch_cash_order_status_rows(kis: Kis, day: str, order_id: str = "") -> list[dict[str, Any]]:
+    body = kis.call(
+        "inquire_daily_ccld",
+        params={
+            "CANO": kis.cano,
+            "ACNT_PRDT_CD": kis.product,
+            "INQR_STRT_DT": day,
+            "INQR_END_DT": day,
+            "SLL_BUY_DVSN_CD": "00",
+            "INQR_DVSN": "00",
+            "PDNO": "",
+            "CCLD_DVSN": "00",
+            "ORD_GNO_BRNO": "",
+            "ODNO": order_id,
+            "INQR_DVSN_3": "00",
+            "INQR_DVSN_1": "",
+            "CTX_AREA_FK100": "",
+            "CTX_AREA_NK100": "",
+        },
+    )
+    return [row for row in rows(body) if broker_order_id(row)]
+
+
+def reconcile_submitted_cash_orders(
+    kis: Kis,
+    execution: dict[str, Any],
+    *,
+    poll_delays: tuple[float, ...] = BROKER_RECONCILIATION_POLL_DELAYS,
+) -> dict[str, Any]:
+    targets = [
+        order
+        for order in execution.get("orders", [])
+        if isinstance(order, dict)
+        and order.get("result") == "submitted"
+        and order.get("order_path") == "immediate"
+        and order.get("direction") in {"buy", "sell"}
+    ]
+    if not targets:
+        summary = {
+            "status": "skipped",
+            "observed_at": now_iso(),
+            "source_api": "inquire_daily_ccld",
+            "submitted_cash_order_count": 0,
+            "filled_order_count": 0,
+            "partially_filled_order_count": 0,
+            "pending_order_count": 0,
+            "rejected_order_count": 0,
+            "canceled_order_count": 0,
+            "unconfirmed_order_count": 0,
+            "lookup_errors": [],
+        }
+        execution["broker_reconciliation"] = summary
+        return summary
+
+    target_ids = {
+        str(order.get("order_or_reservation_id") or "").strip()
+        for order in targets
+        if str(order.get("order_or_reservation_id") or "").strip()
+    }
+    latest_by_order_id: dict[str, dict[str, Any]] = {}
+    lookup_errors: list[str] = []
+    day = execution_order_day(execution)
+    observed_at = now_iso()
+
+    if target_ids:
+        delays = poll_delays or (0.0,)
+        for poll_index, delay in enumerate(delays):
+            if delay > 0:
+                time.sleep(delay)
+            observed_at = now_iso()
+            try:
+                status_rows = fetch_cash_order_status_rows(kis, day)
+            except Exception as exc:  # noqa: BLE001 - later polls may recover
+                lookup_errors.append(redact(exc))
+                continue
+            for row in status_rows:
+                order_id = broker_order_id(row)
+                if order_id in target_ids:
+                    latest_by_order_id[order_id] = row
+            if poll_index == len(delays) - 1:
+                for missing_order_id in sorted(target_ids - set(latest_by_order_id)):
+                    try:
+                        targeted_rows = fetch_cash_order_status_rows(kis, day, missing_order_id)
+                    except Exception as exc:  # noqa: BLE001 - preserve partial status below
+                        lookup_errors.append(redact(exc))
+                        continue
+                    matching_row = next(
+                        (row for row in targeted_rows if broker_order_id(row) == missing_order_id),
+                        None,
+                    )
+                    if matching_row is not None:
+                        latest_by_order_id[missing_order_id] = matching_row
+            if all(
+                normalize_broker_reconciliation(
+                    latest_by_order_id.get(order_id),
+                    requested_quantity=as_int(order.get("validated_order_quantity")),
+                    observed_at=observed_at,
+                ).get("terminal")
+                for order in targets
+                if (order_id := str(order.get("order_or_reservation_id") or "").strip())
+            ) and len(target_ids) == len(targets):
+                break
+
+    statuses: list[str] = []
+    for order in targets:
+        order_id = str(order.get("order_or_reservation_id") or "").strip()
+        reconciliation = normalize_broker_reconciliation(
+            latest_by_order_id.get(order_id) if order_id else None,
+            requested_quantity=as_int(order.get("validated_order_quantity")),
+            observed_at=observed_at,
+        )
+        order["broker_reconciliation"] = reconciliation
+        statuses.append(str(reconciliation.get("status") or "unconfirmed"))
+
+    filled_count = statuses.count("filled")
+    # Aggregate buckets are mutually exclusive so one submitted order is counted once.
+    partially_filled_count = statuses.count("partially_filled")
+    pending_count = statuses.count("pending") + statuses.count("accepted")
+    rejected_count = statuses.count("rejected") + statuses.count("partially_filled_rejected")
+    canceled_count = statuses.count("canceled") + statuses.count("partially_filled_canceled")
+    unconfirmed_count = statuses.count("unconfirmed")
+    summary_status = "success" if filled_count == len(targets) else "partial"
+    summary = {
+        "status": summary_status,
+        "observed_at": observed_at,
+        "source_api": "inquire_daily_ccld",
+        "submitted_cash_order_count": len(targets),
+        "filled_order_count": filled_count,
+        "partially_filled_order_count": partially_filled_count,
+        "pending_order_count": pending_count,
+        "rejected_order_count": rejected_count,
+        "canceled_order_count": canceled_count,
+        "unconfirmed_order_count": unconfirmed_count,
+        "lookup_errors": lookup_errors[-3:],
+    }
+    execution["broker_reconciliation"] = summary
+    execution["errors"] = [
+        item
+        for item in execution.get("errors", [])
+        if isinstance(item, dict) and not str(item.get("code") or "").startswith("broker_order_")
+    ]
+    if rejected_count:
+        execution["errors"].append(error("broker_order_rejected", f"{rejected_count} submitted cash order(s) rejected by KIS"))
+    if canceled_count:
+        execution["errors"].append(error("broker_order_canceled", f"{canceled_count} submitted cash order(s) canceled before fill"))
+    if unconfirmed_count:
+        execution["errors"].append(
+            error(
+                "broker_order_status_unconfirmed",
+                f"broker status unconfirmed for {unconfirmed_count} submitted cash order(s)",
+            )
+        )
+    if summary_status != "success" and execution.get("status") == "success":
+        execution["status"] = "partial"
+    return summary
 
 
 def normalize_execution_order_prices(execution: dict[str, Any]) -> None:
@@ -1578,6 +1817,8 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         execution["required_main_agent_actions"] = []
     else:
         reconcile(account, execution, active, capacities, sell_capacities, submit=args.submit, kis=kis)
+        if args.submit and kis is not None:
+            reconcile_submitted_cash_orders(kis, execution)
     execution["order_execution_mode"] = "submit" if args.submit else "dry-run"
     execution["execution_environment"] = env_dv(args.env or account.get("execution_environment"))
     execution["order_available_checks"] = capacities
@@ -1595,6 +1836,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
             "active_order_count": len([item for item in active if item.get("active_status") == "active"]),
             "buy_capacity_symbols": sorted(capacities),
             "sell_capacity_symbols": sorted(sell_capacities),
+            "broker_reconciliation": execution.get("broker_reconciliation", {}),
         },
     )
     return execution

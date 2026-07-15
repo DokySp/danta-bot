@@ -50,6 +50,17 @@ REASON_LABELS = {
     "buy_blocked_score_band": "점수 밴드 매수 차단",
     "score_band_value_missing": "점수 확인 불가 차단",
 }
+BROKER_STATUS_LABELS = {
+    "filled": "KIS 체결",
+    "partially_filled": "KIS 일부 체결",
+    "partially_filled_rejected": "KIS 일부 체결 후 거절",
+    "partially_filled_canceled": "KIS 일부 체결 후 취소",
+    "pending": "KIS 미체결",
+    "accepted": "KIS 접수",
+    "rejected": "KIS 거절",
+    "canceled": "KIS 취소",
+    "unconfirmed": "KIS 상태 미확인",
+}
 
 
 def load_json(path: Path) -> Any:
@@ -120,6 +131,11 @@ def reason_label(value: Any) -> str:
     return REASON_LABELS.get(raw, raw or "-")
 
 
+def broker_status_label(value: Any) -> str:
+    raw = text(value)
+    return BROKER_STATUS_LABELS.get(raw, raw or "")
+
+
 def clock(value: Any) -> str:
     raw = text(value)
     if len(raw) >= 16 and raw[10] == "T":
@@ -147,7 +163,10 @@ def order_line(item: dict[str, Any]) -> str:
     quantity_text = f"{requested_quantity}주→{quantity}주" if requested_quantity and requested_quantity != quantity else f"{quantity}주"
     adjustment_reason = esc(reason_label(adjustment.get("reason"))) if adjustment.get("reason") else ""
     adjustment_suffix = f", 조정={adjustment_reason}" if adjustment_reason else ""
-    return f"- {symbol_html(item)}: {direction} {quantity_text} · {result}({reason}{adjustment_suffix}){suffix}"
+    broker = item.get("broker_reconciliation") if isinstance(item.get("broker_reconciliation"), dict) else {}
+    broker_text = esc(broker_status_label(broker.get("status")))
+    broker_suffix = f" · {broker_text}" if broker_text else ""
+    return f"- {symbol_html(item)}: {direction} {quantity_text} · {result}({reason}{adjustment_suffix}){broker_suffix}{suffix}"
 
 
 def render(summary: dict[str, Any]) -> str:
@@ -157,6 +176,7 @@ def render(summary: dict[str, Any]) -> str:
     news = evidence.get("news") if isinstance(evidence.get("news"), dict) else {}
     today_fills = summary.get("today_fills_summary") if isinstance(summary.get("today_fills_summary"), dict) else {}
     execution = summary.get("execution") if isinstance(summary.get("execution"), dict) else {}
+    broker_summary = execution.get("broker_reconciliation") if isinstance(execution.get("broker_reconciliation"), dict) else {}
     review = summary.get("review_summary") if isinstance(summary.get("review_summary"), dict) else {}
     tokens = summary.get("token_usage") if isinstance(summary.get("token_usage"), dict) else {}
     total_tokens = ((tokens.get("total") or {}).get("total_tokens")) if isinstance(tokens.get("total"), dict) else 0
@@ -192,6 +212,18 @@ def render(summary: dict[str, Any]) -> str:
             f"<b>이번 run</b> {esc(execution.get('request_type') or '-')} · 제출 {submitted_count} · 차단·실패 {blocked_failed_count} · 스킵 {skipped_count}",
         ]
     )
+    if as_int(broker_summary.get("submitted_cash_order_count")) > 0:
+        unresolved_count = (
+            as_int(broker_summary.get("partially_filled_order_count"))
+            + as_int(broker_summary.get("pending_order_count"))
+            + as_int(broker_summary.get("canceled_order_count"))
+            + as_int(broker_summary.get("unconfirmed_order_count"))
+        )
+        lines.append(
+            f"- KIS 확인: 체결 {as_int(broker_summary.get('filled_order_count'))}"
+            f" · 거절 {as_int(broker_summary.get('rejected_order_count'))}"
+            f" · 대기·기타 {unresolved_count}"
+        )
     if execution.get("requires_main_agent_order_execution"):
         lines.append("- 주문 제출 단계가 아직 완료되지 않았습니다.")
     for item in submitted_or_blocked[:3]:

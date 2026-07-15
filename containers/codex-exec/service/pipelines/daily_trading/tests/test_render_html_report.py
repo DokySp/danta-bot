@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from ..scripts.render_html_report import build_html, render_combined_chart
+from ..scripts.render_html_report import build_html, order_status_badge, render_combined_chart
 
 
 def write_json(path: Path, payload: dict) -> None:
@@ -305,6 +305,54 @@ def self_test() -> int:
 class RenderHtmlReportSelfTest(unittest.TestCase):
     def test_self_test_suite(self) -> None:
         self.assertEqual(self_test(), 0)
+
+    def test_rejected_order_uses_broker_status_instead_of_unconfirmed_fill(self) -> None:
+        rendered = order_status_badge(
+            {
+                "broker_reconciliation": {
+                    "status": "rejected",
+                    "filled_quantity": 0,
+                    "rejected_quantity": 1,
+                    "remaining_quantity": 0,
+                }
+            }
+        )
+
+        self.assertIn("KIS 거절 1주", rendered)
+        self.assertNotIn("체결 미확인", rendered)
+
+    def test_partial_rejection_overrides_matching_fill_as_full_fill(self) -> None:
+        rendered = order_status_badge(
+            {
+                "validated_order_quantity": 2,
+                "broker_reconciliation": {
+                    "status": "partially_filled_rejected",
+                    "filled_quantity": 1,
+                    "rejected_quantity": 1,
+                    "remaining_quantity": 0,
+                },
+            },
+            {"filled_quantity": 1, "filled_at": "2026-07-15T10:01:00+09:00"},
+        )
+
+        self.assertIn("KIS 일부 체결 1주 · 잔여 거절", rendered)
+        self.assertNotIn('badge ok', rendered)
+
+    def test_later_full_fill_overrides_pending_broker_snapshot(self) -> None:
+        rendered = order_status_badge(
+            {
+                "validated_order_quantity": 2,
+                "broker_reconciliation": {
+                    "status": "pending",
+                    "filled_quantity": 0,
+                    "remaining_quantity": 2,
+                },
+            },
+            {"filled_quantity": 2, "filled_at": "2026-07-15T10:01:00+09:00"},
+        )
+
+        self.assertIn("체결 10:01", rendered)
+        self.assertIn('badge ok', rendered)
 
 
 if __name__ == "__main__":

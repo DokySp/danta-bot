@@ -12,15 +12,18 @@ from typing import Any
 
 from ..scripts import execute_orders as execute_orders_module
 from ..scripts.execute_orders import (
+    ENDPOINTS,
     PORTFOLIO_EXCEPT_ENV_VAR,
     adjust_reservation,
     default_reservation_orgno,
     execute,
     load_json,
     normalize_limit_price,
+    normalize_broker_reconciliation,
     normalize_reservation,
     now_iso,
     reconcile,
+    reconcile_submitted_cash_orders,
     write_json,
 )
 
@@ -1021,3 +1024,157 @@ def self_test() -> int:
 class ExecuteOrdersSelfTest(unittest.TestCase):
     def test_self_test_suite(self) -> None:
         self.assertEqual(self_test(), 0)
+
+    def test_broker_reconciliation_distinguishes_fill_and_rejection(self) -> None:
+        class FakeBrokerKis:
+            cano = "12345678"
+            product = "01"
+
+            def call(self, name: str, *, params: dict[str, str] | None = None, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+                self.last_name = name
+                self.last_params = params
+                return {
+                    "output1": [
+                        {
+                            "odno": "fill-1",
+                            "ord_qty": "1",
+                            "tot_ccld_qty": "1",
+                            "rjct_qty": "0",
+                            "rmn_qty": "0",
+                            "avg_prvs": "70100",
+                        },
+                        {
+                            "odno": "reject-1",
+                            "ord_qty": "1",
+                            "tot_ccld_qty": "0",
+                            "rjct_qty": "1",
+                            "rmn_qty": "0",
+                        },
+                        {
+                            "odno": "partial-reject-1",
+                            "ord_qty": "2",
+                            "tot_ccld_qty": "1",
+                            "rjct_qty": "1",
+                            "rmn_qty": "0",
+                            "avg_prvs": "70200",
+                        },
+                    ]
+                }
+
+        execution = {
+            "started_at": "2026-07-15T14:30:00+09:00",
+            "status": "success",
+            "errors": [],
+            "orders": [
+                {
+                    "symbol_id": "005930",
+                    "direction": "buy",
+                    "result": "submitted",
+                    "order_path": "immediate",
+                    "validated_order_quantity": 1,
+                    "order_or_reservation_id": "fill-1",
+                },
+                {
+                    "symbol_id": "042660",
+                    "direction": "buy",
+                    "result": "submitted",
+                    "order_path": "immediate",
+                    "validated_order_quantity": 1,
+                    "order_or_reservation_id": "reject-1",
+                },
+                {
+                    "symbol_id": "000660",
+                    "direction": "buy",
+                    "result": "submitted",
+                    "order_path": "immediate",
+                    "validated_order_quantity": 2,
+                    "order_or_reservation_id": "partial-reject-1",
+                },
+            ],
+        }
+
+        summary = reconcile_submitted_cash_orders(FakeBrokerKis(), execution, poll_delays=(0.0,))
+
+        self.assertEqual(summary["status"], "partial")
+        self.assertEqual(summary["filled_order_count"], 1)
+        self.assertEqual(summary["rejected_order_count"], 2)
+        self.assertEqual(summary["partially_filled_order_count"], 0)
+        counted_orders = sum(
+            summary[key]
+            for key in (
+                "filled_order_count",
+                "partially_filled_order_count",
+                "pending_order_count",
+                "rejected_order_count",
+                "canceled_order_count",
+                "unconfirmed_order_count",
+            )
+        )
+        self.assertEqual(counted_orders, summary["submitted_cash_order_count"])
+        self.assertEqual(execution["status"], "partial")
+        self.assertEqual(execution["orders"][0]["broker_reconciliation"]["status"], "filled")
+        self.assertEqual(execution["orders"][1]["broker_reconciliation"]["status"], "rejected")
+        self.assertEqual(execution["orders"][1]["broker_reconciliation"]["rejected_quantity"], 1)
+        self.assertEqual(execution["orders"][2]["broker_reconciliation"]["status"], "partially_filled_rejected")
+        self.assertIn("broker_order_rejected", {item.get("code") for item in execution["errors"]})
+
+    def test_broker_reconciliation_falls_back_to_order_id_lookup(self) -> None:
+        self.assertEqual(ENDPOINTS["inquire_daily_ccld"][2:], ("TTTC0081R", "VTTC0081R"))
+
+        class FakeBrokerKis:
+            cano = "12345678"
+            product = "01"
+
+            def __init__(self) -> None:
+                self.requested_order_ids: list[str] = []
+
+            def call(self, name: str, *, params: dict[str, str] | None = None, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+                order_id = str((params or {}).get("ODNO") or "")
+                self.requested_order_ids.append(order_id)
+                if not order_id:
+                    return {"output1": []}
+                return {
+                    "output1": [
+                        {
+                            "odno": order_id,
+                            "ord_qty": "1",
+                            "tot_ccld_qty": "0",
+                            "rjct_qty": "1",
+                            "rmn_qty": "0",
+                        }
+                    ]
+                }
+
+        kis = FakeBrokerKis()
+        execution = {
+            "started_at": "2026-07-15T14:30:00+09:00",
+            "status": "success",
+            "errors": [],
+            "orders": [
+                {
+                    "symbol_id": "042660",
+                    "direction": "buy",
+                    "result": "submitted",
+                    "order_path": "immediate",
+                    "validated_order_quantity": 1,
+                    "order_or_reservation_id": "late-page-1",
+                }
+            ],
+        }
+
+        summary = reconcile_submitted_cash_orders(kis, execution, poll_delays=(0.0,))
+
+        self.assertEqual(kis.requested_order_ids, ["", "late-page-1"])
+        self.assertEqual(summary["rejected_order_count"], 1)
+        self.assertEqual(execution["orders"][0]["broker_reconciliation"]["status"], "rejected")
+
+    def test_broker_reconciliation_keeps_pending_order_partial(self) -> None:
+        pending = normalize_broker_reconciliation(
+            {"ord_qty": "2", "tot_ccld_qty": "0", "rjct_qty": "0", "rmn_qty": "2"},
+            requested_quantity=2,
+            observed_at="2026-07-15T06:00:00+00:00",
+        )
+
+        self.assertEqual(pending["status"], "pending")
+        self.assertFalse(pending["terminal"])
+        self.assertEqual(pending["remaining_quantity"], 2)

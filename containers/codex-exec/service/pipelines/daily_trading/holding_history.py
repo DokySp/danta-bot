@@ -67,7 +67,15 @@ def append_holding_history_from_run(workspace_dir: Path, context: Any) -> int:
         order_api = str(order.get("order_api", "")).lower()
         if order_path == "reservation" or order_api == "order_resv":
             continue
-        quantity = int_value(order.get("validated_order_quantity"))
+        broker_reconciliation = order.get("broker_reconciliation")
+        if not isinstance(broker_reconciliation, dict):
+            continue
+        broker_status = str(broker_reconciliation.get("status") or "").lower()
+        if broker_status not in {"filled", "partially_filled", "partially_filled_rejected", "partially_filled_canceled"}:
+            continue
+        # The legacy CSV column is named submitted_quantity, but holding changes must use
+        # the broker-confirmed filled quantity so rejected/pending orders never change holdings.
+        quantity = int_value(broker_reconciliation.get("filled_quantity"))
         if quantity <= 0:
             continue
         current_quantity = int_value(order.get("current_live_holding_quantity"))

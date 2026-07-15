@@ -176,9 +176,30 @@ def self_test() -> int:
         },
         "token_usage": {"total": {"total_tokens": 0}},
     }
+    rejected_payload = json.loads(json.dumps(submitted_payload, ensure_ascii=False))
+    rejected_payload["run_id"] = "self-test-rejected"
+    rejected_payload["status"] = "partial"
+    rejected_payload["execution"]["status"] = "partial"
+    rejected_payload["execution"]["broker_reconciliation"] = {
+        "status": "partial",
+        "submitted_cash_order_count": 1,
+        "filled_order_count": 0,
+        "partially_filled_order_count": 0,
+        "pending_order_count": 0,
+        "rejected_order_count": 1,
+        "canceled_order_count": 0,
+        "unconfirmed_order_count": 0,
+    }
+    rejected_payload["execution"]["orders"][0]["broker_reconciliation"] = {
+        "status": "rejected",
+        "filled_quantity": 0,
+        "rejected_quantity": 1,
+        "remaining_quantity": 0,
+    }
     submitted_rendered = render(submitted_payload)
     blocked_rendered = render(blocked_payload)
     legacy_rendered = render(legacy_payload)
+    rejected_rendered = render(rejected_payload)
     checks = [
         (
             "submitted",
@@ -222,6 +243,16 @@ def self_test() -> int:
                 "- Judge 검토: 매도 후보 2 · 매수 후보 3 · 미선정 25",
             ],
             ["최종 결정", "미결", "평결:", "Judge 후보", "유지"],
+        ),
+        (
+            "broker-rejected",
+            rejected_rendered,
+            [
+                "<b>daily-trading ⚠️ 부분 완료</b> · 09:00",
+                "- KIS 확인: 체결 0 · 거절 1 · 대기·기타 0",
+                "- <code>005930</code> 삼성전자: 매수 3주→1주 · 제출(접수, 조정=매수가능수량으로 축소) · KIS 거절 / <code>r1</code>",
+            ],
+            ["KIS 체결", "KIS 상태 미확인"],
         ),
     ]
     failures = []

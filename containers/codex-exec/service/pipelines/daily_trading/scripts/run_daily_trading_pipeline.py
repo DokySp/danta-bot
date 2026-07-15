@@ -2049,6 +2049,9 @@ class Pipeline:
                     "requested_order_quantity": as_int(execution_item.get("requested_order_quantity")),
                     "quantity_adjustment": execution_item.get("quantity_adjustment") if isinstance(execution_item.get("quantity_adjustment"), dict) else {},
                     "order_or_reservation_id": execution_item.get("order_or_reservation_id") or "",
+                    "broker_reconciliation": execution_item.get("broker_reconciliation")
+                    if isinstance(execution_item.get("broker_reconciliation"), dict)
+                    else {},
                 }
             )
         submitted = [item for item in rows if item.get("order_result") == "submitted"]
@@ -2452,6 +2455,9 @@ class Pipeline:
                     "result": item.get("result"),
                     "reason": item.get("reason"),
                     "order_or_reservation_id": item.get("order_or_reservation_id"),
+                    "broker_reconciliation": item.get("broker_reconciliation")
+                    if isinstance(item.get("broker_reconciliation"), dict)
+                    else {},
                 }
             )
         stages = self.load_summary_stages()
@@ -2519,6 +2525,9 @@ class Pipeline:
                 "required_main_agent_actions": execution.get("required_main_agent_actions", [])
                 if isinstance(execution.get("required_main_agent_actions"), list)
                 else [],
+                "broker_reconciliation": execution.get("broker_reconciliation")
+                if isinstance(execution.get("broker_reconciliation"), dict)
+                else {},
             },
             "token_usage": {
                 "main": (token_summary.get("main") or {}).get("token_usage", zero_usage()),
