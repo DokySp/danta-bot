@@ -11,6 +11,7 @@ from pathlib import Path
 from ..scripts.render_html_report import (
     analyst_score_class,
     build_html,
+    cumulative_today_fills,
     order_status_badge,
     render_combined_chart,
     render_header,
@@ -426,6 +427,40 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
         self.assertNotIn("확인된 체결 전체", rendered)
         self.assertNotIn("봇이 제출한 주문 전체", rendered)
         self.assertEqual(rendered.count("order-1"), 1)
+
+    def test_cumulative_today_fills_keeps_latest_order_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            first_run = Path(temporary) / "run-1"
+            second_run = Path(temporary) / "run-2"
+            common = {
+                "order_id": "order-1",
+                "symbol_id": "000001",
+                "symbol_name": "알파전자",
+                "direction": "buy",
+                "filled_price": 100_000,
+                "filled_amount": 100_000,
+                "filled_at": "2026-07-15T10:00:00+09:00",
+            }
+            write_json(
+                first_run / "today-fills.json",
+                {"status": "success", "fill_scope": "account", "fills": [dict(common, filled_quantity=1)]},
+            )
+            write_json(
+                second_run / "today-fills.json",
+                {
+                    "status": "success",
+                    "fill_scope": "account",
+                    "fills": [dict(common, filled_quantity=2, filled_amount=200_000)],
+                },
+            )
+
+            fills, status, scope = cumulative_today_fills([{"path": first_run}, {"path": second_run}])
+
+        self.assertEqual(status, "success")
+        self.assertEqual(scope, "account")
+        self.assertEqual(len(fills), 1)
+        self.assertEqual(fills[0]["filled_quantity"], 2)
+        self.assertEqual(fills[0]["filled_amount"], 200_000)
 
     def test_rejected_order_uses_broker_status_instead_of_unconfirmed_fill(self) -> None:
         rendered = order_status_badge(

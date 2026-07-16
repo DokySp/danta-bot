@@ -245,15 +245,20 @@ def cumulative_today_fills(runs: list[dict[str, Any]]) -> tuple[list[dict[str, A
         for item in fills:
             if not isinstance(item, dict):
                 continue
+            order_id = str(item.get("order_id") or "")
             key = (
-                str(item.get("order_id") or ""),
-                str(item.get("symbol_id") or ""),
-                str(item.get("direction") or ""),
-                str(item.get("filled_at") or ""),
-                int(item.get("filled_quantity") or 0),
-                int(item.get("filled_price") or 0),
+                ("order", order_id)
+                if order_id
+                else (
+                    "anonymous",
+                    str(item.get("symbol_id") or ""),
+                    str(item.get("direction") or ""),
+                    str(item.get("filled_at") or ""),
+                    int(item.get("filled_quantity") or 0),
+                    int(item.get("filled_price") or 0),
+                )
             )
-            by_key.setdefault(key, item)
+            by_key[key] = item
     fills = sorted(by_key.values(), key=lambda item: (str(item.get("filled_at") or ""), str(item.get("order_id") or "")))
     return fills, latest_status, latest_scope
 
