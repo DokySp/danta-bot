@@ -492,7 +492,7 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
             activity_cards.append('<div class="empty-state">이 run에 연결된 주문 또는 체결이 없습니다.</div>')
 
         time_buttons.append(
-            f'<button type="button" class="time-button{" active" if is_active_time else ""}" data-time-target="{esc(time_key)}">'
+            f'<button type="button" role="option" aria-selected="{str(is_active_time).lower()}" class="time-button{" active" if is_active_time else ""}" data-time-target="{esc(time_key)}">'
             f'<strong>{esc(run_time)}</strong><span>Analyst {len(analyst_symbols)} · Judge {len(final_by_symbol)}</span>'
             f'<small>주문 {len(submitted_orders)} · 체결 {len(linked_fills)}</small></button>'
         )
@@ -611,9 +611,9 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
 
     return f"""
     <section class="panel" id="trade-symbol-analysis">
-      <div class="section-head"><div><p class="kicker">TIME &amp; SYMBOL FOCUS</p><h2>시간대별 거래·전체 종목 판단</h2></div><span class="badge info">시간 → 종목 순서로 선택</span></div>
-      <p class="section-note">시간대를 선택하면 해당 run의 주문과 주문번호로 연결된 체결, Analyst 대상 종목 전체를 표시합니다. Judge 미진입 종목도 Analyst 상세 점수를 확인할 수 있습니다.</p>
-      <div class="time-selector">{''.join(time_buttons)}</div>
+      <div class="section-head"><div><p class="kicker">TIME &amp; SYMBOL FOCUS</p><h2>시간대별 거래·전체 종목 판단</h2></div><span class="badge info">시간 휠 → 종목 순서로 선택</span></div>
+      <p class="section-note">시간 휠을 위아래로 돌리면 해당 run의 주문과 주문번호로 연결된 체결, Analyst 대상 종목 전체를 표시합니다. Judge 미진입 종목도 Analyst 상세 점수를 확인할 수 있습니다.</p>
+      <div class="time-wheel"><span class="time-wheel-caption">실행 시간</span><div class="time-selector" role="listbox" aria-label="실행 시간" aria-orientation="vertical">{''.join(time_buttons)}</div></div>
       <div class="time-analysis-content">{''.join(time_panels)}</div>
     </section>
     """
@@ -1158,7 +1158,7 @@ def build_html(runs_root: Path, target_run: str) -> str:
     .chart-grid-wrap {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; margin-top:16px; }} .chart-card {{ padding:20px; overflow:hidden; border:1px solid var(--line); border-radius:20px; background:var(--surface); box-shadow:var(--shadow); }} .chart-head {{ display:flex; justify-content:space-between; gap:12px; }} .chart-head h3 {{ margin:0; font-size:19px; }} .chart-head p {{ margin:5px 0 0; color:var(--muted); font-size:12px; }} .chart-stat {{ min-width:100px; text-align:right; }} .chart-stat span,.chart-stat strong {{ display:block; }} .chart-stat span {{ color:var(--muted); font-size:11px; }} .line-chart {{ display:block; width:100%; height:auto; margin-top:5px; overflow:visible; }} .chart-grid {{ stroke:#e5eaf2; stroke-width:1; }} .chart-y,.chart-x {{ fill:#738096; font-size:15px; }} .chart-point {{ stroke:#fff; stroke-width:3; }} .chart-range {{ display:flex; justify-content:flex-end; flex-wrap:wrap; gap:14px; color:var(--muted); font-size:11px; }} .chart-range strong {{ color:var(--text); }}
     .financial-list {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }} .financial-card {{ padding:17px; border:1px solid var(--line); border-radius:15px; background:var(--subtle); }} .financial-body {{ padding:13px; border-radius:11px; background:#fff; }} .financial-body ul {{ margin:0; padding-left:20px; }} .evidence-title {{ display:flex; gap:10px; align-items:flex-start; margin-bottom:12px; }} .evidence-title h3 {{ margin:0; }} .evidence-title p {{ margin:4px 0 0; color:var(--muted); font-size:12px; }} .source-note {{ margin:12px 0 0; color:var(--muted); font-size:11px; }}
     .news-timeline {{ position:relative; display:grid; gap:12px; padding-left:22px; }} .news-timeline::before {{ content:""; position:absolute; left:7px; top:9px; bottom:9px; width:2px; background:linear-gradient(var(--accent),var(--accent-2)); }} .news-run {{ position:relative; padding:16px; border:1px solid var(--line); border-radius:15px; background:var(--subtle); }} .news-run::before {{ content:""; position:absolute; left:-22px; top:22px; width:11px; height:11px; border:3px solid var(--bg); border-radius:50%; background:var(--accent); }} .news-run-head {{ display:flex; justify-content:space-between; gap:10px; margin-bottom:9px; }} .news-run-head>div {{ display:flex; align-items:center; flex-wrap:wrap; gap:8px; }} .news-time {{ display:grid; width:50px; height:28px; place-items:center; border-radius:8px; background:var(--accent); color:#fff; font-size:12px; font-weight:900; }} .news-run-head span:not(.news-time):not(.badge) {{ color:var(--muted); font-size:11px; }} .news-run-body {{ padding:4px 12px; border-radius:11px; background:#fff; }} .news-item {{ padding:10px 0; border-bottom:1px solid var(--line); }} .news-item:last-child {{ border-bottom:0; }} .news-item time {{ margin-left:8px; color:var(--muted); font-size:11px; }} .news-item p {{ margin:5px 0 0; }} .sentiment {{ float:right; padding:3px 7px; border-radius:999px; font-size:10px; font-weight:900; }} .sentiment.positive {{ color:#087a55; background:#dff5eb; }} .sentiment.negative {{ color:#b42335; background:#ffe8eb; }} .sentiment.neutral {{ color:#536176; background:#e9eef5; }} .sentiment.unknown {{ color:#815400; background:#fff3ce; }} .empty-state {{ padding:12px; border-radius:9px; background:var(--subtle); color:var(--muted); font-size:12px; }}
-    .time-selector {{ display:flex; gap:9px; padding:3px 2px 12px; margin:14px 0 16px; overflow-x:auto; }} .time-button {{ display:flex; flex:0 0 146px; padding:12px; border:1px solid var(--line); border-radius:13px; background:var(--subtle); color:var(--text); cursor:pointer; flex-direction:column; text-align:left; transition:.16s ease; }} .time-button:hover {{ border-color:#aab4ff; transform:translateY(-1px); }} .time-button.active {{ border-color:var(--accent); background:linear-gradient(145deg,var(--accent-bg),#eefaf7); box-shadow:0 8px 22px rgba(78,92,232,.12); }} .time-button strong {{ font-size:18px; }} .time-button span,.time-button small {{ color:var(--muted); font-size:10px; }} .time-analysis-panel {{ display:none; }} .time-analysis-panel.active {{ display:block; animation:page-in .18s ease; }} .time-panel-head {{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; padding-top:4px; }} .time-panel-head p {{ color:var(--muted); }} .run-activity {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:9px; margin:12px 0 19px; }} .activity-card {{ padding:13px; border:1px solid var(--line); border-radius:12px; background:#fff; }} .activity-card.order {{ border-left:4px solid var(--accent); }} .activity-card.filled {{ border-left:4px solid var(--ok); background:linear-gradient(145deg,#fff,var(--ok-bg)); }} .activity-card.fill {{ border-left:4px solid var(--accent-2); }} .activity-card span,.activity-card strong,.activity-card small {{ display:block; }} .activity-card span,.activity-card small {{ color:var(--muted); font-size:11px; }}
+    .time-wheel {{ position:relative; width:min(100%,360px); margin:14px auto 20px; }} .time-wheel-caption {{ display:block; margin-bottom:6px; color:var(--muted); font-size:11px; font-weight:800; text-align:center; }} .time-wheel::after {{ position:absolute; right:0; bottom:68px; left:0; height:68px; border:1px solid rgba(78,92,232,.28); border-radius:14px; background:rgba(78,92,232,.06); content:""; pointer-events:none; }} .time-selector {{ position:relative; display:flex; height:204px; padding-block:68px; overflow-x:hidden; overflow-y:auto; flex-direction:column; scroll-snap-type:y mandatory; scrollbar-width:none; overscroll-behavior-y:contain; -webkit-mask-image:linear-gradient(transparent,#000 29%,#000 71%,transparent); mask-image:linear-gradient(transparent,#000 29%,#000 71%,transparent); }} .time-selector::-webkit-scrollbar {{ display:none; }} .time-button {{ display:grid; min-height:68px; flex:0 0 68px; padding:10px 16px; border:0; border-radius:13px; background:transparent; color:var(--text); cursor:pointer; grid-template-columns:74px minmax(0,1fr); grid-template-rows:1fr 1fr; align-items:center; text-align:left; scroll-snap-align:center; scroll-snap-stop:always; opacity:.48; transform:scale(.92); transition:opacity .16s ease,transform .16s ease,color .16s ease; }} .time-button:hover {{ color:var(--accent); opacity:.75; }} .time-button.active {{ color:var(--accent); opacity:1; transform:scale(1); }} .time-button strong {{ grid-row:1/-1; font-size:22px; }} .time-button span,.time-button small {{ color:inherit; font-size:10px; }} .time-analysis-panel {{ display:none; }} .time-analysis-panel.active {{ display:block; animation:page-in .18s ease; }} .time-panel-head {{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; padding-top:4px; }} .time-panel-head p {{ color:var(--muted); }} .run-activity {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:9px; margin:12px 0 19px; }} .activity-card {{ padding:13px; border:1px solid var(--line); border-radius:12px; background:#fff; }} .activity-card.order {{ border-left:4px solid var(--accent); }} .activity-card.filled {{ border-left:4px solid var(--ok); background:linear-gradient(145deg,#fff,var(--ok-bg)); }} .activity-card.fill {{ border-left:4px solid var(--accent-2); }} .activity-card span,.activity-card strong,.activity-card small {{ display:block; }} .activity-card span,.activity-card small {{ color:var(--muted); font-size:11px; }}
     .trade-symbol-selector {{ display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:9px; margin-bottom:16px; }} .trade-symbol-button {{ display:grid; min-width:0; padding:12px; border:1px solid var(--line); border-radius:13px; background:var(--subtle); color:var(--text); text-align:left; cursor:pointer; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:10px; transition:.16s ease; }} .trade-symbol-button.score-low {{ border-color:#f3bbc2; background:var(--bad-bg); }} .trade-symbol-button.score-high {{ border-color:#a9ddcc; background:var(--ok-bg); }} .trade-symbol-button:hover {{ border-color:#aab4ff; transform:translateY(-1px); }} .trade-symbol-button.active {{ border-color:var(--accent); box-shadow:0 8px 22px rgba(78,92,232,.12); }} .trade-symbol-button.score-low.active {{ background:linear-gradient(145deg,var(--bad-bg),#fff4f5); }} .trade-symbol-button.score-high.active {{ background:linear-gradient(145deg,var(--ok-bg),#eefaf7); }} .symbol-button-left {{ display:flex; min-width:0; flex-direction:column; }} .symbol-button-status {{ display:flex; min-height:19px; flex-wrap:wrap; gap:4px; }} .symbol-button-name {{ display:-webkit-box; min-width:0; min-height:2.6em; margin-top:4px; overflow:hidden; color:var(--text); font-size:13px; line-height:1.3; text-overflow:ellipsis; white-space:normal; -webkit-box-orient:vertical; -webkit-line-clamp:2; }} .symbol-button-right {{ display:flex; flex:0 0 auto; align-items:flex-end; flex-direction:column; gap:3px; text-align:right; }} .symbol-button-right code {{ color:var(--muted); font-size:10px; }} .symbol-score {{ display:block; padding:0; background:transparent; color:var(--text); font-size:13px; font-weight:800; line-height:1.2; }} .trade-symbol-button.active .symbol-score {{ background:transparent; color:var(--accent); }} .mini-badge {{ padding:2px 5px; border-radius:999px; font-size:9px; }} .mini-badge.judge {{ color:var(--ok); background:var(--ok-bg); }} .mini-badge.analyst {{ color:var(--muted); background:#e9eef5; }} .mini-badge.trade {{ color:var(--accent); background:var(--accent-bg); }} .symbol-analysis-panel {{ display:none; padding:20px; border:1px solid var(--line); border-radius:16px; background:linear-gradient(145deg,#fff,var(--subtle)); }} .symbol-analysis-panel.active {{ display:block; animation:page-in .18s ease; }} .symbol-focus-head {{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }} .symbol-focus-head h2 {{ margin-bottom:5px; }} .symbol-focus-head p {{ color:var(--muted); }} .focus-badges {{ display:flex; flex-wrap:wrap; justify-content:flex-end; gap:6px; }} .inline-analysis,.inline-judge {{ margin-top:20px; }} .compact-phase {{ margin-top:18px; padding-top:15px; }} .final-card.full {{ margin-top:12px; }}
     .decision-hero {{ background:linear-gradient(145deg,#fff,#f4f6ff); }} .decision-hero>div:first-child p:last-child {{ color:var(--muted); }} .decision-meta {{ display:flex; flex-wrap:wrap; gap:8px; }} .decision-meta>span {{ padding:7px 9px; border:1px solid var(--line); border-radius:9px; background:#fff; font-size:12px; }} .decision-orders {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin-top:14px; }} .decision-orders article {{ padding:13px; border-radius:12px; background:linear-gradient(135deg,var(--accent-bg),#eefaf7); }} .decision-orders span,.decision-orders strong,.decision-orders small {{ display:block; }} .decision-orders span,.decision-orders small {{ color:var(--muted); font-size:11px; }}
     .analyst-list {{ display:grid; gap:14px; }} .analyst-card {{ padding:17px; border:1px solid var(--line); border-radius:14px; background:var(--subtle); }} .card-title {{ display:flex; align-items:flex-start; gap:10px; margin-bottom:12px; }} .card-title h3,.card-title h4 {{ margin:0; }} .card-title p {{ margin:3px 0 0; color:var(--muted); font-size:13px; }} .index {{ display:grid; flex:0 0 30px; height:30px; place-items:center; border-radius:9px; background:var(--accent-bg); color:var(--accent); font-weight:900; }}
@@ -1206,17 +1206,55 @@ def build_html(runs_root: Path, target_run: str) -> str:
       const timeButtons = [...selector.querySelectorAll('.time-button')];
       const container = selector.closest('#trade-symbol-analysis');
       const timePanels = [...container.querySelectorAll('.time-analysis-panel')];
+      let scrollFrame = null;
       const selectTime = (timeId) => {{
         timeButtons.forEach((button) => {{
           const active = button.dataset.timeTarget === timeId;
           button.classList.toggle('active', active);
-          button.setAttribute('aria-pressed', String(active));
+          button.setAttribute('aria-selected', String(active));
         }});
         timePanels.forEach((panel) => panel.classList.toggle('active', panel.dataset.timePanel === timeId));
       }};
-      timeButtons.forEach((button) => button.addEventListener('click', () => selectTime(button.dataset.timeTarget)));
+      const centerTimeButton = (button, behavior = 'smooth') => {{
+        selector.scrollTo({{
+          top: button.offsetTop - (selector.clientHeight - button.offsetHeight) / 2,
+          behavior,
+        }});
+      }};
+      const selectNearestTime = () => {{
+        scrollFrame = null;
+        const center = selector.getBoundingClientRect().top + selector.clientHeight / 2;
+        const nearest = timeButtons.reduce((best, button) => {{
+          const rect = button.getBoundingClientRect();
+          const distance = Math.abs(rect.top + rect.height / 2 - center);
+          return !best || distance < best.distance ? {{ button, distance }} : best;
+        }}, null);
+        if (nearest) selectTime(nearest.button.dataset.timeTarget);
+      }};
+      timeButtons.forEach((button) => button.addEventListener('click', () => {{
+        selectTime(button.dataset.timeTarget);
+        centerTimeButton(button);
+      }}));
+      selector.addEventListener('scroll', () => {{
+        if (scrollFrame !== null) cancelAnimationFrame(scrollFrame);
+        scrollFrame = requestAnimationFrame(selectNearestTime);
+      }}, {{ passive: true }});
+      selector.addEventListener('keydown', (event) => {{
+        if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+        event.preventDefault();
+        const currentIndex = Math.max(0, timeButtons.findIndex((button) => button.classList.contains('active')));
+        const offset = event.key === 'ArrowUp' ? -1 : 1;
+        const next = timeButtons[Math.max(0, Math.min(timeButtons.length - 1, currentIndex + offset))];
+        if (!next) return;
+        next.focus();
+        selectTime(next.dataset.timeTarget);
+        centerTimeButton(next);
+      }});
       const initialTime = timeButtons.find((button) => button.classList.contains('active')) || timeButtons[0];
-      if (initialTime) selectTime(initialTime.dataset.timeTarget);
+      if (initialTime) {{
+        selectTime(initialTime.dataset.timeTarget);
+        requestAnimationFrame(() => centerTimeButton(initialTime, 'auto'));
+      }}
     }});
 
     document.querySelectorAll('.trade-symbol-selector').forEach((selector) => {{
