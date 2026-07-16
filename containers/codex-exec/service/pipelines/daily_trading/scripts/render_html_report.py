@@ -741,6 +741,11 @@ def render_combined_chart(runs: list[dict[str, Any]]) -> str:
         </svg>
         <div class="chart-tooltip" aria-live="polite"></div>
       </div>
+      <div class="chart-scrubber">
+        <div class="chart-scrubber-label"><span>조회 시점</span><output class="chart-scrubber-time">{esc(rows[-1]['time'])}</output></div>
+        <input class="chart-range-slider" type="range" min="0" max="{len(rows) - 1}" step="1" value="{len(rows) - 1}" aria-label="차트 조회 시점">
+        <div class="chart-scrubber-ends"><span>{esc(rows[0]['time'])}</span><span>{esc(rows[-1]['time'])}</span></div>
+      </div>
       <div class="series-ranges"><span>총평가 {number(min(total_values))}~{number(max(total_values))}원</span><span>평가손익 {number(min(pnl_values))}~{number(max(pnl_values))}원</span>{kospi_range}</div>
     </section>
     """
@@ -1117,7 +1122,7 @@ def build_html(runs_root: Path, target_run: str) -> str:
     .table-wrap {{ width:100%; overflow-x:auto; border:1px solid var(--line); border-radius:12px; }} table {{ width:100%; border-collapse:collapse; min-width:760px; }} th,td {{ padding:11px 12px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; font-size:13px; }} th {{ position:sticky; top:0; background:#eef3f9; color:#475569; font-size:12px; }} tr:last-child td {{ border-bottom:0; }}
     .positive {{ color:var(--ok); }} .negative {{ color:var(--bad); }}
     .warning-list {{ display:grid; gap:9px; margin-top:18px; }} .warning {{ padding:14px; border-left:4px solid var(--warn); border-radius:10px; background:var(--warn-bg); }} .warning.bad-border {{ border-left-color:var(--bad); background:var(--bad-bg); }} .warning p {{ margin:4px 0 0; font-size:13px; }}
-    .combined-chart-card {{ padding:24px; margin-top:16px; border:1px solid var(--line); border-radius:22px; background:var(--surface); box-shadow:var(--shadow); }} .chart-legend {{ display:flex; flex-wrap:wrap; gap:14px; margin:13px 0 4px; color:var(--muted); font-size:12px; }} .chart-legend span {{ display:flex; align-items:center; gap:6px; }} .chart-legend i {{ width:22px; height:4px; border-radius:999px; background:var(--legend); }} .interactive-chart {{ position:relative; }} .interactive-line-chart {{ display:block; width:100%; height:auto; overflow:visible; }} .series-line {{ fill:none; stroke-width:4; stroke-linecap:round; stroke-linejoin:round; }} .total-line {{ stroke:#4f6df5; }} .pnl-line {{ stroke:#e14c68; stroke-dasharray:11 7; }} .kospi-line {{ stroke:#0b9a86; }} .chart-cursor {{ stroke:#617089; stroke-width:1.5; stroke-dasharray:5 5; opacity:0; }} .chart-marker {{ stroke:#fff; stroke-width:3; opacity:0; }} .total-marker {{ fill:#4f6df5; }} .pnl-marker {{ fill:#e14c68; }} .kospi-marker {{ fill:#0b9a86; }} .chart-hit-area {{ fill:transparent; cursor:crosshair; pointer-events:all; touch-action:none; }} .chart-tooltip {{ position:absolute; z-index:5; min-width:190px; padding:11px 13px; border:1px solid rgba(220,228,239,.9); border-radius:12px; background:rgba(20,29,52,.94); color:#fff; box-shadow:0 12px 32px rgba(18,27,50,.25); opacity:0; pointer-events:none; transform:translate(-50%,-112%); transition:opacity .12s ease; font-size:12px; }} .chart-tooltip.visible {{ opacity:1; }} .chart-tooltip strong,.chart-tooltip span {{ display:block; }} .chart-tooltip strong {{ margin-bottom:5px; }} .chart-tooltip span {{ color:#d8e0f3; }} .series-ranges {{ display:flex; justify-content:flex-end; flex-wrap:wrap; gap:13px; color:var(--muted); font-size:11px; }}
+    .combined-chart-card {{ padding:24px; margin-top:16px; border:1px solid var(--line); border-radius:22px; background:var(--surface); box-shadow:var(--shadow); }} .chart-legend {{ display:flex; flex-wrap:wrap; gap:14px; margin:13px 0 4px; color:var(--muted); font-size:12px; }} .chart-legend span {{ display:flex; align-items:center; gap:6px; }} .chart-legend i {{ width:22px; height:4px; border-radius:999px; background:var(--legend); }} .interactive-chart {{ position:relative; }} .interactive-line-chart {{ display:block; width:100%; height:auto; overflow:visible; }} .series-line {{ fill:none; stroke-width:4; stroke-linecap:round; stroke-linejoin:round; }} .total-line {{ stroke:#4f6df5; }} .pnl-line {{ stroke:#e14c68; stroke-dasharray:11 7; }} .kospi-line {{ stroke:#0b9a86; }} .chart-cursor {{ stroke:#617089; stroke-width:1.5; stroke-dasharray:5 5; opacity:0; }} .chart-marker {{ stroke:#fff; stroke-width:3; opacity:0; }} .total-marker {{ fill:#4f6df5; }} .pnl-marker {{ fill:#e14c68; }} .kospi-marker {{ fill:#0b9a86; }} .chart-hit-area {{ fill:transparent; cursor:crosshair; pointer-events:all; touch-action:none; }} .chart-tooltip {{ position:absolute; z-index:5; min-width:190px; padding:11px 13px; border:1px solid rgba(220,228,239,.9); border-radius:12px; background:rgba(20,29,52,.94); color:#fff; box-shadow:0 12px 32px rgba(18,27,50,.25); opacity:0; pointer-events:none; transform:translate(-50%,-112%); transition:opacity .12s ease; font-size:12px; }} .chart-tooltip.visible {{ opacity:1; }} .chart-tooltip strong,.chart-tooltip span {{ display:block; }} .chart-tooltip strong {{ margin-bottom:5px; }} .chart-tooltip span {{ color:#d8e0f3; }} .chart-scrubber {{ padding:8px 5px 0; }} .chart-scrubber-label,.chart-scrubber-ends {{ display:flex; align-items:center; justify-content:space-between; gap:12px; }} .chart-scrubber-label {{ margin-bottom:3px; color:var(--muted); font-size:12px; font-weight:800; }} .chart-scrubber-time {{ color:var(--accent); font-weight:900; }} .chart-range-slider {{ width:100%; accent-color:var(--accent); cursor:ew-resize; touch-action:pan-x; }} .chart-scrubber-ends {{ color:var(--muted); font-size:10px; }} .series-ranges {{ display:flex; justify-content:flex-end; flex-wrap:wrap; gap:13px; color:var(--muted); font-size:11px; }}
     .portfolio-chart-layout {{ display:grid; grid-template-columns:minmax(300px,.85fr) minmax(320px,1.15fr); align-items:center; gap:28px; padding:20px; margin-bottom:12px; border:1px solid var(--line); border-radius:16px; background:var(--subtle); }} .portfolio-pie {{ position:relative; width:min(100%,430px); margin:auto; }} .portfolio-pie-svg {{ display:block; width:100%; height:auto; filter:drop-shadow(0 12px 22px rgba(24,36,64,.12)); }} .pie-slice {{ stroke:#fff; stroke-width:2; cursor:pointer; outline:none; transition:opacity .15s ease,stroke-width .15s ease; }} .pie-slice:hover,.pie-slice.active,.pie-slice:focus {{ opacity:.8; stroke-width:5; }} .pie-tooltip {{ position:absolute; z-index:6; min-width:205px; padding:11px 13px; border-radius:12px; background:rgba(20,29,52,.95); color:#fff; box-shadow:0 12px 32px rgba(18,27,50,.25); opacity:0; pointer-events:none; transform:translate(-50%,-112%); transition:opacity .1s ease; font-size:12px; }} .pie-tooltip.visible {{ opacity:1; }} .pie-tooltip strong,.pie-tooltip span {{ display:block; }} .pie-tooltip strong {{ margin-bottom:4px; }} .pie-tooltip span {{ color:#d8e0f3; }} .sector-legend {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; }} .sector-legend>div:first-child {{ grid-column:1/-1; }} .sector-legend h3 {{ margin:0; }} .sector-legend>div:first-child p:last-child {{ margin:3px 0 5px; color:var(--muted); font-size:12px; }} .sector-legend-item {{ display:flex; align-items:center; gap:9px; padding:10px; border:1px solid var(--line); border-radius:11px; background:#fff; }} .sector-legend-item i {{ width:13px; height:34px; flex:0 0 13px; border-radius:999px; background:var(--sector-color); }} .sector-legend-item strong,.sector-legend-item small {{ display:block; }} .sector-legend-item small {{ color:var(--muted); font-size:10px; }} .holdings-table {{ margin-top:14px; }}
     .chart-grid-wrap {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; margin-top:16px; }} .chart-card {{ padding:20px; overflow:hidden; border:1px solid var(--line); border-radius:20px; background:var(--surface); box-shadow:var(--shadow); }} .chart-head {{ display:flex; justify-content:space-between; gap:12px; }} .chart-head h3 {{ margin:0; font-size:19px; }} .chart-head p {{ margin:5px 0 0; color:var(--muted); font-size:12px; }} .chart-stat {{ min-width:100px; text-align:right; }} .chart-stat span,.chart-stat strong {{ display:block; }} .chart-stat span {{ color:var(--muted); font-size:11px; }} .line-chart {{ display:block; width:100%; height:auto; margin-top:5px; overflow:visible; }} .chart-grid {{ stroke:#e5eaf2; stroke-width:1; }} .chart-y,.chart-x {{ fill:#738096; font-size:15px; }} .chart-point {{ stroke:#fff; stroke-width:3; }} .chart-range {{ display:flex; justify-content:flex-end; flex-wrap:wrap; gap:14px; color:var(--muted); font-size:11px; }} .chart-range strong {{ color:var(--text); }}
     .financial-list {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }} .financial-card {{ padding:17px; border:1px solid var(--line); border-radius:15px; background:var(--subtle); }} .financial-body {{ padding:13px; border-radius:11px; background:#fff; }} .financial-body ul {{ margin:0; padding-left:20px; }} .evidence-title {{ display:flex; gap:10px; align-items:flex-start; margin-bottom:12px; }} .evidence-title h3 {{ margin:0; }} .evidence-title p {{ margin:4px 0 0; color:var(--muted); font-size:12px; }} .source-note {{ margin:12px 0 0; color:var(--muted); font-size:11px; }}
@@ -1206,6 +1211,8 @@ def build_html(runs_root: Path, target_run: str) -> str:
       const hitArea = card.querySelector('.chart-hit-area');
       const tooltip = card.querySelector('.chart-tooltip');
       const cursor = card.querySelector('.chart-cursor');
+      const slider = card.querySelector('.chart-range-slider');
+      const sliderValue = card.querySelector('.chart-scrubber-time');
       const markers = {{
         total: card.querySelector('.total-marker'),
         pnl: card.querySelector('.pnl-marker'),
@@ -1219,17 +1226,16 @@ def build_html(runs_root: Path, target_run: str) -> str:
         Object.values(markers).filter(Boolean).forEach((marker) => marker.style.opacity = '0');
         tooltip.classList.remove('visible');
       }};
-      const showPoint = (event) => {{
-        if (!points.length || !svg.getScreenCTM()) return;
-        const svgPoint = svg.createSVGPoint();
-        svgPoint.x = event.clientX;
-        svgPoint.y = event.clientY;
-        const local = svgPoint.matrixTransform(svg.getScreenCTM().inverse());
-        const left = Number(hitArea.dataset.left);
-        const width = Number(hitArea.dataset.width);
-        const ratio = Math.max(0, Math.min(1, (local.x - left) / width));
-        const index = Math.round(ratio * (points.length - 1));
+      const showPointAtIndex = (requestedIndex, event = null) => {{
+        const matrix = svg.getScreenCTM();
+        if (!points.length || !matrix) return;
+        const index = Math.max(0, Math.min(points.length - 1, requestedIndex));
         const point = points[index];
+        if (slider) {{
+          slider.value = String(index);
+          slider.setAttribute('aria-valuetext', point.time);
+        }}
+        if (sliderValue) sliderValue.textContent = point.time;
 
         cursor.setAttribute('x1', point.x);
         cursor.setAttribute('x2', point.x);
@@ -1255,11 +1261,33 @@ def build_html(runs_root: Path, target_run: str) -> str:
           'regime ' + point.regimeLabel + ' (' + point.regime + ')',
         ]);
         const chartRect = card.querySelector('.interactive-chart').getBoundingClientRect();
-        const tooltipX = Math.max(105, Math.min(chartRect.width - 105, event.clientX - chartRect.left));
-        const tooltipY = Math.max(90, Math.min(chartRect.height - 10, event.clientY - chartRect.top));
+        let clientX = event ? event.clientX : null;
+        let clientY = event ? event.clientY : null;
+        if (!event) {{
+          const selectedPoint = svg.createSVGPoint();
+          selectedPoint.x = point.x;
+          selectedPoint.y = point.totalY;
+          const screenPoint = selectedPoint.matrixTransform(matrix);
+          clientX = screenPoint.x;
+          clientY = screenPoint.y;
+        }}
+        const tooltipX = Math.max(105, Math.min(chartRect.width - 105, clientX - chartRect.left));
+        const tooltipY = Math.max(90, Math.min(chartRect.height - 10, clientY - chartRect.top));
         tooltip.style.left = tooltipX + 'px';
         tooltip.style.top = tooltipY + 'px';
         tooltip.classList.add('visible');
+      }};
+      const showPoint = (event) => {{
+        if (!points.length || !svg.getScreenCTM()) return;
+        const svgPoint = svg.createSVGPoint();
+        svgPoint.x = event.clientX;
+        svgPoint.y = event.clientY;
+        const local = svgPoint.matrixTransform(svg.getScreenCTM().inverse());
+        const left = Number(hitArea.dataset.left);
+        const width = Number(hitArea.dataset.width);
+        const ratio = Math.max(0, Math.min(1, (local.x - left) / width));
+        const index = Math.round(ratio * (points.length - 1));
+        showPointAtIndex(index, event);
       }};
 
       hitArea.addEventListener('pointerdown', (event) => {{
@@ -1275,6 +1303,7 @@ def build_html(runs_root: Path, target_run: str) -> str:
       }});
       hitArea.addEventListener('pointercancel', () => {{ dragging = false; hidePoint(); }});
       hitArea.addEventListener('pointerleave', hidePoint);
+      if (slider) slider.addEventListener('input', () => showPointAtIndex(Number(slider.value)));
     }});
 
     document.querySelectorAll('.portfolio-pie').forEach((chart) => {{
