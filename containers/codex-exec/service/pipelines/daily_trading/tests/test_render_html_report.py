@@ -296,7 +296,10 @@ def self_test() -> int:
             "KOSPI 3210.50 (+1.25%)",
             "regimeLabel&quot;:&quot;강세",
             "regime&quot;:&quot;risk_on",
-            "KIS 총자산",
+            "KIS 총자산 10,500,000원",
+            'class="series-line asset-line"',
+            "asset&quot;:10500000",
+            "'KIS 총자산 ' + Number(point.asset)",
             'class="trade-symbol-button score-low"',
             'class="trade-symbol-button score-high active"',
             'class="chart-range-slider"',
@@ -342,7 +345,12 @@ def self_test() -> int:
                 }
             ]
         )
-        no_kospi_ok = "10,100,000" in no_kospi_chart and "KOSPI 조회 실패" in no_kospi_chart
+        no_kospi_ok = (
+            "10,100,000" in no_kospi_chart
+            and "KOSPI 조회 실패" in no_kospi_chart
+            and "KIS 총자산 조회 실패" in no_kospi_chart
+            and 'class="series-line asset-line"' not in no_kospi_chart
+        )
         if missing or present or not score_order_ok or not no_kospi_ok:
             print(json.dumps({"status": "failed", "missing": missing, "forbidden_present": present, "score_order_ok": score_order_ok, "no_kospi_ok": no_kospi_ok}, ensure_ascii=False))
             return 1
