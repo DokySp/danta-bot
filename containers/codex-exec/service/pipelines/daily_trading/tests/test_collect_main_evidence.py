@@ -92,6 +92,17 @@ def command_self_test(_args: argparse.Namespace) -> int:
     )
     assert sample_account["symbol_id"] == "0183J0"
     assert sample_account["current_live_holding_quantity"] == 3
+    assert sample_account["current_price"] == 70000
+    average_only_account = normalize_holding(
+        {
+            "pdno": "005930",
+            "hldg_qty": "1",
+            "pchs_avg_pric": "60000",
+            "evlu_amt": "70000",
+        },
+        observed_at="2026-06-18T09:00:00+09:00",
+    )
+    assert average_only_account["current_price"] is None
     assert build_account_summary({"dnca_tot_amt": "1000", "tot_evlu_amt": "2000"})["cash_amount"] == 1000
     orderable_summary = build_account_summary({"dnca_tot_amt": "5183620", "prvs_rcdl_excc_amt": "1043015", "nxdy_excc_amt": "1276976"})
     assert orderable_summary["cash_amount"] == 5183620

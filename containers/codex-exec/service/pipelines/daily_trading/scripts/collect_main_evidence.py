@@ -997,7 +997,7 @@ def normalize_holding(row: dict[str, Any], *, observed_at: str) -> dict[str, Any
         "symbol_name": text_first(row, ("prdt_name", "prdt_abrv_name", "hts_kor_isnm")) or symbol,
         "current_live_holding_quantity": holding_quantity(row),
         "ord_psbl_qty": parse_int(first_present(row, ("ord_psbl_qty", "sell_psbl_qty", "slpsblqty"))) or 0,
-        "current_price": parse_int(first_present(row, ("prpr", "stck_prpr", "now_pric", "pchs_avg_pric"))),
+        "current_price": parse_int(first_present(row, ("prpr", "stck_prpr", "now_pric"))),
         "valuation_amount": parse_int(first_present(row, ("evlu_amt", "evlu_pfls_amt_smtl", "scts_evlu_amt"))),
         "pnl_amount": parse_int(first_present(row, ("evlu_pfls_amt", "evlu_pfls_smtl_amt"))),
         "pnl_rate": parse_float(first_present(row, ("evlu_pfls_rt", "evlu_erng_rt", "pfls_rt"))),
