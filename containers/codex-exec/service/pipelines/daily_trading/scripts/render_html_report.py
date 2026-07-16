@@ -871,7 +871,7 @@ def render_holdings(target_dir: Path, summary: dict[str, Any]) -> str:
         pnl_css = "positive" if float(item.get("pnl_amount") or 0) >= 0 else "negative"
         rows.append(
             f"<tr><td><strong>{esc(symbol_name)}</strong><br><code>{esc(symbol_id)}</code></td><td>{esc(industry)}</td>"
-            f"<td>{number(item.get('current_live_holding_quantity'))}주</td><td>{number(valuation)}원</td>"
+            f"<td>{number(item.get('current_live_holding_quantity'))}주</td><td>{number(item.get('current_price'))}원</td><td>{number(valuation)}원</td>"
             f"<td>{decimal(weight)}%</td><td class=\"{pnl_css}\">{number(item.get('pnl_amount'))}원</td>"
             f"<td class=\"{pnl_css}\">{decimal(item.get('pnl_rate'))}%</td></tr>"
         )
@@ -887,7 +887,7 @@ def render_holdings(target_dir: Path, summary: dict[str, Any]) -> str:
     return f"""
     <section class="panel" id="holdings">
       <div class="section-head"><div><p class="kicker">PORTFOLIO</p><h2>{esc(cut_off)} 주문 제출 직전 보유 현황</h2></div><span class="badge info">보유 {len(positions)}종목</span></div>
-      <div class="notice">이 표는 해당 run의 주문 전 계좌 조회 기준입니다. 제출 주문은 체결이 확인되기 전까지 보유수량 변화로 반영하지 않습니다.</div>
+      <div class="notice">수량·현재가·평가액은 해당 run의 주문 전 계좌 조회 기준입니다. 제출 주문은 체결이 확인되기 전까지 보유수량 변화로 반영하지 않습니다.</div>
       <div class="portfolio-chart-layout">
         <div class="portfolio-pie" data-pie-total="{pie_total}">
           <svg class="portfolio-pie-svg" viewBox="0 0 360 360" role="img" aria-label="보유 종목 평가액 비중 파이차트">{''.join(slices)}</svg>
@@ -896,7 +896,7 @@ def render_holdings(target_dir: Path, summary: dict[str, Any]) -> str:
         <div class="sector-legend"><div><p class="kicker">SECTOR COLORS</p><h3>업종별 색상</h3><p>같은 업종 종목은 같은 색상으로 표시합니다.</p></div>{''.join(legend)}</div>
       </div>
       <p class="source-note">업종은 {esc(cut_off)} decision-brief의 종목별 financial_summary를 사용했습니다. 파이는 현금 제외 주식 평가액 {number(pie_total)}원을 기준으로 합니다.</p>
-      <div class="table-wrap holdings-table"><table><thead><tr><th>종목</th><th>업종</th><th>수량</th><th>평가액</th><th>주식 내 비중</th><th>평가손익</th><th>수익률</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div>
+      <div class="table-wrap holdings-table"><table><thead><tr><th>종목</th><th>업종</th><th>수량</th><th>현재가</th><th>평가액</th><th>주식 내 비중</th><th>평가손익</th><th>수익률</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div>
     </section>
     """
 

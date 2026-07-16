@@ -220,8 +220,8 @@ def make_run(runs_root: Path, run_id: str, started_at: str, *, target: bool) -> 
         run_dir / "account-before-order.json",
         {
             "symbols": [
-                {"symbol_id": "000001", "symbol_name": "알파전자", "current_live_holding_quantity": 2, "valuation_amount": 200_000, "pnl_amount": 20_000, "pnl_rate": 11.1},
-                {"symbol_id": "000002", "symbol_name": "베타소재", "current_live_holding_quantity": 1, "valuation_amount": 50_000, "pnl_amount": -5_000, "pnl_rate": -9.1},
+                {"symbol_id": "000001", "symbol_name": "알파전자", "current_live_holding_quantity": 2, "current_price": 100_000, "valuation_amount": 200_000, "pnl_amount": 20_000, "pnl_rate": 11.1},
+                {"symbol_id": "000002", "symbol_name": "베타소재", "current_live_holding_quantity": 1, "current_price": 50_000, "valuation_amount": 50_000, "pnl_amount": -5_000, "pnl_rate": -9.1},
             ]
         },
     )
@@ -303,6 +303,8 @@ def self_test() -> int:
             'max="2"',
             "slider.addEventListener('input'",
             "같은 업종 종목은 같은 색상",
+            "<th>수량</th><th>현재가</th><th>평가액</th>",
+            "<td>2주</td><td>100,000원</td><td>200,000원</td>",
             "주문 생명주기 사전조회 partial",
             "현재 미체결 1건 · 같은 날 이전 제출 2건 · 보유수량 확인 필요 1건",
             "KIS 거절 1주",
