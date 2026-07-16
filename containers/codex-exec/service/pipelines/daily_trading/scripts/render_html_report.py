@@ -252,6 +252,11 @@ def render_header(summary: dict[str, Any], run_count: int, fills: list[dict[str,
     started_at = str(summary.get("started_at") or "")
     cut_off = time_text(started_at)
     status = str(summary.get("status") or "-")
+    run_id = str(summary.get("run_id") or "-")
+    run_suffix = run_id.rpartition("-")[2]
+    run_id_hint = ""
+    if len(run_suffix) == 8 and all(character in "0123456789abcdefABCDEF" for character in run_suffix):
+        run_id_hint = "<small>마지막 8자리는 해시가 아니라 같은 초에 시작한 실행을 구분하는 임의 식별자입니다.</small>"
     status_label = "실행 성공" if status == "success" else "부분 완료" if status == "partial" else "실행 실패"
     status_css = "success" if status == "success" else ""
     asset_metric = ""
@@ -272,7 +277,7 @@ def render_header(summary: dict[str, Any], run_count: int, fills: list[dict[str,
         <span class="chip">체결 {len(fills)}건</span>
         <span class="chip">봇 주문 제출 {len(submitted_orders)}건</span>
       </div>
-      <div class="run-id"><code>{esc(summary.get('run_id'))}</code></div>
+      <div class="run-id"><span>실행 ID</span><code>{esc(run_id)}</code>{run_id_hint}</div>
     </header>
     <section class="metrics">
       <article><span>총평가</span><strong>{number(account.get('total_evaluation_amount'))}원</strong><small>주식 {number(account.get('securities_valuation_amount'))}원</small></article>
@@ -1101,7 +1106,7 @@ def build_html(runs_root: Path, target_run: str) -> str:
     .tab-page {{ display:none; animation:page-in .22s ease; }} .tab-page.active {{ display:block; }} @keyframes page-in {{ from {{ opacity:.3; transform:translateY(5px); }} to {{ opacity:1; transform:none; }} }}
     .hero {{ position:relative; overflow:hidden; padding:36px; border-radius:26px; background:linear-gradient(135deg,#15234f 0%,#3f4fc4 57%,#087d76 100%); color:#fff; box-shadow:0 24px 60px rgba(30,47,90,.18); }} .hero::after {{ content:""; position:absolute; width:260px; height:260px; right:-80px; top:-120px; border-radius:50%; background:rgba(255,255,255,.10); }}
     .hero p {{ max-width:850px; color:#e3eaff; }} .eyebrow,.kicker {{ margin-bottom:9px; color:#94a3d8; font-size:12px; font-weight:800; letter-spacing:.1em; }}
-    .chips {{ display:flex; flex-wrap:wrap; gap:8px; margin:18px 0 10px; }} .chip {{ padding:6px 10px; border:1px solid rgba(255,255,255,.24); border-radius:999px; background:rgba(255,255,255,.1); font-size:13px; }} .chip.success {{ color:#b7f7dc; }} .run-id {{ color:#cbd7ff; }}
+    .chips {{ display:flex; flex-wrap:wrap; gap:8px; margin:18px 0 10px; }} .chip {{ padding:6px 10px; border:1px solid rgba(255,255,255,.24); border-radius:999px; background:rgba(255,255,255,.1); font-size:13px; }} .chip.success {{ color:#b7f7dc; }} .run-id {{ display:flex; align-items:baseline; flex-wrap:wrap; gap:7px; color:#cbd7ff; }} .run-id span {{ font-size:12px; font-weight:800; }} .run-id small {{ width:100%; color:#aebce9; font-size:11px; }}
     .metrics,.coverage {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin:16px 0; }}
     .metrics article,.coverage article {{ padding:17px; border:1px solid var(--line); border-radius:16px; background:var(--surface); box-shadow:var(--shadow); }}
     .metrics span,.coverage span,.metrics small,.coverage small {{ display:block; color:var(--muted); font-size:12px; }} .metrics strong,.coverage strong {{ display:block; margin:4px 0; font-size:20px; letter-spacing:-.025em; }}

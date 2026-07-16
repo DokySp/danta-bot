@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from ..scripts.render_html_report import build_html, order_status_badge, render_combined_chart
+from ..scripts.render_html_report import build_html, order_status_badge, render_combined_chart, render_header
 
 
 def write_json(path: Path, payload: dict) -> None:
@@ -331,6 +331,22 @@ def self_test() -> int:
 class RenderHtmlReportSelfTest(unittest.TestCase):
     def test_self_test_suite(self) -> None:
         self.assertEqual(self_test(), 0)
+
+    def test_header_explains_random_run_id_suffix(self) -> None:
+        rendered = render_header(
+            {
+                "run_id": "20260714T143005+0900-aeeb370f",
+                "started_at": "2026-07-14T14:30:05+09:00",
+                "status": "success",
+            },
+            1,
+            [],
+            [],
+        )
+
+        self.assertIn("실행 ID", rendered)
+        self.assertIn("마지막 8자리는 해시가 아니라", rendered)
+        self.assertIn("같은 초에 시작한 실행을 구분하는 임의 식별자", rendered)
 
     def test_rejected_order_uses_broker_status_instead_of_unconfirmed_fill(self) -> None:
         rendered = order_status_badge(
