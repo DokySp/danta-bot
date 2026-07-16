@@ -8,7 +8,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from ..scripts.render_html_report import analyst_score_class, build_html, order_status_badge, render_combined_chart, render_header
+from ..scripts.render_html_report import (
+    analyst_score_class,
+    build_html,
+    order_status_badge,
+    render_combined_chart,
+    render_header,
+    render_trade_ledger,
+)
 
 
 def write_json(path: Path, payload: dict) -> None:
@@ -276,6 +283,7 @@ def self_test() -> int:
             "목표 보유 3주",
             "외부종목",
             "계좌 전체 일별 체결 조회",
+            "주문·체결 통합 원장",
             "신규 수주 공시",
             "원가 부담 확대",
             'sentiment positive',
@@ -305,6 +313,8 @@ def self_test() -> int:
             'class="series-line pnl-line"',
             "innerHTML",
             "재무 수집 supplied",
+            "확인된 체결 전체",
+            "봇이 제출한 주문 전체",
         ]
         missing = [value for value in required if value not in rendered]
         present = [value for value in forbidden if value in rendered]
@@ -358,6 +368,49 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
         self.assertEqual(analyst_score_class(6), " score-high")
         self.assertEqual(analyst_score_class(5), "")
         self.assertEqual(analyst_score_class(None), "")
+
+    def test_trade_ledger_merges_order_with_linked_fill(self) -> None:
+        rendered, submitted_orders = render_trade_ledger(
+            [
+                {
+                    "summary": {"started_at": "2026-07-15T10:00:00+09:00"},
+                    "execution": {
+                        "orders": [
+                            {
+                                "symbol_id": "000001",
+                                "symbol_name": "알파전자",
+                                "direction": "buy",
+                                "quantity": 1,
+                                "order_price": 100_000,
+                                "order_or_reservation_id": "order-1",
+                                "result": "submitted",
+                            }
+                        ]
+                    },
+                }
+            ],
+            [
+                {
+                    "order_id": "order-1",
+                    "symbol_id": "000001",
+                    "symbol_name": "알파전자",
+                    "direction": "buy",
+                    "filled_quantity": 1,
+                    "filled_price": 100_000,
+                    "filled_amount": 100_000,
+                    "filled_at": "2026-07-15T10:02:00+09:00",
+                    "source_actor": "bot",
+                }
+            ],
+            "success",
+            "account",
+        )
+
+        self.assertEqual(len(submitted_orders), 1)
+        self.assertIn("주문·체결 통합 원장", rendered)
+        self.assertNotIn("확인된 체결 전체", rendered)
+        self.assertNotIn("봇이 제출한 주문 전체", rendered)
+        self.assertEqual(rendered.count("order-1"), 1)
 
     def test_rejected_order_uses_broker_status_instead_of_unconfirmed_fill(self) -> None:
         rendered = order_status_badge(

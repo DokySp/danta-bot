@@ -320,30 +320,51 @@ def render_trade_ledger(
             row["fill"] = fill_by_order.get(str(item.get("order_or_reservation_id") or ""))
             submitted_orders.append(row)
 
-    fill_rows = []
-    for item in fills:
-        actor = "사용자 직접" if item.get("source_actor") == "non_bot_user" else "봇"
-        direction = "매수" if item.get("direction") == "buy" else "매도"
-        fill_rows.append(
-            f"<tr><td>{time_text(item.get('filled_at'))}</td><td>{esc(actor)}</td>"
-            f"<td><strong>{esc(item.get('symbol_name'))}</strong><br><code>{esc(item.get('symbol_id'))}</code></td>"
-            f"<td>{direction}</td><td>{number(item.get('filled_quantity'))}주</td>"
-            f"<td>{number(item.get('filled_price'))}원</td><td>{number(item.get('filled_amount'))}원</td>"
-            f"<td><code>{esc(item.get('order_id'))}</code></td></tr>"
-        )
-
-    order_rows = []
+    ledger_rows: list[tuple[str, str]] = []
+    linked_order_ids: set[str] = set()
     for item in submitted_orders:
         fill = item.get("fill") if isinstance(item.get("fill"), dict) else None
         result = order_status_badge(item, fill)
         direction = "매수" if item.get("direction") == "buy" else "매도"
-        order_rows.append(
-            f"<tr><td>{time_text(item.get('run_started_at'))} run</td>"
-            f"<td><strong>{esc(item.get('symbol_name'))}</strong><br><code>{esc(item.get('symbol_id'))}</code></td>"
-            f"<td>{direction}</td><td>{number(item.get('validated_order_quantity') or item.get('quantity'))}주</td>"
-            f"<td>{number(item.get('order_price'))}원</td><td><code>{esc(item.get('order_or_reservation_id'))}</code></td>"
-            f"<td>{result}</td></tr>"
+        order_id = str(item.get("order_or_reservation_id") or "")
+        if fill is not None:
+            linked_order_ids.add(order_id)
+        time_cell = f"주문 {time_text(item.get('run_started_at'))}"
+        fill_cell = "-"
+        if fill is not None:
+            time_cell += f"<br><small>체결 {time_text(fill.get('filled_at'))}</small>"
+            fill_cell = (
+                f"{number(fill.get('filled_quantity'))}주<br>"
+                f"<small>{number(fill.get('filled_price'))}원 · {number(fill.get('filled_amount'))}원</small>"
+            )
+        ledger_rows.append(
+            (
+                str(item.get("run_started_at") or ""),
+                f"<tr><td>{time_cell}</td><td>봇</td>"
+                f"<td><strong>{esc(item.get('symbol_name'))}</strong><br><code>{esc(item.get('symbol_id'))}</code></td>"
+                f"<td>{direction}</td>"
+                f"<td>{number(item.get('validated_order_quantity') or item.get('quantity'))}주<br><small>{number(item.get('order_price'))}원</small></td>"
+                f"<td>{fill_cell}</td><td><code>{esc(order_id)}</code></td><td>{result}</td></tr>",
+            )
         )
+
+    for item in fills:
+        order_id = str(item.get("order_id") or "")
+        if order_id in linked_order_ids:
+            continue
+        actor = "사용자 직접" if item.get("source_actor") == "non_bot_user" else "봇"
+        direction = "매수" if item.get("direction") == "buy" else "매도"
+        ledger_rows.append(
+            (
+                str(item.get("filled_at") or ""),
+                f"<tr><td>체결 {time_text(item.get('filled_at'))}</td><td>{esc(actor)}</td>"
+                f"<td><strong>{esc(item.get('symbol_name'))}</strong><br><code>{esc(item.get('symbol_id'))}</code></td>"
+                f"<td>{direction}</td><td>-</td>"
+                f"<td>{number(item.get('filled_quantity'))}주<br><small>{number(item.get('filled_price'))}원 · {number(item.get('filled_amount'))}원</small></td>"
+                f"<td><code>{esc(order_id)}</code></td><td><span class=\"badge ok\">체결 확인</span></td></tr>",
+            )
+        )
+    ledger_html = "".join(row for _, row in sorted(ledger_rows, key=lambda item: item[0]))
 
     cut_off = time_text(runs[-1]["summary"].get("started_at")) if runs else "-"
     if fill_status == "success" and fill_scope == "account":
@@ -357,10 +378,8 @@ def render_trade_ledger(
     <section class="panel" id="trades">
       <div class="section-head"><div><p class="kicker">DAY LEDGER</p><h2>{esc(cut_off)}까지의 당일 전체 거래</h2></div><span class="badge info">체결 {len(fills)} · 봇 제출 {len(submitted_orders)}</span></div>
       <div class="notice">{esc(fill_notice)}</div>
-      <h3>확인된 체결 전체</h3>
-      <div class="table-wrap"><table><thead><tr><th>체결시각</th><th>주체</th><th>종목</th><th>방향</th><th>수량</th><th>체결가</th><th>금액</th><th>주문번호</th></tr></thead><tbody>{''.join(fill_rows) or '<tr><td colspan="8">확인된 체결 없음</td></tr>'}</tbody></table></div>
-      <h3>봇이 제출한 주문 전체</h3>
-      <div class="table-wrap"><table><thead><tr><th>실행</th><th>종목</th><th>방향</th><th>수량</th><th>주문가</th><th>주문번호</th><th>{esc(cut_off)} 기준 상태</th></tr></thead><tbody>{''.join(order_rows) or '<tr><td colspan="7">제출 주문 없음</td></tr>'}</tbody></table></div>
+      <h3>주문·체결 통합 원장</h3>
+      <div class="table-wrap"><table><thead><tr><th>시각</th><th>주체</th><th>종목</th><th>방향</th><th>주문</th><th>체결</th><th>주문번호</th><th>{esc(cut_off)} 기준 상태</th></tr></thead><tbody>{ledger_html or '<tr><td colspan="8">확인된 주문·체결 없음</td></tr>'}</tbody></table></div>
     </section>
     """
     return content, submitted_orders
