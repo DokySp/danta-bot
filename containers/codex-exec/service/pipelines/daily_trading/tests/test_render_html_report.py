@@ -510,6 +510,84 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
         self.assertIn("체결 10:01", rendered)
         self.assertIn('badge ok', rendered)
 
+    def _combined_chart_run(
+        self,
+        started_at: str,
+        *,
+        total: float,
+        pnl: float,
+        asset: float | None = None,
+        kospi: float | None = None,
+        kospi_change: float | None = None,
+    ) -> dict:
+        account_asset_summary = {"total_asset_amount": asset} if asset is not None else {}
+        indexes = (
+            [{"symbol": "KOSPI", "value": kospi, "change_percent": kospi_change}]
+            if kospi is not None
+            else []
+        )
+        return {
+            "summary": {
+                "started_at": started_at,
+                "account_display_summary": {"total_evaluation_amount": total, "total_pnl_amount": pnl},
+                "account_asset_summary": account_asset_summary,
+            },
+            "market": {"indexes": indexes},
+            "decision": {"strategy_context": {"regime": "neutral"}},
+        }
+
+    def test_combined_chart_marks_every_run_on_every_rendered_series(self) -> None:
+        runs = [
+            self._combined_chart_run(
+                "2026-07-15T09:00:00+09:00", total=10_000_000, pnl=100_000, asset=10_500_000, kospi=3200.0, kospi_change=1.0
+            ),
+            self._combined_chart_run(
+                "2026-07-15T09:30:00+09:00", total=10_050_000, pnl=90_000, asset=10_400_000, kospi=3210.0, kospi_change=1.1
+            ),
+            self._combined_chart_run(
+                "2026-07-15T10:00:00+09:00", total=10_100_000, pnl=80_000, asset=10_300_000, kospi=3220.0, kospi_change=1.2
+            ),
+        ]
+
+        rendered = render_combined_chart(runs)
+
+        self.assertIn('class="series-line pnl-line"', rendered)
+        self.assertEqual(rendered.count('class="series-point total-point"'), 3)
+        self.assertEqual(rendered.count('class="series-point pnl-point"'), 3)
+        self.assertEqual(rendered.count('class="series-point asset-point"'), 3)
+        self.assertEqual(rendered.count('class="series-point kospi-point"'), 3)
+
+    def test_combined_chart_omits_pnl_points_when_pnl_overlaps_total(self) -> None:
+        runs = [
+            self._combined_chart_run("2026-07-15T09:00:00+09:00", total=10_000_000, pnl=90_000),
+            self._combined_chart_run("2026-07-15T09:30:00+09:00", total=10_050_000, pnl=95_000),
+        ]
+
+        rendered = render_combined_chart(runs)
+
+        self.assertNotIn('class="series-line pnl-line"', rendered)
+        self.assertNotIn('class="series-point pnl-point"', rendered)
+        self.assertEqual(rendered.count('class="series-point total-point"'), 2)
+
+    def test_combined_chart_skips_points_for_runs_missing_asset_or_kospi(self) -> None:
+        runs = [
+            self._combined_chart_run(
+                "2026-07-15T09:00:00+09:00", total=10_000_000, pnl=100_000, asset=10_500_000, kospi=3200.0, kospi_change=1.0
+            ),
+            self._combined_chart_run(
+                "2026-07-15T09:30:00+09:00", total=10_050_000, pnl=90_000, asset=None, kospi=3210.0, kospi_change=1.1
+            ),
+            self._combined_chart_run(
+                "2026-07-15T10:00:00+09:00", total=10_100_000, pnl=80_000, asset=10_600_000, kospi=None, kospi_change=None
+            ),
+        ]
+
+        rendered = render_combined_chart(runs)
+
+        self.assertEqual(rendered.count('class="series-point total-point"'), 3)
+        self.assertEqual(rendered.count('class="series-point asset-point"'), 2)
+        self.assertEqual(rendered.count('class="series-point kospi-point"'), 2)
+
 
 if __name__ == "__main__":
     raise SystemExit(self_test())
