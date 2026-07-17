@@ -6,6 +6,7 @@ import base64
 import mimetypes
 import os
 import re
+import secrets
 import signal
 import threading
 import time
@@ -17,7 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 import yaml
@@ -283,6 +284,7 @@ def telegram_html_chunks(text: str, limit: int = 4096) -> list[str]:
 
 
 TELEGRAM_CONTEXT_TEXT_LIMIT = 2000
+TELEGRAM_ATTACHMENT_DOWNLOAD_LIMIT = 20 * 1024 * 1024
 TELEGRAM_CONTEXT_CONTENT_FIELDS = (
     "animation",
     "audio",
@@ -305,6 +307,126 @@ TELEGRAM_CONTEXT_CONTENT_FIELDS = (
     "voice",
     "web_app_data",
 )
+
+
+@dataclass(frozen=True)
+class IncomingTelegramAttachment:
+    kind: str
+    file_id: str
+    file_unique_id: str | None
+    file_name: str
+    mime_type: str | None
+    file_size: int | None
+    caption: str | None
+    message_id: int | None
+
+
+@dataclass(frozen=True)
+class CachedTelegramAttachment:
+    attachment_id: str
+    route_id: str
+    chat_id: str
+    kind: str
+    file_name: str
+    mime_type: str | None
+    size: int
+    caption: str | None
+    host_path: Path
+    metadata_path: Path
+    created_at: float
+
+
+def _telegram_file_size(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def safe_attachment_name(value: Any, fallback: str) -> str:
+    raw = str(value or "").strip().replace("\\", "/")
+    name = raw.rsplit("/", 1)[-1]
+    name = re.sub(r"[\x00-\x1f\x7f]+", "_", name).strip(" .")
+    if not name or name in {".", ".."}:
+        name = fallback
+    return name[:180]
+
+
+def extract_telegram_attachment(message: dict[str, Any]) -> IncomingTelegramAttachment | None:
+    caption = message.get("caption")
+    normalized_caption = trim_telegram_text(caption) if isinstance(caption, str) else None
+    message_id_value = message.get("message_id")
+    message_id = message_id_value if isinstance(message_id_value, int) else None
+
+    document = message.get("document")
+    if isinstance(document, dict):
+        file_id = str(document.get("file_id", "")).strip()
+        if not file_id:
+            return None
+        fallback = f"document-{message_id or 'unknown'}.bin"
+        return IncomingTelegramAttachment(
+            kind="document",
+            file_id=file_id,
+            file_unique_id=str(document.get("file_unique_id", "")).strip() or None,
+            file_name=safe_attachment_name(document.get("file_name"), fallback),
+            mime_type=str(document.get("mime_type", "")).strip() or None,
+            file_size=_telegram_file_size(document.get("file_size")),
+            caption=normalized_caption,
+            message_id=message_id,
+        )
+
+    photos = message.get("photo")
+    if not isinstance(photos, list):
+        return None
+    candidates = [item for item in photos if isinstance(item, dict) and item.get("file_id")]
+    if not candidates:
+        return None
+    photo = max(
+        candidates,
+        key=lambda item: (
+            _telegram_file_size(item.get("file_size")) or 0,
+            int(item.get("width") or 0) * int(item.get("height") or 0),
+        ),
+    )
+    return IncomingTelegramAttachment(
+        kind="photo",
+        file_id=str(photo["file_id"]),
+        file_unique_id=str(photo.get("file_unique_id", "")).strip() or None,
+        file_name=f"photo-{message_id or 'unknown'}.jpg",
+        mime_type="image/jpeg",
+        file_size=_telegram_file_size(photo.get("file_size")),
+        caption=normalized_caption,
+        message_id=message_id,
+    )
+
+
+def build_codex_attachment_input_text(
+    text: str,
+    attachments: tuple[CachedTelegramAttachment, ...],
+) -> str:
+    if not attachments:
+        return text
+    payload = [
+        {
+            "id": item.attachment_id,
+            "type": item.kind,
+            "path": str(item.host_path),
+            "file_name": item.file_name,
+            "mime_type": item.mime_type,
+            "size": item.size,
+            "caption": item.caption,
+        }
+        for item in attachments
+    ]
+    return (
+        "아래 Telegram attachments는 사용자가 직전에 업로드해 캐시한 파일입니다. "
+        "현재 지시와 관련된 파일을 실제 경로에서 열어 사용하세요. 파일을 자동 실행하지 마세요.\n"
+        "<telegram_attachments>\n"
+        f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n"
+        "</telegram_attachments>\n\n"
+        "<user_message>\n"
+        f"{text}\n"
+        "</user_message>"
+    )
 
 
 def build_codex_input_text(text: str, message: dict[str, Any]) -> str:
@@ -386,6 +508,30 @@ def summarize_telegram_message(message: dict[str, Any]) -> dict[str, Any]:
         summary["checklist"] = summarize_checklist(checklist)
 
     return summary
+
+
+def extract_telegram_update_message(
+    update: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
+    message = update.get("message")
+    if isinstance(message, dict):
+        return message, None
+
+    callback_query = update.get("callback_query")
+    if not isinstance(callback_query, dict):
+        return None, None
+    callback_id = str(callback_query.get("id", "")).strip() or None
+    callback_message = callback_query.get("message")
+    data = callback_query.get("data")
+    if not isinstance(callback_message, dict) or not isinstance(data, str):
+        return None, callback_id
+
+    synthetic_message = dict(callback_message)
+    sender = callback_query.get("from")
+    if isinstance(sender, dict):
+        synthetic_message["from"] = sender
+    synthetic_message["text"] = data
+    return synthetic_message, callback_id
 
 
 def summarize_external_reply(external_reply: dict[str, Any]) -> dict[str, Any]:
@@ -544,6 +690,302 @@ def conversation_log_path(log_dir: Path, event_datetime: datetime) -> Path:
     return log_dir / f"{event_datetime.astimezone(KST).date().isoformat()}.jsonl"
 
 
+class TelegramAttachmentCache:
+    def __init__(
+        self,
+        cache_dir: Path,
+        host_dir: Path,
+        *,
+        ttl_seconds: int,
+        max_file_bytes: int,
+        max_total_bytes: int,
+        max_pending: int,
+    ) -> None:
+        if ttl_seconds <= 0:
+            raise ValueError("attachment cache TTL must be positive")
+        if max_file_bytes <= 0 or max_file_bytes > TELEGRAM_ATTACHMENT_DOWNLOAD_LIMIT:
+            raise ValueError("attachment max file bytes must be between 1 and 20 MiB")
+        if max_total_bytes < max_file_bytes:
+            raise ValueError("attachment max total bytes must be at least max file bytes")
+        if max_pending <= 0:
+            raise ValueError("attachment max pending must be positive")
+        self.cache_dir = cache_dir.resolve()
+        self.host_dir = host_dir.resolve()
+        self.ttl_seconds = ttl_seconds
+        self.max_file_bytes = max_file_bytes
+        self.max_total_bytes = max_total_bytes
+        self.max_pending = max_pending
+        self.lock = threading.RLock()
+        self.cache_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+    @staticmethod
+    def _component(value: str) -> str:
+        component = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip(".")
+        return component or "unknown"
+
+    def _chat_dir(self, route_id: str, chat_id: str) -> Path:
+        route_dir = self.cache_dir / self._component(route_id)
+        route_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        resolved_route_dir = route_dir.resolve()
+        if not resolved_route_dir.is_relative_to(self.cache_dir):
+            raise ValueError("unsafe attachment cache route path")
+        path = resolved_route_dir / self._component(chat_id)
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        resolved_path = path.resolve()
+        if not resolved_path.is_relative_to(self.cache_dir):
+            raise ValueError("unsafe attachment cache chat path")
+        return resolved_path
+
+    @staticmethod
+    def _storage_suffix(file_name: str, kind: str) -> str:
+        if kind == "photo":
+            return ".jpg"
+        suffix = Path(file_name).suffix.lower()
+        if re.fullmatch(r"\.[a-z0-9]{1,12}", suffix):
+            return suffix
+        return ".bin"
+
+    def store(
+        self,
+        route_id: str,
+        chat_id: str,
+        attachment: IncomingTelegramAttachment,
+        content: bytes,
+        *,
+        now: float | None = None,
+    ) -> CachedTelegramAttachment:
+        timestamp = time.time() if now is None else now
+        actual_size = len(content)
+        if attachment.file_size is not None and attachment.file_size > self.max_file_bytes:
+            raise ValueError("파일이 허용 크기 20MiB를 초과합니다.")
+        if actual_size > self.max_file_bytes:
+            raise ValueError("파일이 허용 크기 20MiB를 초과합니다.")
+
+        with self.lock:
+            self.cleanup_expired(now=timestamp)
+            pending = self._list_pending_locked(route_id, chat_id, now=timestamp)
+            if len(pending) >= self.max_pending:
+                raise ValueError(f"대기 파일은 최대 {self.max_pending}개까지 저장할 수 있습니다.")
+            if self._total_size_locked() + actual_size > self.max_total_bytes:
+                raise ValueError("첨부파일 캐시 전체 용량이 가득 찼습니다. 잠시 후 다시 시도해 주세요.")
+
+            attachment_id = f"{attachment.message_id or 'm'}-{secrets.token_hex(6)}"
+            chat_dir = self._chat_dir(route_id, chat_id)
+            data_path = chat_dir / f"{attachment_id}{self._storage_suffix(attachment.file_name, attachment.kind)}"
+            metadata_path = chat_dir / f"{attachment_id}.json"
+            relative_path = data_path.relative_to(self.cache_dir)
+            metadata = {
+                "version": 1,
+                "attachment_id": attachment_id,
+                "route_id": route_id,
+                "chat_id": chat_id,
+                "kind": attachment.kind,
+                "file_unique_id": attachment.file_unique_id,
+                "file_name": attachment.file_name,
+                "mime_type": attachment.mime_type,
+                "size": actual_size,
+                "caption": attachment.caption,
+                "message_id": attachment.message_id,
+                "relative_path": str(relative_path),
+                "created_at": timestamp,
+                "status": "pending",
+            }
+            data_temp = data_path.with_name(f".{data_path.name}.{secrets.token_hex(4)}.part")
+            metadata_temp = metadata_path.with_name(
+                f".{metadata_path.name}.{secrets.token_hex(4)}.part"
+            )
+            try:
+                with data_temp.open("xb") as handle:
+                    os.chmod(data_temp, 0o600)
+                    handle.write(content)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                data_temp.replace(data_path)
+                with metadata_temp.open("x", encoding="utf-8") as handle:
+                    os.chmod(metadata_temp, 0o600)
+                    json.dump(metadata, handle, ensure_ascii=False, separators=(",", ":"))
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                metadata_temp.replace(metadata_path)
+            except Exception:
+                data_temp.unlink(missing_ok=True)
+                metadata_temp.unlink(missing_ok=True)
+                data_path.unlink(missing_ok=True)
+                metadata_path.unlink(missing_ok=True)
+                raise
+            return self._from_metadata(metadata, metadata_path)
+
+    def list_pending(
+        self,
+        route_id: str,
+        chat_id: str,
+        *,
+        now: float | None = None,
+    ) -> tuple[CachedTelegramAttachment, ...]:
+        timestamp = time.time() if now is None else now
+        with self.lock:
+            self.cleanup_expired(now=timestamp)
+            return self._list_pending_locked(route_id, chat_id, now=timestamp)
+
+    def _list_pending_locked(
+        self,
+        route_id: str,
+        chat_id: str,
+        *,
+        now: float,
+    ) -> tuple[CachedTelegramAttachment, ...]:
+        del now
+        route_dir = (self.cache_dir / self._component(route_id)).resolve()
+        if not route_dir.is_relative_to(self.cache_dir):
+            logging.warning("ignored unsafe attachment cache route path=%s", route_dir)
+            return ()
+        chat_dir = (route_dir / self._component(chat_id)).resolve()
+        if not chat_dir.is_relative_to(self.cache_dir):
+            logging.warning("ignored unsafe attachment cache chat path=%s", chat_dir)
+            return ()
+        if not chat_dir.is_dir():
+            return ()
+        items: list[CachedTelegramAttachment] = []
+        for metadata_path in chat_dir.glob("*.json"):
+            if not self._safe_metadata_path(metadata_path):
+                logging.warning("ignored unsafe attachment metadata path=%s", metadata_path)
+                continue
+            metadata = self._read_metadata(metadata_path)
+            if metadata is None or metadata.get("status") != "pending":
+                continue
+            try:
+                item = self._from_metadata(metadata, metadata_path)
+            except (KeyError, TypeError, ValueError):
+                logging.warning("ignored invalid attachment metadata path=%s", metadata_path)
+                continue
+            if not self._container_data_path(metadata).is_file():
+                metadata_path.unlink(missing_ok=True)
+                continue
+            items.append(item)
+        return tuple(sorted(items, key=lambda item: (item.created_at, item.attachment_id)))
+
+    def mark_consumed(
+        self,
+        attachments: tuple[CachedTelegramAttachment, ...],
+        *,
+        now: float | None = None,
+    ) -> None:
+        timestamp = time.time() if now is None else now
+        with self.lock:
+            for attachment in attachments:
+                if not self._safe_metadata_path(attachment.metadata_path):
+                    logging.warning(
+                        "refused to consume unsafe attachment metadata path=%s",
+                        attachment.metadata_path,
+                    )
+                    continue
+                metadata = self._read_metadata(attachment.metadata_path)
+                if metadata is None or metadata.get("status") != "pending":
+                    continue
+                metadata["status"] = "consumed"
+                metadata["consumed_at"] = timestamp
+                temp_path = attachment.metadata_path.with_name(
+                    f".{attachment.metadata_path.name}.{secrets.token_hex(4)}.part"
+                )
+                try:
+                    with temp_path.open("x", encoding="utf-8") as handle:
+                        os.chmod(temp_path, 0o600)
+                        json.dump(metadata, handle, ensure_ascii=False, separators=(",", ":"))
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    temp_path.replace(attachment.metadata_path)
+                finally:
+                    temp_path.unlink(missing_ok=True)
+
+    def cleanup_expired(self, *, now: float | None = None) -> None:
+        timestamp = time.time() if now is None else now
+        with self.lock:
+            for metadata_path in self.cache_dir.rglob("*.json"):
+                if not self._safe_metadata_path(metadata_path):
+                    logging.warning("ignored unsafe attachment metadata path=%s", metadata_path)
+                    continue
+                metadata = self._read_metadata(metadata_path)
+                if metadata is None:
+                    continue
+                try:
+                    created_at = float(metadata["created_at"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if timestamp - created_at < self.ttl_seconds:
+                    continue
+                try:
+                    self._container_data_path(metadata).unlink(missing_ok=True)
+                except ValueError:
+                    logging.warning("ignored unsafe expired attachment path=%s", metadata_path)
+                metadata_path.unlink(missing_ok=True)
+
+    def _total_size_locked(self) -> int:
+        total = 0
+        for metadata_path in self.cache_dir.rglob("*.json"):
+            if not self._safe_metadata_path(metadata_path):
+                logging.warning("ignored unsafe attachment metadata path=%s", metadata_path)
+                continue
+            metadata = self._read_metadata(metadata_path)
+            if metadata is None:
+                continue
+            size = metadata.get("size")
+            if isinstance(size, int) and not isinstance(size, bool) and size > 0:
+                total += size
+        return total
+
+    @staticmethod
+    def _read_metadata(path: Path) -> dict[str, Any] | None:
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            logging.warning("failed to read attachment metadata path=%s", path)
+            return None
+        return value if isinstance(value, dict) else None
+
+    def _safe_metadata_path(self, path: Path) -> bool:
+        if path.is_symlink():
+            return False
+        try:
+            resolved = path.resolve()
+        except (OSError, RuntimeError):
+            return False
+        return resolved.is_relative_to(self.cache_dir) and resolved.is_file()
+
+    def _container_data_path(self, metadata: dict[str, Any]) -> Path:
+        relative = Path(str(metadata["relative_path"]))
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError("unsafe attachment cache path")
+        path = (self.cache_dir / relative).resolve()
+        if not path.is_relative_to(self.cache_dir):
+            raise ValueError("unsafe attachment cache path")
+        return path
+
+    def _from_metadata(
+        self,
+        metadata: dict[str, Any],
+        metadata_path: Path,
+    ) -> CachedTelegramAttachment:
+        relative = Path(str(metadata["relative_path"]))
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError("unsafe attachment cache path")
+        host_path = (self.host_dir / relative).resolve()
+        if not host_path.is_relative_to(self.host_dir):
+            raise ValueError("unsafe attachment host path")
+        return CachedTelegramAttachment(
+            attachment_id=str(metadata["attachment_id"]),
+            route_id=str(metadata["route_id"]),
+            chat_id=str(metadata["chat_id"]),
+            kind=str(metadata["kind"]),
+            file_name=str(metadata["file_name"]),
+            mime_type=str(metadata["mime_type"]) if metadata.get("mime_type") else None,
+            size=int(metadata["size"]),
+            caption=str(metadata["caption"]) if metadata.get("caption") else None,
+            host_path=host_path,
+            metadata_path=metadata_path,
+            created_at=float(metadata["created_at"]),
+        )
+
+
 def parse_env_file(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     for line in path.read_text().splitlines():
@@ -643,6 +1085,12 @@ class Config:
     gateway_port: int
     gateway_routes_file: Path
     conversation_log_dir: Path | None
+    attachment_cache_dir: Path
+    attachment_host_dir: Path
+    attachment_ttl_seconds: int
+    attachment_max_file_bytes: int
+    attachment_max_total_bytes: int
+    attachment_max_pending: int
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -656,6 +1104,26 @@ class Config:
                 "GATEWAY_CONVERSATION_LOG_DIR",
                 "/workspace/memory/telegram-conversations",
             ),
+            attachment_cache_dir=env_path(
+                "GATEWAY_ATTACHMENT_CACHE_DIR",
+                "/workspace/memory/telegram-inbox",
+            )
+            or Path("/workspace/memory/telegram-inbox"),
+            attachment_host_dir=env_path(
+                "GATEWAY_ATTACHMENT_HOST_DIR",
+                "/workspace/memory/telegram-inbox",
+            )
+            or Path("/workspace/memory/telegram-inbox"),
+            attachment_ttl_seconds=env_int("GATEWAY_ATTACHMENT_TTL_SECONDS", 86400),
+            attachment_max_file_bytes=env_int(
+                "GATEWAY_ATTACHMENT_MAX_FILE_BYTES",
+                TELEGRAM_ATTACHMENT_DOWNLOAD_LIMIT,
+            ),
+            attachment_max_total_bytes=env_int(
+                "GATEWAY_ATTACHMENT_MAX_TOTAL_BYTES",
+                200 * 1024 * 1024,
+            ),
+            attachment_max_pending=env_int("GATEWAY_ATTACHMENT_MAX_PENDING", 10),
         )
 
 
@@ -880,7 +1348,7 @@ class TelegramClient:
     def get_updates(self, offset: int | None) -> list[dict[str, Any]]:
         payload: dict[str, Any] = {
             "timeout": self.route.poll_timeout,
-            "allowed_updates": json.dumps(["message"]),
+            "allowed_updates": json.dumps(["message", "callback_query"]),
         }
         if offset is not None:
             payload["offset"] = offset
@@ -889,6 +1357,33 @@ class TelegramClient:
         response = self.post_form("getUpdates", payload, timeout=timeout)
         result = response.get("result", [])
         return result if isinstance(result, list) else []
+
+    def download_file(self, file_id: str, max_bytes: int) -> bytes:
+        if not file_id:
+            raise ValueError("Telegram file_id is required")
+        file_response = self.post_form("getFile", {"file_id": file_id})
+        result = file_response.get("result")
+        file_path = str(result.get("file_path", "")).strip() if isinstance(result, dict) else ""
+        if not file_path:
+            raise RuntimeError("Telegram getFile response has no file_path")
+
+        request = Request(
+            f"https://api.telegram.org/file/bot{self.route.telegram_bot_token}/{quote(file_path, safe='/')}",
+            method="GET",
+        )
+        try:
+            with urlopen(request, timeout=self.route.http_timeout) as response:
+                content_length = response.headers.get("Content-Length")
+                if content_length and int(content_length) > max_bytes:
+                    raise ValueError("파일이 허용 크기 20MiB를 초과합니다.")
+                content = response.read(max_bytes + 1)
+        except HTTPError as exc:
+            raise RuntimeError(f"Telegram file download failed: HTTP {exc.code}") from exc
+        except URLError as exc:
+            raise RuntimeError("Telegram file download failed") from exc
+        if len(content) > max_bytes:
+            raise ValueError("파일이 허용 크기 20MiB를 초과합니다.")
+        return content
 
     def set_my_commands(self) -> None:
         payload = {
@@ -905,6 +1400,7 @@ class TelegramClient:
         text: str,
         parse_mode: str | None = None,
         escape: bool = True,
+        reply_markup: dict[str, Any] | None = None,
     ) -> None:
         mode = parse_mode if parse_mode is not None else self.route.parse_mode
         outbound_text = escape_markdown_v2(text) if escape and mode == "MarkdownV2" else text
@@ -913,14 +1409,19 @@ class TelegramClient:
         else:
             chunks = split_telegram_text(outbound_text)
 
-        for chunk in chunks:
+        for index, chunk in enumerate(chunks):
             payload: dict[str, Any] = {"chat_id": chat_id, "text": chunk}
             if mode:
                 payload["parse_mode"] = mode
+            if reply_markup is not None and index == 0:
+                payload["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
             self.post_form("sendMessage", payload)
 
     def send_chat_action(self, chat_id: str, action: str = "typing") -> None:
         self.post_form("sendChatAction", {"chat_id": chat_id, "action": action})
+
+    def answer_callback_query(self, callback_query_id: str) -> None:
+        self.post_form("answerCallbackQuery", {"callback_query_id": callback_query_id})
 
     def send_binary_file(
         self,
@@ -1002,6 +1503,19 @@ class GatewayApp:
         self.bot_commands_generation = 0
         self.bot_command_routes: dict[str, RouteConfig] = {}
         self.conversation_log_lock = threading.Lock()
+        self.attachment_cache = TelegramAttachmentCache(
+            config.attachment_cache_dir,
+            config.attachment_host_dir,
+            ttl_seconds=config.attachment_ttl_seconds,
+            max_file_bytes=config.attachment_max_file_bytes,
+            max_total_bytes=config.attachment_max_total_bytes,
+            max_pending=config.attachment_max_pending,
+        )
+        self.attachment_cleanup_interval_seconds = max(
+            60,
+            min(300, config.attachment_ttl_seconds // 4),
+        )
+        self.next_attachment_cleanup_at = 0.0
 
     def serve_http(self) -> ThreadingHTTPServer:
         app = self
@@ -1100,7 +1614,17 @@ class GatewayApp:
                     if parse_mode is not None:
                         parse_mode = str(parse_mode)
                     escape = bool(payload.get("escape", True))
-                    TelegramClient(route).send_message(chat_id, text, parse_mode=parse_mode, escape=escape)
+                    reply_markup = payload.get("reply_markup")
+                    if reply_markup is not None and not isinstance(reply_markup, dict):
+                        self._write_json(400, {"ok": False, "error": "reply_markup must be an object"})
+                        return
+                    TelegramClient(route).send_message(
+                        chat_id,
+                        text,
+                        parse_mode=parse_mode,
+                        escape=escape,
+                        reply_markup=reply_markup,
+                    )
                     app.append_outbound_conversation_event(route, chat_id, "sendMessage", text, source_path=self.path)
                 except Exception as exc:  # noqa: BLE001 - convert all endpoint errors to JSON
                     logging.exception("send endpoint failed")
@@ -1203,6 +1727,7 @@ class GatewayApp:
     def poll_forever(self) -> None:
         while not self.stop_event.is_set():
             try:
+                self.cleanup_attachment_cache_if_due()
                 routing = self.routing_store.get()
                 self.register_bot_commands_if_reloaded()
                 if not routing.routes:
@@ -1225,6 +1750,16 @@ class GatewayApp:
             poll_interval = min((route.poll_interval for route in routing.routes.values()), default=1.0)
             self.stop_event.wait(poll_interval)
 
+    def cleanup_attachment_cache_if_due(self, *, now: float | None = None) -> None:
+        timestamp = time.time() if now is None else now
+        if timestamp < self.next_attachment_cleanup_at:
+            return
+        self.next_attachment_cleanup_at = timestamp + self.attachment_cleanup_interval_seconds
+        try:
+            self.attachment_cache.cleanup_expired(now=timestamp)
+        except Exception:
+            logging.exception("failed to clean Telegram attachment cache")
+
     def poll_route_once(self, route: RouteConfig) -> None:
         if not route.allowed_chat_ids:
             logging.warning("route=%s TELEGRAM_ALLOWED_CHAT_IDS is empty; inbound messages ignored", route.route_id)
@@ -1242,8 +1777,8 @@ class GatewayApp:
             self.handle_update(route, update)
 
     def handle_update(self, route: RouteConfig, update: dict[str, Any]) -> None:
-        message = update.get("message")
-        if not isinstance(message, dict):
+        message, callback_query_id = extract_telegram_update_message(update)
+        if message is None:
             return
 
         chat = message.get("chat") if isinstance(message.get("chat"), dict) else {}
@@ -1257,9 +1792,135 @@ class GatewayApp:
             logging.warning("ignored unauthorized chat_id=%s route=%s", chat_id, route.route_id)
             return
 
+        client = TelegramClient(route)
+        if callback_query_id is not None:
+            try:
+                client.answer_callback_query(callback_query_id)
+            except Exception:
+                logging.exception(
+                    "failed to answer Telegram callback query route=%s chat_id=%s",
+                    route.route_id,
+                    chat_id,
+                )
+
         if not isinstance(text, str):
             self.append_inbound_conversation_event(route, update, message, None, None)
-            logging.info("stored non-text telegram message route=%s chat_id=%s", route.route_id, chat_id)
+            attachment = extract_telegram_attachment(message)
+            if attachment is None:
+                logging.info(
+                    "stored unsupported non-text telegram message route=%s chat_id=%s",
+                    route.route_id,
+                    chat_id,
+                )
+                return
+            try:
+                if (
+                    attachment.file_size is not None
+                    and attachment.file_size > self.attachment_cache.max_file_bytes
+                ):
+                    raise ValueError("파일이 허용 크기 20MiB를 초과합니다.")
+                content = client.download_file(
+                    attachment.file_id,
+                    self.attachment_cache.max_file_bytes,
+                )
+                cached = self.attachment_cache.store(
+                    route.route_id,
+                    chat_id,
+                    attachment,
+                    content,
+                )
+                logging.info(
+                    "cached Telegram attachment route=%s chat_id=%s attachment_id=%s size=%s",
+                    route.route_id,
+                    chat_id,
+                    cached.attachment_id,
+                    cached.size,
+                )
+            except ValueError as exc:
+                client.send_message(chat_id, f"파일을 저장할 수 없습니다: {exc}")
+                return
+            except (OSError, RuntimeError):
+                logging.exception(
+                    "failed to cache Telegram attachment route=%s chat_id=%s",
+                    route.route_id,
+                    chat_id,
+                )
+                client.send_message(
+                    chat_id,
+                    "파일을 저장하지 못했습니다. 게이트웨이 로그를 확인해 주세요.",
+                )
+                return
+
+            caption_prompt = (attachment.caption or "").strip()
+            if not caption_prompt:
+                client.send_message(
+                    chat_id,
+                    f"📎 저장했습니다: {cached.file_name}\n다음 일반 메시지로 작업을 지시해 주세요.",
+                )
+                self.append_outbound_conversation_event(
+                    route,
+                    chat_id,
+                    "sendMessage",
+                    f"attachment cached: {cached.file_name}",
+                    source_path="attachment_cache",
+                    extra={"attachment_id": cached.attachment_id, "size": cached.size},
+                )
+                return
+
+            pending_attachments = self.attachment_cache.list_pending(route.route_id, chat_id)
+            resolved = self.router.resolve(route.route_id, caption_prompt)
+            codex_text = build_codex_input_text(resolved.text, message)
+            codex_text = build_codex_attachment_input_text(codex_text, pending_attachments)
+            payload = {
+                "source": "telegram",
+                "gateway_version": self.config.version,
+                "route": route.route_id,
+                "update_id": update.get("update_id"),
+                "message_id": attachment.message_id,
+                "chat_id": chat_id,
+                "user_id": str(sender.get("id", "")),
+                "username": sender.get("username"),
+                "text": codex_text,
+                "raw_message": message,
+            }
+            try:
+                logging.info(
+                    "routing attachment caption route=%s chat_id=%s url=%s attachment_count=%s",
+                    route.route_id,
+                    chat_id,
+                    resolved.url,
+                    len(pending_attachments),
+                )
+                response = self.codex.post_message(resolved.url, payload)
+            except (OSError, RuntimeError):
+                logging.exception(
+                    "failed to submit cached Telegram attachment caption route=%s chat_id=%s",
+                    route.route_id,
+                    chat_id,
+                )
+                client.send_message(
+                    chat_id,
+                    "파일은 저장했지만 Codex 실행에 실패했습니다. "
+                    "다음 일반 메시지로 다시 지시해 주세요.",
+                )
+                return
+
+            if pending_attachments:
+                self.attachment_cache.mark_consumed(pending_attachments)
+            reply_text = None
+            if response:
+                reply_text = response.get("reply_text") or response.get("text")
+            if reply_text:
+                client.send_message(chat_id, str(reply_text))
+                self.append_outbound_conversation_event(
+                    route,
+                    chat_id,
+                    "sendMessage",
+                    str(reply_text),
+                    source_path="codex_reply",
+                )
+            elif route.ack_text:
+                client.send_message(chat_id, route.ack_text)
             return
 
         routed_text = apply_bot_command_alias(route, text)
@@ -1284,15 +1945,19 @@ class GatewayApp:
             )
         self.append_inbound_conversation_event(route, update, message, text, routed_text)
 
-        client = TelegramClient(route)
         if route.echo_mode:
             logging.info("echoing telegram message route=%s chat_id=%s message_id=%s", route.route_id, chat_id, message_id)
             client.send_message(chat_id, text)
             self.append_outbound_conversation_event(route, chat_id, "sendMessage", text, source_path="echo")
             return
 
+        pending_attachments: tuple[CachedTelegramAttachment, ...] = ()
+        if not routed_text.strip().startswith("/"):
+            pending_attachments = self.attachment_cache.list_pending(route.route_id, chat_id)
+
         resolved = self.router.resolve(route.route_id, routed_text)
         codex_text = build_codex_input_text(resolved.text, message)
+        codex_text = build_codex_attachment_input_text(codex_text, pending_attachments)
         payload = {
             "source": "telegram",
             "gateway_version": self.config.version,
@@ -1313,6 +1978,8 @@ class GatewayApp:
             resolved.url,
         )
         response = self.codex.post_message(resolved.url, payload)
+        if pending_attachments:
+            self.attachment_cache.mark_consumed(pending_attachments)
 
         reply_text = None
         if response:
