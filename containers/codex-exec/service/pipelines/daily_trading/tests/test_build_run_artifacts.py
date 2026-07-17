@@ -1257,3 +1257,133 @@ class BuildRunArtifactsSelfTest(unittest.TestCase):
                 by_symbol["000660"]["reason"],
                 "unverified_holding_requires_active_order_cancellation",
             )
+
+    def test_financial_summary_omits_stale_quote_and_uses_fresh_price_for_target_gap(self) -> None:
+        cache = {
+            "symbols": {
+                "000660": {
+                    "주식현재가 시세": {
+                        "응답": [
+                            {
+                                "현재가": "2082000",
+                                "전일 대비율": "0.00",
+                                "주가수익비율(PER)": "10.5",
+                                "주가순자산비율(PBR)": "1.2",
+                                "업종명": "반도체",
+                            }
+                        ]
+                    },
+                    "국내주식 종목투자의견": {
+                        "응답": [
+                            {
+                                "주식 영업일자": "20260716",
+                                "증권사명": "테스트증권",
+                                "투자의견": "BUY",
+                                "목표가": "2000000",
+                            }
+                        ]
+                    },
+                }
+            }
+        }
+
+        fresh_summary = financial_summary_for(cache, "000660", "financial-cache.yaml", 1838000)
+        joined = " ".join(fresh_summary["items"])
+        self.assertNotIn("2082000", joined)  # stale cached quote price must not leak into evidence
+        self.assertNotIn("등락률", joined)  # stale daily-change label must be removed
+        self.assertIn("PER 10.5", joined)
+        self.assertIn("PBR 1.2", joined)
+        target_item = next(item for item in fresh_summary["items"] if item.startswith("목표가"))
+        self.assertIn("현재가대비 괴리율 -8.1%", target_item)
+        self.assertNotIn("4.1%", target_item)  # would be the stale-cache-price gap if used incorrectly
+
+        no_fresh_price_summary = financial_summary_for(cache, "000660", "financial-cache.yaml", None)
+        no_fresh_target_item = next(item for item in no_fresh_price_summary["items"] if item.startswith("목표가"))
+        self.assertNotIn("괴리율", no_fresh_target_item)
+
+    def test_decision_brief_omits_target_gap_when_price_lacks_observed_at(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            run_dir = tmp / "run"
+            write_json(tmp / "portfolio.json", {"specified": ["000660"], "holding": [], "universe": ["000660"]})
+            write_json(
+                run_dir / "price-chart.json",
+                {
+                    "run_id": "no-observed-at-test",
+                    "started_at": "2026-07-17 09:00:00 KST",
+                    "symbols": [
+                        {
+                            "symbol_id": "000660",
+                            "symbol_name": "SK하이닉스",
+                            "product_type": "stock",
+                            "eligible_for_review": True,
+                            # current_or_last is present but observed_at is missing, so this run's
+                            # price is not validated as a fresh/usable price.
+                            "price": {"current_or_last": 1838000, "observed_at": "", "snapshot_mode": "live"},
+                            "required_missing": [],
+                            "errors": [],
+                        }
+                    ],
+                },
+            )
+            write_json(
+                run_dir / "account-before-order.json",
+                {
+                    "run_id": "no-observed-at-test",
+                    "started_at": "2026-07-17 09:00:00 KST",
+                    "active_order_lookup_performed": False,
+                    "order_available_lookup_performed": False,
+                    "account_summary": {"cash_amount": 1000000, "total_evaluation_amount": 1000000},
+                    "active_orders": [],
+                    "symbols": [
+                        {
+                            "symbol_id": "000660",
+                            "symbol_name": "SK하이닉스",
+                            "current_live_holding_quantity": 0,
+                            "current_price": 1838000,
+                            "valuation_amount": 0,
+                        }
+                    ],
+                },
+            )
+            financial_cache_path = tmp / "memory" / "collect-financial-information" / "financial-2026-07-17.yaml"
+            financial_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            financial_cache_path.write_text(
+                '''date: "2026-07-17"
+source: kis_open_api
+symbols:
+  "000660":
+    SK하이닉스:
+      주식현재가 시세:
+        응답:
+          - 현재가: "2082000"
+            전일 대비율: "0.00"
+      국내주식 종목투자의견:
+        응답:
+          - 주식 영업일자: "20260717"
+            증권사명: "테스트증권"
+            투자의견: "BUY"
+            목표가: "2000000"
+''',
+                encoding="utf-8",
+            )
+            brief = build_decision_brief(
+                argparse.Namespace(
+                    output_dir=run_dir,
+                    output=run_dir / "decision-brief.json",
+                    portfolio_json=str(tmp / "portfolio.json"),
+                    price_chart=None,
+                    account_before_order=None,
+                    today_fills=None,
+                    run_id=None,
+                    started_at=None,
+                    financial_cache_path=str(financial_cache_path),
+                    news_cache_path=None,
+                    market_index_snapshot_json=None,
+                )
+            )
+            by_symbol = {item.get("symbol_id"): item for item in brief["symbols"]}
+            symbol = by_symbol["000660"]
+            self.assertFalse(symbol.get("eligible_for_review"))
+            target_item = next(item for item in symbol["financial_summary"]["items"] if item.startswith("목표가"))
+            self.assertNotIn("괴리율", target_item)

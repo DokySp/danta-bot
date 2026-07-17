@@ -757,7 +757,7 @@ def is_no_news_content(value: Any) -> bool:
     return not text or "수집된 뉴스가 없습니다" in text
 
 
-def financial_summary_for(cache: Any, symbol_id: str, cache_path: str) -> dict[str, Any]:
+def financial_summary_for(cache: Any, symbol_id: str, cache_path: str, fresh_current_price: Any = None) -> dict[str, Any]:
     summary = {
         "cache_path": cache_path or "",
         "cache_status": "supplied" if cache_path else "missing",
@@ -810,19 +810,18 @@ def financial_summary_for(cache: Any, symbol_id: str, cache_path: str) -> dict[s
     targets.sort(key=lambda entry: entry["date"], reverse=True)
     broker_opinions.sort(key=lambda entry: entry["date"], reverse=True)
     quote_parts = []
-    for label, key in (("현재가", "현재가"), ("등락률", "전일 대비율"), ("PER", "주가수익비율(PER)"), ("PBR", "주가순자산비율(PBR)")):
+    for label, key in (("PER", "주가수익비율(PER)"), ("PBR", "주가순자산비율(PBR)")):
         if price.get(key) not in (None, ""):
-            suffix = "%" if key == "전일 대비율" else ""
-            quote_parts.append(f"{label} {price.get(key)}{suffix}")
-            if key in {"주가수익비율(PER)", "주가순자산비율(PBR)"}:
-                summary["quality_value_usable"] = True
+            quote_parts.append(f"{label} {price.get(key)}")
+            summary["quality_value_usable"] = True
     if quote_parts:
         summary["items"].append(", ".join(quote_parts))
     if targets:
         summary["quality_value_usable"] = True
         latest = targets[0]
         latest_source = ", ".join(part for part in (latest["broker"], latest["opinion"], latest["date"]) if part)
-        current_price = as_int(str(price.get("현재가") or "").replace(",", "").strip() or 0)
+        fresh_price = finite_float_value(fresh_current_price)
+        current_price = fresh_price if fresh_price is not None and fresh_price > 0 else 0
 
         def gap_text(reference_value: int) -> str:
             if current_price <= 0 or reference_value <= 0:
@@ -1182,7 +1181,12 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
         if not usable_price and "price.current_or_last/observed_at" not in required_missing:
             required_missing.append("price.current_or_last/observed_at")
         product_type = str(item.get("product_type") or "stock").lower()
-        financial_summary = financial_summary_for(financial_cache, symbol_id, args.financial_cache_path)
+        financial_summary = financial_summary_for(
+            financial_cache,
+            symbol_id,
+            args.financial_cache_path,
+            price.get("current_or_last") if usable_price else None,
+        )
         etf_summary = etf_summary_for(financial_cache, symbol_id, args.financial_cache_path) if product_type in {"etf", "etn"} else {}
         quality_value_summary = etf_summary if product_type in {"etf", "etn"} else financial_summary
         same_day_collection = today_trade_collection_context(
