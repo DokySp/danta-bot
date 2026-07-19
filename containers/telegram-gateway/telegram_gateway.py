@@ -1420,6 +1420,16 @@ class TelegramClient:
     def send_chat_action(self, chat_id: str, action: str = "typing") -> None:
         self.post_form("sendChatAction", {"chat_id": chat_id, "action": action})
 
+    def send_message_draft(self, chat_id: str, draft_id: int, text: str) -> None:
+        self.post_form(
+            "sendMessageDraft",
+            {
+                "chat_id": chat_id,
+                "draft_id": draft_id,
+                "text": text,
+            },
+        )
+
     def answer_callback_query(self, callback_query_id: str) -> None:
         self.post_form("answerCallbackQuery", {"callback_query_id": callback_query_id})
 
@@ -1538,7 +1548,14 @@ class GatewayApp:
                 )
 
             def do_POST(self) -> None:
-                if self.path not in {"/sendMessage", "/notify", "/sendChatAction", "/sendPhoto", "/sendDocument"}:
+                if self.path not in {
+                    "/sendMessage",
+                    "/notify",
+                    "/sendChatAction",
+                    "/sendMessageDraft",
+                    "/sendPhoto",
+                    "/sendDocument",
+                }:
                     self._write_json(404, {"ok": False, "error": "not found"})
                     return
 
@@ -1555,6 +1572,30 @@ class GatewayApp:
                             self._write_json(400, {"ok": False, "error": "action is required"})
                             return
                         TelegramClient(route).send_chat_action(chat_id, action)
+                        self._write_json(200, {"ok": True})
+                        return
+
+                    if self.path == "/sendMessageDraft":
+                        route = app.resolve_send_route(payload)
+                        chat_id = str(payload.get("chat_id") or route.default_chat_id or "")
+                        if not chat_id:
+                            self._write_json(400, {"ok": False, "error": "chat_id is required"})
+                            return
+                        raw_draft_id = payload.get("draft_id")
+                        if not isinstance(raw_draft_id, int) or isinstance(raw_draft_id, bool):
+                            self._write_json(400, {"ok": False, "error": "draft_id must be a non-zero integer"})
+                            return
+                        if raw_draft_id == 0:
+                            self._write_json(400, {"ok": False, "error": "draft_id must be a non-zero integer"})
+                            return
+                        text = payload.get("text")
+                        if not isinstance(text, str) or not text:
+                            self._write_json(400, {"ok": False, "error": "text is required"})
+                            return
+                        if len(text) > 4096:
+                            self._write_json(400, {"ok": False, "error": "text exceeds Telegram's 4096 character limit"})
+                            return
+                        TelegramClient(route).send_message_draft(chat_id, raw_draft_id, text)
                         self._write_json(200, {"ok": True})
                         return
 

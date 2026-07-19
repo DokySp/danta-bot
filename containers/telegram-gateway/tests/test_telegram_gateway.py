@@ -8,6 +8,8 @@ from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "telegram_gateway.py"
@@ -144,6 +146,26 @@ class TelegramClientTest(unittest.TestCase):
         payload = client.post_form.call_args.args[1]
         self.assertEqual(json.loads(payload["reply_markup"]), reply_markup)
 
+    def test_send_message_draft_posts_plain_text_with_draft_id(self) -> None:
+        route = SimpleNamespace(
+            telegram_bot_token="test-token",
+            parse_mode=None,
+            http_timeout=10,
+        )
+        client = telegram_gateway.TelegramClient(route)
+        client.post_form = Mock()
+
+        client.send_message_draft("1", 123, "진행 문구 *원문*")
+
+        client.post_form.assert_called_once_with(
+            "sendMessageDraft",
+            {
+                "chat_id": "1",
+                "draft_id": 123,
+                "text": "진행 문구 *원문*",
+            },
+        )
+
     def test_answer_callback_query_posts_callback_id(self) -> None:
         route = SimpleNamespace(
             telegram_bot_token="test-token",
@@ -195,6 +217,106 @@ class TelegramClientTest(unittest.TestCase):
         with patch.object(telegram_gateway, "urlopen", return_value=response):
             with self.assertRaisesRegex(ValueError, "20MiB"):
                 client.download_file("file-1", 10)
+
+
+class TelegramDraftEndpointTest(unittest.TestCase):
+    def test_forwards_valid_draft_request_to_selected_route(self) -> None:
+        app = telegram_gateway.GatewayApp.__new__(telegram_gateway.GatewayApp)
+        app.config = SimpleNamespace(
+            version="test",
+            gateway_host="127.0.0.1",
+            gateway_port=0,
+        )
+        route = SimpleNamespace(
+            default_chat_id=None,
+            telegram_bot_token="test-token",
+            http_timeout=10,
+        )
+        app.resolve_send_route = Mock(return_value=route)
+        client = Mock()
+
+        with patch.object(telegram_gateway, "TelegramClient", return_value=client):
+            server = app.serve_http()
+            try:
+                payload = json.dumps(
+                    {
+                        "route": "bridge-server",
+                        "chat_id": "1",
+                        "draft_id": 123,
+                        "text": "진행 중",
+                    }
+                ).encode("utf-8")
+                request = Request(
+                    f"http://127.0.0.1:{server.server_port}/sendMessageDraft",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(request, timeout=2) as response:
+                    result = json.loads(response.read().decode("utf-8"))
+            finally:
+                server.shutdown()
+                server.server_close()
+
+        self.assertEqual(result, {"ok": True})
+        app.resolve_send_route.assert_called_once_with(
+            {
+                "route": "bridge-server",
+                "chat_id": "1",
+                "draft_id": 123,
+                "text": "진행 중",
+            }
+        )
+        client.send_message_draft.assert_called_once_with("1", 123, "진행 중")
+
+    def test_rejects_non_integer_draft_id_and_non_string_text(self) -> None:
+        app = telegram_gateway.GatewayApp.__new__(telegram_gateway.GatewayApp)
+        app.config = SimpleNamespace(
+            version="test",
+            gateway_host="127.0.0.1",
+            gateway_port=0,
+        )
+        route = SimpleNamespace(
+            default_chat_id=None,
+            telegram_bot_token="test-token",
+            http_timeout=10,
+        )
+        app.resolve_send_route = Mock(return_value=route)
+        client = Mock()
+
+        with patch.object(telegram_gateway, "TelegramClient", return_value=client):
+            server = app.serve_http()
+            try:
+                for invalid_fields in (
+                    {"draft_id": 1.5, "text": "진행 중"},
+                    {"draft_id": True, "text": "진행 중"},
+                    {"draft_id": 0, "text": "진행 중"},
+                    {"draft_id": 123, "text": None},
+                    {"draft_id": 123, "text": ""},
+                    {"draft_id": 123, "text": "a" * 4097},
+                ):
+                    payload = json.dumps(
+                        {
+                            "route": "bridge-server",
+                            "chat_id": "1",
+                            **invalid_fields,
+                        }
+                    ).encode("utf-8")
+                    request = Request(
+                        f"http://127.0.0.1:{server.server_port}/sendMessageDraft",
+                        data=payload,
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with self.assertRaises(HTTPError) as caught:
+                        urlopen(request, timeout=2)
+                    self.assertEqual(caught.exception.code, 400)
+                    caught.exception.close()
+            finally:
+                server.shutdown()
+                server.server_close()
+
+        client.send_message_draft.assert_not_called()
 
 
 class TelegramAttachmentCacheTest(unittest.TestCase):
