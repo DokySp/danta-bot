@@ -2007,6 +2007,135 @@ class Pipeline:
                     domain_summary["display_text"] = f"재무: {financial_supplied}개 종목 반영, 일부 종목 요약 없음"
         return summary
 
+    def build_reporting_view(
+        self,
+        *,
+        account_display_summary: dict[str, Any],
+        account_asset_summary: dict[str, Any],
+        account: dict[str, Any],
+        order_lifecycle_view: dict[str, Any],
+        current_run_orders: list[dict[str, Any]],
+        evidence_summary: dict[str, Any],
+        account_collection_status: str,
+        order_gate_status: str,
+        execution_status: str,
+        pipeline_status: str,
+    ) -> dict[str, Any]:
+        """Normalize account/order/evidence scopes into one shared rendering contract.
+
+        Markdown/Telegram/HTML all read this instead of re-deriving scope from raw
+        artifacts, so full-account assets, domestic valuation, and lifecycle-derived
+        active order counts cannot silently drift apart across renderers again.
+        """
+        raw_active_orders = account.get("active_orders")
+        raw_active_order_row_count = len(raw_active_orders) if isinstance(raw_active_orders, list) else 0
+        lifecycle_lookup_complete = bool(order_lifecycle_view.get("lookup_complete"))
+        legacy_lookup_performed = account.get("active_order_lookup_performed") is True
+        if lifecycle_lookup_complete:
+            # Only a lifecycle-confirmed lookup may populate a count; the raw
+            # active_orders row length is history/reservation evidence, not a
+            # confirmed active-order count, and must never be guessed as 0.
+            active_count = as_int(order_lifecycle_view.get("active_order_count"))
+            active_lookup_status = "complete"
+        elif legacy_lookup_performed:
+            active_count = None
+            active_lookup_status = "legacy_lookup_without_lifecycle_confirmation"
+        else:
+            active_count = None
+            active_lookup_status = "not_looked_up"
+        current_run_submitted_count = sum(1 for item in current_run_orders if isinstance(item, dict) and item.get("result") == "submitted")
+
+        def evidence_domain_view(name: str) -> dict[str, Any]:
+            domain = evidence_summary.get(name) if isinstance(evidence_summary.get(name), dict) else {}
+            counts = domain.get("cache_counts") if isinstance(domain.get("cache_counts"), dict) else {}
+            usable = counts.get("usable_symbol_count") if counts else domain.get("usable_symbol_count")
+            wanted = counts.get("wanted_symbol_count") if counts else domain.get("wanted_symbol_count") or evidence_summary.get("symbol_count")
+            missing = counts.get("missing_usable_symbol_count") if counts else domain.get("missing_usable_symbol_count")
+            if missing is None and usable is not None and wanted is not None:
+                missing = max(0, as_int(wanted) - as_int(usable))
+            return {
+                "scope": "collection_data_quality",
+                "status": domain.get("status") or "not_supplied",
+                "coverage_text": domain.get("display_text") or "",
+                "usable_symbol_count": usable,
+                "wanted_symbol_count": wanted,
+                "missing_usable_symbol_count": missing,
+                "blocks_trading": False,
+            }
+
+        financial_view = evidence_domain_view("financial")
+        news_view = evidence_domain_view("news")
+        investor_flow_view = evidence_domain_view("investor_flow")
+        supplied_like = {"supplied", "success", "complete"}
+        partial_like = {"partial", "cache_exists_zero_usable_articles"}
+        domain_statuses = {financial_view["status"], news_view["status"], investor_flow_view["status"]}
+        if domain_statuses <= supplied_like:
+            evidence_collection_status = "success"
+        elif domain_statuses & (supplied_like | partial_like):
+            evidence_collection_status = "partial"
+        else:
+            evidence_collection_status = "not_supplied"
+
+        return {
+            "account": {
+                "full_account": {
+                    "scope": "full_account_total_asset",
+                    "label": "전체 계좌 총자산(KIS 잔고, 국내외 전 상품 합산)",
+                    "total_asset_amount": account_asset_summary.get("total_asset_amount"),
+                    "available": account_asset_summary.get("total_asset_amount") is not None,
+                    "source_field": "account_asset_summary.total_asset_amount",
+                    "source_api": account_asset_summary.get("source_api"),
+                    "observed_at": account_asset_summary.get("observed_at"),
+                },
+                "domestic_trading_account": {
+                    "scope": "domestic_trading_account_valuation",
+                    "label": "국내 주식 매매계좌 총평가금액",
+                    "total_evaluation_amount": account_display_summary.get("total_evaluation_amount"),
+                    "securities_valuation_amount": account_display_summary.get("securities_valuation_amount"),
+                    "orderable_cash_amount": account_display_summary.get("orderable_cash_amount"),
+                    "total_pnl_amount": account_display_summary.get("total_pnl_amount"),
+                    "available": account_display_summary.get("total_evaluation_amount") is not None,
+                    "source_field": "account_display_summary.total_evaluation_amount",
+                    "snapshot_generated_at": account.get("generated_at") or account.get("started_at"),
+                    "source_artifact": "account-before-order.json",
+                },
+            },
+            "orders": {
+                "active": {
+                    "scope": "currently_active_orders",
+                    "label": "현재 활성 미체결/예약 주문(lifecycle 확인 필요)",
+                    "count": active_count,
+                    "lookup_status": active_lookup_status,
+                    "source_field": "order_lifecycle.active_order_count (only when lookup_complete is true)",
+                },
+                "current_run_submitted": {
+                    "scope": "current_run_submitted_orders",
+                    "label": "이번 run에서 제출 확정된 주문(당일 전체 제출 이력이 아님)",
+                    "count": current_run_submitted_count,
+                    "source_field": "execution.orders[].result==submitted",
+                },
+                "history_or_reservation_rows": {
+                    "scope": "history_reservation_raw_rows",
+                    "label": "계좌 조회에 포함된 미체결/예약 이력 원본 행 수(참고용, 활성 주문 수와 다를 수 있음)",
+                    "raw_row_count": raw_active_order_row_count,
+                    "source_field": "account-before-order.json.active_orders (raw, compatibility reference only)",
+                },
+            },
+            "evidence_domains": {
+                "financial": financial_view,
+                "news": news_view,
+                "investor_flow": investor_flow_view,
+            },
+            "run_status": {
+                "execution": execution_status or "unknown",
+                "account_collection": account_collection_status or "unknown",
+                "evidence_collection": evidence_collection_status,
+                "pipeline_summary": pipeline_status or "unknown",
+                "delivery": "not_observed_at_summary_build_time",
+                "order_gate": order_gate_status or "unknown",
+            },
+        }
+
     def adopt_existing_run_identity(self) -> None:
         run = load_json_if_exists(self.run_path) or {}
         if not isinstance(run, dict):
@@ -2094,9 +2223,24 @@ class Pipeline:
             "symbols": rows,
         }
 
+    def evidence_domain_or_fallback(self, reporting_domains: dict[str, Any], evidence_summary: dict[str, Any], key: str) -> dict[str, Any]:
+        view = reporting_domains.get(key) if isinstance(reporting_domains, dict) else None
+        if isinstance(view, dict):
+            return {
+                "status": view.get("status"),
+                "display_text": view.get("coverage_text"),
+                "missing_usable_symbol_count": view.get("missing_usable_symbol_count"),
+            }
+        raw = evidence_summary.get(key) if isinstance(evidence_summary.get(key), dict) else {}
+        counts = raw.get("cache_counts") if isinstance(raw.get("cache_counts"), dict) else {}
+        return {
+            "status": raw.get("status"),
+            "display_text": raw.get("display_text"),
+            "missing_usable_symbol_count": counts.get("missing_usable_symbol_count"),
+        }
+
     def write_portfolio_report(self, summary: dict[str, Any]) -> Path:
         path = self.report_path()
-        account = summary.get("account_summary") if isinstance(summary.get("account_summary"), dict) else {}
         execution = summary.get("execution") if isinstance(summary.get("execution"), dict) else {}
         review = summary.get("review_summary") if isinstance(summary.get("review_summary"), dict) else {}
         decision = summary.get("decision_brief") if isinstance(summary.get("decision_brief"), dict) else {}
@@ -2107,15 +2251,39 @@ class Pipeline:
         account_full = load_json_if_exists(self.output_dir / "account-before-order.json") or {}
         price_chart = load_json_if_exists(self.output_dir / "price-chart.json") or {}
         evidence_summary = summary.get("evidence_summary") if isinstance(summary.get("evidence_summary"), dict) else {}
+        reporting_view = summary.get("reporting_view") if isinstance(summary.get("reporting_view"), dict) else {}
+        reporting_account = reporting_view.get("account") if isinstance(reporting_view.get("account"), dict) else {}
+        reporting_orders = reporting_view.get("orders") if isinstance(reporting_view.get("orders"), dict) else {}
+        reporting_domains = reporting_view.get("evidence_domains") if isinstance(reporting_view.get("evidence_domains"), dict) else {}
+        full_account_view = reporting_account.get("full_account") if isinstance(reporting_account.get("full_account"), dict) else {}
+        domestic_account_view = (
+            reporting_account.get("domestic_trading_account") if isinstance(reporting_account.get("domestic_trading_account"), dict) else {}
+        )
+        active_order_view = reporting_orders.get("active") if isinstance(reporting_orders.get("active"), dict) else {}
+        # Fall back to legacy raw account_summary only when the normalized domestic view is
+        # absent entirely (older pipeline-summary.json artifacts). When the normalized view is
+        # present but explicitly unavailable, keep its (unknown) values instead of masking that
+        # state with conflicting legacy numbers.
+        legacy_account = summary.get("account_summary") if isinstance(summary.get("account_summary"), dict) else {}
+        account = domestic_account_view if domestic_account_view else legacy_account
+        legacy_asset = summary.get("account_asset_summary") if isinstance(summary.get("account_asset_summary"), dict) else {}
+        full_account_amount = full_account_view.get("total_asset_amount") if full_account_view else legacy_asset.get("total_asset_amount")
         stages = summary.get("stages") if isinstance(summary.get("stages"), list) else []
         stage_by_name = {item.get("stage"): item for item in stages if isinstance(item, dict)}
         active_order_lookup_performed = account_full.get("active_order_lookup_performed")
         order_available_lookup_performed = account_full.get("order_available_lookup_performed")
-        active_order_count_text = (
-            f"{len(account_full.get('active_orders', [])) if isinstance(account_full.get('active_orders'), list) else 0}건"
-            if active_order_lookup_performed is True
-            else "미조회"
-        )
+        if active_order_view:
+            active_order_count_text = (
+                f"{as_int(active_order_view.get('count'))}건"
+                if active_order_view.get("lookup_status") == "complete"
+                else "미조회"
+            )
+        else:
+            active_order_count_text = (
+                f"{len(account_full.get('active_orders', [])) if isinstance(account_full.get('active_orders'), list) else 0}건"
+                if active_order_lookup_performed is True
+                else "미조회"
+            )
         order_reservation_check = (
             account_full.get("active_order_checks", {}).get("order_resv_ccnl", "")
             if isinstance(account_full.get("active_order_checks"), dict)
@@ -2139,22 +2307,26 @@ class Pipeline:
             "| 도메인 | 상태 | 전체 종목 수 | 오류 종목 수 | 핵심 오류 |",
             "|---|---|---:|---:|---|",
         ]
-        for domain, stage_name in (("시장", "main-evidence"), ("재무", "financial-cache"), ("뉴스", "news-cache")):
-            stage = stage_by_name.get(stage_name, {})
+        for domain, stage_name, evidence_key in (
+            ("시장", "main-evidence", None),
+            ("재무", "financial-cache", "financial"),
+            ("뉴스", "news-cache", "news"),
+            ("수급", "", "investor_flow"),
+        ):
+            stage = stage_by_name.get(stage_name, {}) if stage_name else {}
             detail = stage.get("detail", "")
+            status_text = stage.get("status", "")
             error_count = 0
             if domain == "시장":
                 error_count = count_symbol_errors(price_chart)
-            elif domain in {"재무", "뉴스"}:
-                domain_summary = evidence_summary.get("financial" if domain == "재무" else "news")
-                counts = domain_summary.get("cache_counts") if isinstance(domain_summary, dict) and isinstance(domain_summary.get("cache_counts"), dict) else {}
-                error_count = as_int(counts.get("missing_usable_symbol_count"))
-            if domain == "재무":
-                detail = ((evidence_summary.get("financial") or {}).get("display_text") if isinstance(evidence_summary.get("financial"), dict) else "") or detail
-            elif domain == "뉴스":
-                detail = ((evidence_summary.get("news") or {}).get("display_text") if isinstance(evidence_summary.get("news"), dict) else "") or detail
+            elif evidence_key:
+                domain_view = self.evidence_domain_or_fallback(reporting_domains, evidence_summary, evidence_key)
+                error_count = as_int(domain_view.get("missing_usable_symbol_count"))
+                detail = domain_view.get("display_text") or detail
+                if not status_text:
+                    status_text = domain_view.get("status") or ""
             lines.append(
-                f"| {domain} | {stage.get('status', '')} | {(summary.get('portfolio_counts') or {}).get('universe', 0)} | {error_count} | {md_cell(detail)} |"
+                f"| {domain} | {status_text} | {(summary.get('portfolio_counts') or {}).get('universe', 0)} | {error_count} | {md_cell(detail)} |"
             )
 
         lines.extend(
@@ -2277,7 +2449,10 @@ class Pipeline:
             [
                 "",
                 "## 6. 최신 계좌 검증",
-                f"- 총자산: {format_number(account.get('total_evaluation_amount'))}원",
+                f"- 전체 계좌 총자산(KIS 잔고, 국내외 전 상품 합산): {format_number(full_account_amount)}원"
+                if full_account_amount is not None
+                else "- 전체 계좌 총자산(KIS 잔고, 국내외 전 상품 합산): 조회 안됨",
+                f"- 국내 매매계좌 총평가금액: {format_number(account.get('total_evaluation_amount'))}원",
                 f"- 주문가능금액: {format_number(account.get('orderable_cash_amount'))}원",
                 f"- 주식평가: {format_number(account.get('securities_valuation_amount'))}원",
                 f"- 평가손익: {format_signed_number(account.get('total_pnl_amount'))}원",
@@ -2474,6 +2649,31 @@ class Pipeline:
         account_asset_summary = self.build_account_asset_summary(account_asset_snapshot if isinstance(account_asset_snapshot, dict) else {})
         today_trade_summary = self.build_today_trade_summary(decision_brief if isinstance(decision_brief, dict) else {})
         evidence_summary = self.build_evidence_summary(decision_brief, stages, symbols)
+        pipeline_status = summarized_status(stages, execution)
+        order_lifecycle_view = {
+            "status": order_lifecycle.get("status") or "not_run",
+            "lookup_complete": bool(order_lifecycle.get("lookup_complete")),
+            "active_order_count": int(order_lifecycle.get("active_order_count") or 0),
+            "previous_submitted_cash_order_count": int(
+                order_lifecycle.get("previous_submitted_cash_order_count") or 0
+            ),
+            "holding_state_issue_count": int(order_lifecycle.get("holding_state_issue_count") or 0),
+            "holding_state_issues": order_lifecycle.get("holding_state_issues", [])[:5]
+            if isinstance(order_lifecycle.get("holding_state_issues"), list)
+            else [],
+        }
+        reporting_view = self.build_reporting_view(
+            account_display_summary=account_display_summary,
+            account_asset_summary=account_asset_summary,
+            account=account,
+            order_lifecycle_view=order_lifecycle_view,
+            current_run_orders=orders,
+            evidence_summary=evidence_summary,
+            account_collection_status=account_collection_status,
+            order_gate_status=order_gate_status,
+            execution_status=str(execution.get("status") or ""),
+            pipeline_status=pipeline_status,
+        )
         report_path = self.report_path()
         telegram_summary_path = self.output_dir / "telegram-summary.txt"
         html_report_path = self.output_dir / "daily-trading-report.html"
@@ -2481,7 +2681,7 @@ class Pipeline:
             "schema_version": "1",
             "run_id": self.run_id,
             "started_at": self.started_at,
-            "status": summarized_status(stages, execution),
+            "status": pipeline_status,
             "run_dir": str(self.output_dir),
             "summary_path": str(self.summary_path),
             "command_log_path": str(self.command_log_path),
@@ -2516,19 +2716,9 @@ class Pipeline:
                 "fill_count": len(today_fills.get("fills", [])) if isinstance(today_fills.get("fills"), list) else 0,
             },
             "today_trade_summary": today_trade_summary,
-            "order_lifecycle": {
-                "status": order_lifecycle.get("status") or "not_run",
-                "lookup_complete": bool(order_lifecycle.get("lookup_complete")),
-                "active_order_count": int(order_lifecycle.get("active_order_count") or 0),
-                "previous_submitted_cash_order_count": int(
-                    order_lifecycle.get("previous_submitted_cash_order_count") or 0
-                ),
-                "holding_state_issue_count": int(order_lifecycle.get("holding_state_issue_count") or 0),
-                "holding_state_issues": order_lifecycle.get("holding_state_issues", [])[:5]
-                if isinstance(order_lifecycle.get("holding_state_issues"), list)
-                else [],
-            },
+            "order_lifecycle": order_lifecycle_view,
             "evidence_summary": evidence_summary,
+            "reporting_view": reporting_view,
             "execution": {
                 "status": execution.get("status"),
                 "request_type": execution.get("request_type"),

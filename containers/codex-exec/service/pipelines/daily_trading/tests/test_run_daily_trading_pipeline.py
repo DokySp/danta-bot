@@ -1217,6 +1217,58 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
                 or investor_flow_summary.get("missing_usable_symbol_count") != 1
             ):
                 failures.append(f"pipeline summary omitted investor flow coverage: {investor_flow_summary}")
+            reporting_view = summary.get("reporting_view") if isinstance(summary.get("reporting_view"), dict) else {}
+            reporting_account = reporting_view.get("account") if isinstance(reporting_view.get("account"), dict) else {}
+            full_account_view = reporting_account.get("full_account") if isinstance(reporting_account.get("full_account"), dict) else {}
+            domestic_account_view = (
+                reporting_account.get("domestic_trading_account") if isinstance(reporting_account.get("domestic_trading_account"), dict) else {}
+            )
+            if full_account_view.get("total_asset_amount") != 20000000 or domestic_account_view.get("total_evaluation_amount") != 1500000:
+                failures.append(f"reporting_view did not keep full-account and domestic amounts distinct: {reporting_account}")
+            if full_account_view.get("total_asset_amount") == domestic_account_view.get("total_evaluation_amount"):
+                failures.append("reporting_view full-account and domestic amounts must not collapse to the same figure")
+            if full_account_view.get("source_api") != "inquire_account_balance" or not full_account_view.get("observed_at"):
+                failures.append(f"reporting_view full_account omitted existing account-asset provenance fields: {full_account_view}")
+            if not domestic_account_view.get("snapshot_generated_at") or domestic_account_view.get("source_artifact") != "account-before-order.json":
+                failures.append(f"reporting_view domestic account omitted snapshot/source provenance fields: {domestic_account_view}")
+            reporting_orders = reporting_view.get("orders") if isinstance(reporting_view.get("orders"), dict) else {}
+            active_order_view = reporting_orders.get("active") if isinstance(reporting_orders.get("active"), dict) else {}
+            history_view = (
+                reporting_orders.get("history_or_reservation_rows") if isinstance(reporting_orders.get("history_or_reservation_rows"), dict) else {}
+            )
+            current_run_submitted_view = (
+                reporting_orders.get("current_run_submitted") if isinstance(reporting_orders.get("current_run_submitted"), dict) else {}
+            )
+            if active_order_view.get("count") is not None or active_order_view.get("lookup_status") != "not_looked_up":
+                failures.append(
+                    f"reporting_view active order count must stay unknown without a lifecycle-confirmed lookup: {active_order_view}"
+                )
+            if history_view.get("raw_row_count") != 0:
+                failures.append(f"reporting_view history/reservation raw row count omitted: {history_view}")
+            if current_run_submitted_view.get("scope") != "current_run_submitted_orders" or current_run_submitted_view.get("count") != 0:
+                failures.append(f"reporting_view current-run submitted scope was not truthfully named/counted: {current_run_submitted_view}")
+            reporting_domains = reporting_view.get("evidence_domains") if isinstance(reporting_view.get("evidence_domains"), dict) else {}
+            reporting_investor_flow = reporting_domains.get("investor_flow") if isinstance(reporting_domains.get("investor_flow"), dict) else {}
+            if (
+                reporting_investor_flow.get("status") != "partial"
+                or reporting_investor_flow.get("usable_symbol_count") != 1
+                or reporting_investor_flow.get("wanted_symbol_count") != 2
+                or reporting_investor_flow.get("blocks_trading") is not False
+            ):
+                failures.append(f"reporting_view omitted partial investor_flow coverage: {reporting_investor_flow}")
+            run_status_view = reporting_view.get("run_status") if isinstance(reporting_view.get("run_status"), dict) else {}
+            if run_status_view.get("delivery") != "not_observed_at_summary_build_time":
+                failures.append(f"reporting_view claimed an observed delivery status before delivery happens: {run_status_view}")
+            if run_status_view.get("pipeline_summary") != summary.get("status"):
+                failures.append(f"reporting_view pipeline_summary scope did not track pipeline status: {run_status_view}")
+            if "report_generation" in run_status_view:
+                failures.append(
+                    f"reporting_view must not claim report_generation was observed before Markdown/Telegram/HTML are written: {run_status_view}"
+                )
+            if run_status_view.get("account_collection") != summary.get("account_collection_status"):
+                failures.append(f"reporting_view account_collection scope diverged from account collection status: {run_status_view}")
+            if run_status_view.get("evidence_collection") != "partial":
+                failures.append(f"reporting_view evidence_collection scope did not reflect partial evidence domains: {run_status_view}")
             telegram_policy = summary.get("telegram_response_policy") if isinstance(summary.get("telegram_response_policy"), dict) else {}
             if telegram_policy.get("gate_label") != "주문 전 기존 미체결/예약 주문":
                 failures.append(f"telegram response policy omitted explicit gate label: {telegram_policy}")
@@ -1634,6 +1686,52 @@ print(json.dumps(execution, ensure_ascii=False))
 class RunDailyTradingPipelineSelfTest(unittest.TestCase):
     def test_self_test_suite(self) -> None:
         self.assertEqual(run_self_test(), 0)
+
+    def test_build_reporting_view_ignores_nonzero_raw_history_rows_without_lifecycle_confirmation(self) -> None:
+        # This is the original bug: a raw active_orders history/reservation list with several
+        # rows must never be reported as a confirmed active-order count when the lifecycle
+        # preflight never ran/completed. The raw row count still belongs under the
+        # history/reservation reference scope, unchanged.
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            run_dir = workspace / "reports" / "runs" / "history-rows-probe"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            pipeline = Pipeline(
+                argparse.Namespace(
+                    command="summarize",
+                    workspace_dir=str(workspace),
+                    output_dir=str(run_dir),
+                    run_id="history-rows-probe",
+                    started_at="2026-06-18T09:00:00+09:00",
+                )
+            )
+            account = {
+                "active_order_lookup_performed": False,
+                "active_orders": [
+                    {"order_id": "1"},
+                    {"order_id": "2"},
+                    {"order_id": "3"},
+                    {"order_id": "4"},
+                    {"order_id": "5"},
+                ],
+            }
+            reporting_view = pipeline.build_reporting_view(
+                account_display_summary={},
+                account_asset_summary={},
+                account=account,
+                order_lifecycle_view={"status": "not_run", "lookup_complete": False, "active_order_count": 0},
+                current_run_orders=[],
+                evidence_summary={},
+                account_collection_status="success",
+                order_gate_status="not_run",
+                execution_status="success",
+                pipeline_status="success",
+            )
+            active_view = reporting_view["orders"]["active"]
+            history_view = reporting_view["orders"]["history_or_reservation_rows"]
+            self.assertIsNone(active_view["count"])
+            self.assertEqual(active_view["lookup_status"], "not_looked_up")
+            self.assertEqual(history_view["raw_row_count"], 5)
 
     def test_compact_opening_context_keeps_only_rebuttal_inputs(self) -> None:
         compact = compact_opening_context(

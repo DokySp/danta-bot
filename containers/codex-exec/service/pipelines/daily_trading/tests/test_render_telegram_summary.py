@@ -27,9 +27,11 @@ def self_test() -> int:
             # 생산자(run_daily_trading_pipeline.build_account_display_summary) 실제 키
             "today_trade_amounts": {"buy_amount": 100, "sell_amount": 0},
         },
+        "account_asset_summary": {"total_asset_amount": 17039121},
         "evidence_summary": {
             "financial": {"status": "supplied", "display_text": "재무: 31개 종목 반영"},
             "news": {"status": "supplied", "display_text": "뉴스: 8개 종목 기사 반영"},
+            "investor_flow": {"status": "partial", "display_text": "장중 수급: 일부 종목 추정치 반영"},
         },
         "today_fills_summary": {"status": "success", "skipped": False, "fill_scope": "account", "fill_count": 7},
         "today_trade_summary": {
@@ -176,6 +178,119 @@ def self_test() -> int:
         },
         "token_usage": {"total": {"total_tokens": 0}},
     }
+    reporting_view_preferred_payload = {
+        # reporting_view가 있으면 계좌/증거 도메인 표시는 legacy raw 필드가 아니라
+        # reporting_view 값을 우선해야 한다(값이 서로 충돌하는 상황으로 검증).
+        "run_id": "self-test-reporting-view",
+        "status": "success",
+        "account_display_summary": {
+            "total_evaluation_amount": 999999,
+            "orderable_cash_amount": 999999,
+            "securities_valuation_amount": 999999,
+            "total_pnl_amount": 999999,
+        },
+        "account_asset_summary": {"total_asset_amount": 999999},
+        "evidence_summary": {
+            "financial": {"status": "supplied", "display_text": "legacy stale text"},
+            "news": {"status": "supplied", "display_text": "legacy stale text"},
+            "investor_flow": {"status": "supplied", "display_text": "legacy stale text"},
+        },
+        "order_lifecycle": {
+            # legacy raw lifecycle deliberately conflicts with the normalized view below.
+            "status": "success",
+            "active_order_count": 99,
+            "previous_submitted_cash_order_count": 2,
+            "holding_state_issue_count": 0,
+        },
+        "reporting_view": {
+            "account": {
+                "full_account": {"total_asset_amount": 17039121, "available": True},
+                "domestic_trading_account": {
+                    "total_evaluation_amount": 12601357,
+                    "orderable_cash_amount": 500000,
+                    "securities_valuation_amount": 12000000,
+                    "total_pnl_amount": 300000,
+                    "available": True,
+                },
+            },
+            "orders": {
+                "active": {"count": 3, "lookup_status": "complete"},
+            },
+            "evidence_domains": {
+                "financial": {"status": "supplied", "coverage_text": "재무: 31개 종목 반영"},
+                "news": {
+                    "status": "cache_missing",
+                    "coverage_text": "뉴스: 캐시 파일 없음",
+                    "usable_symbol_count": 9,
+                    "wanted_symbol_count": 31,
+                },
+                "investor_flow": {
+                    "status": "partial",
+                    "coverage_text": "장중 수급: 9개 종목 추정치 반영, 일부 종목 수급 없음",
+                    "usable_symbol_count": 26,
+                    "wanted_symbol_count": 31,
+                },
+            },
+        },
+        "today_fills_summary": {"status": "success", "skipped": False, "fill_scope": "account", "fill_count": 0},
+        "execution": {"request_type": "analysis", "status": "success", "orders": []},
+        "review_summary": {},
+        "token_usage": {"total": {"total_tokens": 1}},
+    }
+    active_order_unconfirmed_payload = {
+        # A normalized active-order view that is present but not lifecycle-confirmed must render
+        # 미조회, never a guessed count, even when legacy raw lifecycle data conflicts.
+        "run_id": "self-test-active-order-unconfirmed",
+        "status": "success",
+        "account_display_summary": {"total_evaluation_amount": 1000},
+        "order_lifecycle": {
+            "status": "partial",
+            "active_order_count": 5,
+            "previous_submitted_cash_order_count": 1,
+            "holding_state_issue_count": 0,
+        },
+        "reporting_view": {
+            "account": {},
+            "orders": {
+                "active": {"count": None, "lookup_status": "legacy_lookup_without_lifecycle_confirmation"},
+            },
+            "evidence_domains": {},
+        },
+        "evidence_summary": {},
+        "today_fills_summary": {"status": "success", "skipped": False, "fill_count": 0},
+        "execution": {"request_type": "analysis", "status": "success", "orders": []},
+        "review_summary": {},
+        "token_usage": {"total": {"total_tokens": 1}},
+    }
+    domestic_unavailable_payload = {
+        # A normalized domestic view that is present but explicitly unavailable must not be
+        # masked by conflicting legacy raw account_display_summary numbers.
+        "run_id": "self-test-domestic-unavailable",
+        "status": "partial",
+        "account_display_summary": {
+            "total_evaluation_amount": 555555,
+            "orderable_cash_amount": 555555,
+            "securities_valuation_amount": 555555,
+            "total_pnl_amount": 555555,
+        },
+        "reporting_view": {
+            "account": {
+                "domestic_trading_account": {
+                    "total_evaluation_amount": None,
+                    "orderable_cash_amount": None,
+                    "securities_valuation_amount": None,
+                    "total_pnl_amount": None,
+                    "available": False,
+                },
+            },
+            "evidence_domains": {},
+        },
+        "evidence_summary": {},
+        "today_fills_summary": {"status": "success", "skipped": False, "fill_count": 0},
+        "execution": {"request_type": "analysis", "status": "success", "orders": []},
+        "review_summary": {},
+        "token_usage": {"total": {"total_tokens": 1}},
+    }
     rejected_payload = json.loads(json.dumps(submitted_payload, ensure_ascii=False))
     rejected_payload["run_id"] = "self-test-rejected"
     rejected_payload["status"] = "partial"
@@ -205,6 +320,9 @@ def self_test() -> int:
     submitted_rendered = render(submitted_payload)
     blocked_rendered = render(blocked_payload)
     legacy_rendered = render(legacy_payload)
+    reporting_view_rendered = render(reporting_view_preferred_payload)
+    active_order_unconfirmed_rendered = render(active_order_unconfirmed_payload)
+    domestic_unavailable_rendered = render(domestic_unavailable_payload)
     rejected_rendered = render(rejected_payload)
     checks = [
         (
@@ -213,12 +331,14 @@ def self_test() -> int:
             [
                 "<b>daily-trading ✅ 성공</b> · 09:00",
                 "<code>self-test</code>",
-                "<b>계좌</b> 총평가 3,000원 · 평가손익 -10원",
+                "<b>계좌</b> 국내매매 총평가 3,000원 · 평가손익 -10원",
                 "- 주문가능 1,043,015원 · 주식평가 2,000원",
+                "- 전체 계좌 총자산(KIS 잔고) 17,039,121원",
                 "<b>당일 누계</b>(이번 run 주문 전 기준) 매수 100원 · 매도 0원 · 체결 7건",
                 "<b>이번 run</b> real-submit · 제출 1 · 차단·실패 0 · 스킵 0",
                 "- <code>005930</code> 삼성전자: 매수 3주→1주 · 제출(접수, 조정=매수가능수량으로 축소) / <code>r1</code>",
                 "- 최종 결정: 매도 0 · 매수 1 · 유지 0 · 미결 2",
+                "- 수집 데이터 일부 확인 필요(실행과 무관): 수급",
                 "상세 리포트: <code>daily-trading-report.html</code> 첨부",
                 "토큰: 123",
             ],
@@ -229,7 +349,7 @@ def self_test() -> int:
             blocked_rendered,
             [
                 "<b>daily-trading ⚠️ 부분 완료</b>",
-                "<b>계좌</b> 총평가 조회 실패 · 평가손익 조회 실패",
+                "<b>계좌</b> 국내매매 총평가 조회 실패 · 평가손익 조회 실패",
                 "<b>당일 누계</b>(이번 run 주문 전 기준) 매수 조회 실패 · 매도 조회 실패 · 체결 조회 실패",
                 "<b>이번 run</b> real-submit · 제출 0 · 차단·실패 2 · 스킵 6",
                 "- <code>402340</code> SK스퀘어: 매도 1주 · 차단(매도가능수량 초과) / <code>0028360200</code>",
@@ -249,6 +369,30 @@ def self_test() -> int:
                 "- Judge 검토: 매도 후보 2 · 매수 후보 3 · 미선정 25",
             ],
             ["최종 결정", "미결", "평결:", "Judge 후보", "유지"],
+        ),
+        (
+            "reporting-view-preferred-over-legacy",
+            reporting_view_rendered,
+            [
+                "<b>계좌</b> 국내매매 총평가 12,601,357원 · 평가손익 +300,000원",
+                "- 주문가능 500,000원 · 주식평가 12,000,000원",
+                "- 전체 계좌 총자산(KIS 잔고) 17,039,121원",
+                "- 사전 주문상태: 미체결 3건",
+                "- 수집 데이터 일부 확인 필요(실행과 무관): 뉴스 9/31, 수급 26/31",
+            ],
+            ["999,999원", "legacy stale text", "미체결 99"],
+        ),
+        (
+            "active-order-unconfirmed-without-lifecycle",
+            active_order_unconfirmed_rendered,
+            ["- 사전 주문상태: 미체결 미조회"],
+            ["미체결 5건", "미체결 0건"],
+        ),
+        (
+            "domestic-account-unavailable-not-masked-by-legacy",
+            domestic_unavailable_rendered,
+            ["<b>계좌</b> 국내매매 총평가 조회 실패 · 평가손익 조회 실패"],
+            ["555,555원"],
         ),
         (
             "broker-rejected",

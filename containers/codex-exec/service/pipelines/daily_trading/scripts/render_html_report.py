@@ -302,8 +302,21 @@ def cumulative_today_fills(runs: list[dict[str, Any]]) -> tuple[list[dict[str, A
 
 
 def render_header(summary: dict[str, Any], run_count: int, fills: list[dict[str, Any]], submitted_orders: list[dict[str, Any]]) -> str:
-    account = summary.get("account_display_summary") if isinstance(summary.get("account_display_summary"), dict) else {}
-    asset = summary.get("account_asset_summary") if isinstance(summary.get("account_asset_summary"), dict) else {}
+    legacy_account = summary.get("account_display_summary") if isinstance(summary.get("account_display_summary"), dict) else {}
+    legacy_asset = summary.get("account_asset_summary") if isinstance(summary.get("account_asset_summary"), dict) else {}
+    reporting_view = summary.get("reporting_view") if isinstance(summary.get("reporting_view"), dict) else {}
+    reporting_account = reporting_view.get("account") if isinstance(reporting_view.get("account"), dict) else {}
+    full_account_view = (
+        reporting_account.get("full_account") if isinstance(reporting_account.get("full_account"), dict) else {}
+    )
+    domestic_account_view = (
+        reporting_account.get("domestic_trading_account") if isinstance(reporting_account.get("domestic_trading_account"), dict) else {}
+    )
+    # Prefer the normalized view; fall back to the raw legacy fields only when the normalized
+    # view is absent entirely (older pipeline-summary.json artifacts). A present-but-unavailable
+    # normalized view must keep its own (unknown) values instead of being masked by legacy data.
+    account = domestic_account_view if domestic_account_view else legacy_account
+    full_account_amount = full_account_view.get("total_asset_amount") if full_account_view else legacy_asset.get("total_asset_amount")
     started_at = str(summary.get("started_at") or "")
     cut_off = time_text(started_at)
     status = str(summary.get("status") or "-")
@@ -315,9 +328,9 @@ def render_header(summary: dict[str, Any], run_count: int, fills: list[dict[str,
     status_label = "실행 성공" if status == "success" else "부분 완료" if status == "partial" else "실행 실패"
     status_css = "success" if status == "success" else ""
     asset_metric = ""
-    if asset.get("total_asset_amount") is not None:
+    if full_account_amount is not None:
         asset_metric = (
-            f"<article><span>KIS 총자산</span><strong>{number(asset.get('total_asset_amount'))}원</strong>"
+            f"<article><span>KIS 총자산</span><strong>{number(full_account_amount)}원</strong>"
             "<small>account asset 조회값 · 원금 수익률 아님</small></article>"
         )
     return f"""
@@ -335,10 +348,10 @@ def render_header(summary: dict[str, Any], run_count: int, fills: list[dict[str,
       <div class="run-id"><span>실행 ID</span><code>{esc(run_id)}</code>{run_id_hint}</div>
     </header>
     <section class="metrics">
-      <article><span>총평가</span><strong>{number(account.get('total_evaluation_amount'))}원</strong><small>주식 {number(account.get('securities_valuation_amount'))}원</small></article>
+      <article><span>국내매매 총평가</span><strong>{number(account.get('total_evaluation_amount'))}원</strong><small>주식 {number(account.get('securities_valuation_amount'))}원</small></article>
       <article><span>평가손익</span><strong class="negative">{number(account.get('total_pnl_amount'))}원</strong><small>전체 매입가 대비</small></article>
       <article><span>주문가능</span><strong>{number(account.get('orderable_cash_amount'))}원</strong><small>D+2 기준</small></article>
-      <article><span>당일 누적 매수</span><strong>{number(((account.get('today_trade_amounts') or {}).get('buy_amount')))}원</strong><small>계좌 누계</small></article>
+      <article><span>당일 누적 매수</span><strong>{number(((legacy_account.get('today_trade_amounts') or {}).get('buy_amount')))}원</strong><small>계좌 누계</small></article>
       {asset_metric}
     </section>
     """
@@ -1005,11 +1018,37 @@ def render_market_and_quality(target_dir: Path, summary: dict[str, Any]) -> str:
             f"<td>{esc(item.get('source'))}</td><td>{badge}</td></tr>"
         )
     evidence = summary.get("evidence_summary") if isinstance(summary.get("evidence_summary"), dict) else {}
-    financial = evidence.get("financial") if isinstance(evidence.get("financial"), dict) else {}
-    news = evidence.get("news") if isinstance(evidence.get("news"), dict) else {}
-    financial_counts = financial.get("cache_counts") if isinstance(financial.get("cache_counts"), dict) else {}
-    news_counts = news.get("cache_counts") if isinstance(news.get("cache_counts"), dict) else {}
+    reporting_view = summary.get("reporting_view") if isinstance(summary.get("reporting_view"), dict) else {}
+    reporting_domains = reporting_view.get("evidence_domains") if isinstance(reporting_view.get("evidence_domains"), dict) else {}
+
+    def domain_view(key: str, default_wanted: Any) -> dict[str, Any]:
+        view = reporting_domains.get(key) if isinstance(reporting_domains, dict) else None
+        if isinstance(view, dict):
+            return {
+                "status": view.get("status"),
+                "display_text": view.get("coverage_text"),
+                "usable_symbol_count": view.get("usable_symbol_count"),
+                "wanted_symbol_count": view.get("wanted_symbol_count"),
+            }
+        raw = evidence.get(key) if isinstance(evidence.get(key), dict) else {}
+        counts = raw.get("cache_counts") if isinstance(raw.get("cache_counts"), dict) else {}
+        return {
+            "status": raw.get("status"),
+            "display_text": raw.get("display_text"),
+            "usable_symbol_count": counts.get("usable_symbol_count", raw.get("usable_symbol_count")),
+            "wanted_symbol_count": counts.get("wanted_symbol_count", default_wanted),
+        }
+
+    symbol_count = evidence.get("symbol_count")
+    financial = domain_view("financial", symbol_count)
+    news = domain_view("news", symbol_count)
+    investor_flow = domain_view("investor_flow", symbol_count)
+    investor_flow_usable = investor_flow.get("usable_symbol_count")
+    investor_flow_wanted = investor_flow.get("wanted_symbol_count")
     lifecycle = summary.get("order_lifecycle") if isinstance(summary.get("order_lifecycle"), dict) else {}
+    reporting_view = summary.get("reporting_view") if isinstance(summary.get("reporting_view"), dict) else {}
+    reporting_orders = reporting_view.get("orders") if isinstance(reporting_view.get("orders"), dict) else {}
+    active_order_view = reporting_orders.get("active") if isinstance(reporting_orders.get("active"), dict) else {}
     partial_stages = [item for item in summary.get("stages", []) if isinstance(item, dict) and item.get("status") != "success"]
     stage_rows = "".join(
         f"<tr><td>{esc(item.get('stage'))}</td><td>{status_badge(item.get('status'))}</td><td>{esc(item.get('detail'))}</td></tr>"
@@ -1025,12 +1064,24 @@ def render_market_and_quality(target_dir: Path, summary: dict[str, Any]) -> str:
         warnings.append(
             f'<div class="warning"><strong>재무 수집 {esc(financial.get("status"))}</strong><p>{esc(financial.get("display_text") or "일부 재무 근거를 사용할 수 없습니다.")}</p></div>'
         )
+    if investor_flow.get("status") not in normal_evidence_statuses:
+        warnings.append(
+            f'<div class="warning"><strong>장중 수급 수집 {esc(investor_flow.get("status"))}</strong><p>{esc(investor_flow.get("display_text") or "일부 종목의 장중 수급 추정치를 사용할 수 없습니다.")}</p></div>'
+        )
     if lifecycle.get("status") not in {None, "", "not_run"}:
         issue_count = number(lifecycle.get("holding_state_issue_count"))
         warning_class = "warning bad-border" if int(lifecycle.get("holding_state_issue_count") or 0) > 0 else "warning"
+        # Prefer the lifecycle-confirmed normalized count; a present-but-unconfirmed view must
+        # render 미조회, never a guessed count, even when raw lifecycle data conflicts.
+        if active_order_view:
+            active_count_text = (
+                f"{number(active_order_view.get('count'))}건" if active_order_view.get("lookup_status") == "complete" else "미조회"
+            )
+        else:
+            active_count_text = f"{number(lifecycle.get('active_order_count'))}건"
         warnings.append(
             f'<div class="{warning_class}"><strong>주문 생명주기 사전조회 {esc(lifecycle.get("status"))}</strong>'
-            f'<p>현재 미체결 {number(lifecycle.get("active_order_count"))}건 · 같은 날 이전 제출 '
+            f'<p>현재 미체결 {active_count_text} · 같은 날 이전 제출 '
             f'{number(lifecycle.get("previous_submitted_cash_order_count"))}건 · 보유수량 확인 필요 {issue_count}건</p></div>'
         )
     if partial_stages:
@@ -1044,8 +1095,9 @@ def render_market_and_quality(target_dir: Path, summary: dict[str, Any]) -> str:
       <p>{esc(strategy.get('advisory_reason'))}</p>
       <div class="table-wrap"><table><thead><tr><th>지수</th><th>값</th><th>등락률</th><th>출처</th><th>판정</th></tr></thead><tbody>{''.join(index_rows)}</tbody></table></div>
       <div class="coverage">
-        <article><span>재무 coverage</span><strong>{number(financial_counts.get('usable_symbol_count'))} / {number(financial_counts.get('wanted_symbol_count'))}</strong><small>{esc(financial.get('status'))}</small></article>
-        <article><span>뉴스 coverage</span><strong>{number(news_counts.get('usable_symbol_count'))} / {number(news_counts.get('wanted_symbol_count'))}</strong><small>{esc(news.get('status'))}</small></article>
+        <article><span>재무 coverage</span><strong>{number(financial.get('usable_symbol_count'))} / {number(financial.get('wanted_symbol_count'))}</strong><small>{esc(financial.get('status'))}</small></article>
+        <article><span>뉴스 coverage</span><strong>{number(news.get('usable_symbol_count'))} / {number(news.get('wanted_symbol_count'))}</strong><small>{esc(news.get('status'))}</small></article>
+        <article><span>수급 coverage</span><strong>{number(investor_flow_usable)} / {number(investor_flow_wanted)}</strong><small>{esc(investor_flow.get('status'))}</small></article>
         <article><span>가격 전용 종목</span><strong>{number(evidence.get('price_only_symbol_count'))}</strong><small>전체 {number(evidence.get('symbol_count'))}종목</small></article>
       </div>
       <h3>완전 성공이 아닌 stage</h3>

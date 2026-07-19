@@ -173,13 +173,50 @@ def order_line(item: dict[str, Any]) -> str:
 
 
 def render(summary: dict[str, Any]) -> str:
-    account = summary.get("account_display_summary") if isinstance(summary.get("account_display_summary"), dict) else {}
+    legacy_account = summary.get("account_display_summary") if isinstance(summary.get("account_display_summary"), dict) else {}
+    account_asset = summary.get("account_asset_summary") if isinstance(summary.get("account_asset_summary"), dict) else {}
+    reporting_view = summary.get("reporting_view") if isinstance(summary.get("reporting_view"), dict) else {}
+    reporting_account = reporting_view.get("account") if isinstance(reporting_view.get("account"), dict) else {}
+    reporting_orders = reporting_view.get("orders") if isinstance(reporting_view.get("orders"), dict) else {}
+    reporting_domains = reporting_view.get("evidence_domains") if isinstance(reporting_view.get("evidence_domains"), dict) else {}
+    full_account_view = (
+        reporting_account.get("full_account") if isinstance(reporting_account.get("full_account"), dict) else {}
+    )
+    domestic_account_view = (
+        reporting_account.get("domestic_trading_account") if isinstance(reporting_account.get("domestic_trading_account"), dict) else {}
+    )
+    active_order_view = reporting_orders.get("active") if isinstance(reporting_orders.get("active"), dict) else {}
+    # Fall back to legacy raw fields only when the normalized view is absent entirely (older
+    # pipeline-summary.json artifacts). A present-but-unavailable normalized view must keep its
+    # own (unknown) values instead of being masked by conflicting legacy numbers.
+    account = domestic_account_view if domestic_account_view else legacy_account
+    full_account_amount = full_account_view.get("total_asset_amount") if full_account_view else account_asset.get("total_asset_amount")
     evidence = summary.get("evidence_summary") if isinstance(summary.get("evidence_summary"), dict) else {}
-    financial = evidence.get("financial") if isinstance(evidence.get("financial"), dict) else {}
-    news = evidence.get("news") if isinstance(evidence.get("news"), dict) else {}
+
+    def domain_view(key: str) -> dict[str, Any]:
+        view = reporting_domains.get(key) if isinstance(reporting_domains, dict) else None
+        if isinstance(view, dict):
+            return {
+                "status": view.get("status"),
+                "display_text": view.get("coverage_text"),
+                "usable_symbol_count": view.get("usable_symbol_count"),
+                "wanted_symbol_count": view.get("wanted_symbol_count"),
+            }
+        raw = evidence.get(key) if isinstance(evidence.get(key), dict) else {}
+        counts = raw.get("cache_counts") if isinstance(raw.get("cache_counts"), dict) else {}
+        return {
+            "status": raw.get("status"),
+            "display_text": raw.get("display_text"),
+            "usable_symbol_count": counts.get("usable_symbol_count", raw.get("usable_symbol_count")),
+            "wanted_symbol_count": counts.get("wanted_symbol_count", raw.get("wanted_symbol_count")),
+        }
+
+    financial = domain_view("financial")
+    news = domain_view("news")
+    investor_flow = domain_view("investor_flow")
     today_fills = summary.get("today_fills_summary") if isinstance(summary.get("today_fills_summary"), dict) else {}
     execution = summary.get("execution") if isinstance(summary.get("execution"), dict) else {}
-    lifecycle = summary.get("order_lifecycle") if isinstance(summary.get("order_lifecycle"), dict) else {}
+    legacy_lifecycle = summary.get("order_lifecycle") if isinstance(summary.get("order_lifecycle"), dict) else {}
     broker_summary = execution.get("broker_reconciliation") if isinstance(execution.get("broker_reconciliation"), dict) else {}
     review = summary.get("review_summary") if isinstance(summary.get("review_summary"), dict) else {}
     tokens = summary.get("token_usage") if isinstance(summary.get("token_usage"), dict) else {}
@@ -195,10 +232,12 @@ def render(summary: dict[str, Any]) -> str:
         f"<b>daily-trading {status_label(summary.get('status'))}</b>{time_suffix}",
         f"<code>{esc(summary.get('run_id') or '-')}</code>",
         "",
-        f"<b>계좌</b> 총평가 {money(account.get('total_evaluation_amount'))} · 평가손익 {signed_money(account.get('total_pnl_amount'))}",
+        f"<b>계좌</b> 국내매매 총평가 {money(account.get('total_evaluation_amount'))} · 평가손익 {signed_money(account.get('total_pnl_amount'))}",
         f"- 주문가능 {money(account.get('orderable_cash_amount'))} · 주식평가 {money(account.get('securities_valuation_amount'))}",
     ]
-    today = account.get("today_trade_amounts") if isinstance(account.get("today_trade_amounts"), dict) else {}
+    if full_account_amount is not None:
+        lines.append(f"- 전체 계좌 총자산(KIS 잔고) {money(full_account_amount)}")
+    today = legacy_account.get("today_trade_amounts") if isinstance(legacy_account.get("today_trade_amounts"), dict) else {}
     today_buy = today.get("buy_amount", today.get("today_buy_amount"))
     today_sell = today.get("sell_amount", today.get("today_sell_amount"))
     fill_count = today_fills.get("fill_count")
@@ -228,11 +267,20 @@ def render(summary: dict[str, Any]) -> str:
             f" · 거절 {as_int(broker_summary.get('rejected_order_count'))}"
             f" · 대기·기타 {unresolved_count}"
         )
-    if lifecycle.get("status") not in {None, "", "not_run"}:
+    if active_order_view and active_order_view.get("lookup_status") != "not_looked_up":
+        active_count_text = (
+            f"{as_int(active_order_view.get('count'))}건" if active_order_view.get("lookup_status") == "complete" else "미조회"
+        )
         lines.append(
-            f"- 사전 주문상태: 미체결 {as_int(lifecycle.get('active_order_count'))}"
-            f" · 이전 제출 {as_int(lifecycle.get('previous_submitted_cash_order_count'))}"
-            f" · 수량 확인 필요 {as_int(lifecycle.get('holding_state_issue_count'))}"
+            f"- 사전 주문상태: 미체결 {active_count_text}"
+            f" · 이전 제출 {as_int(legacy_lifecycle.get('previous_submitted_cash_order_count'))}"
+            f" · 수량 확인 필요 {as_int(legacy_lifecycle.get('holding_state_issue_count'))}"
+        )
+    elif legacy_lifecycle.get("status") not in {None, "", "not_run"}:
+        lines.append(
+            f"- 사전 주문상태: 미체결 {as_int(legacy_lifecycle.get('active_order_count'))}"
+            f" · 이전 제출 {as_int(legacy_lifecycle.get('previous_submitted_cash_order_count'))}"
+            f" · 수량 확인 필요 {as_int(legacy_lifecycle.get('holding_state_issue_count'))}"
         )
     if execution.get("requires_main_agent_order_execution"):
         lines.append("- 주문 제출 단계가 아직 완료되지 않았습니다.")
@@ -256,13 +304,21 @@ def render(summary: dict[str, Any]) -> str:
             f" · 매수 후보 {as_int(review.get('buy_candidate_count'))}"
             f" · 미선정 {as_int(review.get('hold_symbol_count'))}"
         )
-    data_issues = sum(
-        1
-        for payload in (financial, news)
+    def domain_issue_text(label: str, payload: dict[str, Any]) -> str:
+        usable = payload.get("usable_symbol_count")
+        wanted = payload.get("wanted_symbol_count")
+        if usable is not None and wanted is not None:
+            return f"{label} {as_int(usable)}/{as_int(wanted)}"
+        return label
+
+    domain_labels = {"financial": "재무", "news": "뉴스", "investor_flow": "수급"}
+    issue_domains = [
+        domain_issue_text(domain_labels[key], payload)
+        for key, payload in (("financial", financial), ("news", news), ("investor_flow", investor_flow))
         if text(payload.get("status")) not in {"", "success", "complete", "supplied"}
-    )
-    if data_issues:
-        lines.append(f"- 데이터 확인 필요 {data_issues}개 영역")
+    ]
+    if issue_domains:
+        lines.append(f"- 수집 데이터 일부 확인 필요(실행과 무관): {', '.join(issue_domains)}")
     report_name = Path(text(summary.get("html_report_path"))).name if summary.get("html_report_available") else ""
     lines.extend(
         [

@@ -16,6 +16,7 @@ from ..scripts.render_html_report import (
     order_status_badge,
     render_combined_chart,
     render_header,
+    render_market_and_quality,
     render_trade_ledger,
     resolve_fill,
 )
@@ -52,6 +53,11 @@ def make_run(runs_root: Path, run_id: str, started_at: str, *, target: bool) -> 
             "news": {
                 "status": "supplied",
                 "cache_counts": {"usable_symbol_count": 2, "wanted_symbol_count": 2},
+            },
+            "investor_flow": {
+                "status": "partial" if target else "supplied",
+                "usable_symbol_count": 1 if target else 2,
+                "display_text": "장중 수급: 1개 종목 추정치 반영, 일부 종목 수급 없음",
             },
         },
         "token_usage": {"total": {"total_tokens": 123}},
@@ -315,6 +321,10 @@ def self_test() -> int:
             "현재 미체결 1건 · 같은 날 이전 제출 2건 · 보유수량 확인 필요 1건",
             "KIS 거절 1주",
             "row.textContent = value",
+            "수급 coverage",
+            "1 / 2",
+            "장중 수급 수집 partial",
+            "장중 수급: 1개 종목 추정치 반영, 일부 종목 수급 없음",
         ]
         forbidden = [
             "2026-07-14",
@@ -364,6 +374,167 @@ def self_test() -> int:
 class RenderHtmlReportSelfTest(unittest.TestCase):
     def test_self_test_suite(self) -> None:
         self.assertEqual(self_test(), 0)
+
+    def test_render_header_prefers_reporting_view_over_conflicting_legacy_fields(self) -> None:
+        rendered = render_header(
+            {
+                "run_id": "reporting-view-probe",
+                "started_at": "2026-07-16T09:00:00+09:00",
+                "status": "success",
+                "account_display_summary": {
+                    "total_evaluation_amount": 999999,
+                    "securities_valuation_amount": 999999,
+                    "total_pnl_amount": 999999,
+                    "orderable_cash_amount": 999999,
+                },
+                "account_asset_summary": {"total_asset_amount": 999999},
+                "reporting_view": {
+                    "account": {
+                        "full_account": {"total_asset_amount": 17039121, "available": True},
+                        "domestic_trading_account": {
+                            "total_evaluation_amount": 12601357,
+                            "securities_valuation_amount": 12000000,
+                            "total_pnl_amount": 300000,
+                            "orderable_cash_amount": 500000,
+                            "available": True,
+                        },
+                    }
+                },
+            },
+            1,
+            [],
+            [],
+        )
+
+        self.assertIn("12,601,357원", rendered)
+        self.assertIn("KIS 총자산</span><strong>17,039,121원", rendered)
+        self.assertNotIn("999,999", rendered)
+
+    def test_render_header_falls_back_to_legacy_fields_without_reporting_view(self) -> None:
+        rendered = render_header(
+            {
+                "run_id": "legacy-probe",
+                "started_at": "2026-07-16T09:00:00+09:00",
+                "status": "success",
+                "account_display_summary": {"total_evaluation_amount": 5_000_000},
+                "account_asset_summary": {"total_asset_amount": 6_000_000},
+            },
+            1,
+            [],
+            [],
+        )
+
+        self.assertIn("5,000,000원", rendered)
+        self.assertIn("KIS 총자산</span><strong>6,000,000원", rendered)
+
+    def test_render_market_and_quality_prefers_reporting_view_evidence_domains(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            target_dir = Path(temporary)
+            rendered = render_market_and_quality(
+                target_dir,
+                {
+                    "evidence_summary": {
+                        "symbol_count": 2,
+                        "financial": {"status": "supplied", "display_text": "legacy stale text", "cache_counts": {"usable_symbol_count": 2, "wanted_symbol_count": 2}},
+                        "news": {"status": "supplied", "display_text": "legacy stale text", "cache_counts": {"usable_symbol_count": 2, "wanted_symbol_count": 2}},
+                        "investor_flow": {"status": "supplied", "display_text": "legacy stale text"},
+                    },
+                    "reporting_view": {
+                        "evidence_domains": {
+                            "financial": {"status": "supplied", "coverage_text": "재무: 2개 종목 반영", "usable_symbol_count": 2, "wanted_symbol_count": 2},
+                            "news": {"status": "cache_missing", "coverage_text": "뉴스: 캐시 파일 없음", "usable_symbol_count": 0, "wanted_symbol_count": 2},
+                            "investor_flow": {"status": "partial", "coverage_text": "장중 수급: 1개 종목 추정치 반영, 일부 종목 수급 없음", "usable_symbol_count": 1, "wanted_symbol_count": 2},
+                        }
+                    },
+                    "stages": [],
+                },
+            )
+
+        self.assertIn("뉴스 수집 cache_missing", rendered)
+        self.assertIn("뉴스: 캐시 파일 없음", rendered)
+        self.assertIn("장중 수급 수집 partial", rendered)
+        self.assertIn("수급 coverage</span><strong>1 / 2", rendered)
+        self.assertNotIn("legacy stale text", rendered)
+
+    def test_render_market_and_quality_prefers_lifecycle_confirmed_active_count_over_conflicting_legacy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            target_dir = Path(temporary)
+            rendered = render_market_and_quality(
+                target_dir,
+                {
+                    "evidence_summary": {"symbol_count": 0},
+                    "order_lifecycle": {
+                        "status": "partial",
+                        "active_order_count": 99,
+                        "previous_submitted_cash_order_count": 2,
+                        "holding_state_issue_count": 1,
+                    },
+                    "reporting_view": {
+                        "orders": {"active": {"count": 3, "lookup_status": "complete"}},
+                        "evidence_domains": {},
+                    },
+                    "stages": [],
+                },
+            )
+
+        self.assertIn("현재 미체결 3건", rendered)
+        self.assertNotIn("현재 미체결 99건", rendered)
+
+    def test_render_market_and_quality_shows_unconfirmed_active_count_as_unlooked_up(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            target_dir = Path(temporary)
+            rendered = render_market_and_quality(
+                target_dir,
+                {
+                    "evidence_summary": {"symbol_count": 0},
+                    "order_lifecycle": {
+                        "status": "partial",
+                        "active_order_count": 5,
+                        "previous_submitted_cash_order_count": 1,
+                        "holding_state_issue_count": 0,
+                    },
+                    "reporting_view": {
+                        "orders": {"active": {"count": None, "lookup_status": "legacy_lookup_without_lifecycle_confirmation"}},
+                        "evidence_domains": {},
+                    },
+                    "stages": [],
+                },
+            )
+
+        self.assertIn("현재 미체결 미조회", rendered)
+        self.assertNotIn("현재 미체결 5건", rendered)
+        self.assertNotIn("현재 미체결 0건", rendered)
+
+    def test_render_header_domestic_unavailable_view_not_masked_by_conflicting_legacy(self) -> None:
+        rendered = render_header(
+            {
+                "run_id": "domestic-unavailable-probe",
+                "started_at": "2026-07-16T09:00:00+09:00",
+                "status": "partial",
+                "account_display_summary": {
+                    "total_evaluation_amount": 555555,
+                    "securities_valuation_amount": 555555,
+                    "total_pnl_amount": 555555,
+                    "orderable_cash_amount": 555555,
+                },
+                "reporting_view": {
+                    "account": {
+                        "domestic_trading_account": {
+                            "total_evaluation_amount": None,
+                            "securities_valuation_amount": None,
+                            "total_pnl_amount": None,
+                            "orderable_cash_amount": None,
+                            "available": False,
+                        },
+                    }
+                },
+            },
+            1,
+            [],
+            [],
+        )
+
+        self.assertNotIn("555,555", rendered)
 
     def test_header_explains_random_run_id_suffix(self) -> None:
         rendered = render_header(
