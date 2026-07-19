@@ -12,10 +12,12 @@ from ..scripts.render_html_report import (
     analyst_score_class,
     build_html,
     cumulative_today_fills,
+    find_runs,
     order_status_badge,
     render_combined_chart,
     render_header,
     render_trade_ledger,
+    resolve_fill,
 )
 
 
@@ -427,6 +429,143 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
         self.assertNotIn("확인된 체결 전체", rendered)
         self.assertNotIn("봇이 제출한 주문 전체", rendered)
         self.assertEqual(rendered.count("order-1"), 1)
+
+    def test_trade_ledger_joins_reservation_to_resulting_cash_fill_without_duplicate(self) -> None:
+        rendered, submitted_orders = render_trade_ledger(
+            [
+                {
+                    "summary": {"started_at": "2026-07-16T10:00:00+09:00"},
+                    "execution": {
+                        "orders": [
+                            {
+                                "symbol_id": "021240",
+                                "symbol_name": "코웨이",
+                                "direction": "buy",
+                                "validated_order_quantity": 1,
+                                "order_price": 95_700,
+                                "order_path": "reservation",
+                                "order_or_reservation_id": "103586",
+                                "resulting_order_id": "0001452900",
+                                "result": "submitted",
+                            }
+                        ]
+                    },
+                }
+            ],
+            [
+                {
+                    "order_id": "0001452900",
+                    "symbol_id": "021240",
+                    "symbol_name": "코웨이",
+                    "direction": "buy",
+                    "filled_quantity": 1,
+                    "filled_price": 95_700,
+                    "filled_amount": 95_700,
+                    "filled_at": "2026-07-16T10:02:00+09:00",
+                    "source_actor": "bot",
+                }
+            ],
+            "success",
+            "account",
+        )
+
+        self.assertEqual(len(submitted_orders), 1)
+        self.assertIsNotNone(submitted_orders[0]["fill"])
+        self.assertIn("103586", rendered)
+        # Fill must join into the reservation's row, not appear again as a standalone unlinked row.
+        self.assertEqual(rendered.count("0001452900"), 1)
+        self.assertNotIn("확인된 체결 전체", rendered)
+
+    def test_resolve_fill_prefers_resulting_order_id_over_reservation_id(self) -> None:
+        item = {"order_or_reservation_id": "103586", "resulting_order_id": "0001452900"}
+        fill_by_order = {
+            "103586": {"filled_quantity": 999, "filled_at": "wrong-fill"},
+            "0001452900": {"filled_quantity": 1, "filled_at": "correct-fill"},
+        }
+
+        fill = resolve_fill(item, fill_by_order)
+
+        self.assertEqual(fill["filled_at"], "correct-fill")
+
+    def test_resolve_fill_falls_back_to_reservation_id_when_resulting_id_unmatched(self) -> None:
+        item = {"order_or_reservation_id": "103586", "resulting_order_id": "0001452900"}
+        fill_by_order = {"103586": {"filled_at": "reservation-fill"}}
+
+        fill = resolve_fill(item, fill_by_order)
+
+        self.assertEqual(fill["filled_at"], "reservation-fill")
+
+    def test_trade_ledger_end_to_end_join_via_lifecycle_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary) / "run-1"
+            write_json(
+                run_dir / "pipeline-summary.json",
+                {"run_id": "run-1", "started_at": "2026-07-16T10:00:00+09:00", "status": "success"},
+            )
+            write_json(
+                run_dir / "execution.json",
+                {
+                    "status": "success",
+                    "orders": [
+                        {
+                            "symbol_id": "021240",
+                            "symbol_name": "코웨이",
+                            "direction": "buy",
+                            "validated_order_quantity": 1,
+                            "order_price": 95_700,
+                            "order_path": "reservation",
+                            "order_or_reservation_id": "103586",
+                            "result": "submitted",
+                        }
+                    ],
+                },
+            )
+            write_json(
+                run_dir / "order-lifecycle.json",
+                {
+                    "active_orders": [
+                        {
+                            "symbol_id": "021240",
+                            "order_id": "103586",
+                            "order_kind": "reservation",
+                            "rsvn_ord_seq": "103586",
+                            "odno": "0001452900",
+                            "active_status": "inactive",
+                        }
+                    ],
+                    "previous_submitted_cash_orders": [],
+                },
+            )
+            write_json(
+                run_dir / "today-fills.json",
+                {
+                    "status": "success",
+                    "fill_scope": "account",
+                    "fills": [
+                        {
+                            "order_id": "0001452900",
+                            "symbol_id": "021240",
+                            "symbol_name": "코웨이",
+                            "direction": "buy",
+                            "filled_quantity": 1,
+                            "filled_price": 95_700,
+                            "filled_amount": 95_700,
+                            "filled_at": "2026-07-16T10:02:00+09:00",
+                            "source_actor": "bot",
+                        }
+                    ],
+                },
+            )
+
+            runs = find_runs(Path(temporary), "2026-07-16T23:59:59+09:00")
+            self.assertEqual(len(runs), 1)
+            self.assertEqual(runs[0]["execution"]["orders"][0]["resulting_order_id"], "0001452900")
+
+            fills, status, scope = cumulative_today_fills(runs)
+            rendered, submitted_orders = render_trade_ledger(runs, fills, status, scope)
+
+        self.assertIsNotNone(submitted_orders[0]["fill"])
+        self.assertEqual(rendered.count("0001452900"), 1)
 
     def test_cumulative_today_fills_keeps_latest_order_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

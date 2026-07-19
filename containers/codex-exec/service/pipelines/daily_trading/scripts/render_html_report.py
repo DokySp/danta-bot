@@ -120,6 +120,7 @@ def find_runs(runs_root: Path, target_started_at: str) -> list[dict[str, Any]]:
         )
     ordered_runs = sorted(runs, key=lambda item: str(item["summary"].get("started_at") or ""))
     latest_broker_by_order_id: dict[str, dict[str, Any]] = {}
+    reservation_resulting_order_id: dict[str, str] = {}
     for run in ordered_runs:
         lifecycle_orders = run["lifecycle"].get("previous_submitted_cash_orders", [])
         for item in lifecycle_orders if isinstance(lifecycle_orders, list) else []:
@@ -129,6 +130,14 @@ def find_runs(runs_root: Path, target_started_at: str) -> list[dict[str, Any]]:
             broker = item.get("broker_reconciliation")
             if order_id and isinstance(broker, dict):
                 latest_broker_by_order_id[order_id] = broker
+        active_orders = run["lifecycle"].get("active_orders", [])
+        for item in active_orders if isinstance(active_orders, list) else []:
+            if not isinstance(item, dict) or item.get("order_kind") != "reservation":
+                continue
+            reservation_id = str(item.get("rsvn_ord_seq") or item.get("order_id") or "").strip()
+            resulting_order_id = str(item.get("odno") or "").strip()
+            if reservation_id and resulting_order_id:
+                reservation_resulting_order_id[reservation_id] = resulting_order_id
     for run in ordered_runs:
         execution = run["execution"]
         orders = execution.get("orders") if isinstance(execution, dict) else None
@@ -142,12 +151,41 @@ def find_runs(runs_root: Path, target_started_at: str) -> list[dict[str, Any]]:
                     if str(item.get("order_or_reservation_id") or "").strip() in latest_broker_by_order_id
                     else {}
                 ),
+                **(
+                    {"resulting_order_id": reservation_resulting_order_id[str(item.get("order_or_reservation_id") or "").strip()]}
+                    if str(item.get("order_or_reservation_id") or "").strip() in reservation_resulting_order_id
+                    else {}
+                ),
             }
             if isinstance(item, dict)
             else item
             for item in orders
         ]
     return ordered_runs
+
+
+def order_link_ids(item: dict[str, Any]) -> set[str]:
+    ids = {
+        str(item.get("order_or_reservation_id") or "").strip(),
+        str(item.get("resulting_order_id") or "").strip(),
+    }
+    ids.discard("")
+    return ids
+
+
+def resolve_fill(item: dict[str, Any], fill_by_order: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+    # The resulting cash-order id is the authoritative fill identifier once a reservation is
+    # processed into a cash order; only fall back to the submission id when it is absent.
+    for order_id in (
+        str(item.get("resulting_order_id") or "").strip(),
+        str(item.get("order_or_reservation_id") or "").strip(),
+    ):
+        if not order_id:
+            continue
+        fill = fill_by_order.get(order_id)
+        if fill is not None:
+            return fill
+    return None
 
 
 def execution_counts(execution: dict[str, Any]) -> tuple[int, int, int]:
@@ -322,7 +360,7 @@ def render_trade_ledger(
                 continue
             row = dict(item)
             row["run_started_at"] = started_at
-            row["fill"] = fill_by_order.get(str(item.get("order_or_reservation_id") or ""))
+            row["fill"] = resolve_fill(item, fill_by_order)
             submitted_orders.append(row)
 
     ledger_rows: list[tuple[str, str]] = []
@@ -332,8 +370,12 @@ def render_trade_ledger(
         result = order_status_badge(item, fill)
         direction = "매수" if item.get("direction") == "buy" else "매도"
         order_id = str(item.get("order_or_reservation_id") or "")
+        resulting_order_id = str(item.get("resulting_order_id") or "")
+        order_id_cell = (
+            f"{esc(order_id)}<br><small>→ {esc(resulting_order_id)}</small>" if resulting_order_id else esc(order_id)
+        )
         if fill is not None:
-            linked_order_ids.add(order_id)
+            linked_order_ids.update(order_link_ids(item))
         time_cell = f"주문 {time_text(item.get('run_started_at'))}"
         fill_cell = "-"
         if fill is not None:
@@ -349,7 +391,7 @@ def render_trade_ledger(
                 f"<td><strong>{esc(item.get('symbol_name'))}</strong><br><code>{esc(item.get('symbol_id'))}</code></td>"
                 f"<td>{direction}</td>"
                 f"<td>{number(item.get('validated_order_quantity') or item.get('quantity'))}주<br><small>{number(item.get('order_price'))}원</small></td>"
-                f"<td>{fill_cell}</td><td><code>{esc(order_id)}</code></td><td>{result}</td></tr>",
+                f"<td>{fill_cell}</td><td><code>{order_id_cell}</code></td><td>{result}</td></tr>",
             )
         )
 
@@ -402,8 +444,7 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
         for order in execution_orders:
             if not isinstance(order, dict) or order.get("result") != "submitted":
                 continue
-            order_id = str(order.get("order_or_reservation_id") or "")
-            if order_id:
+            for order_id in order_link_ids(order):
                 order_run_index[order_id] = index
 
     fills_by_run: dict[int, list[dict[str, Any]]] = {index: [] for index in range(len(runs))}
@@ -440,9 +481,9 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
             item for item in execution_orders if isinstance(item, dict) and item.get("result") == "submitted"
         ]
         linked_fills = fills_by_run[run_index]
-        submitted_order_ids = {
-            str(item.get("order_or_reservation_id") or "") for item in submitted_orders
-        }
+        submitted_order_ids: set[str] = set()
+        for item in submitted_orders:
+            submitted_order_ids.update(order_link_ids(item))
         unmatched_fills = [
             item for item in linked_fills if str(item.get("order_id") or "") not in submitted_order_ids
         ]
@@ -474,17 +515,19 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
         for order in submitted_orders:
             direction = "매수" if order.get("direction") == "buy" else "매도"
             order_id = str(order.get("order_or_reservation_id") or "")
-            fill = fill_by_order.get(order_id)
+            resulting_order_id = str(order.get("resulting_order_id") or "")
+            order_id_text = f"{order_id} → {resulting_order_id}" if resulting_order_id else order_id
+            fill = resolve_fill(order, fill_by_order)
             if fill_is_complete(order, fill) and str(broker_reconciliation(order).get("status") or "") not in ADVERSE_TERMINAL_BROKER_STATUSES:
                 activity_cards.append(
                     f"<article class=\"activity-card filled\"><span>주문 후 체결</span><strong>{esc(order.get('symbol_name'))} {esc(direction)} {number(fill.get('filled_quantity'))}주</strong>"
-                    f"<small>주문 {run_time} · {number(order.get('order_price'))}원 → 체결 {time_text(fill.get('filled_at'))} · {number(fill.get('filled_price'))}원 · <code>{esc(order_id)}</code></small></article>"
+                    f"<small>주문 {run_time} · {number(order.get('order_price'))}원 → 체결 {time_text(fill.get('filled_at'))} · {number(fill.get('filled_price'))}원 · <code>{esc(order_id_text)}</code></small></article>"
                 )
             else:
                 status_text = order_status_text(order, fill)
                 activity_cards.append(
                     f"<article class=\"activity-card order\"><span>{esc(status_text)}</span><strong>{esc(order.get('symbol_name'))} {esc(direction)} {number(order.get('validated_order_quantity') or order.get('quantity'))}주</strong>"
-                    f"<small>주문 {run_time} · {number(order.get('order_price'))}원 · <code>{esc(order_id)}</code></small></article>"
+                    f"<small>주문 {run_time} · {number(order.get('order_price'))}원 · <code>{esc(order_id_text)}</code></small></article>"
                 )
         for fill in unmatched_fills:
             actor = "사용자 직접" if fill.get("source_actor") == "non_bot_user" else "연결 주문 없음"
@@ -571,13 +614,12 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
                 judge_html = '<div class="empty-state">Analyst 평가는 완료됐지만 이 run의 Judge shortlist에는 선정되지 않았습니다.</div>'
 
             trade_notes = []
-            related_order_ids = {
-                str(order.get("order_or_reservation_id") or "") for order in related_orders
-            }
+            related_order_ids: set[str] = set()
+            for order in related_orders:
+                related_order_ids.update(order_link_ids(order))
             for order in related_orders:
                 direction = "매수" if order.get("direction") == "buy" else "매도"
-                order_id = str(order.get("order_or_reservation_id") or "")
-                fill = fill_by_order.get(order_id)
+                fill = resolve_fill(order, fill_by_order)
                 if fill_is_complete(order, fill) and str(broker_reconciliation(order).get("status") or "") not in ADVERSE_TERMINAL_BROKER_STATUSES:
                     trade_notes.append(
                         f"{run_time} 봇 {direction} 주문 · {time_text(fill.get('filled_at'))} {number(fill.get('filled_quantity'))}주 체결"

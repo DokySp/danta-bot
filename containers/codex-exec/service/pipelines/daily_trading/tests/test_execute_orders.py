@@ -18,6 +18,7 @@ from ..scripts.execute_orders import (
     adjust_reservation,
     default_reservation_orgno,
     execute,
+    fetch_reservations,
     load_json,
     normalize_limit_price,
     normalize_broker_reconciliation,
@@ -1437,3 +1438,131 @@ class ExecuteOrdersSelfTest(unittest.TestCase):
         )
 
         self.assertEqual(execution["orders"][0]["reason"], "active_order_adjustment_required")
+
+    def test_normalize_reservation_preserves_reservation_id_and_resulting_odno(self) -> None:
+        row = {
+            "rsvn_ord_seq": "103586",
+            "odno": "0001452900",
+            "pdno": "021240",
+            "sll_buy_dvsn_cd": "02",
+            "ord_qty": "1",
+            "tot_ccld_qty": "1",
+            "ord_unpr": "95700",
+        }
+
+        item = normalize_reservation(row)
+
+        self.assertEqual(item["order_id"], "103586")
+        self.assertEqual(item["rsvn_ord_seq"], "103586")
+        self.assertEqual(item["odno"], "0001452900")
+
+    def test_normalize_reservation_falls_back_to_odno_when_no_reservation_id(self) -> None:
+        row = {"odno": "0001452900", "pdno": "021240", "ord_qty": "1"}
+
+        item = normalize_reservation(row)
+
+        self.assertEqual(item["order_id"], "0001452900")
+        self.assertEqual(item["rsvn_ord_seq"], "")
+        self.assertEqual(item["odno"], "0001452900")
+
+    def test_fetch_reservations_pages_through_all_results_preserving_continuation(self) -> None:
+        class FakePaginatedKis:
+            env = "real"
+            cano = "12345678"
+            product = "01"
+
+            def __init__(self) -> None:
+                self.calls: list[dict[str, Any]] = []
+
+            def call_with_headers(
+                self,
+                name: str,
+                *,
+                params: dict[str, str] | None = None,
+                payload: dict[str, Any] | None = None,
+                tr_cont: str = "",
+            ) -> tuple[dict[str, Any], dict[str, str]]:
+                self.calls.append({"params": dict(params or {}), "tr_cont": tr_cont})
+                if len(self.calls) == 1:
+                    return (
+                        {
+                            "output1": [{"rsvn_ord_seq": "103586", "pdno": "021240", "ord_qty": "1"}],
+                            "ctx_area_fk200": "FK1",
+                            "ctx_area_nk200": "NK1",
+                        },
+                        {"tr_cont": "F"},
+                    )
+                return (
+                    {
+                        "output1": [{"rsvn_ord_seq": "999999", "pdno": "005930", "ord_qty": "1"}],
+                        "ctx_area_fk200": "",
+                        "ctx_area_nk200": "",
+                    },
+                    {"tr_cont": "D"},
+                )
+
+        kis = FakePaginatedKis()
+
+        results = fetch_reservations(kis, "20260716", "20260716")
+
+        self.assertEqual(len(kis.calls), 2)
+        self.assertEqual(kis.calls[0]["tr_cont"], "")
+        self.assertEqual(kis.calls[0]["params"]["CTX_AREA_FK200"], "")
+        self.assertEqual(kis.calls[1]["tr_cont"], "N")
+        self.assertEqual(kis.calls[1]["params"]["CTX_AREA_FK200"], "FK1")
+        self.assertEqual(kis.calls[1]["params"]["CTX_AREA_NK200"], "NK1")
+        self.assertEqual({item["rsvn_ord_seq"] for item in results}, {"103586", "999999"})
+
+    def test_fetch_reservations_pagination_is_bounded(self) -> None:
+        class FakeInfinitePaginationKis:
+            env = "real"
+            cano = "12345678"
+            product = "01"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def call_with_headers(
+                self,
+                name: str,
+                *,
+                params: dict[str, str] | None = None,
+                payload: dict[str, Any] | None = None,
+                tr_cont: str = "",
+            ) -> tuple[dict[str, Any], dict[str, str]]:
+                self.calls += 1
+                return (
+                    {
+                        "output1": [{"rsvn_ord_seq": f"seq-{self.calls}", "pdno": "021240"}],
+                        "ctx_area_fk200": "FK",
+                        "ctx_area_nk200": "NK",
+                    },
+                    {"tr_cont": "F"},
+                )
+
+        kis = FakeInfinitePaginationKis()
+
+        with self.assertRaises(RuntimeError):
+            fetch_reservations(kis, "20260716", "20260716", max_pages=3)
+
+        self.assertEqual(kis.calls, 3)
+
+    def test_fetch_reservations_falls_back_to_single_page_without_call_with_headers(self) -> None:
+        class FakeSinglePageKis:
+            env = "real"
+            cano = "12345678"
+            product = "01"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def call(self, name: str, *, params: dict[str, str] | None = None, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+                self.calls += 1
+                return {"output1": [{"rsvn_ord_seq": "103586", "pdno": "021240"}]}
+
+        kis = FakeSinglePageKis()
+
+        results = fetch_reservations(kis, "20260716", "20260716")
+
+        self.assertEqual(kis.calls, 1)
+        self.assertEqual(len(results), 1)

@@ -350,14 +350,28 @@ class Kis:
             headers["hashkey"] = str(body.get("HASH") or body.get("hash") or "")
         return headers
 
-    def call(self, name: str, *, params: dict[str, str] | None = None, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    def call_with_headers(
+        self,
+        name: str,
+        *,
+        params: dict[str, str] | None = None,
+        payload: dict[str, Any] | None = None,
+        tr_cont: str = "",
+    ) -> tuple[dict[str, Any], dict[str, str]]:
         path, method, tr_real, tr_demo = ENDPOINTS[name]
         tr_id = tr_demo if self.env == "demo" else tr_real
         # Do not replay order-changing POSTs after ambiguous transport failures.
         request_retries = 0 if method == "POST" else self.retries
-        body, _ = retry_json(method, path, self.headers(tr_id, payload), params=params, payload=payload, retries=request_retries)
+        headers = self.headers(tr_id, payload)
+        if tr_cont:
+            headers["tr_cont"] = tr_cont
+        body, response_headers = retry_json(method, path, headers, params=params, payload=payload, retries=request_retries)
         if str(body.get("rt_cd", "0")) not in {"0", ""}:
             raise RuntimeError(str(body.get("msg1") or body.get("msg_cd") or body.get("rt_cd") or "KIS API failed"))
+        return body, response_headers
+
+    def call(self, name: str, *, params: dict[str, str] | None = None, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        body, _ = self.call_with_headers(name, params=params, payload=payload)
         return body
 
 
@@ -393,10 +407,12 @@ def order_path_api(order_path: str) -> tuple[str, str]:
 
 def normalize_reservation(row: dict[str, Any]) -> dict[str, Any]:
     symbol = symbol_key(row)
-    order_id = str(
-        first(row, ("rsvn_ord_seq", "rsvn_ord_no", "odno", "ord_no", "RSVN_ORD_SEQ", "RSVN_ORD_NO", "ODNO", "ORD_NO"))
-        or ""
+    reservation_id = str(
+        first(row, ("rsvn_ord_seq", "rsvn_ord_no", "RSVN_ORD_SEQ", "RSVN_ORD_NO")) or ""
     ).strip()
+    resulting_order_id = str(first(row, ("odno", "ord_no", "ODNO", "ORD_NO")) or "").strip()
+    # Reservation identity (used for correction/cancellation) still wins when both are present.
+    order_id = reservation_id or resulting_order_id
     orgno = str(
         first(
             row,
@@ -468,9 +484,10 @@ def normalize_reservation(row: dict[str, Any]) -> dict[str, Any]:
         "execution_environment": "",
         "observed_at": now_iso(),
         "active_status": "inactive" if inactive or remaining <= 0 else "active",
-        "rsvn_ord_seq": order_id,
+        "rsvn_ord_seq": reservation_id,
         "rsvn_ord_orgno": (orgno or default_reservation_orgno()) if order_id else "",
         "rsvn_ord_ord_dt": str(first(row, ("rsvn_ord_ord_dt", "ord_dt", "RSVN_ORD_ORD_DT", "ORD_DT")) or "").strip(),
+        "odno": resulting_order_id,
     }
 
 
@@ -512,10 +529,14 @@ def active_quantities(active_orders: list[dict[str, Any]]) -> dict[str, dict[str
     return result
 
 
-def fetch_reservations(kis: Kis, start_date: str, end_date: str) -> list[dict[str, Any]]:
-    body = kis.call(
-        "order_resv_ccnl",
-        params={
+def fetch_reservations(kis: Kis, start_date: str, end_date: str, *, max_pages: int = 20) -> list[dict[str, Any]]:
+    call_with_headers = getattr(kis, "call_with_headers", None)
+    ctx_fk200 = ""
+    ctx_nk200 = ""
+    tr_cont = ""
+    raw_rows: list[dict[str, Any]] = []
+    for _page in range(max_pages):
+        params = {
             "RSVN_ORD_ORD_DT": start_date,
             "RSVN_ORD_END_DT": end_date,
             "TMNL_MDIA_KIND_CD": "00",
@@ -526,11 +547,25 @@ def fetch_reservations(kis: Kis, start_date: str, end_date: str) -> list[dict[st
             "RSVN_ORD_SEQ": "",
             "PDNO": "",
             "SLL_BUY_DVSN_CD": "",
-            "CTX_AREA_FK200": "",
-            "CTX_AREA_NK200": "",
-        },
-    )
-    normalized = [normalize_reservation(row) for row in rows(body)]
+            "CTX_AREA_FK200": ctx_fk200,
+            "CTX_AREA_NK200": ctx_nk200,
+        }
+        if call_with_headers is not None:
+            body, response_headers = call_with_headers("order_resv_ccnl", params=params, tr_cont=tr_cont)
+        else:
+            body = kis.call("order_resv_ccnl", params=params)
+            response_headers = {}
+        raw_rows.extend(rows(body))
+        ctx_fk200 = str(body.get("ctx_area_fk200") or body.get("CTX_AREA_FK200") or "").strip()
+        ctx_nk200 = str(body.get("ctx_area_nk200") or body.get("CTX_AREA_NK200") or "").strip()
+        next_tr_cont = str(response_headers.get("tr_cont") or "").strip()
+        has_more = next_tr_cont in {"F", "M"} and bool(ctx_fk200 or ctx_nk200)
+        if not has_more:
+            break
+        tr_cont = "N"
+    else:
+        raise RuntimeError(f"KIS order_resv_ccnl pagination exceeded max_pages={max_pages} with more data remaining")
+    normalized = [normalize_reservation(row) for row in raw_rows]
     for item in normalized:
         item["execution_environment"] = kis.env
     return normalized
