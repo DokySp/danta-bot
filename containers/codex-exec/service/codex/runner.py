@@ -2,12 +2,16 @@ import html
 import json
 import logging
 import os
+import signal
 import shlex
 import subprocess
+import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from .events import parse_codex_json_events
+from .progress import CodexProgressBridge
 from .runtime_config import CodexRuntimeDefaults, load_codex_runtime_defaults
 from .sessions import detect_new_session_id, session_ids
 from .usage import append_token_usage_summary, read_usage_snapshot
@@ -35,30 +39,143 @@ HTML_PROMPT_SUFFIX = (
     "전체 메시지는 가능한 4096자 안쪽으로 요약해줘."
 )
 
+STDERR_CAPTURE_LIMIT = 8000
+PROCESS_TERMINATE_GRACE_SECONDS = 5.0
+
+
+class CodexRunCancelled(RuntimeError):
+    def __init__(self) -> None:
+        super().__init__("codex run cancelled by /stop")
+
+
+def _signal_process_group(process: subprocess.Popen[str], sig: signal.Signals) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, sig)
+        else:
+            process.send_signal(sig)
+    except (ProcessLookupError, PermissionError, OSError):
+        return
+
+
+def _schedule_forced_kill(process: subprocess.Popen[str]) -> None:
+    def force_kill() -> None:
+        if process.poll() is None:
+            _signal_process_group(process, signal.SIGKILL)
+
+    timer = threading.Timer(PROCESS_TERMINATE_GRACE_SECONDS, force_kill)
+    timer.daemon = True
+    timer.start()
+
+
+class _ActiveCodexRun:
+    def __init__(self, process: subprocess.Popen[str] | None = None) -> None:
+        self.process = process
+        self._lock = threading.Lock()
+        self._state = "running"
+
+    def attach_process(self, process: subprocess.Popen[str]) -> None:
+        with self._lock:
+            if self.process is not None:
+                raise RuntimeError("active Codex run already has a process")
+            self.process = process
+            stop_requested = self._state in {"cancelled", "timed_out"}
+        if stop_requested:
+            _signal_process_group(process, signal.SIGTERM)
+            _schedule_forced_kill(process)
+
+    def cancel(self) -> bool:
+        return self._request_stop("cancelled")
+
+    def timeout(self) -> bool:
+        return self._request_stop("timed_out")
+
+    def mark_stdout_closed(self) -> None:
+        with self._lock:
+            if self._state == "running":
+                self._state = "completed"
+
+    def state(self) -> str:
+        with self._lock:
+            return self._state
+
+    def is_cancellable(self) -> bool:
+        with self._lock:
+            return self._state == "running" and (
+                self.process is None or self.process.poll() is None
+            )
+
+    def _request_stop(self, state: str) -> bool:
+        with self._lock:
+            if self._state != "running":
+                return False
+            if self.process is not None and self.process.poll() is not None:
+                return False
+            self._state = state
+            process = self.process
+        if process is not None:
+            _signal_process_group(process, signal.SIGTERM)
+            _schedule_forced_kill(process)
+        return True
+
+
+class _TextTail:
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self._value = ""
+        self._lock = threading.Lock()
+
+    def append(self, value: str) -> None:
+        with self._lock:
+            self._value = (self._value + value)[-self.limit :]
+
+    def value(self) -> str:
+        with self._lock:
+            return self._value
+
+
 class CodexRunner:
     def __init__(self, config: Config) -> None:
         self.config = config
         self.tmp_dir = Path(os.getenv("CODEX_EXEC_TMP_DIR", "/tmp/codex-exec"))
         self.tmp_dir.mkdir(parents=True, exist_ok=True)
         self.config.codex_home.mkdir(parents=True, exist_ok=True)
+        self._active_telegram_lock = threading.Lock()
+        self._active_telegram_run: _ActiveCodexRun | None = None
         self.runtime_defaults()
         sync_bundled_skills(config)
 
-    def run_new_session(self, prompt: str | None = None) -> tuple[str, str]:
+    def run_new_session(
+        self,
+        prompt: str | None = None,
+        on_progress: Callable[[str], None] | None = None,
+    ) -> tuple[str, str]:
         runtime_defaults = self.runtime_defaults()
         before = self._session_ids()
         output = self._run_codex(
             ["exec"],
             prompt if prompt is not None else runtime_defaults.new_session_prompt,
             runtime_defaults=runtime_defaults,
+            on_progress=on_progress,
         )
         session_id = self._detect_new_session_id(before)
         if not session_id:
             raise RuntimeError("codex finished but new session id was not found")
         return session_id, output
 
-    def run_resume(self, session_id: str, prompt: str) -> str:
-        return self._run_codex(["exec", "resume", session_id], prompt)
+    def run_resume(
+        self,
+        session_id: str,
+        prompt: str,
+        on_progress: Callable[[str], None] | None = None,
+    ) -> str:
+        return self._run_codex(
+            ["exec", "resume", session_id],
+            prompt,
+            on_progress=on_progress,
+        )
 
     def run_once(
         self,
@@ -112,6 +229,18 @@ class CodexRunner:
     def runtime_defaults(self) -> CodexRuntimeDefaults:
         return load_codex_runtime_defaults(self.config.codex_runtime_config_file)
 
+    def cancel_active_telegram_run(self) -> bool:
+        with self._active_telegram_lock:
+            active_run = self._active_telegram_run
+            if active_run is None:
+                return False
+            return active_run.cancel()
+
+    def has_active_telegram_run(self) -> bool:
+        with self._active_telegram_lock:
+            active_run = self._active_telegram_run
+            return active_run is not None and active_run.is_cancellable()
+
     def _build_prompt(self, prompt: str, context, daily_trading_hint: bool) -> str:
         return (
             prompt.rstrip()
@@ -128,6 +257,7 @@ class CodexRunner:
         model: str | None = None,
         reasoning_effort: str | None = None,
         runtime_defaults: CodexRuntimeDefaults | None = None,
+        on_progress: Callable[[str], None] | None = None,
     ) -> str:
         context = new_codex_run_context()
         output_file = self.tmp_dir / f"{context.run_id}.txt"
@@ -169,16 +299,19 @@ class CodexRunner:
             main_model_usage_recorded = True
         logging.info("running codex command=%s", " ".join(shlex.quote(part) for part in cmd[:-1]))
         try:
-            result = subprocess.run(
-                cmd,
-                cwd=self.config.workspace_dir,
-                env=env,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=self.config.codex_timeout_seconds,
-                check=False,
-            )
+            if on_progress is None:
+                result = subprocess.run(
+                    cmd,
+                    cwd=self.config.workspace_dir,
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=self.config.codex_timeout_seconds,
+                    check=False,
+                )
+            else:
+                result = self._run_codex_streaming(cmd, env, on_progress)
         except Exception as exc:
             daily_trading_artifact_exists = self._daily_trading_artifact_exists(context)
             if daily_trading_artifact_exists and not main_model_usage_recorded:
@@ -239,6 +372,110 @@ class CodexRunner:
             usage_after,
         )
         return output
+
+    def _run_codex_streaming(
+        self,
+        cmd: list[str],
+        env: dict[str, str],
+        on_progress: Callable[[str], None],
+    ) -> subprocess.CompletedProcess[str]:
+        active_run = _ActiveCodexRun()
+        self._register_active_telegram_run(active_run)
+        try:
+            if active_run.state() == "cancelled":
+                raise CodexRunCancelled()
+            process = subprocess.Popen(
+                cmd,
+                cwd=self.config.workspace_dir,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=1,
+                start_new_session=os.name == "posix",
+            )
+            active_run.attach_process(process)
+        except BaseException:
+            self._unregister_active_telegram_run(active_run)
+            raise
+        stderr_tail = _TextTail(STDERR_CAPTURE_LIMIT)
+
+        def drain_stderr() -> None:
+            assert process.stderr is not None
+            for chunk in iter(lambda: process.stderr.read(4096), ""):
+                stderr_tail.append(chunk)
+
+        stderr_thread = threading.Thread(
+            target=drain_stderr,
+            name="codex-stderr",
+            daemon=True,
+        )
+        stderr_thread.start()
+        timeout_timer = threading.Timer(
+            self.config.codex_timeout_seconds,
+            active_run.timeout,
+        )
+        timeout_timer.daemon = True
+        timeout_timer.start()
+        stdout_parts: list[str] = []
+        bridge = CodexProgressBridge(on_progress)
+
+        try:
+            assert process.stdout is not None
+            for line in process.stdout:
+                stdout_parts.append(line)
+                bridge.handle_line(line)
+            bridge.finish()
+            active_run.mark_stdout_closed()
+            timeout_timer.cancel()
+            try:
+                returncode = process.wait(timeout=PROCESS_TERMINATE_GRACE_SECONDS + 1)
+            except subprocess.TimeoutExpired:
+                _signal_process_group(process, signal.SIGKILL)
+                returncode = process.wait(timeout=PROCESS_TERMINATE_GRACE_SECONDS)
+        except BaseException:
+            _signal_process_group(process, signal.SIGTERM)
+            _schedule_forced_kill(process)
+            raise
+        finally:
+            timeout_timer.cancel()
+            if process.poll() is None:
+                _signal_process_group(process, signal.SIGKILL)
+                try:
+                    process.wait(timeout=PROCESS_TERMINATE_GRACE_SECONDS)
+                except subprocess.TimeoutExpired:
+                    logging.error("codex process did not exit after SIGKILL pid=%s", process.pid)
+            stderr_thread.join(timeout=1)
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
+            self._unregister_active_telegram_run(active_run)
+
+        stdout = "".join(stdout_parts)
+        stderr = stderr_tail.value()
+        stop_state = active_run.state()
+        if stop_state == "cancelled":
+            raise CodexRunCancelled()
+        if stop_state == "timed_out":
+            raise subprocess.TimeoutExpired(
+                cmd,
+                self.config.codex_timeout_seconds,
+                output=stdout,
+                stderr=stderr,
+            )
+        return subprocess.CompletedProcess(cmd, returncode, stdout, stderr)
+
+    def _register_active_telegram_run(self, active_run: _ActiveCodexRun) -> None:
+        with self._active_telegram_lock:
+            if self._active_telegram_run is not None:
+                raise RuntimeError("another Telegram-triggered Codex run is already active")
+            self._active_telegram_run = active_run
+
+    def _unregister_active_telegram_run(self, active_run: _ActiveCodexRun) -> None:
+        with self._active_telegram_lock:
+            if self._active_telegram_run is active_run:
+                self._active_telegram_run = None
 
     def _append_daily_trading_model_usage(
         self,

@@ -11,6 +11,8 @@ from .portfolio import (
 )
 from .reasoning_effort import handle_reasoning_effort
 from .schedule import handle_schedule_off, handle_schedule_on
+from .session import handle_session
+from .stop import handle_stop
 from .touch_point import handle_show_touch_point
 from .version import handle_version
 
@@ -19,6 +21,8 @@ TelegramCommandHandler = Callable[[Any, Any, str], None]
 
 def handle_telegram_command(worker: Any, task: Any, command: str, args: str) -> None:
     handlers: dict[str, TelegramCommandHandler] = {
+        "stop": handle_stop,
+        "session": handle_session,
         "new": handle_new,
         "usage": handle_usage,
         "version": handle_version,

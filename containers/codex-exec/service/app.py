@@ -58,14 +58,16 @@ class App:
                         self._write_json(400, {"ok": False, "error": "text is required"})
                         return
 
-                    app.telegram_worker.submit(
-                        TelegramTask(
-                            chat_id=str(payload.get("chat_id")) if payload.get("chat_id") else None,
-                            text=text,
-                            route=str(payload.get("route")) if payload.get("route") else None,
-                            message_id=payload.get("message_id"),
-                        )
+                    task = TelegramTask(
+                        chat_id=str(payload.get("chat_id")) if payload.get("chat_id") else None,
+                        text=text,
+                        route=str(payload.get("route")) if payload.get("route") else None,
+                        message_id=payload.get("message_id"),
                     )
+                    if app.telegram_worker.handle_immediate(task):
+                        self._write_json(200, {"ok": True, "queued": False})
+                        return
+                    app.telegram_worker.submit(task)
                 except Exception as exc:  # noqa: BLE001 - expose endpoint failures as JSON
                     logging.exception("failed to accept telegram payload")
                     self._write_json(500, {"ok": False, "error": str(exc)})

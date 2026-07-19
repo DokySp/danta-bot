@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..codex.runner import CodexRunner
+from ..codex.runner import CodexRunCancelled, CodexRunner
 from ..config import Config
 from ..errors import UserFacingError
 from ..state import StateStore
@@ -21,7 +21,7 @@ from ..trading.daily_trading_direct import (
 from ..trading.holding_history import parse_show_holding_history_command, render_holding_history
 from .commands.core import parse_telegram_command
 from .commands.dispatcher import handle_telegram_command
-from .gateway import TelegramGateway, TypingIndicator
+from .gateway import DraftProgressReporter, TelegramGateway, TypingIndicator
 
 
 @dataclass(frozen=True)
@@ -40,6 +40,8 @@ class TelegramWorker:
         self.daily_trading_direct_runner = DailyTradingDirectRunner(config, runner)
         self.gateway = gateway
         self.queue: queue.Queue[TelegramTask] = queue.Queue()
+        self._draft_id = 0
+        self._draft_id_lock = threading.Lock()
         self.thread = threading.Thread(target=self._work, name="telegram-worker", daemon=True)
 
     def start(self) -> None:
@@ -48,17 +50,38 @@ class TelegramWorker:
     def submit(self, task: TelegramTask) -> None:
         self.queue.put(task)
 
+    def handle_immediate(self, task: TelegramTask) -> bool:
+        command = parse_telegram_command(task.text)
+        if command is None or command[0] not in {"stop", "session"}:
+            return False
+        try:
+            handle_telegram_command(self, task, *command)
+        except Exception as exc:  # noqa: BLE001 - mirror queued error reporting
+            self._report_task_failure(task, exc)
+        return True
+
+    def next_draft_id(self) -> int:
+        with self._draft_id_lock:
+            self._draft_id += 1
+            return self._draft_id
+
+    def progress_reporter(self, task: TelegramTask) -> DraftProgressReporter:
+        return DraftProgressReporter(
+            self.gateway,
+            task.chat_id,
+            task.route,
+            self.next_draft_id(),
+        )
+
     def _work(self) -> None:
         while True:
             task = self.queue.get()
             try:
                 self._handle(task)
+            except CodexRunCancelled:
+                logging.info("Telegram-triggered Codex run cancelled message_id=%s", task.message_id)
             except Exception as exc:  # noqa: BLE001 - report task failures to Telegram
-                if isinstance(exc, UserFacingError):
-                    logging.warning("telegram task failed: %s", exc)
-                else:
-                    logging.exception("telegram task failed")
-                self.gateway.send_message(self._error_message(exc), task.chat_id, task.route)
+                self._report_task_failure(task, exc)
             finally:
                 self.queue.task_done()
 
@@ -150,9 +173,16 @@ class TelegramWorker:
             task.chat_id,
             task.route,
             self.config.telegram_typing_interval_seconds,
-        ):
-            output = self.runner.run_resume(session_id, text)
+        ), self.progress_reporter(task) as reporter:
+            output = self.runner.run_resume(session_id, text, on_progress=reporter.update)
         self.gateway.send_message(output, task.chat_id, task.route)
+
+    def _report_task_failure(self, task: TelegramTask, exc: Exception) -> None:
+        if isinstance(exc, UserFacingError):
+            logging.warning("telegram task failed: %s", exc)
+        else:
+            logging.exception("telegram task failed")
+        self.gateway.send_message(self._error_message(exc), task.chat_id, task.route)
 
     @staticmethod
     def _error_message(exc: Exception) -> str:

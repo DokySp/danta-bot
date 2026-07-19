@@ -163,6 +163,40 @@ class TelegramGateway:
         except URLError as exc:
             raise RuntimeError(f"telegram-gateway chat action failed: {exc}") from exc
 
+    def send_message_draft(
+        self,
+        text: str,
+        draft_id: int,
+        chat_id: str | None = None,
+        route: str | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "draft_id": draft_id,
+            "text": text,
+        }
+        if chat_id:
+            payload["chat_id"] = chat_id
+        outbound_route = route or self.config.telegram_route
+        if outbound_route:
+            payload["route"] = outbound_route
+
+        request = Request(
+            self._gateway_url("/sendMessageDraft"),
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=15) as response:
+                response.read()
+        except HTTPError as exc:
+            raw = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"telegram-gateway draft failed: HTTP {exc.code}: {raw}"
+            ) from exc
+        except URLError as exc:
+            raise RuntimeError(f"telegram-gateway draft failed: {exc}") from exc
+
     def _gateway_url(self, endpoint: str) -> str:
         base = self.config.telegram_gateway_url.rstrip("/")
         if base.endswith("/sendMessage"):
@@ -203,3 +237,72 @@ class TypingIndicator:
             except Exception:
                 logging.exception("failed to send telegram typing action")
             self.stop_event.wait(self.interval_seconds)
+
+
+class DraftProgressReporter:
+    """Deliver the newest queued progress with one stable Telegram draft id."""
+
+    def __init__(
+        self,
+        gateway: TelegramGateway,
+        chat_id: str | None,
+        route: str | None,
+        draft_id: int,
+    ) -> None:
+        self.gateway = gateway
+        self.chat_id = chat_id
+        self.route = route
+        self.draft_id = draft_id
+        self._condition = threading.Condition()
+        self._pending: str | None = None
+        self._stopping = False
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self) -> "DraftProgressReporter":
+        self._thread = threading.Thread(
+            target=self._loop,
+            name="telegram-draft-progress",
+            daemon=True,
+        )
+        self._thread.start()
+        return self
+
+    def __exit__(self, _exc_type: Any, _exc: Any, _tb: Any) -> None:
+        with self._condition:
+            self._stopping = True
+            self._pending = None
+            self._condition.notify()
+        if self._thread is not None:
+            # Do not let an older draft request race with the final sendMessage.
+            self._thread.join()
+
+    def update(self, text: str) -> None:
+        normalized = text.strip()
+        if not normalized:
+            return
+        if len(normalized) > 4096:
+            normalized = normalized[:4096]
+        with self._condition:
+            if self._stopping:
+                return
+            self._pending = normalized
+            self._condition.notify()
+
+    def _loop(self) -> None:
+        while True:
+            with self._condition:
+                while self._pending is None and not self._stopping:
+                    self._condition.wait()
+                if self._stopping:
+                    return
+                text = self._pending
+                self._pending = None
+            try:
+                self.gateway.send_message_draft(
+                    text,
+                    self.draft_id,
+                    self.chat_id,
+                    self.route,
+                )
+            except Exception:  # noqa: BLE001 - drafts are best effort
+                logging.exception("failed to send Telegram progress draft")

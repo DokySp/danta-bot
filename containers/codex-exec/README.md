@@ -144,12 +144,15 @@ CODEX_MCP_TRADING_ENV=paper
 
 ## Telegram Commands
 
+- `/stop`: 현재 실행 중인 Telegram 요청의 Codex CLI 프로세스 그룹만 즉시 중지합니다. 스케줄 작업에는 영향을 주지 않습니다.
+- `/session`: 기본 세션 ID, 실행 상태, 모델·effort, 작업 경로와 거래 환경을 Codex 실행 없이 표시합니다.
 - `/new`: `"새 대화 시작"` 더미 메시지로 새 Codex 세션을 만들고 기본 세션으로 저장합니다.
 - 일반 메시지: 저장된 기본 세션으로 `codex exec resume`을 실행합니다.
 
 결과는 `TELEGRAM_GATEWAY_URL`의 `/sendMessage`로 `parse_mode=HTML`, `escape=false` 형태로 전송합니다.
 Telegram에서 들어온 요청은 gateway가 넘긴 `route`로 다시 보내고, 스케줄 작업처럼 route가 없는 요청은 `TELEGRAM_ROUTE`를 사용합니다.
 Codex가 실행 중일 때는 `TELEGRAM_TYPING_INTERVAL_SECONDS` 간격으로 gateway의 `/sendChatAction`에 `typing`을 보내 Telegram 앱에 입력 중 상태를 유지합니다.
+일반 메시지와 `/new` 실행 중에는 공개 진행 메시지의 최신 상태만 같은 `draft_id`의 `/sendMessageDraft`로 갱신합니다. 마지막 `agent_message`는 draft에서 제외하고 기존 `/sendMessage`로만 최종 전송합니다.
 모든 Codex 실행 직전에 `run_id`와 Asia/Seoul `started_at`을 프롬프트에 주입합니다.
 `$execute-trade`, `daily-*`, `pre-open` 작업과 daily-trading 아티팩트가 생성된 간접 실행은 성공 및 실패 Telegram 메시지에 `작업 시작: YYYY-MM-DD HH:MM:SS KST`를 표시합니다.
 

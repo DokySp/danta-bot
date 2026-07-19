@@ -4,6 +4,12 @@ routes:
     env_file: /app/config/telegram-v1.env
     url: http://codex-exec:8080/telegram
     bot_commands:
+      - command: stop
+        description: 현재 Codex 작업 중지
+        instruction: /stop
+      - command: session
+        description: 현재 Codex 세션 정보
+        instruction: /session
       - command: new
         description: 새 Codex 세션 생성
         instruction: /new
@@ -43,6 +49,12 @@ routes:
     env_file: /app/config/telegram-v2.env
     url: http://codex-exec-experimental:8080/telegram
     bot_commands:
+      - command: stop
+        description: 현재 Codex 작업 중지
+        instruction: /stop
+      - command: session
+        description: 현재 Codex 세션 정보
+        instruction: /session
       - command: new
         description: 새 Codex 세션 생성
         instruction: /new
