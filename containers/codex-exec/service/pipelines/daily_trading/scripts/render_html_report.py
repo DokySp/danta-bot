@@ -91,6 +91,13 @@ def time_text(value: Any) -> str:
     return text[11:16] if len(text) >= 16 else "-"
 
 
+def full_time_text(value: Any) -> str:
+    text = str(value or "")
+    if len(text) < 16:
+        return "-"
+    return text[:16].replace("T", " ")
+
+
 def status_badge(status: Any) -> str:
     value = str(status or "-")
     css = "ok" if value == "success" else "warn" if value == "partial" else "bad"
@@ -445,6 +452,91 @@ def render_trade_ledger(
     return content, submitted_orders
 
 
+THESIS_ASSESSMENT_LABELS = {"intact": "유지", "damaged": "훼손", "uncertain": "불확실"}
+THESIS_ASSESSMENT_CSS = {"intact": "ok", "damaged": "bad", "uncertain": "warn"}
+THESIS_GATE_REASON_LABELS = {
+    "no_prior_thesis": "유효한 이전 thesis 없음",
+    "thesis_not_damaged": "thesis 훼손 판단 아님",
+    "invalidation_condition_not_matched": "무효화 조건이 이전 thesis와 불일치",
+    "evidence_not_verified": "인용 근거 검증 실패",
+    "damaged_evidence_confirmed": "훼손 근거 검증 완료",
+}
+
+
+def render_thesis_condition_items(conditions: Any, matched_ids: set[str]) -> str:
+    rows = []
+    for condition in conditions if isinstance(conditions, list) else []:
+        if not isinstance(condition, dict):
+            continue
+        condition_id = str(condition.get("condition_id") or "")
+        is_matched = condition_id in matched_ids
+        matched_badge = '<span class="badge bad">훼손 근거 일치</span> ' if is_matched else ""
+        rows.append(
+            f"<li class=\"thesis-condition{' matched' if is_matched else ''}\">{matched_badge}"
+            f"<code>{esc(condition_id)}</code> {esc(condition.get('description'))}</li>"
+        )
+    return "".join(rows) or "<li>무효화 조건 없음</li>"
+
+
+def render_thesis_section(final_item: dict[str, Any]) -> str:
+    prior_context = final_item.get("prior_thesis_context") if isinstance(final_item.get("prior_thesis_context"), dict) else None
+    assessment = final_item.get("thesis_assessment") if isinstance(final_item.get("thesis_assessment"), dict) else None
+    gate = final_item.get("protected_loss_gate") if isinstance(final_item.get("protected_loss_gate"), dict) else None
+    successor = final_item.get("thesis_definition") if isinstance(final_item.get("thesis_definition"), dict) else None
+    if prior_context is None and assessment is None and gate is None and successor is None:
+        return ""
+
+    blocks = []
+    matched_ids = set(assessment.get("matched_invalidation_condition_ids") or []) if assessment else set()
+
+    if prior_context is not None:
+        if prior_context.get("available"):
+            blocks.append(
+                "<div class=\"thesis-prior\"><h4>이전 thesis (이번 run 평가 대상)</h4>"
+                f"<p class=\"thesis-source\">출처: run <code>{esc(prior_context.get('source_run_id'))}</code>"
+                f" · {esc(full_time_text(prior_context.get('source_started_at')))}"
+                f" · <code>{esc(prior_context.get('source_artifact'))}</code></p>"
+                f"<p>{esc(prior_context.get('core_rationale'))}</p>"
+                f"<ul class=\"thesis-conditions\">{render_thesis_condition_items(prior_context.get('invalidation_conditions'), matched_ids)}</ul></div>"
+            )
+        else:
+            blocks.append(
+                '<div class="thesis-prior"><h4>이전 thesis</h4>'
+                '<p class="thesis-source muted">유효한 이전 thesis 없음 (이번 run이 신규 등록 대상)</p></div>'
+            )
+
+    if assessment is not None:
+        status = str(assessment.get("status") or "uncertain")
+        status_label = THESIS_ASSESSMENT_LABELS.get(status, status)
+        status_css = THESIS_ASSESSMENT_CSS.get(status, "muted")
+        cited = assessment.get("cited_argument_ids") or []
+        cited_text = ", ".join(f"<code>{esc(value)}</code>" for value in cited) if cited else "-"
+        blocks.append(
+            "<div class=\"thesis-assessment\"><h4>이번 run 판단</h4>"
+            f"<p><span class=\"badge {status_css}\">{esc(status_label)}</span></p>"
+            f"<p>인용 근거: {cited_text}</p></div>"
+        )
+
+    if gate is not None:
+        allowed = bool(gate.get("allowed"))
+        reason_code = str(gate.get("reason") or "")
+        reason_label = THESIS_GATE_REASON_LABELS.get(reason_code, reason_code)
+        blocks.append(
+            "<div class=\"thesis-gate\"><h4>손실 보유 종목 감축 게이트</h4>"
+            f"<p><span class=\"badge {'ok' if allowed else 'bad'}\">{'허용' if allowed else '차단'}</span>"
+            f" {esc(reason_label)} <code>{esc(reason_code)}</code></p></div>"
+        )
+
+    if successor is not None:
+        blocks.append(
+            "<div class=\"thesis-successor\"><h4>신규/후속 thesis (이후 run 적용)</h4>"
+            f"<p>{esc(successor.get('core_rationale'))}</p>"
+            f"<ul class=\"thesis-conditions\">{render_thesis_condition_items(successor.get('invalidation_conditions'), set())}</ul></div>"
+        )
+
+    return f'<div class="thesis-block">{"".join(blocks)}</div>'
+
+
 def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[str, Any]]) -> str:
     fill_by_order = {
         str(item.get("order_id")): item
@@ -621,7 +713,8 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
                     f"{''.join(phase_blocks)}<article class=\"final-card full\"><div><h3>Final Judge</h3><span class=\"badge info\">rank {number(final_item.get('relative_attractiveness_rank'))}</span></div>"
                     f"<div class=\"final-numbers\"><span>현재 {number(account_exposure.get('current_live_holding_quantity'))}주</span>"
                     f"<span>최종 {number(final_item.get('final_holding_quantity'))}주</span><span>목표 {number(final_item.get('target_position_value_krw'))}원</span></div>"
-                    f"<p><code>{esc(final_item.get('reason_code'))}</code></p><p>{esc(final_item.get('one_line_reason'))}</p></article>"
+                    f"<p><code>{esc(final_item.get('reason_code'))}</code></p><p>{esc(final_item.get('one_line_reason'))}</p>"
+                    f"{render_thesis_section(final_item)}</article>"
                 )
             else:
                 judge_html = '<div class="empty-state">Analyst 평가는 완료됐지만 이 run의 Judge shortlist에는 선정되지 않았습니다.</div>'
@@ -1309,6 +1402,7 @@ def build_html(runs_root: Path, target_run: str) -> str:
     .arguments {{ display:grid; gap:9px; }} .argument {{ padding:12px; border:1px solid var(--line); border-radius:10px; background:var(--subtle); }} .argument p {{ margin:7px 0; }} .argument small {{ display:block; color:var(--muted); overflow-wrap:anywhere; }}
     .debate-meta {{ display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:10px; }} .debate-meta>div,.position {{ padding:12px; border-radius:10px; background:var(--accent-bg); }} .debate-meta ul {{ margin:7px 0 0; padding-left:20px; }} .position {{ margin-top:10px; }} .position p {{ margin:5px 0 0; }}
     .final-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }} .final-card {{ padding:15px; border:1px solid var(--line); border-radius:12px; background:var(--subtle); }} .final-card h3 {{ display:inline; }} .final-card p {{ margin:8px 0 0; }} .final-numbers {{ display:flex; flex-wrap:wrap; gap:7px; margin-top:10px; }} .final-numbers span {{ padding:5px 8px; border-radius:8px; background:var(--accent-bg); font-size:12px; font-weight:700; }}
+    .thesis-block {{ display:grid; gap:8px; margin-top:12px; padding-top:12px; border-top:1px dashed var(--line); }} .thesis-block h4 {{ margin:0 0 4px; font-size:12px; color:var(--muted); }} .thesis-block p {{ margin:0; font-size:12px; }} .thesis-source {{ color:var(--muted); }} .thesis-conditions {{ display:grid; gap:4px; margin:4px 0 0; padding-left:16px; font-size:12px; }} .thesis-condition.matched {{ font-weight:700; }}
     footer {{ padding:24px 4px 0; color:var(--muted); font-size:12px; text-align:center; }}
     @media(max-width:1000px) {{ .trade-symbol-selector {{ grid-template-columns:repeat(4,minmax(0,1fr)); }} }}
     @media(max-width:900px) {{ .chart-grid-wrap,.financial-list,.portfolio-chart-layout {{ grid-template-columns:1fr; }} .trade-symbol-selector {{ grid-template-columns:repeat(3,minmax(0,1fr)); }} .run-activity {{ grid-template-columns:repeat(2,minmax(0,1fr)); }} }}

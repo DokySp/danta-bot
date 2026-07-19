@@ -364,6 +364,86 @@ def symbol_key(item: Any) -> str:
     return str(item.get("symbol_id") or item.get("symbol") or item.get("code") or "").strip()
 
 
+THESIS_CONDITION_ID_MAX_LENGTH = 64
+
+
+def normalize_thesis_condition_id(value: Any) -> str:
+    """Normalize a thesis invalidation condition_id.
+
+    Unlike the generic filename safe_name(), this never falls back to a
+    placeholder like "unknown": non-string input, or input with nothing left
+    after normalization, returns "". Runs of characters other than Unicode
+    alphanumerics, '.', '_', '-' (including whitespace) collapse to a single
+    '-'; the result is lowercased, trimmed of leading/trailing separators, and
+    capped at THESIS_CONDITION_ID_MAX_LENGTH characters. Korean/non-ASCII
+    identifiers are preserved, while separator-only values remain unusable.
+    """
+    if not isinstance(value, str):
+        return ""
+    text = value.strip().lower()
+    if not text:
+        return ""
+    collapsed = re.sub(r"[^\w.\-]+", "-", text, flags=re.UNICODE)
+    normalized = collapsed[:THESIS_CONDITION_ID_MAX_LENGTH].strip("._-")
+    return normalized if any(character.isalnum() for character in normalized) else ""
+
+
+def thesis_definition_is_valid(thesis: Any) -> bool:
+    """True when thesis has a non-empty core_rationale and >=1 usable invalidation condition.
+
+    An empty/malformed thesis_definition (missing rationale, no conditions, or
+    conditions missing condition_id/description) never counts as a valid prior.
+    core_rationale, condition_id, and description must be actual strings, not
+    other JSON types coerced with str().
+    """
+    if not isinstance(thesis, dict):
+        return False
+    core_rationale = thesis.get("core_rationale")
+    if not isinstance(core_rationale, str) or not core_rationale.strip():
+        return False
+    conditions = thesis.get("invalidation_conditions")
+    if not isinstance(conditions, list) or not conditions:
+        return False
+    for condition in conditions:
+        if not isinstance(condition, dict):
+            continue
+        condition_id = condition.get("condition_id")
+        description = condition.get("description")
+        if not isinstance(condition_id, str) or not isinstance(description, str):
+            continue
+        if normalize_thesis_condition_id(condition_id) and description.strip():
+            return True
+    return False
+
+
+def debate_argument_ids_for_symbol(judge_debate: dict[str, Any], symbol_id: str) -> set[str]:
+    """Collect argument_id values actually present in judge-debate.json for symbol_id.
+
+    This is the verifiable evidence set: a thesis_assessment cannot cite an
+    argument_id that was never returned by the persisted bull/bear debate.
+    """
+    ids: set[str] = set()
+    if not isinstance(judge_debate, dict) or not symbol_id:
+        return ids
+    phases = judge_debate.get("phases") if isinstance(judge_debate.get("phases"), list) else []
+    for phase in phases:
+        sides = phase.get("sides") if isinstance(phase, dict) and isinstance(phase.get("sides"), dict) else {}
+        for side in sides.values():
+            output = side.get("output") if isinstance(side, dict) else None
+            symbols = output.get("symbols") if isinstance(output, dict) else None
+            if not isinstance(symbols, list):
+                continue
+            for entry in symbols:
+                if not isinstance(entry, dict) or symbol_key(entry) != symbol_id:
+                    continue
+                for argument in entry.get("arguments") or []:
+                    if isinstance(argument, dict):
+                        argument_id = str(argument.get("argument_id") or "").strip()
+                        if argument_id:
+                            ids.add(argument_id)
+    return ids
+
+
 def compact_opening_context(payload: Any) -> dict[str, Any]:
     source = payload if isinstance(payload, dict) else {}
     symbols: list[dict[str, Any]] = []
@@ -1572,6 +1652,274 @@ class Pipeline:
         write_json(account_path, account)
         return status
 
+    def select_prior_thesis_source(self, symbol_id: str) -> dict[str, Any] | None:
+        """Return the most recent strictly-earlier successful run's valid thesis_definition.
+
+        Eligible runs must have judge-review.json status == "success" and a
+        started_at strictly earlier than this run's started_at; the current run,
+        future/equal-time runs, and partial/failed/malformed artifacts are
+        ignored. An empty or malformed thesis_definition never counts as a valid
+        prior. This prior definition is immutable input for this run: it must
+        not be rewritten by anything the current run's judge output claims
+        about the same symbol.
+
+        Single source of truth for load_prior_thesis() and prior_thesis_context():
+        both derive from this same selection so the mechanical protected-loss
+        gate and the persisted/rendered provenance can never drift apart.
+        """
+        if not symbol_id:
+            return None
+        runs_dir = self.output_dir.parent
+        if not runs_dir.is_dir():
+            return None
+        current_started = parse_kst_datetime(self.started_at)
+        current_dir = self.output_dir.resolve()
+        # Secondary sort key (source run_id) breaks ties when two eligible runs
+        # share the exact same started_at, so this and run_subagent.prior_thesis_context
+        # deterministically agree instead of depending on filesystem iteration order.
+        best: tuple[datetime, str, str, dict[str, Any]] | None = None
+        for run_dir in (path for path in runs_dir.iterdir() if path.is_dir()):
+            if run_dir.resolve() == current_dir:
+                continue
+            payload = load_json_if_exists(run_dir / "judge-review.json")
+            if not isinstance(payload, dict) or payload.get("status") != "success":
+                continue
+            started_text = str(payload.get("started_at") or "").strip()
+            if not started_text:
+                continue
+            try:
+                candidate_started = parse_kst_datetime(started_text)
+            except ValueError:
+                continue
+            if not candidate_started < current_started:
+                continue
+            source_run_id = str(payload.get("run_id") or run_dir.name)
+            symbols = payload.get("symbols") if isinstance(payload.get("symbols"), list) else []
+            for item in symbols:
+                if not isinstance(item, dict) or symbol_key(item) != symbol_id:
+                    continue
+                thesis = item.get("thesis_definition")
+                if not thesis_definition_is_valid(thesis):
+                    continue
+                candidate_key = (candidate_started, source_run_id)
+                if best is None or candidate_key > (best[0], best[1]):
+                    best = (candidate_started, source_run_id, started_text, thesis)
+        if best is None:
+            return None
+        return {
+            "source_run_id": best[1],
+            "source_started_at": best[2],
+            "thesis_definition": best[3],
+        }
+
+    def load_prior_thesis(self, symbol_id: str) -> dict[str, Any] | None:
+        """Return only the prior thesis_definition; unchanged public shape for existing callers."""
+        selected = self.select_prior_thesis_source(symbol_id)
+        return selected["thesis_definition"] if selected else None
+
+    def prior_thesis_context_from_selection(self, selected: dict[str, Any] | None) -> dict[str, Any]:
+        """Format an already-selected prior source into bounded, HTML-safe provenance.
+
+        Pure formatting, no filesystem access: callers that already hold a
+        select_prior_thesis_source() result (e.g. protected_loss_thesis_gate) must
+        pass that exact object here instead of triggering a second scan, so the
+        persisted/rendered provenance can never drift from what the mechanical
+        gate actually evaluated. Never includes filesystem paths; source_artifact
+        is a stable relative label.
+        """
+        if selected is None:
+            return {"available": False}
+        thesis = selected["thesis_definition"]
+        raw_conditions = thesis.get("invalidation_conditions") if isinstance(thesis, dict) else None
+        conditions: list[dict[str, Any]] = []
+        for condition in raw_conditions if isinstance(raw_conditions, list) else []:
+            if not isinstance(condition, dict):
+                continue
+            condition_id = normalize_thesis_condition_id(condition.get("condition_id"))
+            description = condition.get("description")
+            if not condition_id or not isinstance(description, str) or not description.strip():
+                continue
+            conditions.append({"condition_id": condition_id, "description": description.strip()[:200]})
+        return {
+            "available": True,
+            "source_run_id": selected["source_run_id"],
+            "source_started_at": selected["source_started_at"],
+            "source_artifact": "judge-review.json",
+            "core_rationale": str(thesis.get("core_rationale") or "").strip()[:300],
+            "invalidation_conditions": conditions[:8],
+        }
+
+    def prior_thesis_context(self, symbol_id: str) -> dict[str, Any]:
+        """Bounded, HTML-safe prior-thesis provenance from a fresh selection.
+
+        Only for callers that do not already hold a selection (e.g. a symbol
+        whose protected-loss gate never ran). When the gate already ran for this
+        symbol, reuse its returned prior_thesis_context instead of calling this.
+        """
+        return self.prior_thesis_context_from_selection(self.select_prior_thesis_source(symbol_id))
+
+    def validate_thesis_definition(self, raw: Any) -> dict[str, Any] | None:
+        """Sanitize a judge-supplied thesis_definition, returning None when invalid.
+
+        A valid definition requires a non-empty core_rationale and at least one
+        unique invalidation condition with a non-empty condition_id and
+        description. core_rationale, condition_id, and description must be
+        actual strings (not numbers/bools/objects/lists coerced with str()).
+        Nothing is ever synthesized here: an invalid/missing input simply
+        yields None so callers never persist an empty placeholder.
+        """
+        if not isinstance(raw, dict):
+            return None
+        core_rationale = raw.get("core_rationale")
+        if not isinstance(core_rationale, str) or not core_rationale.strip():
+            return None
+        conditions: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        for condition in raw.get("invalidation_conditions") or []:
+            if not isinstance(condition, dict):
+                continue
+            raw_condition_id = condition.get("condition_id")
+            description = condition.get("description")
+            if not isinstance(raw_condition_id, str) or not isinstance(description, str):
+                continue
+            description = description.strip()
+            if not description:
+                continue
+            condition_id = normalize_thesis_condition_id(raw_condition_id)
+            if not condition_id or condition_id in seen_ids:
+                continue
+            seen_ids.add(condition_id)
+            conditions.append({"condition_id": condition_id, "description": description[:200]})
+        if not conditions:
+            return None
+        return {
+            "defined_at_run_id": self.run_id,
+            "core_rationale": core_rationale.strip()[:300],
+            "invalidation_conditions": conditions[:8],
+        }
+
+    def sanitize_thesis_assessment(self, raw: dict[str, Any]) -> dict[str, Any]:
+        status = str(raw.get("status") or "").strip().lower()
+        if status not in {"intact", "damaged", "uncertain"}:
+            status = "uncertain"
+        raw_matched = raw.get("matched_invalidation_condition_ids")
+        raw_cited = raw.get("cited_argument_ids")
+        matched_ids: list[str] = []
+        if isinstance(raw_matched, list):
+            for value in raw_matched:
+                normalized = normalize_thesis_condition_id(value)
+                if normalized and normalized not in matched_ids:
+                    matched_ids.append(normalized)
+        return {
+            "status": status,
+            "matched_invalidation_condition_ids": matched_ids[:8],
+            "cited_argument_ids": (
+                [str(value).strip() for value in raw_cited if str(value).strip()][:20]
+                if isinstance(raw_cited, list)
+                else []
+            ),
+        }
+
+    def protected_loss_thesis_gate(
+        self,
+        symbol_id: str,
+        item: dict[str, Any],
+        context: dict[str, Any],
+        judge_debate: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Deterministically decide whether a loss-position reduction is allowed.
+
+        The judge supplies the semantic thesis_assessment (intact/damaged/uncertain);
+        this method independently verifies the protected-loss predicate, that any
+        matched invalidation condition actually belongs to the immutable prior
+        thesis, and that any cited evidence actually exists in judge-debate.json.
+        Missing prior context, a non-damaged status, or unverifiable evidence all
+        resolve to "not allowed" rather than silently authorizing the reduction.
+
+        Selects the prior source exactly once via select_prior_thesis_source() and
+        returns it (formatted) as "prior_thesis_context" in the result, so callers
+        persist/display the identical source this gate actually evaluated instead
+        of re-scanning runs and risking a different run completing in between.
+        """
+        strategy_context = context.get("symbol_strategy_context") if isinstance(context.get("symbol_strategy_context"), dict) else {}
+        account_exposure = context.get("account_exposure") if isinstance(context.get("account_exposure"), dict) else {}
+        loss_flag = strategy_context.get("loss_position") is True
+        strategy_pnl_rate = as_float(strategy_context.get("pnl_rate"))
+        account_pnl_rate = as_float(account_exposure.get("pnl_rate"))
+        loss_position = (
+            loss_flag
+            or (strategy_pnl_rate is not None and strategy_pnl_rate < 0)
+            or (account_pnl_rate is not None and account_pnl_rate < 0)
+        )
+        if not loss_position:
+            return {"applicable": False}
+
+        assessment = item.get("thesis_assessment") if isinstance(item.get("thesis_assessment"), dict) else {}
+        status = str(assessment.get("status") or "").strip().lower()
+        raw_matched = assessment.get("matched_invalidation_condition_ids")
+        matched_ids = {
+            normalized
+            for value in raw_matched
+            for normalized in [normalize_thesis_condition_id(value)]
+            if normalized
+        } if isinstance(raw_matched, list) else set()
+        raw_cited = assessment.get("cited_argument_ids")
+        cited_ids = {
+            str(value).strip() for value in raw_cited if str(value).strip()
+        } if isinstance(raw_cited, list) else set()
+
+        selected = self.select_prior_thesis_source(symbol_id)
+        prior_thesis_context = self.prior_thesis_context_from_selection(selected)
+        prior_thesis = selected["thesis_definition"] if selected else None
+        if prior_thesis is None:
+            # No valid earlier definition exists: this run's own thesis_assessment can
+            # never authorize a reduction. If the judge supplied a genuinely valid
+            # thesis_definition here, persist it for a future run to treat as prior;
+            # otherwise nothing is persisted and the next run still sees no_prior_thesis.
+            bootstrap_candidate = self.validate_thesis_definition(item.get("thesis_definition"))
+            return {
+                "applicable": True,
+                "allowed": False,
+                "reason": "no_prior_thesis",
+                "bootstrap_candidate": bootstrap_candidate,
+                "prior_thesis_context": prior_thesis_context,
+            }
+        if status != "damaged":
+            return {
+                "applicable": True,
+                "allowed": False,
+                "reason": "thesis_not_damaged",
+                "prior_thesis_context": prior_thesis_context,
+            }
+        prior_condition_ids = {
+            normalized
+            for condition in prior_thesis.get("invalidation_conditions", [])
+            if isinstance(condition, dict)
+            for normalized in [normalize_thesis_condition_id(condition.get("condition_id"))]
+            if normalized
+        }
+        if not matched_ids or not matched_ids.issubset(prior_condition_ids):
+            return {
+                "applicable": True,
+                "allowed": False,
+                "reason": "invalidation_condition_not_matched",
+                "prior_thesis_context": prior_thesis_context,
+            }
+        available_evidence = debate_argument_ids_for_symbol(judge_debate or {}, symbol_id)
+        if not cited_ids or not cited_ids.issubset(available_evidence):
+            return {
+                "applicable": True,
+                "allowed": False,
+                "reason": "evidence_not_verified",
+                "prior_thesis_context": prior_thesis_context,
+            }
+        return {
+            "applicable": True,
+            "allowed": True,
+            "reason": "damaged_evidence_confirmed",
+            "prior_thesis_context": prior_thesis_context,
+        }
+
     def judge_review_context_by_symbol(self, wrapper: dict[str, Any]) -> dict[str, dict[str, Any]]:
         paths = wrapper.get("review_input_paths") if isinstance(wrapper.get("review_input_paths"), dict) else {}
         review_core_path = paths.get("review_core")
@@ -1614,6 +1962,7 @@ class Pipeline:
         context: dict[str, Any],
         candidate_direction: str = "",
         force_baseline: bool = False,
+        judge_debate: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
         symbol_id = symbol_key(item)
         errors: list[dict[str, Any]] = []
@@ -1705,6 +2054,48 @@ class Pipeline:
             )
             return None, errors
 
+        thesis_definition_out: dict[str, Any] | None = None
+        protected_loss_gate: dict[str, Any] | None = None
+        forced_reason_code = ""
+        forced_one_line_reason = ""
+        if not force_baseline and target_value <= baseline_value:
+            # Evaluated for every judge-reviewed held loss position at or below
+            # baseline, independent of candidate_direction (a loss position can be
+            # a buy candidate holding exactly baseline, not only a sell candidate),
+            # and not only when a reduction is proposed, so a symbol with no prior
+            # thesis is bootstrapped even at a hold instead of only on an attempted
+            # reduction. Direction preconditions already ran above and are unchanged;
+            # this never runs for an increase (target_value > baseline_value).
+            protected_loss_gate = self.protected_loss_thesis_gate(symbol_id, item, context, judge_debate)
+            if protected_loss_gate.get("applicable"):
+                bootstrap_candidate = protected_loss_gate.get("bootstrap_candidate")
+                if bootstrap_candidate is not None:
+                    thesis_definition_out = bootstrap_candidate
+                if not protected_loss_gate.get("allowed") and target_value < baseline_value:
+                    target_value = baseline_value
+                    forced_reason_code = "hold_protected_loss_thesis"
+                    forced_one_line_reason = "손실 보유 종목의 thesis 훼손 근거가 검증되지 않아 기준 노출을 유지한다."
+        if target_value > baseline_value:
+            # Entry/increase must mechanically establish a compact thesis definition;
+            # a missing or invalid one rejects the increase rather than executing it.
+            candidate_thesis = self.validate_thesis_definition(item.get("thesis_definition"))
+            if candidate_thesis is None:
+                errors.append(
+                    {
+                        "stage": "judge-review",
+                        "source": "pipeline",
+                        "code": "missing_thesis_definition_for_increase",
+                        "message": (
+                            f"{symbol_id}: target_position_value_krw {target_value} exceeds baseline {baseline_value} "
+                            "but no valid thesis_definition (non-empty core_rationale and at least one "
+                            "invalidation_condition with condition_id and description) was supplied"
+                        ),
+                        "required": True,
+                    }
+                )
+                return None, errors
+            thesis_definition_out = candidate_thesis
+
         normalized = {
             "symbol_id": symbol_id,
             "symbol_name": item.get("symbol_name") or context.get("symbol_name") or symbol_id,
@@ -1715,16 +2106,38 @@ class Pipeline:
             "reason_code": (
                 "hold_debate_incomplete"
                 if force_baseline
+                else forced_reason_code
+                if forced_reason_code
                 else safe_name(str(item.get("reason_code") or "hold_neutral")).lower()
             ),
             "one_line_reason": (
                 "Bull/Bear 토론이 불완전하여 기준 노출을 유지한다."
                 if force_baseline
+                else forced_one_line_reason
+                if forced_reason_code
                 else str(item.get("one_line_reason") or "")[:300]
             ),
         }
         if additional_buy_reason:
             normalized["additional_buy_reason"] = additional_buy_reason[:300]
+        if thesis_definition_out is not None:
+            normalized["thesis_definition"] = thesis_definition_out
+        assessment_echo = item.get("thesis_assessment") if isinstance(item.get("thesis_assessment"), dict) else None
+        if assessment_echo is not None:
+            normalized["thesis_assessment"] = self.sanitize_thesis_assessment(assessment_echo)
+        if protected_loss_gate is not None and protected_loss_gate.get("applicable"):
+            normalized["protected_loss_gate"] = {
+                "allowed": bool(protected_loss_gate.get("allowed")),
+                "reason": str(protected_loss_gate.get("reason") or ""),
+            }
+        gate_applicable = protected_loss_gate is not None and protected_loss_gate.get("applicable")
+        if gate_applicable:
+            # Reuse the exact selection the gate already made instead of scanning runs
+            # again, so a concurrently completed run can never make the persisted
+            # provenance disagree with what the gate actually evaluated.
+            normalized["prior_thesis_context"] = protected_loss_gate.get("prior_thesis_context") or {"available": False}
+        elif assessment_echo is not None or thesis_definition_out is not None:
+            normalized["prior_thesis_context"] = self.prior_thesis_context(symbol_id)
         return normalized, errors
 
     def write_judge_review(self, wrapper: dict[str, Any]) -> None:
@@ -1770,6 +2183,7 @@ class Pipeline:
                 context_by_symbol.get(symbol_id, {}),
                 str(candidate_directions.get(symbol_id) or ""),
                 force_baseline=force_baseline,
+                judge_debate=debate,
             )
             errors.extend(item_errors)
             if normalized is None:

@@ -15,6 +15,7 @@ import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from typing import Any
 
 
@@ -1003,7 +1004,139 @@ def recent_submitted_trade_context(output_dir: Path, symbol_id: str, run_limit: 
     }
 
 
-def add_judge_review_holding_context(payload: Any, output_dir: Path | None = None) -> Any:
+DAILY_TRADING_TIMEZONE = ZoneInfo("Asia/Seoul")
+
+
+def parse_iso_datetime(value: Any) -> datetime | None:
+    """Parse a daily-trading timestamp, matching run_daily_trading_pipeline.parse_kst_datetime.
+
+    A timezone-naive timestamp is treated as KST (not UTC) so both selection
+    paths agree on legacy artifacts that omit an offset.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=DAILY_TRADING_TIMEZONE)
+    return parsed
+
+
+THESIS_CONDITION_ID_MAX_LENGTH = 64
+
+
+def normalize_thesis_condition_id(value: Any) -> str:
+    """Normalize a thesis invalidation condition_id.
+
+    Mirrors run_daily_trading_pipeline.normalize_thesis_condition_id exactly:
+    non-string input, or input with nothing left after normalization, returns
+    "" (never a placeholder like "unknown"). Runs of characters other than
+    Unicode alphanumerics, '.', '_', '-' (including whitespace) collapse to a
+    single '-'; the result is lowercased, trimmed of leading/trailing
+    separators, and capped at THESIS_CONDITION_ID_MAX_LENGTH characters.
+    Korean/non-ASCII identifiers are preserved, while separator-only values
+    remain unusable.
+    """
+    if not isinstance(value, str):
+        return ""
+    text = value.strip().lower()
+    if not text:
+        return ""
+    collapsed = re.sub(r"[^\w.\-]+", "-", text, flags=re.UNICODE)
+    normalized = collapsed[:THESIS_CONDITION_ID_MAX_LENGTH].strip("._-")
+    return normalized if any(character.isalnum() for character in normalized) else ""
+
+
+def thesis_definition_is_valid(thesis: Any) -> bool:
+    """True when thesis has a non-empty core_rationale and >=1 usable invalidation condition.
+
+    Mirrors the pipeline's validity rule so the judge's supplied context and the
+    pipeline's mechanical gate select the same prior thesis. core_rationale,
+    condition_id, and description must be actual strings, not other JSON types
+    coerced with str().
+    """
+    if not isinstance(thesis, dict):
+        return False
+    core_rationale = thesis.get("core_rationale")
+    if not isinstance(core_rationale, str) or not core_rationale.strip():
+        return False
+    conditions = thesis.get("invalidation_conditions")
+    if not isinstance(conditions, list) or not conditions:
+        return False
+    for condition in conditions:
+        if not isinstance(condition, dict):
+            continue
+        condition_id = condition.get("condition_id")
+        description = condition.get("description")
+        if not isinstance(condition_id, str) or not isinstance(description, str):
+            continue
+        if normalize_thesis_condition_id(condition_id) and description.strip():
+            return True
+    return False
+
+
+def prior_thesis_context(output_dir: Path, symbol_id: str, current_started_at: str = "") -> dict[str, Any]:
+    unavailable = {
+        "thesis_definition": None,
+        "source_run_id": "",
+        "status": "no_prior_thesis",
+        "policy": "A missing prior thesis is not evidence of thesis damage; it means no earlier run recorded a structured thesis for this symbol. The pipeline bootstraps such positions without allowing this run's own assessment to invalidate them.",
+    }
+    if not symbol_id:
+        return unavailable
+    runs_dir = output_dir.parent
+    if not runs_dir.is_dir():
+        return unavailable
+    current_started = parse_iso_datetime(current_started_at)
+    if current_started is None:
+        return unavailable
+    current = output_dir.resolve()
+    best: tuple[datetime, str, dict[str, Any]] | None = None
+    for run_dir in (path for path in runs_dir.iterdir() if path.is_dir()):
+        if run_dir.resolve() == current:
+            continue
+        try:
+            payload = read_json_if_exists(run_dir / "judge-review.json")
+        except (OSError, ValueError):
+            continue
+        if not isinstance(payload, dict) or payload.get("status") != "success":
+            continue
+        candidate_started = parse_iso_datetime(payload.get("started_at"))
+        if candidate_started is None or not candidate_started < current_started:
+            continue
+        symbols = payload.get("symbols")
+        if not isinstance(symbols, list):
+            continue
+        for item in symbols:
+            if not isinstance(item, dict) or symbol_key(item) != symbol_id:
+                continue
+            thesis = item.get("thesis_definition")
+            if not thesis_definition_is_valid(thesis):
+                continue
+            source_run_id = str(payload.get("run_id") or run_dir.name)
+            candidate_key = (candidate_started, source_run_id)
+            # Secondary key (source_run_id) breaks ties when two eligible runs share
+            # the exact same started_at, matching run_daily_trading_pipeline.load_prior_thesis
+            # so both selection paths agree instead of depending on iteration order.
+            if best is None or candidate_key > (best[0], best[1]):
+                best = (candidate_started, source_run_id, thesis)
+    if best is None:
+        return unavailable
+    _, source_run_id, thesis = best
+    return {
+        "thesis_definition": thesis,
+        "source_run_id": source_run_id,
+        "status": "available",
+        "policy": "This thesis_definition is immutable for evaluating a reduction in this run: report thesis_assessment.status honestly and only cite matched_invalidation_condition_ids that already exist here and cited_argument_ids that already exist in debate_artifact. A new definition cannot be applied retroactively to that assessment; a valid definition returned for an actual buy/increase becomes the successor prior for later runs.",
+    }
+
+
+def add_judge_review_holding_context(payload: Any, output_dir: Path | None = None, current_started_at: str = "") -> Any:
     if not isinstance(payload, dict):
         return payload
     context_output_dir = output_dir or Path("")
@@ -1015,6 +1148,7 @@ def add_judge_review_holding_context(payload: Any, output_dir: Path | None = Non
                 copied = dict(item)
                 copied["holding_quantity_context"] = build_holding_quantity_context(copied)
                 copied["recent_trade_context"] = recent_submitted_trade_context(context_output_dir, symbol_key(copied))
+                copied["prior_thesis_context"] = prior_thesis_context(context_output_dir, symbol_key(copied), current_started_at)
                 enriched.append(copied)
             else:
                 enriched.append(item)
@@ -1028,6 +1162,7 @@ def add_judge_review_holding_context(payload: Any, output_dir: Path | None = Non
                 item,
                 holding_quantity_context=build_holding_quantity_context(item),
                 recent_trade_context=recent_submitted_trade_context(context_output_dir, symbol_id),
+                prior_thesis_context=prior_thesis_context(context_output_dir, symbol_id, current_started_at),
             )
             if isinstance(item, dict)
             else item
@@ -1100,7 +1235,7 @@ def write_review_input_slices(spec: dict[str, Any]) -> dict[str, str]:
         if artifact_key == "decision_brief":
             sliced = build_review_core_payload(payload, symbols, str(spec.get("agent_role") or ""))
             if stage in {"judge-review", DEBATE_STAGE}:
-                sliced = add_judge_review_holding_context(sliced, output_dir)
+                sliced = add_judge_review_holding_context(sliced, output_dir, str(spec.get("started_at") or ""))
             relative_name = "review-core"
             slice_paths["review_core"] = str(slice_dir / f"{task_name}.{relative_name}.json")
         else:
@@ -1273,6 +1408,11 @@ def compact_review_prompt(spec: dict[str, Any]) -> str | None:
                 "Treat an empty recent_trade_context.recent_submitted_trades list as confirmed absence only when coverage_status=complete; otherwise recent trade history is unknown and its absence is non-directional.",
                 "For held sell candidates, an intact long-term thesis favors holding despite the low score; sell only when thesis damage, material adverse news/disclosure, or structural deterioration is supported by supplied evidence.",
                 "Use strategy_context and symbol_strategy_context as advisory inputs for target_position_value_krw, not as order allow/block rules.",
+                "prior_thesis_context reports whether an earlier run already recorded a structured thesis_definition (core_rationale and invalidation_conditions, each with a condition_id and description) for this symbol. Those prior conditions are immutable for evaluating a reduction in this run: a newly returned definition cannot be applied retroactively to that assessment, while a valid definition returned for an actual buy/increase becomes the successor prior for later runs.",
+                "For a held symbol whose symbol_strategy_context.loss_position is true (or pnl_rate < 0), always return thesis_assessment: {status: intact|damaged|uncertain, matched_invalidation_condition_ids: [...], cited_argument_ids: [...]}. Price loss, index/regime panic, a low score, or missing optional evidence alone are never sufficient for status=damaged.",
+                "The pipeline only allows reducing target_position_value_krw below baseline for a loss position when status is damaged, matched_invalidation_condition_ids reference condition_id values that already exist in prior_thesis_context.thesis_definition.invalidation_conditions, and cited_argument_ids reference argument_id values that already exist in debate_artifact for this symbol. Otherwise it preserves baseline exposure regardless of target_position_value_krw.",
+                "If prior_thesis_context.status is no_prior_thesis for a loss position, still return your honest thesis_assessment and also return a real thesis_definition (core_rationale, invalidation_conditions) for this symbol even when you decide to hold at baseline or a reduction gets blocked. This bootstraps a valid prior for a future run; the pipeline never invents this definition on your behalf, and an empty/malformed one is not persisted and leaves the symbol with no prior thesis next run.",
+                "target_position_value_krw above baseline requires thesis_definition: {core_rationale, invalidation_conditions: [{condition_id, description}, ...]} with a non-empty core_rationale and at least one condition with a non-empty condition_id and description. The pipeline mechanically rejects an increase that omits or malforms this definition; it never executes the increase anyway.",
                 "The Python pipeline already completed bull/bear opening and rebuttal-1 final arguments. Do not spawn or resume debate agents and do not request another round.",
                 "Compare each side's explicit claims, rebuttals, concessions, unresolved conflicts, final position, recommended action, and target holding quantity for every symbol.",
                 "If debate_artifact status is incomplete, or if the completed debate remains balanced or directionally insufficient, hold at the baseline.",

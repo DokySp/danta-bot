@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from ..scripts.run_daily_trading_pipeline import (
     DEBATE_SIDES,
@@ -25,6 +26,7 @@ from ..scripts.run_daily_trading_pipeline import (
     file_sha256,
     load_json,
     load_json_if_exists,
+    normalize_thesis_condition_id,
     now_iso,
     news_cache_coverage,
     news_cache_evidence_counts,
@@ -33,6 +35,7 @@ from ..scripts.run_daily_trading_pipeline import (
     resolve_strategy_policy_config_path,
     script_dir,
     symbol_key,
+    thesis_definition_is_valid,
     write_json,
 )
 
@@ -120,7 +123,13 @@ for index, symbol in enumerate(symbols, start=1):
             "target_position_value_krw": 70000 if symbol == "005930" else 0,
             "relative_attractiveness_rank": index,
             "reason_code": "hold_neutral",
-            "one_line_reason": "self-test"
+            "one_line_reason": "self-test",
+            "thesis_definition": {
+                "core_rationale": "self-test entry rationale",
+                "invalidation_conditions": [
+                    {"condition_id": "self-test-condition", "description": "self-test invalidation condition"}
+                ]
+            }
         })
     else:
         row = {"symbol_id": symbol, "symbol_name": symbol}
@@ -784,6 +793,12 @@ def run_self_test() -> int:
                             "relative_attractiveness_rank": 1,
                             "reason_code": "increase_target",
                             "one_line_reason": "half-up self-test",
+                            "thesis_definition": {
+                                "core_rationale": "half-up self-test entry rationale",
+                                "invalidation_conditions": [
+                                    {"condition_id": "self-test-condition", "description": "self-test invalidation condition"}
+                                ],
+                            },
                         }
                     ],
                 },
@@ -885,6 +900,12 @@ def run_self_test() -> int:
             "relative_attractiveness_rank": 1,
             "reason_code": "increase_with_unknown_history",
             "one_line_reason": "unknown-history self-test",
+            "thesis_definition": {
+                "core_rationale": "same-day self-test entry rationale",
+                "invalidation_conditions": [
+                    {"condition_id": "same-day-self-test-condition", "description": "same-day self-test invalidation condition"}
+                ],
+            },
         }
         unknown_normalized, unknown_errors = same_day_pipeline.derive_judge_final_quantity(unknown_item, {}, "buy")
         if unknown_normalized is not None or not any(
@@ -1830,3 +1851,919 @@ class RunDailyTradingPipelineSelfTest(unittest.TestCase):
             # Judge candidate counts remain for diagnostics but are no longer the reported verdict.
             self.assertEqual(review["buy_candidate_count"], 2)
             self.assertEqual(review["sell_candidate_count"], 1)
+
+    def _make_pipeline(self, workspace: Path, run_id: str, started_at: str = "2026-06-02T09:00:00+09:00") -> Pipeline:
+        run_dir = workspace / "reports" / "runs" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        return Pipeline(
+            argparse.Namespace(
+                command="summarize",
+                workspace_dir=str(workspace),
+                output_dir=str(run_dir),
+                run_id=run_id,
+                started_at=started_at,
+            )
+        )
+
+    def _loss_context(self) -> dict:
+        return {
+            "price": {"current_or_last": 70000},
+            "holding_quantity_context": {"expected_holding_quantity": 10},
+            "symbol_strategy_context": {"loss_position": True},
+        }
+
+    def _debate_with_argument(self, symbol_id: str, argument_id: str) -> dict:
+        return {
+            "phases": [
+                {
+                    "sides": {
+                        "bear": {
+                            "output": {
+                                "symbols": [
+                                    {"symbol_id": symbol_id, "arguments": [{"argument_id": argument_id}]}
+                                ]
+                            }
+                        }
+                    }
+                }
+            ]
+        }
+
+    def test_load_prior_thesis_ignores_future_equal_and_invalid_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            runs_dir = workspace / "reports" / "runs"
+
+            def write_run(run_id: str, started_at: str, status: str, thesis: dict) -> None:
+                run_dir = runs_dir / run_id
+                run_dir.mkdir(parents=True, exist_ok=True)
+                write_json(
+                    run_dir / "judge-review.json",
+                    {
+                        "run_id": run_id,
+                        "started_at": started_at,
+                        "status": status,
+                        "symbols": [{"symbol_id": "005930", "thesis_definition": thesis}],
+                    },
+                )
+
+            valid_condition = {
+                "core_rationale": "quality moat",
+                "invalidation_conditions": [{"condition_id": "cond-a", "description": "description a"}],
+            }
+            # Future run relative to "current-run" started_at -> ignored.
+            write_run("future-run", "2026-06-05T09:00:00+09:00", "success", dict(valid_condition, core_rationale="future"))
+            # Exactly equal started_at -> ignored (must be strictly earlier).
+            write_run("equal-time-run", "2026-06-02T09:00:00+09:00", "success", dict(valid_condition, core_rationale="equal-time"))
+            # Partial/failed status -> ignored even though earlier and otherwise valid.
+            write_run("partial-run", "2026-06-01T12:00:00+09:00", "partial", dict(valid_condition, core_rationale="partial"))
+            write_run("failed-run", "2026-06-01T11:00:00+09:00", "failed", dict(valid_condition, core_rationale="failed"))
+            # Malformed artifact (not even a dict at top level after load) -> ignored without crashing.
+            malformed_dir = runs_dir / "malformed-run"
+            malformed_dir.mkdir(parents=True, exist_ok=True)
+            (malformed_dir / "judge-review.json").write_text("not json", encoding="utf-8")
+            # Earlier and valid, but not the most recent eligible one.
+            write_run("older-valid-run", "2026-06-01T08:00:00+09:00", "success", dict(valid_condition, core_rationale="older-valid"))
+            # The latest earlier successful run with a valid definition.
+            write_run("latest-valid-run", "2026-06-01T20:00:00+09:00", "success", dict(valid_condition, core_rationale="latest-valid"))
+
+            pipeline = self._make_pipeline(workspace, "current-run", started_at="2026-06-02T09:00:00+09:00")
+            prior = pipeline.load_prior_thesis("005930")
+            self.assertIsNotNone(prior)
+            self.assertEqual(prior.get("core_rationale"), "latest-valid")
+
+    def test_protected_loss_thesis_gate_requires_prior_definition_and_verified_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            prior_dir = workspace / "reports" / "runs" / "prior-run"
+            prior_dir.mkdir(parents=True, exist_ok=True)
+            write_json(
+                prior_dir / "judge-review.json",
+                {
+                    "run_id": "prior-run",
+                    "started_at": "2026-06-01T09:00:00+09:00",
+                    "status": "success",
+                    "symbols": [
+                        {
+                            "symbol_id": "005930",
+                            "thesis_definition": {
+                                "defined_at_run_id": "prior-run",
+                                "core_rationale": "quality moat and pricing power",
+                                "invalidation_conditions": [
+                                    {"condition_id": "margin-compression", "description": "gross margin drops below prior guidance"}
+                                ],
+                            },
+                        }
+                    ],
+                },
+            )
+            pipeline = self._make_pipeline(workspace, "current-run")
+
+            # Prior thesis loads back without crashing and is the exact prior artifact.
+            prior_thesis = pipeline.load_prior_thesis("005930")
+            self.assertIsNotNone(prior_thesis)
+            self.assertEqual(
+                [c["condition_id"] for c in prior_thesis["invalidation_conditions"]],
+                ["margin-compression"],
+            )
+
+            debate = self._debate_with_argument("005930", "005930-bear-opening-1")
+
+            # Valid: damaged status, matched prior condition id, verifiable cited evidence -> allowed.
+            allowed_item = {
+                "symbol_id": "005930",
+                "target_position_value_krw": 350000,
+                "reason_code": "reduce_on_thesis_damage",
+                "one_line_reason": "margin compression confirmed",
+                "thesis_assessment": {
+                    "status": "damaged",
+                    "matched_invalidation_condition_ids": ["margin-compression"],
+                    "cited_argument_ids": ["005930-bear-opening-1"],
+                },
+            }
+            normalized, errors = pipeline.derive_judge_final_quantity(
+                dict(allowed_item), self._loss_context(), "sell", judge_debate=debate
+            )
+            self.assertEqual(errors, [])
+            self.assertIsNotNone(normalized)
+            self.assertEqual(normalized["target_position_value_krw"], 350000)
+            self.assertEqual(normalized["protected_loss_gate"], {"allowed": True, "reason": "damaged_evidence_confirmed"})
+            # The persisted prior_thesis_context must be exactly the mechanical gate's
+            # own selected source: no path leaked, only the stable artifact label.
+            self.assertEqual(
+                normalized["prior_thesis_context"],
+                {
+                    "available": True,
+                    "source_run_id": "prior-run",
+                    "source_started_at": "2026-06-01T09:00:00+09:00",
+                    "source_artifact": "judge-review.json",
+                    "core_rationale": "quality moat and pricing power",
+                    "invalidation_conditions": [
+                        {"condition_id": "margin-compression", "description": "gross margin drops below prior guidance"}
+                    ],
+                },
+            )
+
+            # Arbitrary/unverifiable evidence ref -> blocked, baseline preserved.
+            bad_evidence_item = dict(allowed_item)
+            bad_evidence_item["thesis_assessment"] = {
+                "status": "damaged",
+                "matched_invalidation_condition_ids": ["margin-compression"],
+                "cited_argument_ids": ["made-up-argument-id"],
+            }
+            normalized, errors = pipeline.derive_judge_final_quantity(
+                bad_evidence_item, self._loss_context(), "sell", judge_debate=debate
+            )
+            self.assertIsNotNone(normalized)
+            self.assertEqual(normalized["target_position_value_krw"], 700000)
+            self.assertEqual(normalized["reason_code"], "hold_protected_loss_thesis")
+            self.assertEqual(normalized["protected_loss_gate"], {"allowed": False, "reason": "evidence_not_verified"})
+
+            # Invalidation condition not present in the immutable prior thesis -> blocked.
+            unmatched_condition_item = dict(allowed_item)
+            unmatched_condition_item["thesis_assessment"] = {
+                "status": "damaged",
+                "matched_invalidation_condition_ids": ["a-condition-invented-this-run"],
+                "cited_argument_ids": ["005930-bear-opening-1"],
+            }
+            normalized, errors = pipeline.derive_judge_final_quantity(
+                unmatched_condition_item, self._loss_context(), "sell", judge_debate=debate
+            )
+            self.assertIsNotNone(normalized)
+            self.assertEqual(normalized["target_position_value_krw"], 700000)
+            self.assertEqual(normalized["protected_loss_gate"]["reason"], "invalidation_condition_not_matched")
+
+            # intact/uncertain status can never authorize a reduction, even with valid ids/evidence.
+            for status in ("intact", "uncertain"):
+                status_item = dict(allowed_item)
+                status_item["thesis_assessment"] = {
+                    "status": status,
+                    "matched_invalidation_condition_ids": ["margin-compression"],
+                    "cited_argument_ids": ["005930-bear-opening-1"],
+                }
+                normalized, errors = pipeline.derive_judge_final_quantity(
+                    status_item, self._loss_context(), "sell", judge_debate=debate
+                )
+                self.assertEqual(normalized["target_position_value_krw"], 700000, msg=f"status={status}")
+                self.assertEqual(normalized["protected_loss_gate"]["reason"], "thesis_not_damaged", msg=f"status={status}")
+
+            # Price loss / low score / missing optional evidence alone (no thesis_assessment at all) cannot
+            # qualify as damage; the pipeline defaults to blocked and preserves baseline.
+            no_assessment_item = {
+                "symbol_id": "005930",
+                "target_position_value_krw": 350000,
+                "reason_code": "low_score_reduce",
+                "one_line_reason": "score dropped, index fell",
+            }
+            normalized, errors = pipeline.derive_judge_final_quantity(
+                no_assessment_item, self._loss_context(), "sell", judge_debate=debate
+            )
+            self.assertEqual(normalized["target_position_value_krw"], 700000)
+            self.assertEqual(normalized["protected_loss_gate"], {"allowed": False, "reason": "thesis_not_damaged"})
+
+    def test_derive_judge_final_quantity_reuses_single_selector_read_for_gate_and_persisted_context(self) -> None:
+        # A concurrently completed run must not be able to make the mechanical gate
+        # evaluate one prior source while judge-review.json persists/displays a
+        # different one. Simulate that race: select_prior_thesis_source is mocked to
+        # return DIFFERENT sources on successive calls. If the code path still reads
+        # it twice for one symbol, the gate and the persisted prior_thesis_context
+        # would disagree; with a single shared selection they must always agree.
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            pipeline = self._make_pipeline(workspace, "race-run")
+            debate = self._debate_with_argument("005930", "005930-bear-opening-1")
+
+            first_selection = {
+                "source_run_id": "prior-run-first",
+                "source_started_at": "2026-06-01T09:00:00+09:00",
+                "thesis_definition": {
+                    "core_rationale": "first selection rationale",
+                    "invalidation_conditions": [
+                        {"condition_id": "margin-compression", "description": "gross margin drops below prior guidance"}
+                    ],
+                },
+            }
+            second_selection = {
+                "source_run_id": "prior-run-second-concurrent",
+                "source_started_at": "2026-06-01T10:00:00+09:00",
+                "thesis_definition": {
+                    "core_rationale": "second concurrent selection rationale",
+                    "invalidation_conditions": [
+                        {"condition_id": "margin-compression", "description": "different description"}
+                    ],
+                },
+            }
+            call_count = {"n": 0}
+
+            def fake_select(symbol_id: str) -> dict:
+                call_count["n"] += 1
+                return first_selection if call_count["n"] == 1 else second_selection
+
+            item = {
+                "symbol_id": "005930",
+                "target_position_value_krw": 350000,
+                "reason_code": "reduce_on_thesis_damage",
+                "one_line_reason": "margin compression confirmed",
+                "thesis_assessment": {
+                    "status": "damaged",
+                    "matched_invalidation_condition_ids": ["margin-compression"],
+                    "cited_argument_ids": ["005930-bear-opening-1"],
+                },
+            }
+            with mock.patch.object(pipeline, "select_prior_thesis_source", side_effect=fake_select) as mocked:
+                normalized, errors = pipeline.derive_judge_final_quantity(
+                    item, self._loss_context(), "sell", judge_debate=debate
+                )
+            self.assertEqual(errors, [])
+            self.assertIsNotNone(normalized)
+            # Exactly one selection for this symbol: the gate and the persisted
+            # provenance must come from the identical read, never a second scan.
+            self.assertEqual(mocked.call_count, 1)
+            self.assertEqual(normalized["protected_loss_gate"], {"allowed": True, "reason": "damaged_evidence_confirmed"})
+            self.assertEqual(
+                normalized["prior_thesis_context"],
+                {
+                    "available": True,
+                    "source_run_id": "prior-run-first",
+                    "source_started_at": "2026-06-01T09:00:00+09:00",
+                    "source_artifact": "judge-review.json",
+                    "core_rationale": "first selection rationale",
+                    "invalidation_conditions": [
+                        {"condition_id": "margin-compression", "description": "gross margin drops below prior guidance"}
+                    ],
+                },
+            )
+            self.assertNotIn("second concurrent", json.dumps(normalized, ensure_ascii=False))
+
+    def test_protected_loss_thesis_gate_bootstraps_without_defining_and_invalidating_in_one_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            pipeline = self._make_pipeline(workspace, "bootstrap-run")
+            self.assertIsNone(pipeline.load_prior_thesis("005930"))
+            debate = self._debate_with_argument("005930", "005930-bear-opening-1")
+            assessment = {
+                "status": "damaged",
+                "matched_invalidation_condition_ids": ["margin-compression"],
+                "cited_argument_ids": ["005930-bear-opening-1"],
+            }
+
+            # The judge omits/malforms a bootstrap thesis_definition: nothing is
+            # synthesized, the reduction stays blocked, and no thesis_definition claim
+            # is written into the artifact.
+            no_def_item = {
+                "symbol_id": "005930",
+                "target_position_value_krw": 350000,
+                "reason_code": "reduce_on_thesis_damage",
+                "one_line_reason": "margin compression confirmed",
+                "thesis_assessment": assessment,
+            }
+            normalized, errors = pipeline.derive_judge_final_quantity(
+                no_def_item, self._loss_context(), "sell", judge_debate=debate
+            )
+            self.assertEqual(errors, [])
+            self.assertIsNotNone(normalized)
+            # No prior thesis: this run's own assessment cannot both define and invalidate it, so
+            # baseline exposure is preserved even though status/evidence look otherwise valid.
+            self.assertEqual(normalized["target_position_value_krw"], 700000)
+            self.assertEqual(normalized["protected_loss_gate"], {"allowed": False, "reason": "no_prior_thesis"})
+            self.assertNotIn("thesis_definition", normalized)
+            # No fabricated provenance: prior_thesis_context reports unavailable rather
+            # than inventing a source, distinguishing this from an actual prior thesis.
+            self.assertEqual(normalized["prior_thesis_context"], {"available": False})
+
+            malformed_def_item = dict(no_def_item, thesis_definition={"core_rationale": "", "invalidation_conditions": []})
+            normalized, errors = pipeline.derive_judge_final_quantity(
+                malformed_def_item, self._loss_context(), "sell", judge_debate=debate
+            )
+            self.assertEqual(normalized["target_position_value_krw"], 700000)
+            self.assertNotIn("thesis_definition", normalized)
+
+            # A genuinely valid judge-supplied thesis_definition IS persisted, still
+            # without authorizing this run's own reduction.
+            valid_def_item = dict(
+                no_def_item,
+                thesis_definition={
+                    "core_rationale": "quality moat and pricing power",
+                    "invalidation_conditions": [
+                        {"condition_id": "margin-compression", "description": "gross margin drops below prior guidance"}
+                    ],
+                },
+            )
+            normalized, errors = pipeline.derive_judge_final_quantity(
+                valid_def_item, self._loss_context(), "sell", judge_debate=debate
+            )
+            self.assertEqual(errors, [])
+            self.assertEqual(normalized["target_position_value_krw"], 700000)
+            self.assertEqual(normalized["protected_loss_gate"], {"allowed": False, "reason": "no_prior_thesis"})
+            self.assertEqual(
+                normalized["thesis_definition"],
+                {
+                    "defined_at_run_id": "bootstrap-run",
+                    "core_rationale": "quality moat and pricing power",
+                    "invalidation_conditions": [
+                        {"condition_id": "margin-compression", "description": "gross margin drops below prior guidance"}
+                    ],
+                },
+            )
+            # This run's newly bootstrapped thesis_definition is a successor for future
+            # runs, not a prior; prior_thesis_context still correctly reports unavailable.
+            self.assertEqual(normalized["prior_thesis_context"], {"available": False})
+
+    def test_protected_loss_thesis_gate_does_not_apply_outside_loss_positions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            pipeline = self._make_pipeline(workspace, "profit-taking-run")
+            item = {
+                "symbol_id": "005930",
+                "target_position_value_krw": 200000,
+                "reason_code": "profit_taking",
+                "one_line_reason": "밸류에이션 부담으로 이익 실현",
+            }
+            profit_context = {
+                "price": {"current_or_last": 70000},
+                "holding_quantity_context": {"expected_holding_quantity": 10},
+                "symbol_strategy_context": {"loss_position": False},
+            }
+            normalized, errors = pipeline.derive_judge_final_quantity(item, profit_context, "sell")
+            self.assertEqual(errors, [])
+            self.assertIsNotNone(normalized)
+            self.assertEqual(normalized["target_position_value_krw"], 200000)
+            self.assertNotIn("protected_loss_gate", normalized)
+
+    def test_protected_loss_thesis_gate_applies_on_negative_pnl_rate_even_if_loss_flag_is_false(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            pipeline = self._make_pipeline(workspace, "false-flag-run")
+            item = {
+                "symbol_id": "005930",
+                "target_position_value_krw": 200000,
+                "reason_code": "reduce",
+                "one_line_reason": "score dropped",
+            }
+            # symbol_strategy_context.loss_position is explicitly false, but
+            # symbol_strategy_context.pnl_rate (and account_exposure.pnl_rate) is
+            # negative; the OR contract means the gate must still apply.
+            strategy_pnl_context = {
+                "price": {"current_or_last": 70000},
+                "holding_quantity_context": {"expected_holding_quantity": 10},
+                "symbol_strategy_context": {"loss_position": False, "pnl_rate": -4.2},
+            }
+            normalized, errors = pipeline.derive_judge_final_quantity(item, strategy_pnl_context, "sell")
+            self.assertEqual(errors, [])
+            self.assertIsNotNone(normalized)
+            self.assertEqual(normalized["target_position_value_krw"], 700000)
+            self.assertIn("protected_loss_gate", normalized)
+            self.assertEqual(normalized["protected_loss_gate"]["allowed"], False)
+
+            account_pnl_context = {
+                "price": {"current_or_last": 70000},
+                "holding_quantity_context": {"expected_holding_quantity": 10},
+                "symbol_strategy_context": {"loss_position": False},
+                "account_exposure": {"pnl_rate": -1.5},
+            }
+            normalized, errors = pipeline.derive_judge_final_quantity(item, account_pnl_context, "sell")
+            self.assertEqual(normalized["target_position_value_krw"], 700000)
+            self.assertIn("protected_loss_gate", normalized)
+            self.assertEqual(normalized["protected_loss_gate"]["allowed"], False)
+
+    def test_write_judge_review_persists_bootstrap_thesis_and_blocks_reduction(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            pipeline = self._make_pipeline(workspace, "bootstrap-write-run", started_at="2026-06-02T09:00:00+09:00")
+            write_json(
+                pipeline.output_dir / "judge-debate.json",
+                {"schema_version": "1", "stage": "judge-debate", "status": "success", "phases": []},
+            )
+            write_json(
+                pipeline.output_dir / "judge-review-spec.json",
+                {"candidate_directions": {"005930": "sell"}, "symbol_ids": ["005930"]},
+            )
+            pipeline.write_judge_review(
+                {
+                    "stage": "judge-review",
+                    "parsed_json": {
+                        "stage": "judge-review",
+                        "symbols": [
+                            {
+                                "symbol_id": "005930",
+                                "symbol_name": "삼성전자",
+                                "target_position_value_krw": 350000,
+                                "price": {"current_or_last": 70000},
+                                "holding_quantity_context": {"expected_holding_quantity": 10},
+                                "symbol_strategy_context": {"loss_position": True},
+                                "relative_attractiveness_rank": 1,
+                                "reason_code": "reduce_on_thesis_damage",
+                                "one_line_reason": "margin compression confirmed",
+                                "thesis_assessment": {
+                                    "status": "damaged",
+                                    "matched_invalidation_condition_ids": ["margin-compression"],
+                                    "cited_argument_ids": ["005930-bear-opening-1"],
+                                },
+                            }
+                        ],
+                    },
+                    "errors": [],
+                }
+            )
+            review = load_json_if_exists(pipeline.output_dir / "judge-review.json") or {}
+            symbol = (review.get("symbols") or [{}])[0]
+            self.assertEqual(symbol.get("target_position_value_krw"), 700000)
+            self.assertEqual(symbol.get("protected_loss_gate", {}).get("allowed"), False)
+            # The judge never supplied a thesis_definition, so nothing is synthesized
+            # or persisted, and the artifact must not claim bootstrap succeeded.
+            self.assertNotIn("thesis_definition", symbol)
+
+            # A later run still finds no valid prior thesis for this symbol.
+            later_pipeline = self._make_pipeline(workspace, "bootstrap-write-run-2", started_at="2026-06-03T09:00:00+09:00")
+            prior = later_pipeline.load_prior_thesis("005930")
+            self.assertIsNone(prior)
+
+    def test_write_judge_review_persists_valid_bootstrap_thesis_and_next_run_loads_it_as_prior(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            pipeline = self._make_pipeline(workspace, "valid-bootstrap-write-run", started_at="2026-06-02T09:00:00+09:00")
+            write_json(
+                pipeline.output_dir / "judge-debate.json",
+                {"schema_version": "1", "stage": "judge-debate", "status": "success", "phases": []},
+            )
+            write_json(
+                pipeline.output_dir / "judge-review-spec.json",
+                {"candidate_directions": {"000660": "sell"}, "symbol_ids": ["000660"]},
+            )
+            pipeline.write_judge_review(
+                {
+                    "stage": "judge-review",
+                    "parsed_json": {
+                        "stage": "judge-review",
+                        "symbols": [
+                            {
+                                "symbol_id": "000660",
+                                "symbol_name": "SK하이닉스",
+                                "target_position_value_krw": 350000,
+                                "price": {"current_or_last": 70000},
+                                "holding_quantity_context": {"expected_holding_quantity": 10},
+                                "symbol_strategy_context": {"loss_position": True},
+                                "relative_attractiveness_rank": 1,
+                                "reason_code": "reduce_on_thesis_damage",
+                                "one_line_reason": "margin compression confirmed",
+                                "thesis_assessment": {
+                                    "status": "damaged",
+                                    "matched_invalidation_condition_ids": ["margin-compression"],
+                                    "cited_argument_ids": ["000660-bear-opening-1"],
+                                },
+                                "thesis_definition": {
+                                    "core_rationale": "memory cycle upside and cost leadership",
+                                    "invalidation_conditions": [
+                                        {"condition_id": "margin-compression", "description": "gross margin drops below prior guidance"}
+                                    ],
+                                },
+                            }
+                        ],
+                    },
+                    "errors": [],
+                }
+            )
+            review = load_json_if_exists(pipeline.output_dir / "judge-review.json") or {}
+            symbol = (review.get("symbols") or [{}])[0]
+            # No prior thesis existed yet this run, so the reduction is still held at
+            # baseline even though the judge supplied a genuinely valid definition.
+            self.assertEqual(symbol.get("target_position_value_krw"), 700000)
+            self.assertEqual(symbol.get("protected_loss_gate", {}).get("allowed"), False)
+            self.assertEqual(symbol.get("protected_loss_gate", {}).get("reason"), "no_prior_thesis")
+            self.assertEqual(
+                symbol.get("thesis_definition"),
+                {
+                    "defined_at_run_id": "valid-bootstrap-write-run",
+                    "core_rationale": "memory cycle upside and cost leadership",
+                    "invalidation_conditions": [
+                        {"condition_id": "margin-compression", "description": "gross margin drops below prior guidance"}
+                    ],
+                },
+            )
+
+            # A later run now loads this bootstrap record as its immutable prior thesis.
+            later_pipeline = self._make_pipeline(workspace, "valid-bootstrap-write-run-2", started_at="2026-06-03T09:00:00+09:00")
+            prior = later_pipeline.load_prior_thesis("000660")
+            self.assertEqual(prior, symbol.get("thesis_definition"))
+
+    def test_protected_loss_thesis_gate_bootstraps_loss_position_buy_candidate_holding_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            pipeline = self._make_pipeline(workspace, "buy-candidate-loss-bootstrap-run")
+            self.assertIsNone(pipeline.load_prior_thesis("005930"))
+
+            # A loss-position symbol that is a buy candidate (score-band precondition),
+            # holding exactly baseline. This is not a "sell" and not a reduction, but
+            # the bootstrap rule must still apply and a valid definition must persist.
+            item = {
+                "symbol_id": "005930",
+                "target_position_value_krw": 700000,
+                "reason_code": "hold_at_baseline",
+                "one_line_reason": "add conditions not yet satisfied",
+                "thesis_definition": {
+                    "core_rationale": "quality moat and pricing power",
+                    "invalidation_conditions": [
+                        {"condition_id": "margin-compression", "description": "gross margin drops below prior guidance"}
+                    ],
+                },
+            }
+            normalized, errors = pipeline.derive_judge_final_quantity(
+                item, self._loss_context(), "buy"
+            )
+            self.assertEqual(errors, [])
+            self.assertIsNotNone(normalized)
+            self.assertEqual(normalized["target_position_value_krw"], 700000)
+            self.assertEqual(normalized["protected_loss_gate"], {"allowed": False, "reason": "no_prior_thesis"})
+            self.assertEqual(
+                normalized["thesis_definition"],
+                {
+                    "defined_at_run_id": "buy-candidate-loss-bootstrap-run",
+                    "core_rationale": "quality moat and pricing power",
+                    "invalidation_conditions": [
+                        {"condition_id": "margin-compression", "description": "gross margin drops below prior guidance"}
+                    ],
+                },
+            )
+
+            # Write it through the real artifact path and confirm a later run loads it as prior.
+            write_json(
+                pipeline.output_dir / "judge-review.json",
+                {
+                    "run_id": pipeline.run_id,
+                    "started_at": pipeline.started_at,
+                    "status": "success" if normalized else "partial",
+                    "symbols": [normalized],
+                },
+            )
+            later_pipeline = self._make_pipeline(workspace, "buy-candidate-loss-bootstrap-run-2", started_at="2026-06-03T09:00:00+09:00")
+            prior = later_pipeline.load_prior_thesis("005930")
+            self.assertEqual(prior, normalized["thesis_definition"])
+
+    def test_derive_judge_final_quantity_rejects_increase_with_missing_or_malformed_thesis_definition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            pipeline = self._make_pipeline(workspace, "increase-missing-thesis-run")
+            context = {
+                "price": {"current_or_last": 70000},
+                "holding_quantity_context": {"expected_holding_quantity": 1},
+                "today_trade_timeline_context": {"collection_status": "complete", "has_same_day_buy": False},
+            }
+
+            missing_item = {
+                "symbol_id": "005930",
+                "target_position_value_krw": 210000,
+                "reason_code": "increase_target",
+                "one_line_reason": "increase without any thesis_definition",
+            }
+            normalized, errors = pipeline.derive_judge_final_quantity(missing_item, context, "buy")
+            self.assertIsNone(normalized)
+            self.assertTrue(any(error.get("code") == "missing_thesis_definition_for_increase" for error in errors))
+
+            empty_core_rationale_item = dict(
+                missing_item,
+                thesis_definition={
+                    "core_rationale": "   ",
+                    "invalidation_conditions": [{"condition_id": "cond-a", "description": "description a"}],
+                },
+            )
+            normalized, errors = pipeline.derive_judge_final_quantity(empty_core_rationale_item, context, "buy")
+            self.assertIsNone(normalized)
+            self.assertTrue(any(error.get("code") == "missing_thesis_definition_for_increase" for error in errors))
+
+            no_conditions_item = dict(
+                missing_item,
+                thesis_definition={"core_rationale": "valid rationale", "invalidation_conditions": []},
+            )
+            normalized, errors = pipeline.derive_judge_final_quantity(no_conditions_item, context, "buy")
+            self.assertIsNone(normalized)
+            self.assertTrue(any(error.get("code") == "missing_thesis_definition_for_increase" for error in errors))
+
+            malformed_condition_item = dict(
+                missing_item,
+                thesis_definition={
+                    "core_rationale": "valid rationale",
+                    "invalidation_conditions": [{"condition_id": "", "description": ""}],
+                },
+            )
+            normalized, errors = pipeline.derive_judge_final_quantity(malformed_condition_item, context, "buy")
+            self.assertIsNone(normalized)
+            self.assertTrue(any(error.get("code") == "missing_thesis_definition_for_increase" for error in errors))
+
+    def test_derive_judge_final_quantity_accepts_increase_with_valid_thesis_definition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            pipeline = self._make_pipeline(workspace, "increase-valid-thesis-run")
+            context = {
+                "price": {"current_or_last": 70000},
+                "holding_quantity_context": {"expected_holding_quantity": 1},
+                "today_trade_timeline_context": {"collection_status": "complete", "has_same_day_buy": False},
+            }
+            item = {
+                "symbol_id": "005930",
+                "target_position_value_krw": 210000,
+                "reason_code": "increase_target",
+                "one_line_reason": "increase with a valid thesis_definition",
+                "thesis_definition": {
+                    "core_rationale": "  quality moat and pricing power  ",
+                    "invalidation_conditions": [
+                        {"condition_id": "Margin Compression!", "description": "  gross margin drops below prior guidance  "},
+                        {"condition_id": "Margin Compression!", "description": "duplicate condition_id is deduped"},
+                        {"condition_id": "", "description": "dropped: empty condition_id"},
+                    ],
+                },
+            }
+            normalized, errors = pipeline.derive_judge_final_quantity(item, context, "buy")
+            self.assertEqual(errors, [])
+            self.assertIsNotNone(normalized)
+            self.assertEqual(normalized["target_position_value_krw"], 210000)
+            self.assertEqual(
+                normalized["thesis_definition"],
+                {
+                    "defined_at_run_id": "increase-valid-thesis-run",
+                    "core_rationale": "quality moat and pricing power",
+                    "invalidation_conditions": [
+                        {"condition_id": "margin-compression", "description": "gross margin drops below prior guidance"}
+                    ],
+                },
+            )
+            self.assertNotIn("protected_loss_gate", normalized)
+
+    def test_load_prior_thesis_treats_naive_started_at_as_kst(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            prior_dir = workspace / "reports" / "runs" / "naive-prior-run"
+            prior_dir.mkdir(parents=True, exist_ok=True)
+            write_json(
+                prior_dir / "judge-review.json",
+                {
+                    "run_id": "naive-prior-run",
+                    # Naive timestamp (no offset): must be treated as KST, matching
+                    # run_subagent.prior_thesis_context so both selection paths agree.
+                    "started_at": "2026-06-02T01:00:00",
+                    "status": "success",
+                    "symbols": [
+                        {
+                            "symbol_id": "005930",
+                            "thesis_definition": {
+                                "core_rationale": "quality moat",
+                                "invalidation_conditions": [{"condition_id": "cond-a", "description": "description a"}],
+                            },
+                        }
+                    ],
+                },
+            )
+            pipeline = self._make_pipeline(workspace, "current-run-naive", started_at="2026-06-02T09:00:00+09:00")
+            prior = pipeline.load_prior_thesis("005930")
+            self.assertIsNotNone(prior)
+            self.assertEqual(prior.get("core_rationale"), "quality moat")
+
+    def test_normalize_thesis_condition_id_preserves_korean_and_rejects_unusable_input(self) -> None:
+        self.assertEqual(normalize_thesis_condition_id("한글조건"), "한글조건")
+        self.assertEqual(normalize_thesis_condition_id("  한글 조건!! 이름  "), "한글-조건-이름")
+        self.assertEqual(normalize_thesis_condition_id("Margin  Compression!!"), "margin-compression")
+        self.assertEqual(normalize_thesis_condition_id("--leading-and-trailing--"), "leading-and-trailing")
+        self.assertEqual(normalize_thesis_condition_id("already.valid_id-1"), "already.valid_id-1")
+        # Non-string input never coerces to a placeholder; it is simply unusable.
+        self.assertEqual(normalize_thesis_condition_id(1), "")
+        self.assertEqual(normalize_thesis_condition_id(True), "")
+        self.assertEqual(normalize_thesis_condition_id(None), "")
+        self.assertEqual(normalize_thesis_condition_id({"condition_id": "x"}), "")
+        self.assertEqual(normalize_thesis_condition_id(["x"]), "")
+        # Whitespace/punctuation-only input normalizes to empty, not "unknown".
+        self.assertEqual(normalize_thesis_condition_id("   "), "")
+        self.assertEqual(normalize_thesis_condition_id("!!!"), "")
+        self.assertEqual(normalize_thesis_condition_id("...___---"), "")
+        self.assertEqual(normalize_thesis_condition_id("._condition_."), "condition")
+        # Length cap is applied identically to run_subagent's normalizer.
+        long_id = "a" * 200
+        normalized = normalize_thesis_condition_id(long_id)
+        self.assertEqual(len(normalized), 64)
+        self.assertEqual(normalized, "a" * 64)
+
+    def test_thesis_definition_is_valid_requires_actual_string_fields(self) -> None:
+        # The direct reproduction from the finding: numeric/bool/object/list JSON
+        # values coerced with str() must not make a valid definition or valid prior.
+        numeric_fields = {
+            "core_rationale": 1,
+            "invalidation_conditions": [{"condition_id": 1, "description": 1}],
+        }
+        self.assertFalse(thesis_definition_is_valid(numeric_fields))
+        bool_fields = {
+            "core_rationale": True,
+            "invalidation_conditions": [{"condition_id": True, "description": True}],
+        }
+        self.assertFalse(thesis_definition_is_valid(bool_fields))
+        object_fields = {
+            "core_rationale": {"text": "quality moat"},
+            "invalidation_conditions": [{"condition_id": {"a": 1}, "description": {"b": 2}}],
+        }
+        self.assertFalse(thesis_definition_is_valid(object_fields))
+        list_fields = {
+            "core_rationale": ["quality", "moat"],
+            "invalidation_conditions": [{"condition_id": ["a"], "description": ["b"]}],
+        }
+        self.assertFalse(thesis_definition_is_valid(list_fields))
+        # A genuinely valid string-typed definition still passes.
+        valid_fields = {
+            "core_rationale": "quality moat",
+            "invalidation_conditions": [{"condition_id": "cond-a", "description": "description a"}],
+        }
+        self.assertTrue(thesis_definition_is_valid(valid_fields))
+
+    def test_load_prior_thesis_rejects_prior_with_non_string_thesis_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            prior_dir = workspace / "reports" / "runs" / "numeric-fields-prior-run"
+            prior_dir.mkdir(parents=True, exist_ok=True)
+            write_json(
+                prior_dir / "judge-review.json",
+                {
+                    "run_id": "numeric-fields-prior-run",
+                    "started_at": "2026-06-01T09:00:00+09:00",
+                    "status": "success",
+                    "symbols": [
+                        {
+                            "symbol_id": "005930",
+                            "thesis_definition": {
+                                "core_rationale": 1,
+                                "invalidation_conditions": [{"condition_id": 1, "description": 1}],
+                            },
+                        }
+                    ],
+                },
+            )
+            pipeline = self._make_pipeline(workspace, "numeric-fields-current-run")
+            self.assertIsNone(pipeline.load_prior_thesis("005930"))
+
+    def test_derive_judge_final_quantity_rejects_increase_with_non_string_thesis_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            pipeline = self._make_pipeline(workspace, "increase-non-string-thesis-run")
+            context = {
+                "price": {"current_or_last": 70000},
+                "holding_quantity_context": {"expected_holding_quantity": 1},
+                "today_trade_timeline_context": {"collection_status": "complete", "has_same_day_buy": False},
+            }
+            base_item = {
+                "symbol_id": "005930",
+                "target_position_value_krw": 210000,
+                "reason_code": "increase_target",
+                "one_line_reason": "increase with numeric/bool/object/list thesis fields",
+            }
+            numeric_item = dict(
+                base_item,
+                thesis_definition={
+                    "core_rationale": 1,
+                    "invalidation_conditions": [{"condition_id": 1, "description": 1}],
+                },
+            )
+            normalized, errors = pipeline.derive_judge_final_quantity(numeric_item, context, "buy")
+            self.assertIsNone(normalized)
+            self.assertTrue(any(error.get("code") == "missing_thesis_definition_for_increase" for error in errors))
+
+            bool_item = dict(
+                base_item,
+                thesis_definition={
+                    "core_rationale": True,
+                    "invalidation_conditions": [{"condition_id": True, "description": True}],
+                },
+            )
+            normalized, errors = pipeline.derive_judge_final_quantity(bool_item, context, "buy")
+            self.assertIsNone(normalized)
+            self.assertTrue(any(error.get("code") == "missing_thesis_definition_for_increase" for error in errors))
+
+            object_item = dict(
+                base_item,
+                thesis_definition={
+                    "core_rationale": {"text": "quality moat"},
+                    "invalidation_conditions": [{"condition_id": {"a": 1}, "description": {"b": 2}}],
+                },
+            )
+            normalized, errors = pipeline.derive_judge_final_quantity(object_item, context, "buy")
+            self.assertIsNone(normalized)
+            self.assertTrue(any(error.get("code") == "missing_thesis_definition_for_increase" for error in errors))
+
+            list_item = dict(
+                base_item,
+                thesis_definition={
+                    "core_rationale": ["quality", "moat"],
+                    "invalidation_conditions": [{"condition_id": ["a"], "description": ["b"]}],
+                },
+            )
+            normalized, errors = pipeline.derive_judge_final_quantity(list_item, context, "buy")
+            self.assertIsNone(normalized)
+            self.assertTrue(any(error.get("code") == "missing_thesis_definition_for_increase" for error in errors))
+
+    def test_derive_judge_final_quantity_preserves_korean_condition_id_and_dedupes_after_normalization(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            pipeline = self._make_pipeline(workspace, "korean-condition-id-run")
+            context = {
+                "price": {"current_or_last": 70000},
+                "holding_quantity_context": {"expected_holding_quantity": 1},
+                "today_trade_timeline_context": {"collection_status": "complete", "has_same_day_buy": False},
+            }
+            item = {
+                "symbol_id": "005930",
+                "target_position_value_krw": 210000,
+                "reason_code": "increase_target",
+                "one_line_reason": "increase with Korean condition_id",
+                "thesis_definition": {
+                    "core_rationale": "품질과 가격 결정력",
+                    "invalidation_conditions": [
+                        {"condition_id": "한글조건", "description": "설명 1"},
+                        {"condition_id": "  한글조건  ", "description": "duplicate after normalization is dropped"},
+                        {"condition_id": "HAN-GEUL-CONDITION", "description": "distinct ascii id kept"},
+                    ],
+                },
+            }
+            normalized, errors = pipeline.derive_judge_final_quantity(item, context, "buy")
+            self.assertEqual(errors, [])
+            self.assertIsNotNone(normalized)
+            self.assertEqual(
+                normalized["thesis_definition"]["invalidation_conditions"],
+                [
+                    {"condition_id": "한글조건", "description": "설명 1"},
+                    {"condition_id": "han-geul-condition", "description": "distinct ascii id kept"},
+                ],
+            )
+
+    def test_load_prior_thesis_breaks_ties_by_source_run_id_when_started_at_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            runs_dir = workspace / "reports" / "runs"
+            same_started_at = "2026-06-01T09:00:00+09:00"
+
+            def write_run(run_id: str, core_rationale: str) -> None:
+                run_dir = runs_dir / run_id
+                run_dir.mkdir(parents=True, exist_ok=True)
+                write_json(
+                    run_dir / "judge-review.json",
+                    {
+                        "run_id": run_id,
+                        "started_at": same_started_at,
+                        "status": "success",
+                        "symbols": [
+                            {
+                                "symbol_id": "005930",
+                                "thesis_definition": {
+                                    "core_rationale": core_rationale,
+                                    "invalidation_conditions": [{"condition_id": "cond-a", "description": "description a"}],
+                                },
+                            }
+                        ],
+                    },
+                )
+
+            # Two eligible earlier runs share the exact same started_at; only the
+            # source run_id can break the tie deterministically.
+            write_run("tie-run-aaa", "from aaa")
+            write_run("tie-run-zzz", "from zzz")
+
+            pipeline = self._make_pipeline(workspace, "tie-current-run", started_at="2026-06-02T09:00:00+09:00")
+            prior = pipeline.load_prior_thesis("005930")
+            self.assertIsNotNone(prior)
+            # run_subagent.prior_thesis_context uses the identical (started_at, run_id)
+            # tie-break, so both paths deterministically pick the lexicographically
+            # greatest run_id ("tie-run-zzz") regardless of filesystem iteration order.
+            self.assertEqual(prior.get("core_rationale"), "from zzz")

@@ -23,9 +23,12 @@ from ..scripts.run_subagent import (
     load_subagent_model_config,
     mcp_degraded_dependencies,
     normalize_compact_review_payload,
+    normalize_thesis_condition_id,
+    prior_thesis_context,
     recent_submitted_trade_context,
     run_group,
     run_one,
+    thesis_definition_is_valid,
     validate_spec,
     write_json,
     write_review_input_slices,
@@ -1628,6 +1631,236 @@ class RunSubagentSelfTest(unittest.TestCase):
             self.assertEqual(trade["broker_status"], "rejected")
             self.assertTrue(trade["broker_terminal"])
             self.assertEqual(trade["broker_rejected_quantity"], 1)
+
+    def test_prior_thesis_context_selects_latest_earlier_successful_valid_definition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            runs_dir = Path(tmp_name) / "runs"
+            current = runs_dir / "current"
+            current.mkdir(parents=True)
+
+            def write_run(run_id: str, started_at: str, status: str, thesis: dict) -> None:
+                run_dir = runs_dir / run_id
+                run_dir.mkdir(parents=True, exist_ok=True)
+                write_json(
+                    run_dir / "judge-review.json",
+                    {
+                        "run_id": run_id,
+                        "started_at": started_at,
+                        "status": status,
+                        "symbols": [{"symbol_id": "005930", "thesis_definition": thesis}],
+                    },
+                )
+
+            valid = {
+                "core_rationale": "quality moat",
+                "invalidation_conditions": [{"condition_id": "cond-a", "description": "description a"}],
+            }
+            current_started_at = "2026-06-02T09:00:00+09:00"
+            write_run("future-run", "2026-06-05T09:00:00+09:00", "success", dict(valid, core_rationale="future"))
+            write_run("equal-time-run", current_started_at, "success", dict(valid, core_rationale="equal-time"))
+            write_run("partial-run", "2026-06-01T12:00:00+09:00", "partial", dict(valid, core_rationale="partial"))
+            write_run("failed-run", "2026-06-01T11:00:00+09:00", "failed", dict(valid, core_rationale="failed"))
+            malformed_dir = runs_dir / "malformed-run"
+            malformed_dir.mkdir(parents=True, exist_ok=True)
+            (malformed_dir / "judge-review.json").write_text("not json", encoding="utf-8")
+            write_run("empty-thesis-run", "2026-06-01T13:00:00+09:00", "success", {"core_rationale": "", "invalidation_conditions": []})
+            write_run("older-valid-run", "2026-06-01T08:00:00+09:00", "success", dict(valid, core_rationale="older-valid"))
+            write_run("latest-valid-run", "2026-06-01T20:00:00+09:00", "success", dict(valid, core_rationale="latest-valid"))
+
+            context = prior_thesis_context(current, "005930", current_started_at)
+            self.assertEqual(context["status"], "available")
+            self.assertEqual(context["source_run_id"], "latest-valid-run")
+            self.assertEqual(context["thesis_definition"]["core_rationale"], "latest-valid")
+
+            # No symbol match at all -> explicit no_prior_thesis, not a crash.
+            missing_context = prior_thesis_context(current, "999999", current_started_at)
+            self.assertEqual(missing_context["status"], "no_prior_thesis")
+            self.assertIsNone(missing_context["thesis_definition"])
+
+    def test_prior_thesis_context_treats_naive_started_at_as_kst_matching_pipeline(self) -> None:
+        # Reproduction: current=2026-06-02T09:00:00+09:00, prior started_at is naive
+        # "2026-06-02T01:00:00". run_daily_trading_pipeline.parse_kst_datetime treats a
+        # naive timestamp as KST (01:00 KST is strictly before 09:00 KST -> eligible).
+        # run_subagent.parse_iso_datetime must agree, not treat it as UTC (which would
+        # be 01:00 UTC == 10:00 KST, i.e. after current, and wrongly excluded).
+        with tempfile.TemporaryDirectory() as tmp_name:
+            runs_dir = Path(tmp_name) / "runs"
+            current = runs_dir / "current"
+            current.mkdir(parents=True)
+            prior_dir = runs_dir / "naive-prior-run"
+            prior_dir.mkdir(parents=True)
+            write_json(
+                prior_dir / "judge-review.json",
+                {
+                    "run_id": "naive-prior-run",
+                    "started_at": "2026-06-02T01:00:00",
+                    "status": "success",
+                    "symbols": [
+                        {
+                            "symbol_id": "005930",
+                            "thesis_definition": {
+                                "core_rationale": "quality moat",
+                                "invalidation_conditions": [{"condition_id": "cond-a", "description": "description a"}],
+                            },
+                        }
+                    ],
+                },
+            )
+            context = prior_thesis_context(current, "005930", "2026-06-02T09:00:00+09:00")
+            self.assertEqual(context["status"], "available")
+            self.assertEqual(context["source_run_id"], "naive-prior-run")
+            self.assertEqual(context["thesis_definition"]["core_rationale"], "quality moat")
+
+    def test_normalize_thesis_condition_id_preserves_korean_and_rejects_unusable_input(self) -> None:
+        # Mirrors run_daily_trading_pipeline.normalize_thesis_condition_id exactly.
+        self.assertEqual(normalize_thesis_condition_id("한글조건"), "한글조건")
+        self.assertEqual(normalize_thesis_condition_id("  한글 조건!! 이름  "), "한글-조건-이름")
+        self.assertEqual(normalize_thesis_condition_id("Margin  Compression!!"), "margin-compression")
+        self.assertEqual(normalize_thesis_condition_id("--leading-and-trailing--"), "leading-and-trailing")
+        self.assertEqual(normalize_thesis_condition_id("already.valid_id-1"), "already.valid_id-1")
+        self.assertEqual(normalize_thesis_condition_id(1), "")
+        self.assertEqual(normalize_thesis_condition_id(True), "")
+        self.assertEqual(normalize_thesis_condition_id(None), "")
+        self.assertEqual(normalize_thesis_condition_id({"condition_id": "x"}), "")
+        self.assertEqual(normalize_thesis_condition_id(["x"]), "")
+        self.assertEqual(normalize_thesis_condition_id("   "), "")
+        self.assertEqual(normalize_thesis_condition_id("!!!"), "")
+        self.assertEqual(normalize_thesis_condition_id("...___---"), "")
+        self.assertEqual(normalize_thesis_condition_id("._condition_."), "condition")
+        self.assertEqual(normalize_thesis_condition_id("a" * 200), "a" * 64)
+
+    def test_thesis_definition_is_valid_requires_actual_string_fields(self) -> None:
+        numeric_fields = {
+            "core_rationale": 1,
+            "invalidation_conditions": [{"condition_id": 1, "description": 1}],
+        }
+        self.assertFalse(thesis_definition_is_valid(numeric_fields))
+        bool_fields = {
+            "core_rationale": True,
+            "invalidation_conditions": [{"condition_id": True, "description": True}],
+        }
+        self.assertFalse(thesis_definition_is_valid(bool_fields))
+        object_fields = {
+            "core_rationale": {"text": "quality moat"},
+            "invalidation_conditions": [{"condition_id": {"a": 1}, "description": {"b": 2}}],
+        }
+        self.assertFalse(thesis_definition_is_valid(object_fields))
+        list_fields = {
+            "core_rationale": ["quality", "moat"],
+            "invalidation_conditions": [{"condition_id": ["a"], "description": ["b"]}],
+        }
+        self.assertFalse(thesis_definition_is_valid(list_fields))
+        valid_fields = {
+            "core_rationale": "quality moat",
+            "invalidation_conditions": [{"condition_id": "cond-a", "description": "description a"}],
+        }
+        self.assertTrue(thesis_definition_is_valid(valid_fields))
+
+    def test_prior_thesis_context_rejects_prior_with_non_string_thesis_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            runs_dir = Path(tmp_name) / "runs"
+            current = runs_dir / "current"
+            current.mkdir(parents=True)
+            prior_dir = runs_dir / "numeric-fields-prior-run"
+            prior_dir.mkdir(parents=True)
+            write_json(
+                prior_dir / "judge-review.json",
+                {
+                    "run_id": "numeric-fields-prior-run",
+                    "started_at": "2026-06-01T09:00:00+09:00",
+                    "status": "success",
+                    "symbols": [
+                        {
+                            "symbol_id": "005930",
+                            "thesis_definition": {
+                                "core_rationale": 1,
+                                "invalidation_conditions": [{"condition_id": 1, "description": 1}],
+                            },
+                        }
+                    ],
+                },
+            )
+            context = prior_thesis_context(current, "005930", "2026-06-02T09:00:00+09:00")
+            self.assertEqual(context["status"], "no_prior_thesis")
+
+    def test_prior_thesis_context_breaks_ties_by_source_run_id_when_started_at_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            runs_dir = Path(tmp_name) / "runs"
+            current = runs_dir / "current"
+            current.mkdir(parents=True)
+            same_started_at = "2026-06-01T09:00:00+09:00"
+
+            def write_run(run_id: str, core_rationale: str) -> None:
+                run_dir = runs_dir / run_id
+                run_dir.mkdir(parents=True, exist_ok=True)
+                write_json(
+                    run_dir / "judge-review.json",
+                    {
+                        "run_id": run_id,
+                        "started_at": same_started_at,
+                        "status": "success",
+                        "symbols": [
+                            {
+                                "symbol_id": "005930",
+                                "thesis_definition": {
+                                    "core_rationale": core_rationale,
+                                    "invalidation_conditions": [{"condition_id": "cond-a", "description": "description a"}],
+                                },
+                            }
+                        ],
+                    },
+                )
+
+            write_run("tie-run-aaa", "from aaa")
+            write_run("tie-run-zzz", "from zzz")
+
+            context = prior_thesis_context(current, "005930", "2026-06-02T09:00:00+09:00")
+            self.assertEqual(context["status"], "available")
+            self.assertEqual(context["source_run_id"], "tie-run-zzz")
+            # Same deterministic winner as run_daily_trading_pipeline.load_prior_thesis
+            # for the identical fixture (see test_load_prior_thesis_breaks_ties_by_source_run_id_when_started_at_matches).
+            self.assertEqual(context["thesis_definition"]["core_rationale"], "from zzz")
+
+    def test_write_review_input_slices_surfaces_prior_thesis_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            write_sample_review_inputs(tmp)
+            prior_dir = tmp / "reports" / "runs" / "self-test-prior-thesis"
+            prior_dir.mkdir(parents=True, exist_ok=True)
+            write_json(
+                prior_dir / "judge-review.json",
+                {
+                    "run_id": "self-test-prior-thesis",
+                    "started_at": "2026-06-07T09:00:00+09:00",
+                    "status": "success",
+                    "symbols": [
+                        {
+                            "symbol_id": "005930",
+                            "thesis_definition": {
+                                "core_rationale": "quality moat and pricing power",
+                                "invalidation_conditions": [
+                                    {"condition_id": "margin-compression", "description": "gross margin drops below prior guidance"}
+                                ],
+                            },
+                        }
+                    ],
+                },
+            )
+            payload = compact_spec(tmp, stage="judge-review", agent_role="judge", task_name="prior-thesis-slice")
+            slice_paths = write_review_input_slices(payload)
+            core = load_json(Path(slice_paths["review_core"]))
+            symbol = next(item for item in core["symbols"] if item.get("symbol_id") == "005930")
+            prior = symbol.get("prior_thesis_context")
+            self.assertIsNotNone(prior)
+            self.assertEqual(prior["status"], "available")
+            self.assertEqual(prior["source_run_id"], "self-test-prior-thesis")
+            self.assertEqual(
+                prior["thesis_definition"]["invalidation_conditions"],
+                [{"condition_id": "margin-compression", "description": "gross margin drops below prior guidance"}],
+            )
+
+            other_symbol = next(item for item in core["symbols"] if item.get("symbol_id") == "000660")
+            self.assertEqual(other_symbol.get("prior_thesis_context", {}).get("status"), "no_prior_thesis")
 
     def test_rebuttal_final_decision_issues_validate_action_and_quantity(self) -> None:
         spec = {

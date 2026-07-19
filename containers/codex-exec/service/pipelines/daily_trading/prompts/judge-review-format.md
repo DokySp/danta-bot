@@ -65,12 +65,25 @@ Return JSON:
       "target_position_value_krw": 560000,
       "relative_attractiveness_rank": 1,
       "reason_code": "hold_final_quantity",
-      "one_line_reason": "기준금액 수준의 목표금액을 유지한다."
+      "one_line_reason": "기준금액 수준의 목표금액을 유지한다.",
+      "thesis_definition": {
+        "core_rationale": "quality moat and pricing power",
+        "invalidation_conditions": [
+          {"condition_id": "margin-compression", "description": "gross margin drops below prior guidance"}
+        ]
+      },
+      "thesis_assessment": {
+        "status": "damaged",
+        "matched_invalidation_condition_ids": ["margin-compression"],
+        "cited_argument_ids": ["005930-bear-opening-1"]
+      }
     }
   ],
   "errors": []
 }
 ```
+
+`thesis_definition` and `thesis_assessment` are optional per symbol and used only as described below.
 
 Rules:
 
@@ -95,6 +108,14 @@ Rules:
 - The judge cannot add symbols outside the supplied candidate set.
 - Do not return long `cash_rationale`, `duplicate_exposure_limits`, `price_chart_view`, `rationale`, `risks`, or prose arrays.
 
+### Position-thesis fields (protected-loss reductions)
+
+- Each symbol's `review-core` input carries `prior_thesis_context`: `status` (`available`/`no_prior_thesis`) and, when available, a `thesis_definition` (`core_rationale`, `invalidation_conditions[]` with `condition_id`/`description`) recorded by an earlier successful run. Those prior conditions are immutable for evaluating a reduction in the current run: a newly returned definition cannot be applied retroactively to that assessment. A valid definition returned for an actual buy/increase becomes the successor prior for later runs. When `prior_thesis_context.status` is `no_prior_thesis`, a definition or assessment newly produced in the current run can never authorize that same run's reduction. When a valid prior exists, the current run's `thesis_assessment` is exactly the semantic input that may authorize a reduction, once matched against the prior's `invalidation_conditions` and verified against `debate_artifact` (see Validation by Main agent below).
+- `thesis_definition` is valid only when `core_rationale` is non-empty and at least one `invalidation_conditions[]` entry has both a non-empty `condition_id` and a non-empty `description`. An empty, missing, or otherwise malformed `thesis_definition` is never treated as valid.
+- When you decide to buy or increase `target_position_value_krw` above baseline, return a valid `thesis_definition` so a later run has explicit invalidation criteria to assess against. Main/pipeline mechanically rejects the increase (no order, no updated target) when a valid `thesis_definition` is missing or malformed for that symbol.
+- For any held symbol whose `symbol_strategy_context.loss_position` is `true` (or `pnl_rate < 0`), always return `thesis_assessment`: `status` (`intact`/`damaged`/`uncertain`), `matched_invalidation_condition_ids[]`, and `cited_argument_ids[]` (decisive `debate_artifact` argument ids). Price loss, index/regime panic, a low score, or missing optional evidence alone never justify `status: damaged`. This applies regardless of whether the symbol is a buy candidate, a sell candidate, or holding at baseline.
+- When `prior_thesis_context.status` is `no_prior_thesis` for such a held loss position, also return a valid `thesis_definition` even though the decision is to hold at baseline (or a reduction gets blocked): this bootstraps a real prior for a future run. Main/pipeline never invents this definition; an invalid/missing one is simply not persisted, and the next run still sees `no_prior_thesis`.
+
 Validation by Main agent:
 
 - Use the single valid `judge` target position values as the canonical `judge-review.json` `target_position_value_krw` values.
@@ -103,5 +124,7 @@ Validation by Main agent:
 - A sell candidate whose target exceeds the baseline, or a buy candidate whose target is below the baseline, is rejected with an error and produces no order.
 - If the valid judge result is missing a target position value for a symbol, set no final holding quantity and exclude it from orders.
 - Do not reduce buy-side quantities solely because rounded target shares exceed `target_position_value_krw`; affordability and order availability are handled by existing account/order gates.
+- For a held loss position (`symbol_strategy_context.loss_position` or `pnl_rate < 0`), regardless of whether it is a buy candidate, sell candidate, or holding at baseline, a reduction below baseline is only accepted when `thesis_assessment.status` is `damaged`, `matched_invalidation_condition_ids` reference condition ids that already exist in the immutable prior `thesis_definition`, and `cited_argument_ids` reference argument ids that already exist in `judge-debate.json` for that symbol; otherwise Main/pipeline forces `target_position_value_krw` back to baseline and records `protected_loss_gate`. A symbol with no prior `thesis_definition` is bootstrapped the same way, at or below baseline: this run's own assessment cannot both define and invalidate the thesis, and only a valid judge-supplied `thesis_definition` is persisted (never a synthesized placeholder).
+- A buy/increase (`target_position_value_krw` above baseline) with a missing or malformed `thesis_definition` is rejected: Main/pipeline records an error and produces no order for that symbol instead of executing the increase.
 - If derived final holdings are below assets, leave the remainder as residual cash. Do not create, report, or optimize toward a cash target value.
 - Preserve existing account/order execution checks such as orderable cash, active orders, same-day context, order validity, and market open checks.
