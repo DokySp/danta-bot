@@ -18,6 +18,7 @@ from ..scripts.render_html_report import (
     render_header,
     render_market_and_quality,
     render_thesis_section,
+    render_time_symbol_inspector,
     render_trade_ledger,
     resolve_fill,
 )
@@ -1016,6 +1017,96 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
         self.assertEqual(rendered.count('class="series-point total-point"'), 3)
         self.assertEqual(rendered.count('class="series-point asset-point"'), 2)
         self.assertEqual(rendered.count('class="series-point kospi-point"'), 2)
+
+    def test_trade_ledger_shows_blocked_buy_attempt_without_counting_as_submitted(self) -> None:
+        rendered, submitted_orders = render_trade_ledger(
+            [
+                {
+                    "summary": {"started_at": "2026-07-20T13:00:48+09:00"},
+                    "execution": {
+                        "orders": [
+                            {
+                                "symbol_id": "078930",
+                                "symbol_name": "GS",
+                                "direction": "buy",
+                                "order_price": 84_300,
+                                "requested_order_quantity": 1,
+                                "validated_order_quantity": 1,
+                                "order_or_reservation_id": "",
+                                "reason": "buy_quantity_exceeds_order_available_quantity",
+                                "result": "blocked",
+                                "attempts": [
+                                    {
+                                        "api_name": "inquire_psbl_order",
+                                        "attempt": 1,
+                                        "error_code": "cash_gate",
+                                        "message": "max_buy_qty=0",
+                                        "result": "blocked",
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                }
+            ],
+            [],
+            "success",
+            "account",
+        )
+
+        self.assertEqual(submitted_orders, [])
+        self.assertIn("GS", rendered)
+        self.assertIn("매수", rendered)
+        self.assertIn("1주 요청", rendered)
+        self.assertIn("매수가능수량 초과", rendered)
+        self.assertIn("max_buy_qty=0", rendered)
+        self.assertIn("차단", rendered)
+        self.assertNotIn("체결 확인", rendered)
+
+    def test_time_symbol_inspector_shows_blocked_sell_attempt_as_preferred_symbol(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary) / "run-1"
+            write_json(
+                run_dir / "analyst-review.json",
+                {
+                    "symbols": [
+                        {"symbol_id": "005930", "symbol_name": "삼성전자", "final_first_score": 5.0}
+                    ]
+                },
+            )
+            run = {
+                "path": run_dir,
+                "summary": {"started_at": "2026-07-20T14:00:49+09:00"},
+                "execution": {
+                    "orders": [
+                        {
+                            "symbol_id": "005930",
+                            "symbol_name": "삼성전자",
+                            "direction": "sell",
+                            "order_price": 70_000,
+                            "requested_order_quantity": 3,
+                            "validated_order_quantity": 3,
+                            "order_or_reservation_id": "",
+                            "reason": "sell_quantity_exceeds_order_available_quantity",
+                            "result": "blocked",
+                            "attempts": [
+                                {"message": "max_sell_qty=0", "result": "blocked"},
+                            ],
+                        }
+                    ]
+                },
+                "decision": {},
+            }
+
+            rendered = render_time_symbol_inspector([run], [])
+
+        self.assertIn("삼성전자", rendered)
+        self.assertIn("매도", rendered)
+        self.assertIn("3주 요청", rendered)
+        self.assertIn("매도가능수량 초과", rendered)
+        self.assertIn("max_sell_qty=0", rendered)
+        self.assertIn('class="mini-badge attempt"', rendered)
+        self.assertIn('active" data-symbol-target="run-0-1400-005930"', rendered)
 
 
 if __name__ == "__main__":

@@ -30,6 +30,33 @@ REGIME_LABELS = {
     "weak_downside": "약세",
     "panic_downside": "급락",
 }
+ORDER_REASON_LABELS = {
+    "accepted": "접수",
+    "cash_order_submitted": "현금주문 제출",
+    "reservation_order_submitted": "예약주문 제출",
+    "final_equals_expected_holding_quantity": "목표수량 일치",
+    "symbol_in_portfolio_except_list": "제외 종목 차단",
+    "invalid_final_holding_quantity": "최종수량 값 오류",
+    "buy_cash_limit_missing": "매수한도 조회 불가",
+    "buy_quantity_exceeds_order_available_quantity": "매수가능수량 초과",
+    "sell_quantity_exceeds_order_available_quantity": "매도가능수량 초과",
+    "buy_quantity_reduced_to_order_available_quantity": "매수가능수량으로 축소",
+    "sell_quantity_reduced_to_order_available_quantity": "매도가능수량으로 축소",
+    "buy_quantity_reduced_to_remaining_cash": "잔여현금 기준 축소",
+    "buy_cash_gate_reduced_reverse_rank": "현금부족 후순위 축소",
+    "existing_matching_reservation_kept": "기존 예약 유지",
+    "active_order_cancel_submitted": "기존주문 취소 제출",
+    "active_order_cancel_and_replacement_submitted": "기존주문 취소 후 재제출",
+    "replacement_order_submission_failed": "대체주문 제출 실패",
+    "order_submission_blocked": "주문 제출 차단",
+    "submit_requires_explicit_execution_request": "명시적 실행 요청 필요",
+    "sell_blocked_score_band": "점수 밴드 매도 차단",
+    "buy_blocked_score_band": "점수 밴드 매수 차단",
+    "score_band_value_missing": "점수 확인 불가 차단",
+    "holding_state_not_verified": "보유수량 상태 불일치",
+    "stale_active_order_requires_cancellation": "이전 미체결 주문 정리 필요",
+    "unverified_holding_requires_active_order_cancellation": "수량 불일치로 기존 미체결 주문 취소 필요",
+}
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -242,6 +269,28 @@ def requested_order_quantity(order: dict[str, Any]) -> int:
     return int(order.get("validated_order_quantity") or order.get("quantity") or 0)
 
 
+def attempted_order_quantity(order: dict[str, Any]) -> int:
+    return int(
+        order.get("requested_order_quantity")
+        or order.get("validated_order_quantity")
+        or order.get("quantity")
+        or 0
+    )
+
+
+def order_reason_label(order: dict[str, Any]) -> str:
+    raw = str(order.get("reason") or "")
+    return ORDER_REASON_LABELS.get(raw, raw or "-")
+
+
+def blocked_attempt_detail(order: dict[str, Any]) -> str:
+    attempts = order.get("attempts") if isinstance(order.get("attempts"), list) else []
+    for attempt in reversed(attempts):
+        if isinstance(attempt, dict) and attempt.get("message"):
+            return str(attempt.get("message"))
+    return ""
+
+
 def fill_is_complete(order: dict[str, Any], fill: dict[str, Any] | None) -> bool:
     if not fill:
         return False
@@ -372,16 +421,22 @@ def render_trade_ledger(
 ) -> tuple[str, list[dict[str, Any]]]:
     fill_by_order = {str(item.get("order_id")): item for item in fills if item.get("order_id")}
     submitted_orders: list[dict[str, Any]] = []
+    blocked_orders: list[dict[str, Any]] = []
     for run in runs:
         started_at = run["summary"].get("started_at")
         orders = run["execution"].get("orders") if isinstance(run["execution"].get("orders"), list) else []
         for item in orders:
-            if not isinstance(item, dict) or item.get("result") != "submitted":
+            if not isinstance(item, dict):
                 continue
-            row = dict(item)
-            row["run_started_at"] = started_at
-            row["fill"] = resolve_fill(item, fill_by_order)
-            submitted_orders.append(row)
+            if item.get("result") == "submitted":
+                row = dict(item)
+                row["run_started_at"] = started_at
+                row["fill"] = resolve_fill(item, fill_by_order)
+                submitted_orders.append(row)
+            elif item.get("result") in {"blocked", "failed"}:
+                row = dict(item)
+                row["run_started_at"] = started_at
+                blocked_orders.append(row)
 
     ledger_rows: list[tuple[str, str]] = []
     linked_order_ids: set[str] = set()
@@ -431,6 +486,25 @@ def render_trade_ledger(
                 f"<td><code>{esc(order_id)}</code></td><td><span class=\"badge ok\">체결 확인</span></td></tr>",
             )
         )
+
+    for item in blocked_orders:
+        direction = "매수" if item.get("direction") == "buy" else "매도"
+        is_failed = item.get("result") == "failed"
+        result_text = "실패" if is_failed else "차단"
+        reason_text = order_reason_label(item)
+        detail = blocked_attempt_detail(item)
+        detail_html = f"<br><small>{esc(detail)}</small>" if detail else ""
+        ledger_rows.append(
+            (
+                str(item.get("run_started_at") or ""),
+                f"<tr class=\"blocked-row\"><td>시도 {time_text(item.get('run_started_at'))}</td><td>봇</td>"
+                f"<td><strong>{esc(item.get('symbol_name'))}</strong><br><code>{esc(item.get('symbol_id'))}</code></td>"
+                f"<td>{direction}</td>"
+                f"<td>{number(attempted_order_quantity(item))}주 요청<br><small>{number(item.get('order_price'))}원</small></td>"
+                f"<td>-</td><td>-</td>"
+                f"<td><span class=\"badge bad\">{esc(result_text)}</span><br><small>{esc(reason_text)}</small>{detail_html}</td></tr>",
+            )
+        )
     ledger_html = "".join(row for _, row in sorted(ledger_rows, key=lambda item: item[0]))
 
     cut_off = time_text(runs[-1]["summary"].get("started_at")) if runs else "-"
@@ -443,7 +517,7 @@ def render_trade_ledger(
         )
     content = f"""
     <section class="panel" id="trades">
-      <div class="section-head"><div><p class="kicker">DAY LEDGER</p><h2>{esc(cut_off)}까지의 당일 전체 거래</h2></div><span class="badge info">체결 {len(fills)} · 봇 제출 {len(submitted_orders)}</span></div>
+      <div class="section-head"><div><p class="kicker">DAY LEDGER</p><h2>{esc(cut_off)}까지의 당일 전체 거래</h2></div><span class="badge info">체결 {len(fills)} · 봇 제출 {len(submitted_orders)} · 시도 차단/실패 {len(blocked_orders)}</span></div>
       <div class="notice">{esc(fill_notice)}</div>
       <h3>주문·체결 통합 원장</h3>
       <div class="table-wrap"><table><thead><tr><th>시각</th><th>주체</th><th>종목</th><th>방향</th><th>주문</th><th>체결</th><th>주문번호</th><th>{esc(cut_off)} 기준 상태</th></tr></thead><tbody>{ledger_html or '<tr><td colspan="8">확인된 주문·체결 없음</td></tr>'}</tbody></table></div>
@@ -585,6 +659,9 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
         submitted_orders = [
             item for item in execution_orders if isinstance(item, dict) and item.get("result") == "submitted"
         ]
+        blocked_orders = [
+            item for item in execution_orders if isinstance(item, dict) and item.get("result") in {"blocked", "failed"}
+        ]
         linked_fills = fills_by_run[run_index]
         submitted_order_ids: set[str] = set()
         for item in submitted_orders:
@@ -611,6 +688,8 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
             preferred_symbol = str(submitted_orders[0].get("symbol_id") or "")
         elif linked_fills:
             preferred_symbol = str(linked_fills[0].get("symbol_id") or "")
+        elif blocked_orders:
+            preferred_symbol = str(blocked_orders[0].get("symbol_id") or "")
         elif final_by_symbol:
             preferred_symbol = next(iter(final_by_symbol))
         elif analyst_symbols:
@@ -641,13 +720,24 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
                 f"<article class=\"activity-card fill\"><span>{esc(actor)} 체결</span><strong>{esc(fill.get('symbol_name'))} {esc(direction)} {number(fill.get('filled_quantity'))}주</strong>"
                 f"<small>체결 {time_text(fill.get('filled_at'))} · {number(fill.get('filled_price'))}원 · <code>{esc(fill.get('order_id'))}</code></small></article>"
             )
+        for order in blocked_orders:
+            direction = "매수" if order.get("direction") == "buy" else "매도"
+            result_text = "실패" if order.get("result") == "failed" else "차단"
+            reason_text = order_reason_label(order)
+            detail = blocked_attempt_detail(order)
+            detail_suffix = f" · {esc(detail)}" if detail else ""
+            activity_cards.append(
+                f"<article class=\"activity-card blocked\"><span>{esc(direction)} 시도 {esc(result_text)}</span>"
+                f"<strong>{esc(order.get('symbol_name'))} {esc(direction)} {number(attempted_order_quantity(order))}주 요청</strong>"
+                f"<small>주문 {run_time} · {esc(reason_text)}{detail_suffix}</small></article>"
+            )
         if not activity_cards:
             activity_cards.append('<div class="empty-state">이 run에 연결된 주문 또는 체결이 없습니다.</div>')
 
         time_buttons.append(
             f'<button type="button" role="option" aria-selected="{str(is_active_time).lower()}" class="time-button{" active" if is_active_time else ""}" data-time-target="{esc(time_key)}">'
             f'<strong>{esc(run_time)}</strong><span>Analyst {len(analyst_symbols)} · Judge {len(final_by_symbol)}</span>'
-            f'<small>주문 {len(submitted_orders)} · 체결 {len(linked_fills)}</small></button>'
+            f'<small>주문 {len(submitted_orders)} · 체결 {len(linked_fills)} · 차단 {len(blocked_orders)}</small></button>'
         )
 
         symbol_buttons = []
@@ -660,12 +750,19 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
             final_item = final_by_symbol.get(symbol_id)
             related_orders = [item for item in submitted_orders if str(item.get("symbol_id") or "") == symbol_id]
             related_fills = [item for item in linked_fills if str(item.get("symbol_id") or "") == symbol_id]
+            related_blocked = [item for item in blocked_orders if str(item.get("symbol_id") or "") == symbol_id]
             has_trade = bool(related_orders or related_fills)
+            has_attempt = bool(related_blocked)
             judge_label = "Judge 진행" if final_item else "Analyst only"
+            attempt_badge = ""
+            if has_trade:
+                attempt_badge = "<b class=\"mini-badge trade\">거래</b>"
+            elif has_attempt:
+                attempt_badge = "<b class=\"mini-badge attempt\">시도 차단</b>"
             symbol_buttons.append(
                 f'<button type="button" class="trade-symbol-button{analyst_score_class(analyst_item.get("final_first_score"))}{" active" if is_active_symbol else ""}" data-symbol-target="{esc(composite_key)}">'
                 f'<span class="symbol-button-left"><span class="symbol-button-status"><b class="mini-badge {"judge" if final_item else "analyst"}">{judge_label}</b>'
-                f'{"<b class=\"mini-badge trade\">거래</b>" if has_trade else ""}</span>'
+                f'{attempt_badge}</span>'
                 f'<strong class="symbol-button-name" title="{esc(symbol_name)}">{esc(symbol_name)}</strong></span>'
                 f'<span class="symbol-button-right"><b class="symbol-score">{decimal(analyst_item.get("final_first_score"))}</b><code>{esc(symbol_id)}</code></span></button>'
             )
@@ -741,6 +838,15 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
                 direction = "매수" if fill.get("direction") == "buy" else "매도"
                 trade_notes.append(
                     f"{time_text(fill.get('filled_at'))} {actor} {direction} {number(fill.get('filled_quantity'))}주 체결"
+                )
+            for order in related_blocked:
+                direction = "매수" if order.get("direction") == "buy" else "매도"
+                result_text = "실패" if order.get("result") == "failed" else "차단"
+                reason_text = order_reason_label(order)
+                detail = blocked_attempt_detail(order)
+                detail_suffix = f" · {detail}" if detail else ""
+                trade_notes.append(
+                    f"{run_time} 봇 {direction} {number(attempted_order_quantity(order))}주 시도 {result_text} · {reason_text}{detail_suffix}"
                 )
             trade_note = " · ".join(trade_notes) or "이 run에 연결된 거래 없음 · Analyst 평가만 표시"
             symbol_panels.append(
@@ -1392,8 +1498,8 @@ def build_html(runs_root: Path, target_run: str) -> str:
     .chart-grid-wrap {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; margin-top:16px; }} .chart-card {{ padding:20px; overflow:hidden; border:1px solid var(--line); border-radius:20px; background:var(--surface); box-shadow:var(--shadow); }} .chart-head {{ display:flex; justify-content:space-between; gap:12px; }} .chart-head h3 {{ margin:0; font-size:19px; }} .chart-head p {{ margin:5px 0 0; color:var(--muted); font-size:12px; }} .chart-stat {{ min-width:100px; text-align:right; }} .chart-stat span,.chart-stat strong {{ display:block; }} .chart-stat span {{ color:var(--muted); font-size:11px; }} .line-chart {{ display:block; width:100%; height:auto; margin-top:5px; overflow:visible; }} .chart-grid {{ stroke:#e5eaf2; stroke-width:1; }} .chart-y,.chart-x {{ fill:#738096; font-size:15px; }} .chart-point {{ stroke:#fff; stroke-width:3; }} .chart-range {{ display:flex; justify-content:flex-end; flex-wrap:wrap; gap:14px; color:var(--muted); font-size:11px; }} .chart-range strong {{ color:var(--text); }}
     .financial-list {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }} .financial-card {{ padding:17px; border:1px solid var(--line); border-radius:15px; background:var(--subtle); }} .financial-body {{ padding:13px; border-radius:11px; background:#fff; }} .financial-body ul {{ margin:0; padding-left:20px; }} .evidence-title {{ display:flex; gap:10px; align-items:flex-start; margin-bottom:12px; }} .evidence-title h3 {{ margin:0; }} .evidence-title p {{ margin:4px 0 0; color:var(--muted); font-size:12px; }} .source-note {{ margin:12px 0 0; color:var(--muted); font-size:11px; }}
     .news-timeline {{ position:relative; display:grid; gap:12px; padding-left:22px; }} .news-timeline::before {{ content:""; position:absolute; left:7px; top:9px; bottom:9px; width:2px; background:linear-gradient(var(--accent),var(--accent-2)); }} .news-run {{ position:relative; padding:16px; border:1px solid var(--line); border-radius:15px; background:var(--subtle); }} .news-run::before {{ content:""; position:absolute; left:-22px; top:22px; width:11px; height:11px; border:3px solid var(--bg); border-radius:50%; background:var(--accent); }} .news-run-head {{ display:flex; justify-content:space-between; gap:10px; margin-bottom:9px; }} .news-run-head>div {{ display:flex; align-items:center; flex-wrap:wrap; gap:8px; }} .news-time {{ display:grid; width:50px; height:28px; place-items:center; border-radius:8px; background:var(--accent); color:#fff; font-size:12px; font-weight:900; }} .news-run-head span:not(.news-time):not(.badge) {{ color:var(--muted); font-size:11px; }} .news-run-body {{ padding:4px 12px; border-radius:11px; background:#fff; }} .news-item {{ padding:10px 0; border-bottom:1px solid var(--line); }} .news-item:last-child {{ border-bottom:0; }} .news-item time {{ margin-left:8px; color:var(--muted); font-size:11px; }} .news-item p {{ margin:5px 0 0; }} .sentiment {{ float:right; padding:3px 7px; border-radius:999px; font-size:10px; font-weight:900; }} .sentiment.positive {{ color:#087a55; background:#dff5eb; }} .sentiment.negative {{ color:#b42335; background:#ffe8eb; }} .sentiment.neutral {{ color:#536176; background:#e9eef5; }} .sentiment.unknown {{ color:#815400; background:#fff3ce; }} .empty-state {{ padding:12px; border-radius:9px; background:var(--subtle); color:var(--muted); font-size:12px; }}
-    .time-wheel {{ position:relative; width:min(100%,360px); margin:14px auto 20px; }} .time-wheel-caption {{ display:block; margin-bottom:6px; color:var(--muted); font-size:11px; font-weight:800; text-align:center; }} .time-wheel::after {{ position:absolute; right:0; bottom:68px; left:0; height:68px; border:1px solid rgba(78,92,232,.28); border-radius:14px; background:rgba(78,92,232,.06); content:""; pointer-events:none; }} .time-selector {{ position:relative; display:flex; height:204px; padding-block:68px; overflow-x:hidden; overflow-y:auto; flex-direction:column; scroll-snap-type:y mandatory; scrollbar-width:none; overscroll-behavior-y:contain; -webkit-mask-image:linear-gradient(transparent,#000 29%,#000 71%,transparent); mask-image:linear-gradient(transparent,#000 29%,#000 71%,transparent); }} .time-selector::-webkit-scrollbar {{ display:none; }} .time-button {{ display:grid; min-height:68px; flex:0 0 68px; padding:10px 16px; border:0; border-radius:13px; background:transparent; color:var(--text); cursor:pointer; grid-template-columns:74px minmax(0,1fr); grid-template-rows:1fr 1fr; align-items:center; text-align:left; scroll-snap-align:center; scroll-snap-stop:always; opacity:.48; transform:scale(.92); transition:opacity .16s ease,transform .16s ease,color .16s ease; }} .time-button:hover {{ color:var(--accent); opacity:.75; }} .time-button.active {{ color:var(--accent); opacity:1; transform:scale(1); }} .time-button strong {{ grid-row:1/-1; font-size:22px; }} .time-button span,.time-button small {{ color:inherit; font-size:10px; }} .time-analysis-panel {{ display:none; }} .time-analysis-panel.active {{ display:block; animation:page-in .18s ease; }} .time-panel-head {{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; padding-top:4px; }} .time-panel-head p {{ color:var(--muted); }} .run-activity {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:9px; margin:12px 0 19px; }} .activity-card {{ padding:13px; border:1px solid var(--line); border-radius:12px; background:#fff; }} .activity-card.order {{ border-left:4px solid var(--accent); }} .activity-card.filled {{ border-left:4px solid var(--ok); background:linear-gradient(145deg,#fff,var(--ok-bg)); }} .activity-card.fill {{ border-left:4px solid var(--accent-2); }} .activity-card span,.activity-card strong,.activity-card small {{ display:block; }} .activity-card span,.activity-card small {{ color:var(--muted); font-size:11px; }}
-    .trade-symbol-selector {{ display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:9px; margin-bottom:16px; }} .trade-symbol-button {{ display:grid; min-width:0; padding:12px; border:1px solid var(--line); border-radius:13px; background:var(--subtle); color:var(--text); text-align:left; cursor:pointer; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:10px; transition:.16s ease; }} .trade-symbol-button.score-low {{ border-color:#f3bbc2; background:var(--bad-bg); }} .trade-symbol-button.score-high {{ border-color:#a9ddcc; background:var(--ok-bg); }} .trade-symbol-button:hover {{ border-color:#aab4ff; transform:translateY(-1px); }} .trade-symbol-button.active {{ border-color:var(--accent); box-shadow:0 8px 22px rgba(78,92,232,.12); }} .trade-symbol-button.score-low.active {{ background:linear-gradient(145deg,var(--bad-bg),#fff4f5); }} .trade-symbol-button.score-high.active {{ background:linear-gradient(145deg,var(--ok-bg),#eefaf7); }} .symbol-button-left {{ display:flex; min-width:0; flex-direction:column; }} .symbol-button-status {{ display:flex; min-height:19px; flex-wrap:wrap; gap:4px; }} .symbol-button-name {{ display:-webkit-box; min-width:0; min-height:2.6em; margin-top:4px; overflow:hidden; color:var(--text); font-size:13px; line-height:1.3; text-overflow:ellipsis; white-space:normal; -webkit-box-orient:vertical; -webkit-line-clamp:2; }} .symbol-button-right {{ display:flex; flex:0 0 auto; align-items:flex-end; flex-direction:column; gap:3px; text-align:right; }} .symbol-button-right code {{ color:var(--muted); font-size:10px; }} .symbol-score {{ display:block; padding:0; background:transparent; color:var(--text); font-size:13px; font-weight:800; line-height:1.2; }} .trade-symbol-button.active .symbol-score {{ background:transparent; color:var(--accent); }} .mini-badge {{ padding:2px 5px; border-radius:999px; font-size:9px; }} .mini-badge.judge {{ color:var(--ok); background:var(--ok-bg); }} .mini-badge.analyst {{ color:var(--muted); background:#e9eef5; }} .mini-badge.trade {{ color:var(--accent); background:var(--accent-bg); }} .symbol-analysis-panel {{ display:none; padding:20px; border:1px solid var(--line); border-radius:16px; background:linear-gradient(145deg,#fff,var(--subtle)); }} .symbol-analysis-panel.active {{ display:block; animation:page-in .18s ease; }} .symbol-focus-head {{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }} .symbol-focus-head h2 {{ margin-bottom:5px; }} .symbol-focus-head p {{ color:var(--muted); }} .focus-badges {{ display:flex; flex-wrap:wrap; justify-content:flex-end; gap:6px; }} .inline-analysis,.inline-judge {{ margin-top:20px; }} .compact-phase {{ margin-top:18px; padding-top:15px; }} .final-card.full {{ margin-top:12px; }}
+    .time-wheel {{ position:relative; width:min(100%,360px); margin:14px auto 20px; }} .time-wheel-caption {{ display:block; margin-bottom:6px; color:var(--muted); font-size:11px; font-weight:800; text-align:center; }} .time-wheel::after {{ position:absolute; right:0; bottom:68px; left:0; height:68px; border:1px solid rgba(78,92,232,.28); border-radius:14px; background:rgba(78,92,232,.06); content:""; pointer-events:none; }} .time-selector {{ position:relative; display:flex; height:204px; padding-block:68px; overflow-x:hidden; overflow-y:auto; flex-direction:column; scroll-snap-type:y mandatory; scrollbar-width:none; overscroll-behavior-y:contain; -webkit-mask-image:linear-gradient(transparent,#000 29%,#000 71%,transparent); mask-image:linear-gradient(transparent,#000 29%,#000 71%,transparent); }} .time-selector::-webkit-scrollbar {{ display:none; }} .time-button {{ display:grid; min-height:68px; flex:0 0 68px; padding:10px 16px; border:0; border-radius:13px; background:transparent; color:var(--text); cursor:pointer; grid-template-columns:74px minmax(0,1fr); grid-template-rows:1fr 1fr; align-items:center; text-align:left; scroll-snap-align:center; scroll-snap-stop:always; opacity:.48; transform:scale(.92); transition:opacity .16s ease,transform .16s ease,color .16s ease; }} .time-button:hover {{ color:var(--accent); opacity:.75; }} .time-button.active {{ color:var(--accent); opacity:1; transform:scale(1); }} .time-button strong {{ grid-row:1/-1; font-size:22px; }} .time-button span,.time-button small {{ color:inherit; font-size:10px; }} .time-analysis-panel {{ display:none; }} .time-analysis-panel.active {{ display:block; animation:page-in .18s ease; }} .time-panel-head {{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; padding-top:4px; }} .time-panel-head p {{ color:var(--muted); }} .run-activity {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:9px; margin:12px 0 19px; }} .activity-card {{ padding:13px; border:1px solid var(--line); border-radius:12px; background:#fff; }} .activity-card.order {{ border-left:4px solid var(--accent); }} .activity-card.filled {{ border-left:4px solid var(--ok); background:linear-gradient(145deg,#fff,var(--ok-bg)); }} .activity-card.fill {{ border-left:4px solid var(--accent-2); }} .activity-card.blocked {{ border-left:4px solid var(--bad); background:linear-gradient(145deg,#fff,var(--bad-bg)); }} .activity-card span,.activity-card strong,.activity-card small {{ display:block; }} .activity-card span,.activity-card small {{ color:var(--muted); font-size:11px; }}
+    .trade-symbol-selector {{ display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:9px; margin-bottom:16px; }} .trade-symbol-button {{ display:grid; min-width:0; padding:12px; border:1px solid var(--line); border-radius:13px; background:var(--subtle); color:var(--text); text-align:left; cursor:pointer; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:10px; transition:.16s ease; }} .trade-symbol-button.score-low {{ border-color:#f3bbc2; background:var(--bad-bg); }} .trade-symbol-button.score-high {{ border-color:#a9ddcc; background:var(--ok-bg); }} .trade-symbol-button:hover {{ border-color:#aab4ff; transform:translateY(-1px); }} .trade-symbol-button.active {{ border-color:var(--accent); box-shadow:0 8px 22px rgba(78,92,232,.12); }} .trade-symbol-button.score-low.active {{ background:linear-gradient(145deg,var(--bad-bg),#fff4f5); }} .trade-symbol-button.score-high.active {{ background:linear-gradient(145deg,var(--ok-bg),#eefaf7); }} .symbol-button-left {{ display:flex; min-width:0; flex-direction:column; }} .symbol-button-status {{ display:flex; min-height:19px; flex-wrap:wrap; gap:4px; }} .symbol-button-name {{ display:-webkit-box; min-width:0; min-height:2.6em; margin-top:4px; overflow:hidden; color:var(--text); font-size:13px; line-height:1.3; text-overflow:ellipsis; white-space:normal; -webkit-box-orient:vertical; -webkit-line-clamp:2; }} .symbol-button-right {{ display:flex; flex:0 0 auto; align-items:flex-end; flex-direction:column; gap:3px; text-align:right; }} .symbol-button-right code {{ color:var(--muted); font-size:10px; }} .symbol-score {{ display:block; padding:0; background:transparent; color:var(--text); font-size:13px; font-weight:800; line-height:1.2; }} .trade-symbol-button.active .symbol-score {{ background:transparent; color:var(--accent); }} .mini-badge {{ padding:2px 5px; border-radius:999px; font-size:9px; }} .mini-badge.judge {{ color:var(--ok); background:var(--ok-bg); }} .mini-badge.analyst {{ color:var(--muted); background:#e9eef5; }} .mini-badge.trade {{ color:var(--accent); background:var(--accent-bg); }} .mini-badge.attempt {{ color:var(--bad); background:var(--bad-bg); }} .symbol-analysis-panel {{ display:none; padding:20px; border:1px solid var(--line); border-radius:16px; background:linear-gradient(145deg,#fff,var(--subtle)); }} .symbol-analysis-panel.active {{ display:block; animation:page-in .18s ease; }} .symbol-focus-head {{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }} .symbol-focus-head h2 {{ margin-bottom:5px; }} .symbol-focus-head p {{ color:var(--muted); }} .focus-badges {{ display:flex; flex-wrap:wrap; justify-content:flex-end; gap:6px; }} .inline-analysis,.inline-judge {{ margin-top:20px; }} .compact-phase {{ margin-top:18px; padding-top:15px; }} .final-card.full {{ margin-top:12px; }}
     .decision-hero {{ background:linear-gradient(145deg,#fff,#f4f6ff); }} .decision-hero>div:first-child p:last-child {{ color:var(--muted); }} .decision-meta {{ display:flex; flex-wrap:wrap; gap:8px; }} .decision-meta>span {{ padding:7px 9px; border:1px solid var(--line); border-radius:9px; background:#fff; font-size:12px; }} .decision-orders {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin-top:14px; }} .decision-orders article {{ padding:13px; border-radius:12px; background:linear-gradient(135deg,var(--accent-bg),#eefaf7); }} .decision-orders span,.decision-orders strong,.decision-orders small {{ display:block; }} .decision-orders span,.decision-orders small {{ color:var(--muted); font-size:11px; }}
     .analyst-list {{ display:grid; gap:14px; }} .analyst-card {{ padding:17px; border:1px solid var(--line); border-radius:14px; background:var(--subtle); }} .card-title {{ display:flex; align-items:flex-start; gap:10px; margin-bottom:12px; }} .card-title h3,.card-title h4 {{ margin:0; }} .card-title p {{ margin:3px 0 0; color:var(--muted); font-size:13px; }} .index {{ display:grid; flex:0 0 30px; height:30px; place-items:center; border-radius:9px; background:var(--accent-bg); color:var(--accent); font-weight:900; }}
     .phase,.final-section {{ margin-top:26px; padding-top:22px; border-top:3px solid var(--line); }} .phase-title {{ display:flex; align-items:baseline; gap:12px; margin-bottom:12px; }} .phase-title span {{ font-size:22px; font-weight:900; }} .phase-title small {{ color:var(--muted); }}
