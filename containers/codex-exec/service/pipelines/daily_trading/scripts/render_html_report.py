@@ -7,6 +7,7 @@ import argparse
 import html
 import json
 import math
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -675,6 +676,7 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
             key=analyst_score_sort_key,
         )
         debate = load_json(run_dir / "judge-debate.json")
+        debate_argument_index = build_debate_argument_index(debate)
         final = load_json(run_dir / "judge-review.json")
         final_by_symbol = {
             str(item.get("symbol_id")): item for item in final.get("symbols", []) if isinstance(item, dict)
@@ -797,7 +799,7 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
                         None,
                     )
                     if symbol_item is not None:
-                        side_blocks.append(render_debate_symbol(symbol_item, side))
+                        side_blocks.append(render_debate_symbol(symbol_item, side, run_index))
                 if side_blocks:
                     phase_blocks.append(
                         f"<section class=\"phase compact-phase\"><div class=\"phase-title\"><span>{esc(PHASE_LABELS.get(str(phase.get('phase')), phase.get('phase')))}</span>"
@@ -806,12 +808,15 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
 
             if final_item:
                 account_exposure = (decision_by_symbol.get(symbol_id) or {}).get("account_exposure") or {}
+                decision_evidence_html = render_decision_evidence(
+                    final_item.get("one_line_reason"), debate_argument_index, run_index, symbol_id
+                )
                 judge_html = (
-                    f"{''.join(phase_blocks)}<article class=\"final-card full\"><div><h3>Final Judge</h3><span class=\"badge info\">rank {number(final_item.get('relative_attractiveness_rank'))}</span></div>"
+                    f"<article class=\"final-card full\"><div><h3>Final Judge</h3><span class=\"badge info\">rank {number(final_item.get('relative_attractiveness_rank'))}</span></div>"
                     f"<div class=\"final-numbers\"><span>현재 {number(account_exposure.get('current_live_holding_quantity'))}주</span>"
                     f"<span>최종 {number(final_item.get('final_holding_quantity'))}주</span><span>목표 {number(final_item.get('target_position_value_krw'))}원</span></div>"
                     f"<p><code>{esc(final_item.get('reason_code'))}</code></p><p>{esc(final_item.get('one_line_reason'))}</p>"
-                    f"{render_thesis_section(final_item)}</article>"
+                    f"{decision_evidence_html}{render_thesis_section(final_item)}</article>{''.join(phase_blocks)}"
                 )
             else:
                 judge_html = '<div class="empty-state">Analyst 평가는 완료됐지만 이 run의 Judge shortlist에는 선정되지 않았습니다.</div>'
@@ -1391,7 +1396,87 @@ def list_items(values: Any, empty: str = "없음") -> str:
     return "".join(f"<li>{esc(value)}</li>" for value in values)
 
 
-def render_debate_symbol(item: dict[str, Any], side: str) -> str:
+CITED_ARGUMENT_ID_PATTERN = re.compile(
+    r"(?<![0-9A-Za-z_-])\d{6}-(?:bull|bear)-(?:opening|rebuttal-\d+)-\d+(?:/\d+)*(?![0-9A-Za-z_/-])"
+)
+ARGUMENT_ID_PATTERN = re.compile(r"\d{6}-(?:bull|bear)-(?:opening|rebuttal-\d+)-\d+")
+
+
+def parse_cited_argument_ids(text: Any) -> list[str]:
+    """Extract decisive argument IDs from a Judge one_line_reason, expanding slash shorthand.
+
+    `010950-bear-rebuttal-1-1/3` cites both `...-1-1` and `...-1-3`; the shorthand only ever
+    replaces the trailing argument number, never the phase/side/symbol prefix.
+    """
+    ids: list[str] = []
+    seen: set[str] = set()
+    for match in CITED_ARGUMENT_ID_PATTERN.finditer(str(text or "")):
+        base, _, last_segment = match.group(0).rpartition("-")
+        for number_text in last_segment.split("/"):
+            candidate = f"{base}-{number_text}"
+            if candidate not in seen:
+                seen.add(candidate)
+                ids.append(candidate)
+    return ids
+
+
+def build_debate_argument_index(debate: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    index: dict[str, dict[str, Any]] = {}
+    phases = debate.get("phases") if isinstance(debate.get("phases"), list) else []
+    for phase in phases:
+        if not isinstance(phase, dict):
+            continue
+        sides = phase.get("sides") if isinstance(phase.get("sides"), dict) else {}
+        for side in ("bull", "bear"):
+            payload = ((sides.get(side) or {}).get("output") or {})
+            symbols = payload.get("symbols") if isinstance(payload.get("symbols"), list) else []
+            for symbol_item in symbols:
+                if not isinstance(symbol_item, dict):
+                    continue
+                arguments = symbol_item.get("arguments") if isinstance(symbol_item.get("arguments"), list) else []
+                for argument in arguments:
+                    if not isinstance(argument, dict):
+                        continue
+                    argument_id = str(argument.get("argument_id") or "")
+                    if argument_id:
+                        index[argument_id] = {
+                            "statement": argument.get("statement"),
+                            "side": side,
+                            "symbol_id": str(symbol_item.get("symbol_id") or ""),
+                        }
+    return index
+
+
+def argument_anchor_id(run_index: int, argument_id: str) -> str | None:
+    if not ARGUMENT_ID_PATTERN.fullmatch(argument_id):
+        return None
+    return f"arg-{run_index}-{argument_id}"
+
+
+def render_decision_evidence(
+    reason_text: Any, argument_index: dict[str, dict[str, Any]], run_index: int, symbol_id: str
+) -> str:
+    items = []
+    for argument_id in parse_cited_argument_ids(reason_text):
+        info = argument_index.get(argument_id)
+        if info is None or info.get("symbol_id") != symbol_id:
+            continue
+        anchor = argument_anchor_id(run_index, argument_id)
+        if anchor is None:
+            continue
+        side_label = SIDE_LABELS.get(str(info.get("side")), str(info.get("side")))
+        items.append(
+            f'<li class="decision-evidence-item {esc(info.get("side"))}">'
+            f'<a href="#{esc(anchor)}"><code>{esc(argument_id)}</code></a> '
+            f'<span class="badge info">{esc(side_label)}</span>'
+            f'<p>{esc(info.get("statement"))}</p></li>'
+        )
+    if not items:
+        return ""
+    return f'<div class="decision-evidence"><h4>판단 근거 인용</h4><ul>{"".join(items)}</ul></div>'
+
+
+def render_debate_symbol(item: dict[str, Any], side: str, run_index: int) -> str:
     arguments = item.get("arguments") if isinstance(item.get("arguments"), list) else []
     argument_rows = []
     for argument in arguments:
@@ -1399,8 +1484,11 @@ def render_debate_symbol(item: dict[str, Any], side: str) -> str:
             continue
         refs = argument.get("evidence_refs") if isinstance(argument.get("evidence_refs"), list) else []
         targets = argument.get("targets") if isinstance(argument.get("targets"), list) else []
+        argument_id = str(argument.get("argument_id") or "")
+        anchor_id = argument_anchor_id(run_index, argument_id)
+        anchor = f' id="{esc(anchor_id)}"' if anchor_id else ""
         argument_rows.append(
-            f"<article class=\"argument\"><div><code>{esc(argument.get('argument_id'))}</code> <span class=\"badge info\">{esc(argument.get('kind'))}</span></div>"
+            f"<article class=\"argument\"{anchor}><div><code>{esc(argument.get('argument_id'))}</code> <span class=\"badge info\">{esc(argument.get('kind'))}</span></div>"
             f"<p>{esc(argument.get('statement'))}</p><small>근거: {esc(' · '.join(str(value) for value in refs) or '-')}</small>"
             f"<small>대상: {esc(' · '.join(str(value) for value in targets) or '-')}</small></article>"
         )
@@ -1508,6 +1596,7 @@ def build_html(runs_root: Path, target_run: str) -> str:
     .arguments {{ display:grid; gap:9px; }} .argument {{ padding:12px; border:1px solid var(--line); border-radius:10px; background:var(--subtle); }} .argument p {{ margin:7px 0; }} .argument small {{ display:block; color:var(--muted); overflow-wrap:anywhere; }}
     .debate-meta {{ display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:10px; }} .debate-meta>div,.position {{ padding:12px; border-radius:10px; background:var(--accent-bg); }} .debate-meta ul {{ margin:7px 0 0; padding-left:20px; }} .position {{ margin-top:10px; }} .position p {{ margin:5px 0 0; }}
     .final-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }} .final-card {{ padding:15px; border:1px solid var(--line); border-radius:12px; background:var(--subtle); }} .final-card h3 {{ display:inline; }} .final-card p {{ margin:8px 0 0; }} .final-numbers {{ display:flex; flex-wrap:wrap; gap:7px; margin-top:10px; }} .final-numbers span {{ padding:5px 8px; border-radius:8px; background:var(--accent-bg); font-size:12px; font-weight:700; }}
+    .decision-evidence {{ margin-top:12px; padding-top:12px; border-top:1px dashed var(--line); }} .decision-evidence h4 {{ margin:0 0 6px; font-size:12px; color:var(--muted); }} .decision-evidence ul {{ display:grid; gap:6px; margin:0; padding:0; list-style:none; }} .decision-evidence-item {{ padding:8px 10px; border-radius:9px; background:#fff; border-left:4px solid var(--bull); }} .decision-evidence-item.bear {{ border-left-color:var(--bear); }} .decision-evidence-item a {{ color:var(--accent); font-weight:700; text-decoration:none; }} .decision-evidence-item a:hover {{ text-decoration:underline; }} .decision-evidence-item p {{ margin:4px 0 0; font-size:12px; }}
     .thesis-block {{ display:grid; gap:8px; margin-top:12px; padding-top:12px; border-top:1px dashed var(--line); }} .thesis-block h4 {{ margin:0 0 4px; font-size:12px; color:var(--muted); }} .thesis-block p {{ margin:0; font-size:12px; }} .thesis-source {{ color:var(--muted); }} .thesis-conditions {{ display:grid; gap:4px; margin:4px 0 0; padding-left:16px; font-size:12px; }} .thesis-condition.matched {{ font-weight:700; }}
     footer {{ padding:24px 4px 0; color:var(--muted); font-size:12px; text-align:center; }}
     @media(max-width:1000px) {{ .trade-symbol-selector {{ grid-template-columns:repeat(4,minmax(0,1fr)); }} }}

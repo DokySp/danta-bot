@@ -10,10 +10,12 @@ from pathlib import Path
 
 from ..scripts.render_html_report import (
     analyst_score_class,
+    argument_anchor_id,
     build_html,
     cumulative_today_fills,
     find_runs,
     order_status_badge,
+    parse_cited_argument_ids,
     render_combined_chart,
     render_header,
     render_market_and_quality,
@@ -1107,6 +1109,400 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
         self.assertIn("max_sell_qty=0", rendered)
         self.assertIn('class="mini-badge attempt"', rendered)
         self.assertIn('active" data-symbol-target="run-0-1400-005930"', rendered)
+
+    def _write_debate_and_judge_run(
+        self, run_dir: Path, *, one_line_reason: str, extra_bear_argument: bool = True
+    ) -> dict:
+        write_json(
+            run_dir / "analyst-review.json",
+            {"symbols": [{"symbol_id": "000001", "symbol_name": "알파전자", "final_first_score": 5.0}]},
+        )
+        bear_arguments = [
+            {"argument_id": "000001-bear-opening-1", "kind": "claim", "statement": "밸류에이션 부담", "evidence_refs": [], "targets": []},
+        ]
+        if extra_bear_argument:
+            bear_arguments.append(
+                {"argument_id": "000001-bear-opening-2", "kind": "claim", "statement": "수급 악화", "evidence_refs": [], "targets": []}
+            )
+        write_json(
+            run_dir / "judge-debate.json",
+            {
+                "phases": [
+                    {
+                        "phase": "opening",
+                        "sides": {
+                            "bull": {
+                                "output": {
+                                    "symbols": [
+                                        {
+                                            "symbol_id": "000001",
+                                            "symbol_name": "알파전자",
+                                            "arguments": [
+                                                {"argument_id": "000001-bull-opening-1", "kind": "claim", "statement": "성장 모멘텀 강함", "evidence_refs": [], "targets": []}
+                                            ],
+                                            "concessions": [],
+                                            "unresolved_conflicts": [],
+                                            "final_position": "매수 우위",
+                                            "recommended_action": "buy",
+                                            "target_holding_quantity": 1,
+                                        }
+                                    ]
+                                }
+                            },
+                            "bear": {
+                                "output": {
+                                    "symbols": [
+                                        {
+                                            "symbol_id": "000001",
+                                            "symbol_name": "알파전자",
+                                            "arguments": bear_arguments,
+                                            "concessions": [],
+                                            "unresolved_conflicts": [],
+                                            "final_position": "매도 우위",
+                                            "recommended_action": "hold",
+                                            "target_holding_quantity": 0,
+                                        }
+                                    ]
+                                }
+                            },
+                        },
+                    }
+                ]
+            },
+        )
+        write_json(
+            run_dir / "judge-review.json",
+            {
+                "symbols": [
+                    {
+                        "symbol_id": "000001",
+                        "symbol_name": "알파전자",
+                        "final_holding_quantity": 1,
+                        "target_position_value_krw": 100_000,
+                        "relative_attractiveness_rank": 1,
+                        "reason_code": "buy",
+                        "one_line_reason": one_line_reason,
+                    }
+                ]
+            },
+        )
+        return {
+            "path": run_dir,
+            "summary": {"started_at": "2026-07-20T14:00:49+09:00"},
+            "execution": {"orders": []},
+            "decision": {},
+        }
+
+    def test_time_symbol_inspector_shows_final_judge_before_phase_details(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary) / "run-1"
+            run = self._write_debate_and_judge_run(
+                run_dir, one_line_reason="000001-bull-opening-1의 근거로 매수한다."
+            )
+            rendered = render_time_symbol_inspector([run], [])
+
+        final_index = rendered.index('<article class="final-card full">')
+        phase_index = rendered.index('class="phase compact-phase"')
+        self.assertLess(final_index, phase_index)
+
+    def test_time_symbol_inspector_renders_decision_evidence_link_and_statement(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary) / "run-1"
+            run = self._write_debate_and_judge_run(
+                run_dir,
+                one_line_reason="000001-bull-opening-1의 성장 모멘텀이 000001-bear-opening-1/2의 우려보다 크다.",
+            )
+            rendered = render_time_symbol_inspector([run], [])
+
+        self.assertIn('href="#arg-0-000001-bull-opening-1"', rendered)
+        self.assertIn('href="#arg-0-000001-bear-opening-1"', rendered)
+        self.assertIn('href="#arg-0-000001-bear-opening-2"', rendered)
+        self.assertIn("성장 모멘텀 강함", rendered)
+        self.assertIn("밸류에이션 부담", rendered)
+        self.assertIn("수급 악화", rendered)
+        self.assertIn('id="arg-0-000001-bull-opening-1"', rendered)
+        self.assertIn('id="arg-0-000001-bear-opening-1"', rendered)
+        self.assertIn('id="arg-0-000001-bear-opening-2"', rendered)
+        evidence_index = rendered.index('class="decision-evidence"')
+        final_index = rendered.index('<article class="final-card full">')
+        self.assertLess(final_index, evidence_index)
+
+    def test_time_symbol_inspector_anchors_are_unique_across_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir_a = Path(temporary) / "run-1"
+            run_a = self._write_debate_and_judge_run(
+                run_dir_a, one_line_reason="000001-bull-opening-1의 근거로 매수한다.", extra_bear_argument=False
+            )
+            run_a["summary"] = {"started_at": "2026-07-20T14:00:49+09:00"}
+            run_dir_b = Path(temporary) / "run-2"
+            run_b = self._write_debate_and_judge_run(
+                run_dir_b, one_line_reason="000001-bull-opening-1의 근거로 매수한다.", extra_bear_argument=False
+            )
+            run_b["summary"] = {"started_at": "2026-07-20T15:00:00+09:00"}
+
+            rendered = render_time_symbol_inspector([run_a, run_b], [])
+
+        self.assertIn('id="arg-0-000001-bull-opening-1"', rendered)
+        self.assertIn('id="arg-1-000001-bull-opening-1"', rendered)
+        self.assertIn('href="#arg-0-000001-bull-opening-1"', rendered)
+        self.assertIn('href="#arg-1-000001-bull-opening-1"', rendered)
+
+    def test_time_symbol_inspector_ignores_unknown_or_missing_cited_arguments(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary) / "run-1"
+            run = self._write_debate_and_judge_run(
+                run_dir,
+                one_line_reason="999999-bull-opening-9의 근거로 매수하지만 실제 debate에는 없다.",
+            )
+            rendered = render_time_symbol_inspector([run], [])
+
+        self.assertIn("999999-bull-opening-9의 근거로 매수하지만 실제 debate에는 없다.", rendered)
+        self.assertNotIn('href="#arg-0-999999-bull-opening-9"', rendered)
+        self.assertNotIn('class="decision-evidence"', rendered)
+
+    def test_time_symbol_inspector_handles_missing_debate_artifact_gracefully(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary) / "run-1"
+            write_json(
+                run_dir / "analyst-review.json",
+                {"symbols": [{"symbol_id": "000001", "symbol_name": "알파전자", "final_first_score": 5.0}]},
+            )
+            write_json(
+                run_dir / "judge-review.json",
+                {
+                    "symbols": [
+                        {
+                            "symbol_id": "000001",
+                            "symbol_name": "알파전자",
+                            "final_holding_quantity": 1,
+                            "target_position_value_krw": 100_000,
+                            "relative_attractiveness_rank": 1,
+                            "reason_code": "buy",
+                            "one_line_reason": "000001-bull-opening-1의 근거로 매수한다.",
+                        }
+                    ]
+                },
+            )
+            run = {
+                "path": run_dir,
+                "summary": {"started_at": "2026-07-20T14:00:49+09:00"},
+                "execution": {"orders": []},
+                "decision": {},
+            }
+
+            rendered = render_time_symbol_inspector([run], [])
+
+        self.assertIn("000001-bull-opening-1의 근거로 매수한다.", rendered)
+        self.assertNotIn('class="decision-evidence"', rendered)
+
+    def test_parse_cited_argument_ids_expands_shorthand_and_dedupes_in_order(self) -> None:
+        text = (
+            "010950-bull-rebuttal-1-2의 강한 추세에도 010950-bear-rebuttal-1-1/3의 과열이 크고 "
+            "010950-bull-rebuttal-1-2도 다시 언급된다."
+        )
+
+        ids = parse_cited_argument_ids(text)
+
+        self.assertEqual(
+            ids,
+            ["010950-bull-rebuttal-1-2", "010950-bear-rebuttal-1-1", "010950-bear-rebuttal-1-3"],
+        )
+
+    def test_parse_cited_argument_ids_rejects_substring_of_longer_digit_run(self) -> None:
+        text = "1010950-bull-opening-1 is not a standalone symbol argument id"
+
+        ids = parse_cited_argument_ids(text)
+
+        self.assertEqual(ids, [])
+
+    def test_parse_cited_argument_ids_rejects_ascii_letter_prefix(self) -> None:
+        self.assertEqual(parse_cited_argument_ids("x010950-bull-opening-1"), [])
+
+    def test_parse_cited_argument_ids_rejects_ascii_letter_suffix(self) -> None:
+        self.assertEqual(parse_cited_argument_ids("010950-bull-opening-1x"), [])
+
+    def test_parse_cited_argument_ids_rejects_dangling_trailing_slash(self) -> None:
+        self.assertEqual(parse_cited_argument_ids("010950-bull-opening-1/"), [])
+
+    def test_parse_cited_argument_ids_accepts_id_followed_by_korean_particle(self) -> None:
+        self.assertEqual(
+            parse_cited_argument_ids("010950-bull-opening-1의 근거"), ["010950-bull-opening-1"]
+        )
+
+    def test_parse_cited_argument_ids_rejects_underscore_prefix(self) -> None:
+        self.assertEqual(parse_cited_argument_ids("_010950-bull-opening-1"), [])
+
+    def test_parse_cited_argument_ids_rejects_hyphen_prefix(self) -> None:
+        self.assertEqual(parse_cited_argument_ids("-010950-bull-opening-1"), [])
+
+    def test_parse_cited_argument_ids_rejects_underscore_suffix(self) -> None:
+        self.assertEqual(parse_cited_argument_ids("010950-bull-opening-1_extra"), [])
+
+    def test_parse_cited_argument_ids_rejects_hyphen_suffix(self) -> None:
+        self.assertEqual(parse_cited_argument_ids("010950-bull-opening-1-extra"), [])
+
+    def test_parse_cited_argument_ids_accepts_id_wrapped_in_punctuation_with_korean_suffix(self) -> None:
+        self.assertEqual(
+            parse_cited_argument_ids("(010950-bull-opening-1)의 근거"), ["010950-bull-opening-1"]
+        )
+
+    def test_argument_anchor_id_rejects_malformed_argument_id(self) -> None:
+        self.assertIsNone(argument_anchor_id(0, "bad id"))
+        self.assertIsNone(argument_anchor_id(0, "000001-bull-opening-1\n"))
+        self.assertEqual(argument_anchor_id(0, "000001-bull-opening-1"), "arg-0-000001-bull-opening-1")
+
+    def test_time_symbol_inspector_does_not_link_real_argument_belonging_to_other_symbol(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary) / "run-1"
+            write_json(
+                run_dir / "analyst-review.json",
+                {
+                    "symbols": [
+                        {"symbol_id": "000001", "symbol_name": "알파전자", "final_first_score": 5.0},
+                        {"symbol_id": "000002", "symbol_name": "베타소재", "final_first_score": 5.0},
+                    ]
+                },
+            )
+            write_json(
+                run_dir / "judge-debate.json",
+                {
+                    "phases": [
+                        {
+                            "phase": "opening",
+                            "sides": {
+                                "bull": {
+                                    "output": {
+                                        "symbols": [
+                                            {
+                                                "symbol_id": "000001",
+                                                "symbol_name": "알파전자",
+                                                "arguments": [
+                                                    {"argument_id": "000001-bull-opening-1", "kind": "claim", "statement": "알파전자 성장 모멘텀", "evidence_refs": [], "targets": []}
+                                                ],
+                                                "concessions": [],
+                                                "unresolved_conflicts": [],
+                                                "final_position": "매수 우위",
+                                                "recommended_action": "buy",
+                                                "target_holding_quantity": 1,
+                                            },
+                                            {
+                                                "symbol_id": "000002",
+                                                "symbol_name": "베타소재",
+                                                "arguments": [
+                                                    {"argument_id": "000002-bull-opening-1", "kind": "claim", "statement": "베타소재 반등 기대", "evidence_refs": [], "targets": []}
+                                                ],
+                                                "concessions": [],
+                                                "unresolved_conflicts": [],
+                                                "final_position": "매수 우위",
+                                                "recommended_action": "buy",
+                                                "target_holding_quantity": 1,
+                                            },
+                                        ]
+                                    }
+                                },
+                                "bear": {"output": {"symbols": []}},
+                            },
+                        }
+                    ]
+                },
+            )
+            write_json(
+                run_dir / "judge-review.json",
+                {
+                    "symbols": [
+                        {
+                            "symbol_id": "000001",
+                            "symbol_name": "알파전자",
+                            "final_holding_quantity": 1,
+                            "target_position_value_krw": 100_000,
+                            "relative_attractiveness_rank": 1,
+                            "reason_code": "buy",
+                            # Cites a real argument ID, but it belongs to symbol 000002, not this
+                            # 000001 Final Judge entry.
+                            "one_line_reason": "000002-bull-opening-1의 근거로 매수한다.",
+                        }
+                    ]
+                },
+            )
+            run = {
+                "path": run_dir,
+                "summary": {"started_at": "2026-07-20T14:00:49+09:00"},
+                "execution": {"orders": []},
+                "decision": {},
+            }
+
+            rendered = render_time_symbol_inspector([run], [])
+
+        self.assertIn("000002-bull-opening-1의 근거로 매수한다.", rendered)
+        self.assertNotIn('href="#arg-0-000002-bull-opening-1"', rendered)
+        self.assertNotIn('class="decision-evidence"', rendered)
+
+    def test_time_symbol_inspector_skips_dom_anchor_for_malformed_argument_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary) / "run-1"
+            write_json(
+                run_dir / "analyst-review.json",
+                {"symbols": [{"symbol_id": "000001", "symbol_name": "알파전자", "final_first_score": 5.0}]},
+            )
+            write_json(
+                run_dir / "judge-debate.json",
+                {
+                    "phases": [
+                        {
+                            "phase": "opening",
+                            "sides": {
+                                "bull": {
+                                    "output": {
+                                        "symbols": [
+                                            {
+                                                "symbol_id": "000001",
+                                                "symbol_name": "알파전자",
+                                                "arguments": [
+                                                    {"argument_id": "bad id", "kind": "claim", "statement": "malformed id from an old artifact", "evidence_refs": [], "targets": []}
+                                                ],
+                                                "concessions": [],
+                                                "unresolved_conflicts": [],
+                                                "final_position": "매수 우위",
+                                                "recommended_action": "buy",
+                                                "target_holding_quantity": 1,
+                                            }
+                                        ]
+                                    }
+                                },
+                                "bear": {"output": {"symbols": []}},
+                            },
+                        }
+                    ]
+                },
+            )
+            write_json(
+                run_dir / "judge-review.json",
+                {
+                    "symbols": [
+                        {
+                            "symbol_id": "000001",
+                            "symbol_name": "알파전자",
+                            "final_holding_quantity": 1,
+                            "target_position_value_krw": 100_000,
+                            "relative_attractiveness_rank": 1,
+                            "reason_code": "buy",
+                            "one_line_reason": "malformed id를 참고해 매수한다.",
+                        }
+                    ]
+                },
+            )
+            run = {
+                "path": run_dir,
+                "summary": {"started_at": "2026-07-20T14:00:49+09:00"},
+                "execution": {"orders": []},
+                "decision": {},
+            }
+
+            rendered = render_time_symbol_inspector([run], [])
+
+        self.assertIn("malformed id from an old artifact", rendered)
+        self.assertNotIn(' id="arg-0-bad id"', rendered)
+        self.assertNotIn('href="#arg-0-bad id"', rendered)
 
 
 if __name__ == "__main__":
