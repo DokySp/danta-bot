@@ -980,7 +980,6 @@ def news_summary_for(cache: Any, symbol_id: str, cache_path: str, expected_date:
         result.append(
             {
                 "article_date": article_date,
-                "sentiment": item.get("sentiment") or "neutral",
                 "content": content,
             }
         )

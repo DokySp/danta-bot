@@ -390,6 +390,29 @@ symbols:
             )
             if len(freshness_filtered_news) != 1 or freshness_filtered_news[0].get("content") != "fresh":
                 failures.append(f"news summary should keep matching-date articles after filtering stale leading rows: {freshness_filtered_news}")
+            if set(freshness_filtered_news[0]) != {"article_date", "content"}:
+                failures.append(f"news summary entries must only carry article_date/content: {freshness_filtered_news}")
+            legacy_sentiment_news = news_summary_for(
+                {
+                    "date": "2026-06-18",
+                    "symbols": {
+                        "005930": {
+                            "articles": [
+                                {
+                                    "article_date": "2026-06-18T09:30:00+09:00",
+                                    "content": "legacy",
+                                    "sentiment": "positive",
+                                }
+                            ]
+                        }
+                    },
+                },
+                "005930",
+                "news-cache.yaml",
+                "2026-06-18",
+            )
+            if len(legacy_sentiment_news) != 1 or "sentiment" in legacy_sentiment_news[0]:
+                failures.append(f"legacy sentiment key must be dropped from news summary output: {legacy_sentiment_news}")
             if news_summary_for(
                 {"symbols": {"005930": [{"article_date": "2026-06-18", "content": "undated cache"}]}},
                 "005930",

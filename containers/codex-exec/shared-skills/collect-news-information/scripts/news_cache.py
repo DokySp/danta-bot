@@ -335,34 +335,6 @@ def load_symbols(args: argparse.Namespace) -> list[tuple[str, str]]:
     return unique
 
 
-def sentiment_for(text: str) -> str:
-    positive = ("상승", "호재", "수주", "실적 개선", "흑자", "증가", "강세", "목표가 상향", "매수", "계약")
-    negative = ("하락", "악재", "적자", "감소", "약세", "목표가 하향", "매도", "소송", "리콜", "손실")
-    has_pos = any(word in text for word in positive)
-    has_neg = any(word in text for word in negative)
-    if has_pos and has_neg:
-        return "mixed"
-    if has_pos:
-        return "positive"
-    if has_neg:
-        return "negative"
-    return "neutral"
-
-
-def normalize_sentiment(value: Any) -> str:
-    mapping = {
-        "긍정": "positive",
-        "중립": "neutral",
-        "부정": "negative",
-        "혼합": "mixed",
-        "positive": "positive",
-        "neutral": "neutral",
-        "negative": "negative",
-        "mixed": "mixed",
-    }
-    return mapping.get(str(value).strip(), "neutral")
-
-
 def normalize_symbol_key(value: Any) -> str:
     text = str(value or "").strip()
     digits = "".join(ch for ch in text if ch.isdigit())
@@ -376,7 +348,6 @@ def canonical_article(raw_article: Any) -> dict[str, str]:
         raw_article = {}
     return {
         "article_date": str(raw_article.get("article_date") or ""),
-        "sentiment": normalize_sentiment(raw_article.get("sentiment")),
         "content": str(raw_article.get("content") or ""),
     }
 
@@ -479,18 +450,15 @@ def row_text(item: dict[str, Any]) -> str:
 
 
 def article_payload(item: dict[str, Any]) -> dict[str, Any]:
-    text = row_text(item)
     return {
         "article_date": row_date(item),
-        "sentiment": sentiment_for(text),
-        "content": text,
+        "content": row_text(item),
     }
 
 
 def no_article_payload(date_hyphen: str) -> dict[str, Any]:
     return {
         "article_date": "",
-        "sentiment": "neutral",
         "content": f"{date_hyphen} 기준 수집된 뉴스가 없습니다.",
     }
 
@@ -556,7 +524,6 @@ def normalize_existing_symbols(symbols: dict[str, Any]) -> None:
                 normalized_articles.append(
                     {
                         "article_date": str(item.get("article_date") or ""),
-                        "sentiment": normalize_sentiment(item.get("sentiment")),
                         "content": str(item.get("content") or ""),
                     }
                 )

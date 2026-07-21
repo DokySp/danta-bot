@@ -103,7 +103,6 @@ def make_run(runs_root: Path, run_id: str, started_at: str, *, target: bool) -> 
                 {
                     "article_date": "2026-07-15 08:30",
                     "content": "신규 수주 공시",
-                    "sentiment": "positive",
                 }
             ],
         },
@@ -122,7 +121,6 @@ def make_run(runs_root: Path, run_id: str, started_at: str, *, target: bool) -> 
                 {
                     "article_date": "2026-07-15 09:10",
                     "content": "원가 부담 확대",
-                    "sentiment": "negative",
                 }
             ]
             if target
@@ -342,8 +340,6 @@ def self_test() -> int:
             "event.key === 'ArrowUp'",
             "신규 수주 공시",
             "원가 부담 확대",
-            'sentiment positive',
-            'sentiment negative',
             "KOSPI 3210.50 (+1.25%)",
             "regimeLabel&quot;:&quot;강세",
             "regime&quot;:&quot;risk_on",
@@ -380,6 +376,9 @@ def self_test() -> int:
             "재무 수집 supplied",
             "확인된 체결 전체",
             "봇이 제출한 주문 전체",
+            'class="sentiment',
+            "sentiment positive",
+            "sentiment negative",
         ]
         missing = [value for value in required if value not in rendered]
         present = [value for value in forbidden if value in rendered]

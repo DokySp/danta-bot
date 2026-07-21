@@ -63,13 +63,10 @@ symbols:
     symbol_name: 종목이름
     articles:
       - article_date: "2026-06-10T09:30:00+09:00"
-        sentiment: positive
         content: KIS API 반환 제목 또는 문구
 ```
 
-Allowed sentiment values are `positive`, `neutral`, `negative`, and `mixed`.
-
-Top-level fields are always ordered as `date`, `source`, and `symbols`. Symbol fields are ordered as `symbol_name` then `articles` when `symbol_name` is present; otherwise only `articles` is written. Article fields are always strings: `article_date`, `sentiment`, and `content`. Use an empty string for `article_date` when the API does not provide a date. Do not write `title`, `symbol_id`, `updated_at`, or `errors` fields. Write `symbol_name` only when the KIS API response includes a matching Korean symbol name for the requested symbol code.
+Top-level fields are always ordered as `date`, `source`, and `symbols`. Symbol fields are ordered as `symbol_name` then `articles` when `symbol_name` is present; otherwise only `articles` is written. Article fields are always strings: `article_date` and `content`. Use an empty string for `article_date` when the API does not provide a date. Do not write `title`, `symbol_id`, `updated_at`, `errors`, or `sentiment` fields. Write `symbol_name` only when the KIS API response includes a matching Korean symbol name for the requested symbol code.
 
 ## Boundaries
 

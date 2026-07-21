@@ -21,7 +21,6 @@ from news_cache import (  # noqa: E402
     normalize_date,
     row_date,
     row_text,
-    sentiment_for,
     write_yaml,
 )
 
@@ -38,12 +37,11 @@ def command_self_test(_args: argparse.Namespace) -> int:
         "kor_isnm1": "삼성전자",
     }
     assert row_date(item) == "2026-06-10T09:30:00+09:00"
-    assert sentiment_for(row_text(item)) == "positive"
+    assert row_text(item) == "삼성전자 수주 증가"
     cache = merge_cache(date_hyphen, Path("/tmp/nonexistent-news-cache.yaml"), [("005930", "삼성전자", [item], [])])
     assert list(cache["symbols"]["005930"].keys()) == ["symbol_name", "articles"]
-    assert set(cache["symbols"]["005930"]["articles"][0]) == {"article_date", "sentiment", "content"}
+    assert set(cache["symbols"]["005930"]["articles"][0]) == {"article_date", "content"}
     assert cache["symbols"]["005930"]["articles"][0]["article_date"] == "2026-06-10T09:30:00+09:00"
-    assert cache["symbols"]["005930"]["articles"][0]["sentiment"] == "positive"
     assert cache["symbols"]["005930"]["symbol_name"] == "삼성전자"
     assert "symbol_id" not in cache["symbols"]["005930"]
     assert "updated_at" not in cache["symbols"]["005930"]
@@ -74,9 +72,8 @@ def command_self_test(_args: argparse.Namespace) -> int:
     assert "005930" in merged["symbols"]
     assert merged["symbols"]["005930"]["symbol_name"] == "삼성전자"
     assert "symbol_name" not in merged["symbols"]["000660"]
-    assert set(merged["symbols"]["000660"]["articles"][0]) == {"article_date", "sentiment", "content"}
+    assert set(merged["symbols"]["000660"]["articles"][0]) == {"article_date", "content"}
     assert merged["symbols"]["000660"]["articles"][0]["article_date"] == ""
-    assert merged["symbols"]["000660"]["articles"][0]["sentiment"] == "neutral"
     assert "updated_at" not in merged
     assert "title" not in merged
     assert "symbol_id" not in merged
