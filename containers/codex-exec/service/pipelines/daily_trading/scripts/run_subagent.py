@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shlex
@@ -822,6 +823,8 @@ def non_negative_number_value(raw: Any) -> int | float | None:
     if isinstance(raw, bool) or raw is None:
         return None
     if isinstance(raw, (int, float)):
+        if isinstance(raw, float) and not math.isfinite(raw):
+            return None
         if raw < 0:
             return None
         return int(raw) if isinstance(raw, float) and raw.is_integer() else raw
@@ -832,6 +835,8 @@ def non_negative_number_value(raw: Any) -> int | float | None:
         try:
             value = float(text)
         except ValueError:
+            return None
+        if not math.isfinite(value):
             return None
         if value < 0:
             return None
@@ -1172,6 +1177,131 @@ def add_judge_review_holding_context(payload: Any, output_dir: Path | None = Non
     return payload
 
 
+POSITION_COST_CONTEXT_ADVISORY = (
+    "Use position_cost_context as reference information for profit/loss, risk, and position adjustments. "
+    "Determine final direction and target exposure by considering thesis, market evidence, and portfolio risk "
+    "together."
+)
+
+
+def positive_number_value(raw: Any) -> int | float | None:
+    value = non_negative_number_value(raw)
+    return value if value is not None and value > 0 else None
+
+
+def compact_position_cost_context(
+    account_item: dict[str, Any] | None,
+    current_review_price: Any,
+    price_observed_at: str,
+) -> dict[str, Any]:
+    context: dict[str, Any] = {
+        "status": "unavailable",
+        "held": None,
+        "average_purchase_price": None,
+        "purchase_amount": None,
+        "current_quantity": None,
+        "current_review_price": None,
+        "current_review_price_observed_at": "",
+        "pct_distance_from_average_price": None,
+        "source": "",
+        "observed_at": "",
+        "advisory_semantics": POSITION_COST_CONTEXT_ADVISORY,
+    }
+    if not isinstance(account_item, dict) or "current_live_holding_quantity" not in account_item:
+        return context
+    quantity = non_negative_int_value(account_item.get("current_live_holding_quantity"))
+    if quantity is None:
+        return context
+    if quantity == 0:
+        context["status"] = "not_held"
+        context["held"] = False
+        context["current_quantity"] = 0
+        return context
+    context["held"] = True
+    context["current_quantity"] = quantity
+    context["purchase_amount"] = positive_number_value(account_item.get("purchase_amount"))
+    context["observed_at"] = str(account_item.get("observed_at") or "")
+    average_price = positive_number_value(account_item.get("average_purchase_price"))
+    if average_price is not None:
+        context["average_purchase_price"] = average_price
+        context["source"] = "direct_kis.inquire_balance.pchs_avg_pric"
+        context["status"] = "held_available"
+    else:
+        context["status"] = "held_average_price_unavailable"
+    review_price = positive_number_value(current_review_price)
+    if review_price is not None:
+        context["current_review_price"] = review_price
+        context["current_review_price_observed_at"] = str(price_observed_at or "")
+    if average_price is not None and review_price is not None:
+        try:
+            pct_distance = ((review_price - average_price) / average_price) * 100
+        except (OverflowError, ZeroDivisionError, ArithmeticError):
+            pct_distance = None
+        if pct_distance is not None and math.isfinite(pct_distance):
+            context["pct_distance_from_average_price"] = round(pct_distance, 2)
+    return context
+
+
+ACCOUNT_ARTIFACT_USABLE_STATUSES = {"success", "partial"}
+
+
+def account_artifact_holdings_usable(account: Any) -> bool:
+    if not isinstance(account, dict):
+        return False
+    if account.get("skipped"):
+        return False
+    return str(account.get("status") or "") in ACCOUNT_ARTIFACT_USABLE_STATUSES
+
+
+def account_holdings_by_symbol(output_dir: Path) -> dict[str, dict[str, Any]]:
+    account = read_json_if_exists(output_dir / "account-before-order.json")
+    holdings: dict[str, dict[str, Any]] = {}
+    if not account_artifact_holdings_usable(account):
+        return holdings
+    symbols = account.get("symbols")
+    if isinstance(symbols, list):
+        for item in symbols:
+            key = symbol_key(item)
+            if key and isinstance(item, dict):
+                holdings[key] = item
+    return holdings
+
+
+def add_judge_review_position_cost_context(payload: Any, output_dir: Path | None = None) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+    holdings = account_holdings_by_symbol(output_dir or Path(""))
+
+    def context_for(symbol_id: str, item: dict[str, Any]) -> dict[str, Any]:
+        price = item.get("price") if isinstance(item.get("price"), dict) else {}
+        return compact_position_cost_context(
+            holdings.get(symbol_id),
+            price.get("current_or_last"),
+            str(price.get("observed_at") or ""),
+        )
+
+    symbols = payload.get("symbols")
+    if isinstance(symbols, list):
+        copied_payload = dict(payload)
+        copied_payload["symbols"] = [
+            dict(item, position_cost_context=context_for(symbol_key(item), item))
+            if isinstance(item, dict)
+            else item
+            for item in symbols
+        ]
+        return copied_payload
+    if isinstance(symbols, dict):
+        copied_payload = dict(payload)
+        copied_payload["symbols"] = {
+            symbol_id: dict(item, position_cost_context=context_for(symbol_id, item))
+            if isinstance(item, dict)
+            else item
+            for symbol_id, item in symbols.items()
+        }
+        return copied_payload
+    return payload
+
+
 def without_excluded_agent_scores(item: Any) -> Any:
     if not isinstance(item, dict):
         return item
@@ -1236,6 +1366,8 @@ def write_review_input_slices(spec: dict[str, Any]) -> dict[str, str]:
             sliced = build_review_core_payload(payload, symbols, str(spec.get("agent_role") or ""))
             if stage in {"judge-review", DEBATE_STAGE}:
                 sliced = add_judge_review_holding_context(sliced, output_dir, str(spec.get("started_at") or ""))
+            if stage == "judge-review":
+                sliced = add_judge_review_position_cost_context(sliced, output_dir)
             relative_name = "review-core"
             slice_paths["review_core"] = str(slice_dir / f"{task_name}.{relative_name}.json")
         else:
@@ -1408,6 +1540,7 @@ def compact_review_prompt(spec: dict[str, Any]) -> str | None:
                 "Treat an empty recent_trade_context.recent_submitted_trades list as confirmed absence only when coverage_status=complete; otherwise recent trade history is unknown and its absence is non-directional.",
                 "For held sell candidates, an intact long-term thesis favors holding despite the low score; sell only when thesis damage, material adverse news/disclosure, or structural deterioration is supported by supplied evidence.",
                 "Use strategy_context and symbol_strategy_context as advisory inputs for target_position_value_krw, not as order allow/block rules.",
+                "Use position_cost_context (average_purchase_price, purchase_amount, current_review_price, pct_distance_from_average_price) as reference information for profit/loss, risk, and position adjustments. Determine final direction and target exposure by considering thesis, market evidence, and portfolio risk together.",
                 "prior_thesis_context reports whether an earlier run already recorded a structured thesis_definition (core_rationale and invalidation_conditions, each with a condition_id and description) for this symbol. Those prior conditions are immutable for evaluating a reduction in this run: a newly returned definition cannot be applied retroactively to that assessment, while a valid definition returned for an actual buy/increase becomes the successor prior for later runs.",
                 "For a held symbol whose symbol_strategy_context.loss_position is true (or pnl_rate < 0), always return thesis_assessment: {status: intact|damaged|uncertain, matched_invalidation_condition_ids: [...], cited_argument_ids: [...]}. Price loss, index/regime panic, a low score, or missing optional evidence alone are never sufficient for status=damaged.",
                 "The pipeline only allows reducing target_position_value_krw below baseline for a loss position when status is damaged, matched_invalidation_condition_ids reference condition_id values that already exist in prior_thesis_context.thesis_definition.invalidation_conditions, and cited_argument_ids reference argument_id values that already exist in debate_artifact for this symbol. Otherwise it preserves baseline exposure regardless of target_position_value_krw.",
@@ -2208,6 +2341,10 @@ def artifact_content_fingerprints(spec: dict[str, Any]) -> dict[str, str | None]
         if key in {"persona", "persona_path", "review_format", "analyst-review-format"}:
             continue
         fingerprints[key] = file_sha256(resolve_artifact_path(path_text, workspace_dir))
+    if str(spec.get("stage", "")).strip() == "judge-review":
+        output_dir = str(spec.get("output_dir", "")).strip()
+        if output_dir:
+            fingerprints["account_before_order_position_cost"] = file_sha256(Path(output_dir) / "account-before-order.json")
     return fingerprints
 
 

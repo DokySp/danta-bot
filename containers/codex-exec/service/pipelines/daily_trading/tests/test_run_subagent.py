@@ -14,7 +14,9 @@ from typing import Any
 from ..scripts.run_subagent import (
     MODEL_USAGE_FILENAME,
     RUNTIME_CONFIG_ENV,
+    account_holdings_by_symbol,
     build_prompt,
+    compact_position_cost_context,
     compact_prompt,
     compact_review_payload_errors,
     debate_final_decision_issues,
@@ -549,6 +551,33 @@ def write_sample_review_inputs(tmp: Path) -> None:
         },
     )
     write_json(
+        run_dir / "account-before-order.json",
+        {
+            "schema_version": "1",
+            "run_id": "self-test",
+            "status": "success",
+            "skipped": False,
+            "symbols": [
+                {
+                    "symbol_id": "005930",
+                    "symbol_name": "삼성전자",
+                    "current_live_holding_quantity": 10,
+                    "average_purchase_price": 65000.0,
+                    "purchase_amount": 650000,
+                    "observed_at": "2026-06-08T08:55:00+09:00",
+                },
+                {
+                    "symbol_id": "000660",
+                    "symbol_name": "SK하이닉스",
+                    "current_live_holding_quantity": 0,
+                    "average_purchase_price": None,
+                    "purchase_amount": None,
+                    "observed_at": "2026-06-08T08:55:00+09:00",
+                },
+            ],
+        },
+    )
+    write_json(
         run_dir / "analyst-review.json",
         {
             "schema_version": "1",
@@ -613,6 +642,8 @@ def assert_compact_review_prompt(tmp: Path) -> None:
         raise AssertionError(f"compact review prompt missing {missing}: {prompt}")
     if "Optional evidence marked missing, failed, empty, unavailable" in prompt:
         raise AssertionError(f"judge-only optional-evidence policy leaked into analyst-review prompt: {prompt}")
+    if "position_cost_context" in prompt:
+        raise AssertionError(f"judge-only position_cost_context guard leaked into analyst-review prompt: {prompt}")
 
     second_prompt = build_prompt(
         compact_spec(tmp, stage="judge-review", agent_role="judge", task_name="second")
@@ -627,6 +658,8 @@ def assert_compact_review_prompt(tmp: Path) -> None:
         "final_first_score is the simple mean of the included analyst view scores",
         "For held sell candidates, an intact long-term thesis favors holding despite the low score",
         "Use strategy_context and symbol_strategy_context as advisory inputs for target_position_value_krw, not as order allow/block rules.",
+        "Use position_cost_context (average_purchase_price, purchase_amount, current_review_price, pct_distance_from_average_price) as reference information for profit/loss, risk, and position adjustments.",
+        "Determine final direction and target exposure by considering thesis, market evidence, and portfolio risk together.",
         "debate_artifact:",
         "The Python pipeline already completed bull/bear opening and rebuttal-1 final arguments.",
         "Do not spawn or resume debate agents and do not request another round.",
@@ -716,6 +749,8 @@ def assert_review_input_slices(tmp: Path) -> None:
         raise AssertionError(f"analyst-review slice kept full same-day timeline: {first_symbol}")
     if "financial_summary" in first_symbol or "account_exposure" in first_symbol or "custom_detail" in first_symbol:
         raise AssertionError(f"momentum-news slice kept unrelated fields: {first_symbol}")
+    if "position_cost_context" in first_symbol:
+        raise AssertionError(f"analyst-review slice must not receive position_cost_context: {first_symbol}")
     quality_payload = compact_spec(tmp, stage="analyst-review", agent_role="analyst-quality-risk", task_name="slice-quality")
     quality_slices = write_review_input_slices(quality_payload)
     quality_core = load_json(Path(quality_slices["decision_brief"]))
@@ -727,6 +762,8 @@ def assert_review_input_slices(tmp: Path) -> None:
         raise AssertionError(f"analyst-review slice kept strategy_context: {quality_core}")
     if "symbol_strategy_context" in (quality_core.get("symbols") or [{}])[0]:
         raise AssertionError(f"analyst-review slice kept symbol_strategy_context: {quality_core}")
+    if "position_cost_context" in (quality_core.get("symbols") or [{}])[0]:
+        raise AssertionError(f"analyst-review slice must not receive position_cost_context: {quality_core}")
 
     payload = compact_spec(tmp, stage="judge-review", agent_role="judge", task_name="slice-test")
     slices = write_review_input_slices(payload)
@@ -784,6 +821,174 @@ def assert_review_input_slices(tmp: Path) -> None:
             recent_context = first_symbol.get("recent_trade_context", {})
             if recent_context.get("coverage_status") != "complete" or recent_context.get("inspected_run_count") != 2:
                 raise AssertionError(f"review-core did not mark complete recent-trade coverage: {first_symbol}")
+            position_cost_context = first_symbol.get("position_cost_context", {})
+            if position_cost_context.get("status") != "held_available" or position_cost_context.get("held") is not True:
+                raise AssertionError(f"judge-review review-core dropped position_cost_context: {first_symbol}")
+            if position_cost_context.get("average_purchase_price") != 65000.0:
+                raise AssertionError(f"judge-review review-core dropped average_purchase_price: {first_symbol}")
+            if position_cost_context.get("current_quantity") != 10 or position_cost_context.get("current_review_price") != 70000:
+                raise AssertionError(f"judge-review review-core position_cost_context wrong quantity/price: {first_symbol}")
+            if position_cost_context.get("purchase_amount") != 650000:
+                raise AssertionError(f"judge-review review-core position_cost_context dropped purchase_amount: {first_symbol}")
+            expected_pct = round(((70000 - 65000.0) / 65000.0) * 100, 2)
+            if position_cost_context.get("pct_distance_from_average_price") != expected_pct:
+                raise AssertionError(f"judge-review review-core computed wrong pct distance: {first_symbol}")
+            if "buy" in position_cost_context.get("advisory_semantics", "").lower() and "not" not in position_cost_context.get("advisory_semantics", "").lower():
+                raise AssertionError(f"position_cost_context advisory_semantics missing non-directional guard: {first_symbol}")
+            second_symbol = slice_payload["symbols"][1]
+            second_cost_context = second_symbol.get("position_cost_context", {})
+            if second_cost_context.get("status") != "not_held" or second_cost_context.get("held") is not False:
+                raise AssertionError(f"confirmed non-held symbol position_cost_context must say not_held: {second_symbol}")
+            if second_cost_context.get("average_purchase_price") is not None:
+                raise AssertionError(f"not_held symbol must not carry an average_purchase_price: {second_symbol}")
+            if second_cost_context.get("current_quantity") != 0:
+                raise AssertionError(f"confirmed not_held symbol must report current_quantity=0: {second_symbol}")
+            missing_account_context = compact_position_cost_context(None, 70000, "2026-06-08T09:00:00+09:00")
+            if missing_account_context.get("status") != "unavailable" or missing_account_context.get("held") is not None:
+                raise AssertionError(
+                    f"missing account source must be unavailable, not confirmed not-held: {missing_account_context}"
+                )
+            if missing_account_context.get("current_quantity") is not None:
+                raise AssertionError(
+                    f"unavailable position cost context must not report a fabricated current_quantity: {missing_account_context}"
+                )
+            unpriced_holding_context = compact_position_cost_context(
+                {"current_live_holding_quantity": 5, "average_purchase_price": None, "purchase_amount": None, "observed_at": "x"},
+                70000,
+                "2026-06-08T09:00:00+09:00",
+            )
+            if unpriced_holding_context.get("status") != "held_average_price_unavailable" or unpriced_holding_context.get("held") is not True:
+                raise AssertionError(
+                    f"held row without a valid average price must stay held with an unavailable-price status: {unpriced_holding_context}"
+                )
+            if unpriced_holding_context.get("average_purchase_price") is not None or unpriced_holding_context.get("pct_distance_from_average_price") is not None:
+                raise AssertionError(f"unavailable average price must not fabricate a value or distance: {unpriced_holding_context}")
+            zero_purchase_amount_context = compact_position_cost_context(
+                {"current_live_holding_quantity": 5, "average_purchase_price": 60000.0, "purchase_amount": 0, "observed_at": "x"},
+                70000,
+                "2026-06-08T09:00:00+09:00",
+            )
+            if zero_purchase_amount_context.get("purchase_amount") is not None:
+                raise AssertionError(f"zero broker purchase_amount must stay unavailable, not a valid amount: {zero_purchase_amount_context}")
+            missing_quantity_key_context = compact_position_cost_context(
+                {"average_purchase_price": 60000.0, "observed_at": "x"}, 70000, "2026-06-08T09:00:00+09:00"
+            )
+            if missing_quantity_key_context.get("status") != "unavailable" or missing_quantity_key_context.get("held") is not None:
+                raise AssertionError(
+                    f"a row missing current_live_holding_quantity must be unavailable, not confirmed not-held: {missing_quantity_key_context}"
+                )
+            if missing_quantity_key_context.get("current_quantity") is not None:
+                raise AssertionError(
+                    f"a row missing current_live_holding_quantity must not report current_quantity=0: {missing_quantity_key_context}"
+                )
+            negative_quantity_context = compact_position_cost_context(
+                {"current_live_holding_quantity": -1, "average_purchase_price": 60000.0, "observed_at": "x"},
+                70000,
+                "2026-06-08T09:00:00+09:00",
+            )
+            if negative_quantity_context.get("status") != "unavailable" or negative_quantity_context.get("held") is not None:
+                raise AssertionError(
+                    f"a malformed/negative quantity must be unavailable, not confirmed not-held: {negative_quantity_context}"
+                )
+            if negative_quantity_context.get("current_quantity") is not None:
+                raise AssertionError(
+                    f"a malformed/negative quantity must not report a fabricated current_quantity: {negative_quantity_context}"
+                )
+            zero_review_price_context = compact_position_cost_context(
+                {"current_live_holding_quantity": 5, "average_purchase_price": 60000.0, "observed_at": "x"},
+                0,
+                "2026-06-08T09:00:00+09:00",
+            )
+            if zero_review_price_context.get("current_review_price") is not None:
+                raise AssertionError(f"a zero current review price must stay unavailable: {zero_review_price_context}")
+            if zero_review_price_context.get("pct_distance_from_average_price") is not None:
+                raise AssertionError(
+                    f"a zero current review price must never fabricate a pct distance: {zero_review_price_context}"
+                )
+            infinite_average_price_context = compact_position_cost_context(
+                {"current_live_holding_quantity": 5, "average_purchase_price": float("inf"), "observed_at": "x"},
+                70000,
+                "2026-06-08T09:00:00+09:00",
+            )
+            if infinite_average_price_context.get("average_purchase_price") is not None:
+                raise AssertionError(
+                    f"an infinite average purchase price must stay unavailable, not fabricate a value: {infinite_average_price_context}"
+                )
+            if infinite_average_price_context.get("status") != "held_average_price_unavailable":
+                raise AssertionError(
+                    f"an infinite average purchase price must report held_average_price_unavailable: {infinite_average_price_context}"
+                )
+            if infinite_average_price_context.get("pct_distance_from_average_price") is not None:
+                raise AssertionError(
+                    f"an infinite average purchase price must never produce a NaN/Inf pct distance: {infinite_average_price_context}"
+                )
+            nan_review_price_context = compact_position_cost_context(
+                {"current_live_holding_quantity": 5, "average_purchase_price": 60000.0, "observed_at": "x"},
+                float("nan"),
+                "2026-06-08T09:00:00+09:00",
+            )
+            if nan_review_price_context.get("current_review_price") is not None:
+                raise AssertionError(f"a NaN current review price must stay unavailable: {nan_review_price_context}")
+            if nan_review_price_context.get("pct_distance_from_average_price") is not None:
+                raise AssertionError(
+                    f"a NaN current review price must never fabricate a pct distance: {nan_review_price_context}"
+                )
+            infinite_purchase_amount_context = compact_position_cost_context(
+                {
+                    "current_live_holding_quantity": 5,
+                    "average_purchase_price": 60000.0,
+                    "purchase_amount": float("inf"),
+                    "observed_at": "x",
+                },
+                70000,
+                "2026-06-08T09:00:00+09:00",
+            )
+            if infinite_purchase_amount_context.get("purchase_amount") is not None:
+                raise AssertionError(
+                    f"an infinite broker purchase_amount must stay unavailable, not fabricate a value: {infinite_purchase_amount_context}"
+                )
+            overflowing_pct_distance_context = compact_position_cost_context(
+                {"current_live_holding_quantity": 1, "average_purchase_price": 1e-308, "observed_at": "x"},
+                1e308,
+                "2026-06-08T09:00:00+09:00",
+            )
+            if overflowing_pct_distance_context.get("status") != "held_available":
+                raise AssertionError(
+                    f"finite extreme average/review prices must still report held_available: {overflowing_pct_distance_context}"
+                )
+            if overflowing_pct_distance_context.get("average_purchase_price") != 1e-308:
+                raise AssertionError(
+                    f"an overflowing derived pct distance must not blank out the finite average price: {overflowing_pct_distance_context}"
+                )
+            if overflowing_pct_distance_context.get("current_review_price") != 1e308:
+                raise AssertionError(
+                    f"an overflowing derived pct distance must not blank out the finite review price: {overflowing_pct_distance_context}"
+                )
+            if overflowing_pct_distance_context.get("pct_distance_from_average_price") is not None:
+                raise AssertionError(
+                    f"a pct distance that overflows to inf must stay unavailable, not serialize as Infinity: {overflowing_pct_distance_context}"
+                )
+            huge_integer_pct_distance_context = compact_position_cost_context(
+                {"current_live_holding_quantity": 1, "average_purchase_price": 1, "observed_at": "x"},
+                10**10000,
+                "2026-06-08T09:00:00+09:00",
+            )
+            if huge_integer_pct_distance_context.get("status") != "held_available":
+                raise AssertionError(
+                    f"huge-integer review price must still report held_available: {huge_integer_pct_distance_context}"
+                )
+            if huge_integer_pct_distance_context.get("average_purchase_price") != 1:
+                raise AssertionError(
+                    f"a huge-integer pct distance overflow must not blank out the finite average price: {huge_integer_pct_distance_context}"
+                )
+            if huge_integer_pct_distance_context.get("current_review_price") != 10**10000:
+                raise AssertionError(
+                    f"a huge-integer pct distance overflow must not blank out the raw review price: {huge_integer_pct_distance_context}"
+                )
+            if huge_integer_pct_distance_context.get("pct_distance_from_average_price") is not None:
+                raise AssertionError(
+                    f"a pct distance calc that raises OverflowError on huge Python ints must stay unavailable: {huge_integer_pct_distance_context}"
+                )
         if key == "analyst_review" and slice_payload.get("slice_type") != "analyst-review-slice":
             raise AssertionError(f"judge-review first slice missing slice_type: {slice_payload}")
         if key == "analyst_review":
@@ -846,6 +1051,104 @@ def assert_review_input_slices(tmp: Path) -> None:
     if unavailable_context.get("coverage_status") != "unavailable" or unavailable_context.get("inspected_run_count") != 0:
         raise AssertionError(f"zero prior executions should produce unavailable recent-trade coverage: {unavailable_context}")
 
+    debate_opening_slices = write_review_input_slices(
+        compact_debate_spec(tmp, side="bull", phase="opening", task_name="cost-context-debate-bull-opening")
+    )
+    debate_review_core = load_json(Path(debate_opening_slices["review_core"]))
+    for debate_symbol in debate_review_core.get("symbols", []):
+        if "position_cost_context" in debate_symbol:
+            raise AssertionError(f"judge-debate opening input must not receive position_cost_context: {debate_symbol}")
+
+    failed_account_dir = tmp / "reports" / "runs" / "self-test-failed-account"
+    write_json(
+        failed_account_dir / "account-before-order.json",
+        {
+            "schema_version": "1",
+            "run_id": "self-test-failed-account",
+            "status": "failed",
+            "skipped": False,
+            "symbols": [{"symbol_id": "005930", "current_live_holding_quantity": 0}],
+            "errors": [{"code": "inquire_balance_failed"}],
+        },
+    )
+    failed_account_holdings = account_holdings_by_symbol(failed_account_dir)
+    if failed_account_holdings:
+        raise AssertionError(
+            f"a failed account artifact's placeholder rows must never be treated as confirmed holdings: {failed_account_holdings}"
+        )
+
+    skipped_account_dir = tmp / "reports" / "runs" / "self-test-skipped-account"
+    write_json(
+        skipped_account_dir / "account-before-order.json",
+        {
+            "schema_version": "1",
+            "run_id": "self-test-skipped-account",
+            "status": "success",
+            "skipped": True,
+            "symbols": [{"symbol_id": "005930", "current_live_holding_quantity": 0}],
+        },
+    )
+    skipped_account_holdings = account_holdings_by_symbol(skipped_account_dir)
+    if skipped_account_holdings:
+        raise AssertionError(
+            f"a skipped account artifact must never be treated as confirmed holdings: {skipped_account_holdings}"
+        )
+
+    partial_account_dir = tmp / "reports" / "runs" / "self-test-partial-account"
+    write_json(
+        partial_account_dir / "account-before-order.json",
+        {
+            "schema_version": "1",
+            "run_id": "self-test-partial-account",
+            "status": "partial",
+            "skipped": False,
+            "symbols": [{"symbol_id": "005930", "current_live_holding_quantity": 3, "average_purchase_price": 50000.0}],
+        },
+    )
+    partial_account_holdings = account_holdings_by_symbol(partial_account_dir)
+    if partial_account_holdings.get("005930", {}).get("current_live_holding_quantity") != 3:
+        raise AssertionError(
+            f"a partial account artifact with explicit normalized holding rows must remain usable: {partial_account_holdings}"
+        )
+
+    missing_status_account_dir = tmp / "reports" / "runs" / "self-test-missing-status-account"
+    write_json(
+        missing_status_account_dir / "account-before-order.json",
+        {
+            "schema_version": "1",
+            "run_id": "self-test-missing-status-account",
+            "symbols": [{"symbol_id": "005930", "current_live_holding_quantity": 3, "average_purchase_price": 50000.0}],
+        },
+    )
+    if account_holdings_by_symbol(missing_status_account_dir):
+        raise AssertionError("an account artifact with no status field must never be treated as confirmed holdings")
+
+    null_status_account_dir = tmp / "reports" / "runs" / "self-test-null-status-account"
+    write_json(
+        null_status_account_dir / "account-before-order.json",
+        {
+            "schema_version": "1",
+            "run_id": "self-test-null-status-account",
+            "status": None,
+            "symbols": [{"symbol_id": "005930", "current_live_holding_quantity": 3, "average_purchase_price": 50000.0}],
+        },
+    )
+    if account_holdings_by_symbol(null_status_account_dir):
+        raise AssertionError("an account artifact with a null status must never be treated as confirmed holdings")
+
+    unknown_status_account_dir = tmp / "reports" / "runs" / "self-test-unknown-status-account"
+    write_json(
+        unknown_status_account_dir / "account-before-order.json",
+        {
+            "schema_version": "1",
+            "run_id": "self-test-unknown-status-account",
+            "status": "unexpected_future_status",
+            "symbols": [{"symbol_id": "005930", "current_live_holding_quantity": 3, "average_purchase_price": 50000.0}],
+        },
+    )
+    if account_holdings_by_symbol(unknown_status_account_dir):
+        raise AssertionError("an account artifact with an unrecognized status must never be treated as confirmed holdings")
+
 
 def assert_debate_optional_evidence_policy() -> None:
     prompt_dir = Path(__file__).resolve().parents[1] / "prompts"
@@ -862,6 +1165,11 @@ def assert_debate_optional_evidence_policy() -> None:
     judge_text = (prompt_dir / "judge.md").read_text(encoding="utf-8")
     if "optional evidence 부재는 어느 방향의 논거로도 세지 않는다" not in judge_text:
         raise AssertionError("judge.md missing non-directional optional-evidence policy")
+    if (
+        "position_cost_context`는 손익·리스크·포지션 조정의 참고 정보로 활용한다" not in judge_text
+        or "최종 방향과 목표 노출은 thesis, 시장 근거, 포트폴리오 위험을 함께 고려한다" not in judge_text
+    ):
+        raise AssertionError("judge.md missing position_cost_context judgment guidance")
     format_text = (prompt_dir / "judge-review-format.md").read_text(encoding="utf-8")
     if "unavailable news is neutral rather than favorable or adverse" not in format_text:
         raise AssertionError("judge-review-format.md missing unavailable-news neutrality policy")
@@ -1481,6 +1789,28 @@ def run_self_test() -> int:
             changed_reuse_after = len(argv_log.read_text(encoding="utf-8").splitlines())
             if changed_wrapper.get("reused_existing_wrapper") or changed_reuse_after != changed_reuse_before + 1:
                 failures.append(f"changed artifact content incorrectly reused wrapper: {changed_wrapper}")
+
+            write_sample_review_inputs(tmp)
+            judge_reuse_spec = compact_spec(tmp, stage="judge-review", agent_role="judge", task_name="judge-reuse")
+            first_judge_wrapper = run_one(judge_reuse_spec)
+            if first_judge_wrapper.get("status") != "success":
+                failures.append(f"judge-review reuse setup wrapper failed: {first_judge_wrapper}")
+            judge_reuse_before = len(argv_log.read_text(encoding="utf-8").splitlines())
+            second_judge_wrapper = run_one(judge_reuse_spec)
+            judge_reuse_after = len(argv_log.read_text(encoding="utf-8").splitlines())
+            if not second_judge_wrapper.get("reused_existing_wrapper") or judge_reuse_after != judge_reuse_before:
+                failures.append(f"unchanged judge-review wrapper was not reused: {second_judge_wrapper}")
+            account_before_order_path = tmp / "reports" / "runs" / "self-test" / "account-before-order.json"
+            account_before_order = load_json(account_before_order_path)
+            account_before_order["symbols"][0]["average_purchase_price"] = 61000.0
+            write_json(account_before_order_path, account_before_order)
+            judge_changed_before = len(argv_log.read_text(encoding="utf-8").splitlines())
+            judge_changed_wrapper = run_one(judge_reuse_spec)
+            judge_changed_after = len(argv_log.read_text(encoding="utf-8").splitlines())
+            if judge_changed_wrapper.get("reused_existing_wrapper") or judge_changed_after != judge_changed_before + 1:
+                failures.append(
+                    f"changing only account-before-order.json average purchase price incorrectly reused judge-review wrapper: {judge_changed_wrapper}"
+                )
 
             old_raw_retention = os.environ.get("CODEX_SUBAGENT_RAW_RETENTION")
             os.environ["CODEX_SUBAGENT_RAW_RETENTION"] = "failed"

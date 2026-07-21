@@ -7,6 +7,7 @@ import argparse
 import fcntl
 import importlib.util
 import json
+import math
 import os
 import re
 import sys
@@ -286,7 +287,7 @@ def parse_int(value: Any) -> int | None:
         return None
     try:
         return int(float(text))
-    except ValueError:
+    except (ValueError, OverflowError):
         return None
 
 
@@ -990,6 +991,18 @@ def holding_quantity(row: dict[str, Any]) -> int:
     return parse_int(first_present(row, ("hldg_qty", "hold_qty", "qty"))) or 0
 
 
+def holding_average_purchase_price(row: dict[str, Any]) -> float | None:
+    price = parse_float(first_present(row, ("pchs_avg_pric",)))
+    if price is None or not math.isfinite(price) or price <= 0:
+        return None
+    return price
+
+
+def holding_purchase_amount(row: dict[str, Any]) -> int | None:
+    amount = parse_int(first_present(row, ("pchs_amt",)))
+    return amount if amount is not None and amount > 0 else None
+
+
 def normalize_holding(row: dict[str, Any], *, observed_at: str) -> dict[str, Any]:
     symbol = holding_symbol(row)
     return {
@@ -1001,6 +1014,8 @@ def normalize_holding(row: dict[str, Any], *, observed_at: str) -> dict[str, Any
         "valuation_amount": parse_int(first_present(row, ("evlu_amt", "evlu_pfls_amt_smtl", "scts_evlu_amt"))),
         "pnl_amount": parse_int(first_present(row, ("evlu_pfls_amt", "evlu_pfls_smtl_amt"))),
         "pnl_rate": parse_float(first_present(row, ("evlu_pfls_rt", "evlu_erng_rt", "pfls_rt"))),
+        "average_purchase_price": holding_average_purchase_price(row),
+        "purchase_amount": holding_purchase_amount(row),
         "today_buy_quantity": parse_int(first_present(row, ("thdt_buyqty", "thdt_buy_qty", "tdy_buy_qty"))) or 0,
         "today_sell_quantity": parse_int(first_present(row, ("thdt_sll_qty", "thdt_sllqty", "tdy_sell_qty"))) or 0,
         "observed_at": observed_at,
@@ -1461,6 +1476,8 @@ def collect_account_artifact(symbols: list[str], *, run_id: str, started_at: str
                     "valuation_amount": 0,
                     "pnl_amount": 0,
                     "pnl_rate": None,
+                    "average_purchase_price": None,
+                    "purchase_amount": None,
                     "today_buy_quantity": 0,
                     "today_sell_quantity": 0,
                     "observed_at": observed_at,

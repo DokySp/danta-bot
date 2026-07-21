@@ -148,6 +148,8 @@ def run_self_test() -> int:
                         "valuation_amount": 70000,
                         "pnl_amount": -2500,
                         "pnl_rate": -3.5,
+                        "average_purchase_price": 72500.0,
+                        "purchase_amount": 72500,
                     },
                     {
                         "symbol_id": "000660",
@@ -303,6 +305,15 @@ symbols:
             by_symbol = {item.get("symbol_id"): item for item in brief["symbols"]}
             if by_symbol["005930"].get("evidence_mode") != "full":
                 failures.append(f"financial-covered symbol should be full: {by_symbol['005930']}")
+            account_exposure_005930 = by_symbol["005930"].get("account_exposure", {})
+            if "average_purchase_price" in account_exposure_005930 or "purchase_amount" in account_exposure_005930:
+                failures.append(
+                    f"decision-brief account_exposure must never carry broker cost-basis fields: {account_exposure_005930}"
+                )
+            if "position_cost_context" in by_symbol["005930"]:
+                failures.append(
+                    f"decision-brief symbols must not carry position_cost_context; it is judge-review-only: {by_symbol['005930']}"
+                )
             if by_symbol["000660"].get("evidence_mode") != "price_only":
                 failures.append(f"financial-missing symbol should remain price_only: {by_symbol['000660']}")
             if by_symbol["000660"].get("financial_summary", {}).get("cache_status") != "missing_symbol":

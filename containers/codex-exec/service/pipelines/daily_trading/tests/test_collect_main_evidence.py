@@ -93,16 +93,80 @@ def command_self_test(_args: argparse.Namespace) -> int:
     assert sample_account["symbol_id"] == "0183J0"
     assert sample_account["current_live_holding_quantity"] == 3
     assert sample_account["current_price"] == 70000
+    assert sample_account["average_purchase_price"] is None
+    assert sample_account["purchase_amount"] is None
     average_only_account = normalize_holding(
         {
             "pdno": "005930",
             "hldg_qty": "1",
             "pchs_avg_pric": "60000",
+            "pchs_amt": "60000",
             "evlu_amt": "70000",
         },
         observed_at="2026-06-18T09:00:00+09:00",
     )
     assert average_only_account["current_price"] is None
+    assert average_only_account["average_purchase_price"] == 60000.0
+    assert average_only_account["purchase_amount"] == 60000
+    invalid_average_account = normalize_holding(
+        {
+            "pdno": "005935",
+            "hldg_qty": "1",
+            "pchs_avg_pric": "0",
+            "pchs_amt": "0",
+            "evlu_amt": "0",
+        },
+        observed_at="2026-06-18T09:00:00+09:00",
+    )
+    assert invalid_average_account["average_purchase_price"] is None
+    assert invalid_average_account["purchase_amount"] is None
+    negative_purchase_amount_account = normalize_holding(
+        {
+            "pdno": "005936",
+            "hldg_qty": "1",
+            "pchs_avg_pric": "60000",
+            "pchs_amt": "-1",
+            "evlu_amt": "70000",
+        },
+        observed_at="2026-06-18T09:00:00+09:00",
+    )
+    assert negative_purchase_amount_account["purchase_amount"] is None
+    non_finite_account = normalize_holding(
+        {
+            "pdno": "005937",
+            "hldg_qty": "1",
+            "pchs_avg_pric": "Infinity",
+            "pchs_amt": "Infinity",
+            "evlu_amt": "70000",
+        },
+        observed_at="2026-06-18T09:00:00+09:00",
+    )
+    assert non_finite_account["average_purchase_price"] is None
+    assert non_finite_account["purchase_amount"] is None
+    negative_infinity_account = normalize_holding(
+        {
+            "pdno": "005938",
+            "hldg_qty": "1",
+            "pchs_avg_pric": "-Infinity",
+            "pchs_amt": "-Infinity",
+            "evlu_amt": "70000",
+        },
+        observed_at="2026-06-18T09:00:00+09:00",
+    )
+    assert negative_infinity_account["average_purchase_price"] is None
+    assert negative_infinity_account["purchase_amount"] is None
+    nan_account = normalize_holding(
+        {
+            "pdno": "005939",
+            "hldg_qty": "1",
+            "pchs_avg_pric": "NaN",
+            "pchs_amt": "NaN",
+            "evlu_amt": "70000",
+        },
+        observed_at="2026-06-18T09:00:00+09:00",
+    )
+    assert nan_account["average_purchase_price"] is None
+    assert nan_account["purchase_amount"] is None
     assert build_account_summary({"dnca_tot_amt": "1000", "tot_evlu_amt": "2000"})["cash_amount"] == 1000
     orderable_summary = build_account_summary({"dnca_tot_amt": "5183620", "prvs_rcdl_excc_amt": "1043015", "nxdy_excc_amt": "1276976"})
     assert orderable_summary["cash_amount"] == 5183620

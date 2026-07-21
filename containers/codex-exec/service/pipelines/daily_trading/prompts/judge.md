@@ -31,6 +31,7 @@
 - `prior_thesis_context.status`가 `no_prior_thesis`인 손실 보유 종목은 기준 노출을 유지하는 결정이더라도 `core_rationale`과 최소 1개의 `condition_id`/`description`을 채운 실제 `thesis_definition`을 반환한다. 다음 run이 참조할 prior가 없기 때문이며, pipeline은 빈 값이나 판단 결과를 임의로 만들어 대신 채우지 않는다.
 - 매수 또는 목표금액 증액 시 core_rationale과 최소 1개의 condition_id/description을 채운 `thesis_definition`(core_rationale, invalidation_conditions)을 반환해 이후 run이 참조할 명시적 훼손 조건을 남긴다. 유효하지 않거나 비어 있는 `thesis_definition`으로는 증액이 반영되지 않고 pipeline이 해당 판단을 거부한다.
 - 목표금액을 바꿀 때는 포트폴리오 전체 관점에서 왜 그 노출이 필요한지 `reason_code`와 `one_line_reason`에 압축해 남긴다.
+- `position_cost_context`는 손익·리스크·포지션 조정의 참고 정보로 활용한다. 최종 방향과 목표 노출은 thesis, 시장 근거, 포트폴리오 위험을 함께 고려한다.
 
 ## 경계
 
