@@ -548,7 +548,8 @@ def render_thesis_condition_items(conditions: Any, matched_ids: set[str]) -> str
         matched_badge = '<span class="badge bad">훼손 근거 일치</span> ' if is_matched else ""
         rows.append(
             f"<li class=\"thesis-condition{' matched' if is_matched else ''}\">{matched_badge}"
-            f"<code>{esc(condition_id)}</code> {esc(condition.get('description'))}</li>"
+            f"{esc(condition.get('description'))}"
+            f" <span class=\"thesis-cond-key muted\">(내부 비교 키: <code>{esc(condition_id)}</code>)</span></li>"
         )
     return "".join(rows) or "<li>무효화 조건 없음</li>"
 
@@ -597,8 +598,8 @@ def render_thesis_section(final_item: dict[str, Any]) -> str:
         reason_code = str(gate.get("reason") or "")
         reason_label = THESIS_GATE_REASON_LABELS.get(reason_code, reason_code)
         blocks.append(
-            "<div class=\"thesis-gate\"><h4>손실 보유 종목 감축 게이트</h4>"
-            f"<p><span class=\"badge {'ok' if allowed else 'bad'}\">{'허용' if allowed else '차단'}</span>"
+            "<div class=\"thesis-gate\"><h4>손실 보유 종목 감축 요건</h4>"
+            f"<p><span class=\"badge {'ok' if allowed else 'bad'}\">{'요건 충족' if allowed else '요건 미충족'}</span>"
             f" {esc(reason_label)} <code>{esc(reason_code)}</code></p></div>"
         )
 

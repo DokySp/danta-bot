@@ -326,7 +326,7 @@ def self_test() -> int:
             "매출총이익률이 직전 가이던스 아래로 하락",
             "훼손 근거 일치",
             "000001-bear-opening-1",
-            "손실 보유 종목 감축 게이트",
+            "손실 보유 종목 감축 요건",
             "훼손 근거 검증 완료",
             "damaged_evidence_confirmed",
             "신규/후속 thesis",
@@ -634,10 +634,16 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
         self.assertIn("quality moat &amp; pricing power", rendered)
         self.assertIn("margin-compression", rendered)
         self.assertIn("demand-collapse", rendered)
+        self.assertIn("내부 비교 키", rendered)
+        self.assertIn("gross margin drops below prior guidance", rendered)
+        self.assertLess(
+            rendered.find("gross margin drops below prior guidance"),
+            rendered.find("margin-compression"),
+        )
         self.assertIn("훼손 근거 일치", rendered)
         self.assertIn("훼손", rendered)
         self.assertIn("005930-bear-opening-1", rendered)
-        self.assertIn("허용", rendered)
+        self.assertIn("요건 충족", rendered)
         self.assertIn("damaged_evidence_confirmed", rendered)
         self.assertIn("훼손 근거 검증 완료", rendered)
         self.assertIn("신규/후속 thesis", rendered)
@@ -665,7 +671,7 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
         self.assertIn("신규 등록 대상", rendered)
         self.assertNotIn("source_run_id", rendered)
         self.assertNotIn("출처: run", rendered)
-        self.assertIn("차단", rendered)
+        self.assertIn("요건 미충족", rendered)
         self.assertIn("no_prior_thesis", rendered)
         self.assertIn("유효한 이전 thesis 없음", rendered)
 
