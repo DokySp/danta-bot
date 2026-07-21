@@ -80,6 +80,7 @@ class Config:
     sync_skills_overwrite: bool
     portfolio_file: Path
     portfolio_except_file: Path
+    market_news_config_file: Path = Path("/app/config/market-news.yaml")
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -123,4 +124,8 @@ class Config:
             sync_skills_overwrite=required_env_bool("CODEX_SYNC_SKILLS_OVERWRITE"),
             portfolio_file=Path(os.getenv("PORTFOLIO_FILE", "/app/config/portfolio.txt")),
             portfolio_except_file=Path(os.getenv("PORTFOLIO_EXCEPT_FILE", "/app/config/portfolio-except.txt")),
+            market_news_config_file=env_path(
+                "MARKET_NEWS_CONFIG_FILE",
+                "/app/config/market-news.yaml",
+            ),
         )

@@ -47,8 +47,14 @@ def assert_unsupported_stage_rejected() -> None:
     try:
         launcher_model_effort("unsupported-stage", "judge")
     except ValueError:
+        pass
+    else:
+        raise AssertionError("unsupported daily-trading sub-agent stage/role was accepted")
+    try:
+        launcher_model_effort("symbol-news-collection", "news")
+    except ValueError:
         return
-    raise AssertionError("unsupported daily-trading sub-agent stage/role was accepted")
+    raise AssertionError("deterministic symbol-news collection was accepted as a sub-agent stage")
 
 
 def assert_model_effort(stage: str, agent_role: str, *, model: str, effort: str) -> None:
@@ -65,12 +71,6 @@ def assert_all_supported_stages_use_expected_models() -> None:
         (
             "financial-collection",
             "financial",
-            model_config["collection"]["model"],
-            model_config["collection"]["model_reasoning_effort"],
-        ),
-        (
-            "news-collection",
-            "news",
             model_config["collection"]["model"],
             model_config["collection"]["model_reasoning_effort"],
         ),
@@ -217,7 +217,7 @@ else:
                             "confidence": 5,
                             "reason_code": "no_news_excluded",
                             "one_line_reason": "뉴스 정보가 없어 평균에서 제외",
-                            "missing_data": ["news_summary"],
+                            "missing_data": ["symbol_news_summary"],
                         },
                     }
                 }
@@ -473,6 +473,19 @@ def write_sample_review_inputs(tmp: Path) -> None:
                     }
                 ],
             },
+            "market_news_context": {
+                "status": "supplied",
+                "window_start": "2026-06-07T06:00:00+00:00",
+                "window_end": "2026-06-08T00:00:00+00:00",
+                "selected_count": 1,
+                "items": [
+                    {
+                        "title": "Global semiconductor policy update",
+                        "published_at": "2026-06-07T23:00:00+00:00",
+                        "classifications": ["global"],
+                    }
+                ],
+            },
             "strategy_context": {
                 "schema_version": "1",
                 "regime": "weak_downside",
@@ -536,7 +549,7 @@ def write_sample_review_inputs(tmp: Path) -> None:
                     "orderbook_summary": {"bid_depth": 100},
                     "trade_flow_summary": {"tick_count": 3},
                     "investor_flow_summary": {"foreign_net_buy_quantity": 1000},
-                    "news_summary": [
+                    "symbol_news_summary": [
                         {"content": "n1", "url": "u1"},
                         {"content": "n2", "url": "u2"},
                         {"content": "n3", "url": "u3"},
@@ -739,10 +752,12 @@ def assert_review_input_slices(tmp: Path) -> None:
         raise AssertionError(f"analyst-review slice did not record output roles: {first_core}")
     if first_symbol.get("chart_context", {}).get("daily", [{}])[0].get("close") != 70000:
         raise AssertionError(f"momentum-news slice dropped chart_context: {first_symbol}")
-    if len(first_symbol.get("news_summary", [])) != 4:
-        raise AssertionError(f"momentum-news slice dropped news_summary: {first_symbol}")
+    if len(first_symbol.get("symbol_news_summary", [])) != 4:
+        raise AssertionError(f"momentum-news slice dropped symbol_news_summary: {first_symbol}")
     if first_core.get("market_index_snapshot", {}).get("indexes", [{}])[0].get("symbol") != "NASDAQ":
         raise AssertionError(f"momentum-news slice dropped market_index_snapshot: {first_core}")
+    if first_core.get("market_news_context", {}).get("items", [{}])[0].get("title") != "Global semiconductor policy update":
+        raise AssertionError(f"momentum-news slice dropped market_news_context: {first_core}")
     if first_symbol.get("today_trade_price_context", {}).get("last_fill_price") != 70100:
         raise AssertionError(f"momentum-news slice dropped same-day trade price context: {first_symbol}")
     if "today_trade_timeline_context" in first_symbol:
@@ -760,6 +775,10 @@ def assert_review_input_slices(tmp: Path) -> None:
         raise AssertionError(f"quality-risk slice dropped product_type needed for financial/ETF policy: {quality_core}")
     if "strategy_context" in quality_core:
         raise AssertionError(f"analyst-review slice kept strategy_context: {quality_core}")
+    if "market_news_context" in quality_core:
+        raise AssertionError(f"quality-risk slice kept market_news_context: {quality_core}")
+    if "symbol_news_summary" in (quality_core.get("symbols") or [{}])[0]:
+        raise AssertionError(f"quality-risk slice kept symbol_news_summary: {quality_core}")
     if "symbol_strategy_context" in (quality_core.get("symbols") or [{}])[0]:
         raise AssertionError(f"analyst-review slice kept symbol_strategy_context: {quality_core}")
     if "position_cost_context" in (quality_core.get("symbols") or [{}])[0]:
@@ -785,6 +804,8 @@ def assert_review_input_slices(tmp: Path) -> None:
                 raise AssertionError(f"judge-review slice dropped market_index_snapshot: {slice_payload}")
             if slice_payload.get("strategy_context", {}).get("regime") != "weak_downside":
                 raise AssertionError(f"judge-review slice dropped strategy_context: {slice_payload}")
+            if slice_payload.get("market_news_context", {}).get("selected_count") != 1:
+                raise AssertionError(f"judge-review slice dropped market_news_context: {slice_payload}")
             error_codes = [item.get("code") for item in slice_payload.get("errors", []) if isinstance(item, dict)]
             if error_codes != ["keep_symbol_error", "keep_run_error"]:
                 raise AssertionError(f"review-core did not filter symbol-scoped errors: {slice_payload}")
@@ -793,8 +814,8 @@ def assert_review_input_slices(tmp: Path) -> None:
                 raise AssertionError(f"review-core did not preserve nested price fields: {first_symbol}")
             if len(first_symbol.get("price_chart_signals", [])) != 4:
                 raise AssertionError(f"review-core truncated price_chart_signals: {first_symbol}")
-            if len(first_symbol.get("news_summary", [])) != 4:
-                raise AssertionError(f"review-core truncated news_summary: {first_symbol}")
+            if len(first_symbol.get("symbol_news_summary", [])) != 4:
+                raise AssertionError(f"review-core truncated symbol_news_summary: {first_symbol}")
             if first_symbol.get("warnings") != ["w1", "w2", "w3", "w4"]:
                 raise AssertionError(f"review-core truncated warnings: {first_symbol}")
             if first_symbol.get("custom_detail") != {"keep": True}:
@@ -1826,7 +1847,7 @@ def run_self_test() -> int:
             else:
                 os.environ["CODEX_SUBAGENT_RAW_RETENTION"] = old_raw_retention
 
-            text_spec = spec(tmp, stage="news-collection", agent_role="news", task_name="text-news")
+            text_spec = spec(tmp, stage="financial-collection", agent_role="financial", task_name="text-financial")
             os.environ["FAKE_CODEX_INVALID_JSON"] = "1"
             wrapper = run_one(text_spec)
             if wrapper["status"] != "success" or wrapper["parsed_json"] is not None or wrapper.get("parsed_text") != "not json":
@@ -1835,8 +1856,8 @@ def run_self_test() -> int:
 
             group = run_group(
                 [
-                    spec(tmp, stage="financial-collection", agent_role="financial", task_name="g-financial"),
-                    spec(tmp, stage="news-collection", agent_role="news", task_name="g-news"),
+                    spec(tmp, stage="financial-collection", agent_role="financial", task_name="g-financial-1"),
+                    spec(tmp, stage="financial-collection", agent_role="financial", task_name="g-financial-2"),
                 ],
                 max_workers=3,
             )
@@ -1846,21 +1867,21 @@ def run_self_test() -> int:
                 group_model_entries = [
                     json.loads(line)
                     for line in model_usage_path.read_text(encoding="utf-8").splitlines()
-                    if line.strip() and json.loads(line).get("task_name") in {"g-financial", "g-news"}
+                    if line.strip() and json.loads(line).get("task_name") in {"g-financial-1", "g-financial-2"}
                 ]
             except json.JSONDecodeError as exc:
                 failures.append(f"parallel model usage writes produced invalid JSONL: {exc}")
                 group_model_entries = []
-            if {item.get("task_name") for item in group_model_entries} != {"g-financial", "g-news"}:
+            if {item.get("task_name") for item in group_model_entries} != {"g-financial-1", "g-financial-2"}:
                 failures.append(f"parallel model invocations were not recorded: {group_model_entries}")
             wrapper_count = len(list((Path(group["wrappers"][0]["raw_output_path"]).parent).glob("g-*.wrapper.json")))
             if wrapper_count != 2:
                 failures.append(f"expected 2 group wrapper files, got {wrapper_count}")
 
-            os.environ["FAKE_CODEX_EMPTY_TASKS"] = "optional-news"
+            os.environ["FAKE_CODEX_EMPTY_TASKS"] = "optional-financial"
             optional_group = run_group(
                 [
-                    spec(tmp, stage="news-collection", agent_role="news", task_name="optional-news"),
+                    spec(tmp, stage="financial-collection", agent_role="financial", task_name="optional-financial"),
                 ],
                 max_workers=2,
             )
@@ -1876,7 +1897,7 @@ def run_self_test() -> int:
             required_group = run_group(
                 [
                     compact_spec(tmp, stage="analyst-review", agent_role="analyst-quality-risk", task_name="required-first"),
-                    spec(tmp, stage="news-collection", agent_role="news", task_name="required-news"),
+                    spec(tmp, stage="financial-collection", agent_role="financial", task_name="optional-financial-success"),
                 ],
                 max_workers=2,
             )

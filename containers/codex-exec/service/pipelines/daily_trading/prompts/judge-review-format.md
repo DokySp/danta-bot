@@ -97,6 +97,7 @@ Rules:
 - Treat an empty `recent_trade_context.recent_submitted_trades` list as confirmed absence only when `coverage_status=complete`; with `partial`/`unavailable` coverage, recent trade history is unknown and its absence is non-directional.
 - `reason_code` and `one_line_reason` must describe the same reduce/hold/increase direction implied by `target_position_value_krw` versus the baseline.
 - Consider relative attractiveness, duplicate exposure, current weight, price/chart conditions, `portfolio_snapshot`, and the supplied selected-symbol analyst-review results that contain usable evidence.
+- Treat top-level `market_news_context` as a full-review market signal, never as an automatic order for every candidate. Apply an item to an individual symbol only with an explicit sector, geographic revenue, supply-chain, rate, currency, commodity, or policy linkage; otherwise it is non-directional for that symbol.
 - Optional evidence marked `missing`, `failed`, `empty`, `unavailable`, or `excluded_from_aggregation` is non-directional. Do not use its absence to justify hold, reduce, or increase decisions, and do not cite it as decisive evidence in `reason_code` or `one_line_reason`.
 - Do not use optional-domain coverage counts or completeness to decide whether the supplied usable evidence is sufficient. Judge sufficiency from the directional strength and conflict of the usable evidence that is actually supplied.
 - If a symbol's analyst-review score is missing, unavailable, or unusable, hold it at the baseline instead of failing the judgment.

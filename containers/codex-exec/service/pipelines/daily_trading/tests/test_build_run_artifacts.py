@@ -31,7 +31,7 @@ from ..scripts.build_run_artifacts import (
     load_json,
     load_strategy_policy_config,
     mark_quality_value_excluded_without_financial,
-    news_summary_for,
+    symbol_news_summary_for,
     pipeline_dir,
     today_trade_collection_context,
     today_trade_context,
@@ -240,9 +240,9 @@ symbols:
 ''',
             encoding="utf-8",
         )
-        news_cache_path = tmp / "memory" / "collect-news-information" / "news-2026-06-18.yaml"
-        news_cache_path.parent.mkdir(parents=True, exist_ok=True)
-        news_cache_path.write_text(
+        symbol_news_cache_path = tmp / "memory" / "symbol-news-cache" / "symbol-news-2026-06-18.yaml"
+        symbol_news_cache_path.parent.mkdir(parents=True, exist_ok=True)
+        symbol_news_cache_path.write_text(
             '''date: "2026-06-18"
 source: kis_open_api
 symbols:
@@ -279,6 +279,36 @@ symbols:
                 "errors": [],
             },
         )
+        news_context_path = run_dir / "news-context.json"
+        write_json(
+            news_context_path,
+            {
+                "schema_version": "1",
+                "status": "success",
+                "window_start": "2026-06-17T06:15:00+00:00",
+                "window_end": "2026-06-18T00:00:00+00:00",
+                "window_source": "previous_daily_trading_run",
+                "deduplicated_count": 2,
+                "market_news": {
+                    "status": "supplied",
+                    "raw_count": 1,
+                    "selected_count": 1,
+                    "source_statuses": {"global": {"status": "success"}},
+                    "items": [
+                        {
+                            "title": "Global central bank update",
+                            "published_at": "2026-06-17T23:00:00+00:00",
+                            "url": "https://example.com/macro",
+                            "domain": "example.com",
+                            "source_country": "United States",
+                            "source_language": "English",
+                            "source_ids": ["global"],
+                            "classifications": ["global"],
+                        }
+                    ],
+                },
+            },
+        )
         try:
             brief = build_decision_brief(
                 argparse.Namespace(
@@ -291,7 +321,8 @@ symbols:
                     run_id=None,
                     started_at=None,
                     financial_cache_path=str(financial_cache_path),
-                    news_cache_path=str(news_cache_path),
+                    symbol_news_cache_path=str(symbol_news_cache_path),
+                    news_context_json=str(news_context_path),
                     market_index_snapshot_json=str(market_index_snapshot_path),
                 )
             )
@@ -368,9 +399,9 @@ symbols:
             expected_target_item = "목표가 컨센서스 3건(발표 20260701~20260708) 중앙값 460000(현재가대비 괴리율 -84.8%), 범위 390000~500000, 최신 390000 (키움, BUY, 20260708)"
             if target_price_items != [expected_target_item]:
                 failures.append(f"invest opinion target consensus should be summarized: {financial_items}")
-            if by_symbol["005930"].get("news_summary"):
+            if by_symbol["005930"].get("symbol_news_summary"):
                 failures.append(f"no-news placeholder should not be included: {by_symbol['005930']}")
-            freshness_filtered_news = news_summary_for(
+            freshness_filtered_news = symbol_news_summary_for(
                 {
                     "date": "2026-06-18",
                     "symbols": {
@@ -385,14 +416,14 @@ symbols:
                     },
                 },
                 "005930",
-                "news-cache.yaml",
+                "symbol-news-cache.yaml",
                 "2026-06-18",
             )
             if len(freshness_filtered_news) != 1 or freshness_filtered_news[0].get("content") != "fresh":
                 failures.append(f"news summary should keep matching-date articles after filtering stale leading rows: {freshness_filtered_news}")
             if set(freshness_filtered_news[0]) != {"article_date", "content"}:
                 failures.append(f"news summary entries must only carry article_date/content: {freshness_filtered_news}")
-            legacy_sentiment_news = news_summary_for(
+            legacy_sentiment_news = symbol_news_summary_for(
                 {
                     "date": "2026-06-18",
                     "symbols": {
@@ -408,19 +439,19 @@ symbols:
                     },
                 },
                 "005930",
-                "news-cache.yaml",
+                "symbol-news-cache.yaml",
                 "2026-06-18",
             )
             if len(legacy_sentiment_news) != 1 or "sentiment" in legacy_sentiment_news[0]:
                 failures.append(f"legacy sentiment key must be dropped from news summary output: {legacy_sentiment_news}")
-            if news_summary_for(
+            if symbol_news_summary_for(
                 {"symbols": {"005930": [{"article_date": "2026-06-18", "content": "undated cache"}]}},
                 "005930",
-                "news-cache.yaml",
+                "symbol-news-cache.yaml",
                 "2026-06-18",
             ):
                 failures.append("news summary without a verifiable cache date should not be usable")
-            if news_summary_for(
+            if symbol_news_summary_for(
                 {
                     "date": "2020-01-01",
                     "symbols": {
@@ -432,7 +463,7 @@ symbols:
                     },
                 },
                 "005930",
-                "old-news-cache.yaml",
+                "old-symbol-news-cache.yaml",
                 "2026-06-18",
             ):
                 failures.append("news cache and article dates matching each other should still be rejected when they differ from the run date")
@@ -440,6 +471,9 @@ symbols:
                 failures.append("decision-brief started_at fallback should derive the expected news date in KST")
             if (brief.get("market_index_snapshot") or {}).get("indexes", [{}])[0].get("symbol") != "KOSPI":
                 failures.append(f"decision brief should include compact market index snapshot: {brief.get('market_index_snapshot')}")
+            market_news_context = brief.get("market_news_context") if isinstance(brief.get("market_news_context"), dict) else {}
+            if market_news_context.get("status") != "supplied" or market_news_context.get("items", [{}])[0].get("title") != "Global central bank update":
+                failures.append(f"decision brief should include compact market news context: {market_news_context}")
             strategy = brief.get("strategy_context") if isinstance(brief.get("strategy_context"), dict) else {}
             if strategy.get("regime") != "neutral" or strategy.get("missing_tracked_indexes") != ["KOSDAQ"]:
                 failures.append(f"strategy context should use partial missing-index policy: {strategy}")
@@ -841,7 +875,7 @@ symbols:
                     run_id=None,
                     started_at=None,
                     financial_cache_path=str(etf_cache_path),
-                    news_cache_path="",
+                    symbol_news_cache_path="",
                     market_index_snapshot_json="",
                 )
             )
@@ -1412,7 +1446,7 @@ symbols:
                     run_id=None,
                     started_at=None,
                     financial_cache_path=str(financial_cache_path),
-                    news_cache_path=None,
+                    symbol_news_cache_path=None,
                     market_index_snapshot_json=None,
                 )
             )

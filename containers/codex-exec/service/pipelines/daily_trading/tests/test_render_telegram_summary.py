@@ -30,7 +30,8 @@ def self_test() -> int:
         "account_asset_summary": {"total_asset_amount": 17039121},
         "evidence_summary": {
             "financial": {"status": "supplied", "display_text": "재무: 31개 종목 반영"},
-            "news": {"status": "supplied", "display_text": "뉴스: 8개 종목 기사 반영"},
+            "symbol_news": {"status": "supplied", "display_text": "종목뉴스: 8개 종목 기사 반영"},
+            "market_news": {"status": "supplied", "display_text": "시장뉴스: 6건 반영", "article_count": 6},
             "investor_flow": {"status": "partial", "display_text": "장중 수급: 일부 종목 추정치 반영"},
         },
         "today_fills_summary": {"status": "success", "skipped": False, "fill_scope": "account", "fill_count": 7},
@@ -105,7 +106,8 @@ def self_test() -> int:
         },
         "evidence_summary": {
             "financial": {"display_text": "재무: cache hit"},
-            "news": {},
+            "symbol_news": {},
+            "market_news": {},
         },
         "today_fills_summary": {"status": "partial", "skipped": False, "fill_scope": "account", "fill_count": 0},
         "execution": {
@@ -168,7 +170,7 @@ def self_test() -> int:
         "run_id": "self-test-legacy",
         "status": "success",
         "account_display_summary": {},
-        "evidence_summary": {"financial": {}, "news": {}},
+        "evidence_summary": {"financial": {}, "symbol_news": {}, "market_news": {}},
         "today_fills_summary": {"status": "success", "skipped": False, "fill_count": 0},
         "execution": {"request_type": "analysis", "status": "success", "orders": []},
         "review_summary": {
@@ -192,7 +194,8 @@ def self_test() -> int:
         "account_asset_summary": {"total_asset_amount": 999999},
         "evidence_summary": {
             "financial": {"status": "supplied", "display_text": "legacy stale text"},
-            "news": {"status": "supplied", "display_text": "legacy stale text"},
+            "symbol_news": {"status": "supplied", "display_text": "legacy stale text"},
+            "market_news": {"status": "supplied", "display_text": "legacy stale market text"},
             "investor_flow": {"status": "supplied", "display_text": "legacy stale text"},
         },
         "order_lifecycle": {
@@ -218,11 +221,16 @@ def self_test() -> int:
             },
             "evidence_domains": {
                 "financial": {"status": "supplied", "coverage_text": "재무: 31개 종목 반영"},
-                "news": {
+                "symbol_news": {
                     "status": "cache_missing",
-                    "coverage_text": "뉴스: 캐시 파일 없음",
+                    "coverage_text": "종목뉴스: 캐시 파일 없음",
                     "usable_symbol_count": 9,
                     "wanted_symbol_count": 31,
+                },
+                "market_news": {
+                    "status": "partial",
+                    "coverage_text": "시장뉴스: 4건 반영, 일부 수집원 실패",
+                    "usable_item_count": 4,
                 },
                 "investor_flow": {
                     "status": "partial",
@@ -378,7 +386,7 @@ def self_test() -> int:
                 "- 주문가능 500,000원 · 주식평가 12,000,000원",
                 "- 전체 계좌 총자산(KIS 잔고) 17,039,121원",
                 "- 사전 주문상태: 미체결 3건",
-                "- 수집 데이터 일부 확인 필요(실행과 무관): 뉴스 9/31, 수급 26/31",
+                "- 수집 데이터 일부 확인 필요(실행과 무관): 종목뉴스 9/31, 시장뉴스 4건, 수급 26/31",
             ],
             ["999,999원", "legacy stale text", "미체결 99"],
         ),

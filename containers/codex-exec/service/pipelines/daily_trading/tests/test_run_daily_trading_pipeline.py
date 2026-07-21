@@ -28,8 +28,8 @@ from ..scripts.run_daily_trading_pipeline import (
     load_json_if_exists,
     normalize_thesis_condition_id,
     now_iso,
-    news_cache_coverage,
-    news_cache_evidence_counts,
+    symbol_news_cache_coverage,
+    symbol_news_cache_evidence_counts,
     repo_root_from,
     resolve_order_path,
     resolve_strategy_policy_config_path,
@@ -164,7 +164,7 @@ for index, symbol in enumerate(symbols, start=1):
                     "confidence": 5,
                     "reason_code": "no_news_excluded",
                     "one_line_reason": "뉴스 정보가 없어 평균에서 제외",
-                    "missing_data": ["news_summary"]
+                    "missing_data": ["symbol_news_summary"]
                 }
             }
         else:
@@ -358,42 +358,42 @@ def run_self_test() -> int:
         covered, missing = cache_coverage(empty_payload_cache, ["005930", "000660"])
         if covered or missing != ["000660", "005930"]:
             failures.append(f"empty payload cache should be incomplete: covered={covered}, missing={missing}")
-        empty_news_cache = workspace / "empty-news-cache.yaml"
-        empty_news_cache.write_text(
+        empty_symbol_news_cache = workspace / "empty-symbol-news-cache.yaml"
+        empty_symbol_news_cache.write_text(
             'date: "2026-06-18"\nsymbols:\n  "005930":\n    articles:\n      - article_date: ""\n        sentiment: neutral\n        content: ""\n',
             encoding="utf-8",
         )
-        covered, missing = cache_coverage(empty_news_cache, ["005930"])
+        covered, missing = cache_coverage(empty_symbol_news_cache, ["005930"])
         if covered or missing != ["005930"]:
             failures.append(f"empty news article should be incomplete: covered={covered}, missing={missing}")
-        no_news_cache = workspace / "no-news-cache.yaml"
-        no_news_cache.write_text(
+        no_symbol_news_cache = workspace / "no-symbol-news-cache.yaml"
+        no_symbol_news_cache.write_text(
             'date: "2026-06-18"\nsymbols:\n  "005930":\n    articles:\n      - article_date: ""\n        sentiment: neutral\n        content: "2026-06-18 기준 수집된 뉴스가 없습니다."\n',
             encoding="utf-8",
         )
-        covered, missing = cache_coverage(no_news_cache, ["005930"])
+        covered, missing = cache_coverage(no_symbol_news_cache, ["005930"])
         if covered or missing != ["005930"]:
             failures.append(f"no-news placeholder should be incomplete: covered={covered}, missing={missing}")
-        no_news_counts = cache_evidence_counts(no_news_cache, ["005930"])
+        no_news_counts = cache_evidence_counts(no_symbol_news_cache, ["005930"])
         if no_news_counts.get("present_symbol_count") != 1 or no_news_counts.get("usable_symbol_count") != 0:
             failures.append(f"no-news cache counts did not distinguish present from usable: {no_news_counts}")
-        stale_news_cache = workspace / "stale-news-cache.yaml"
-        stale_news_cache.write_text(
+        stale_symbol_news_cache = workspace / "stale-symbol-news-cache.yaml"
+        stale_symbol_news_cache.write_text(
             'date: "2026-06-18"\nsymbols:\n  "005930":\n    articles:\n      - article_date: "2020-01-01"\n        sentiment: neutral\n        content: "old article"\n',
             encoding="utf-8",
         )
-        covered, missing = news_cache_coverage(stale_news_cache, ["005930"], "2026-06-18")
+        covered, missing = symbol_news_cache_coverage(stale_symbol_news_cache, ["005930"], "2026-06-18")
         if covered or missing != ["005930"]:
             failures.append(f"stale-only news cache should not satisfy same-date coverage: covered={covered}, missing={missing}")
-        stale_news_counts = news_cache_evidence_counts(stale_news_cache, ["005930"], "2026-06-18")
+        stale_news_counts = symbol_news_cache_evidence_counts(stale_symbol_news_cache, ["005930"], "2026-06-18")
         if stale_news_counts.get("present_symbol_count") != 1 or stale_news_counts.get("usable_symbol_count") != 0:
             failures.append(f"stale-only news cache counts should distinguish present from usable: {stale_news_counts}")
-        fresh_news_cache = workspace / "fresh-news-cache.yaml"
-        fresh_news_cache.write_text(
+        fresh_symbol_news_cache = workspace / "fresh-symbol-news-cache.yaml"
+        fresh_symbol_news_cache.write_text(
             'date: "2026-06-18"\nsymbols:\n  "005930":\n    articles:\n      - article_date: "2026-06-18T09:30:00+09:00"\n        sentiment: positive\n        content: "fresh article"\n',
             encoding="utf-8",
         )
-        covered, missing = news_cache_coverage(fresh_news_cache, ["005930"], "2026-06-18")
+        covered, missing = symbol_news_cache_coverage(fresh_symbol_news_cache, ["005930"], "2026-06-18")
         if not covered or missing:
             failures.append(f"matching-date news cache should satisfy coverage: covered={covered}, missing={missing}")
         if resolve_order_path(ORDER_PATH_AUTO, "2026-06-18T09:00:00+09:00") != ("immediate", "auto_regular_session"):
@@ -438,7 +438,7 @@ def run_self_test() -> int:
                 request_type="analysis",
                 portfolio_json=str(portfolio_path),
                 financial_cache_path="",
-                news_cache_path="",
+                symbol_news_cache_path="",
                 main_events="",
                 date="2026-06-18",
                 reuse_existing_artifacts=True,
@@ -450,9 +450,9 @@ def run_self_test() -> int:
             failures.append("ETF financial cache without NAV evidence should not be accepted as covered")
         if not etf_probe.covered_cache_path("financial", str(fresh_etf_cache), ["069500"], detail="fresh etf cache"):
             failures.append("ETF financial cache with NAV evidence should be accepted as covered")
-        if etf_probe.covered_cache_path("news", str(stale_news_cache), ["005930"], detail="stale news cache"):
+        if etf_probe.covered_cache_path("symbol_news", str(stale_symbol_news_cache), ["005930"], detail="stale news cache"):
             failures.append("stale-only news cache should not skip same-date news collection")
-        if not etf_probe.covered_cache_path("news", str(fresh_news_cache), ["005930"], detail="fresh news cache"):
+        if not etf_probe.covered_cache_path("symbol_news", str(fresh_symbol_news_cache), ["005930"], detail="fresh news cache"):
             failures.append("matching-date news cache should be accepted as covered")
         stage_status_probe = Pipeline(
             argparse.Namespace(
@@ -465,7 +465,7 @@ def run_self_test() -> int:
                 request_type="analysis",
                 portfolio_json=str(portfolio_path),
                 financial_cache_path="",
-                news_cache_path="",
+                symbol_news_cache_path="",
                 main_events="",
                 date="2026-06-18",
                 reuse_existing_artifacts=True,
@@ -477,19 +477,19 @@ def run_self_test() -> int:
         if stage_status_probe.pipeline_status() != "success":
             failures.append(f"optional skipped stage changed pipeline status: {stage_status_probe.pipeline_status()}")
         old_financial_memory = os.environ.get("COLLECT_FINANCIAL_INFORMATION_MEMORY_DIR")
-        old_news_memory = os.environ.get("COLLECT_NEWS_INFORMATION_MEMORY_DIR")
+        old_news_memory = os.environ.get("SYMBOL_NEWS_CACHE_MEMORY_DIR")
         try:
             env_financial_dir = workspace / "env-financial-cache"
-            env_news_dir = workspace / "env-news-cache"
+            env_news_dir = workspace / "env-symbol-news-cache"
             env_financial_dir.mkdir(parents=True, exist_ok=True)
             env_news_dir.mkdir(parents=True, exist_ok=True)
             (env_financial_dir / "financial-2026-06-18.yaml").write_text('date: "2026-06-18"\nsymbols: {}\n', encoding="utf-8")
-            (env_news_dir / "news-2026-06-18.yaml").write_text('date: "2026-06-18"\nsymbols: {}\n', encoding="utf-8")
+            (env_news_dir / "symbol-news-2026-06-18.yaml").write_text('date: "2026-06-18"\nsymbols: {}\n', encoding="utf-8")
             os.environ["COLLECT_FINANCIAL_INFORMATION_MEMORY_DIR"] = str(env_financial_dir)
-            os.environ["COLLECT_NEWS_INFORMATION_MEMORY_DIR"] = str(env_news_dir)
+            os.environ["SYMBOL_NEWS_CACHE_MEMORY_DIR"] = str(env_news_dir)
             if Path(stage_status_probe.default_cache_path("financial")).parent != env_financial_dir:
                 failures.append("financial env memory dir was not preferred")
-            if Path(stage_status_probe.default_cache_path("news")).parent != env_news_dir:
+            if Path(stage_status_probe.default_cache_path("symbol_news")).parent != env_news_dir:
                 failures.append("news env memory dir was not preferred")
         finally:
             if old_financial_memory is None:
@@ -497,9 +497,9 @@ def run_self_test() -> int:
             else:
                 os.environ["COLLECT_FINANCIAL_INFORMATION_MEMORY_DIR"] = old_financial_memory
             if old_news_memory is None:
-                os.environ.pop("COLLECT_NEWS_INFORMATION_MEMORY_DIR", None)
+                os.environ.pop("SYMBOL_NEWS_CACHE_MEMORY_DIR", None)
             else:
-                os.environ["COLLECT_NEWS_INFORMATION_MEMORY_DIR"] = old_news_memory
+                os.environ["SYMBOL_NEWS_CACHE_MEMORY_DIR"] = old_news_memory
 
         old_codex_home_env = os.environ.get("CODEX_HOME")
         try:
@@ -530,8 +530,8 @@ def run_self_test() -> int:
                 if stage.endswith("-cache-get"):
                     self.get_attempts += 1
                     domain = stage.removesuffix("-cache-get")
-                    subdir = "collect-financial-information" if domain == "financial" else "collect-news-information"
-                    prefix = "financial" if domain == "financial" else "news"
+                    subdir = "collect-financial-information" if domain == "financial" else "symbol-news-cache"
+                    prefix = "financial" if domain == "financial" else "symbol-news"
                     path = self.workspace_dir / "memory" / subdir / f"{prefix}-2026-06-18.yaml"
                     stdout = str(path) if path.exists() else "missing cache"
                     self.logs.append(
@@ -550,8 +550,8 @@ def run_self_test() -> int:
                 if stage.endswith("-cache-collect"):
                     self.cache_attempts += 1
                     domain = stage.removesuffix("-cache-collect")
-                    subdir = "collect-financial-information" if domain == "financial" else "collect-news-information"
-                    prefix = "financial" if domain == "financial" else "news"
+                    subdir = "collect-financial-information" if domain == "financial" else "symbol-news-cache"
+                    prefix = "financial" if domain == "financial" else "symbol-news"
                     path = self.workspace_dir / "memory" / subdir / f"{prefix}-2026-06-18.yaml"
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_text(
@@ -574,7 +574,7 @@ def run_self_test() -> int:
                 return super().run_cmd(stage, cmd, required=required, env=env)
 
         optional_cache_dir = workspace / "reports" / "runs" / "optional-cache-probe"
-        for probe_script in (workspace / "financial_cache_probe.py", workspace / "news_cache_probe.py"):
+        for probe_script in (workspace / "financial_cache_probe.py", workspace / "symbol_news_cache_probe.py"):
             probe_script.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
         optional_probe = OptionalCacheProbePipeline(
             argparse.Namespace(
@@ -587,7 +587,7 @@ def run_self_test() -> int:
                 request_type="analysis",
                 portfolio_json=str(portfolio_path),
                 financial_cache_path="",
-                news_cache_path="",
+                symbol_news_cache_path="",
                 main_events="",
                 date="2026-06-18",
                 reuse_existing_artifacts=True,
@@ -596,7 +596,7 @@ def run_self_test() -> int:
             )
         )
         financial_partial = optional_probe.collect_optional_cache("financial", ["005930", "000660"])
-        news_partial = optional_probe.collect_optional_cache("news", ["005930", "000660"])
+        news_partial = optional_probe.collect_optional_cache("symbol_news", ["005930", "000660"])
         if optional_probe.cache_attempts != 2:
             failures.append(f"optional cache probe should collect once per domain: attempts={optional_probe.cache_attempts}")
         if optional_probe.get_attempts != 4:
@@ -617,8 +617,8 @@ def run_self_test() -> int:
             def run_cmd(self, stage: str, cmd: list[str], *, required: bool = True, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
                 if stage.endswith("-cache-get") or stage.endswith("-cache-collect"):
                     domain = stage.split("-cache-", 1)[0]
-                    subdir = "collect-financial-information" if domain == "financial" else "collect-news-information"
-                    prefix = "financial" if domain == "financial" else "news"
+                    subdir = "collect-financial-information" if domain == "financial" else "symbol-news-cache"
+                    prefix = "financial" if domain == "financial" else "symbol-news"
                     path = self.workspace_dir / "memory" / subdir / f"{prefix}-2026-06-18.yaml"
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_text('date: "2026-06-18"\nsource: kis_open_api\nsymbols: {}\n', encoding="utf-8")
@@ -641,7 +641,7 @@ def run_self_test() -> int:
             probe_script.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
         for stale_cache in (
             workspace / "memory" / "collect-financial-information" / "financial-2026-06-18.yaml",
-            workspace / "memory" / "collect-news-information" / "news-2026-06-18.yaml",
+            workspace / "memory" / "symbol-news-cache" / "symbol-news-2026-06-18.yaml",
         ):
             if stale_cache.exists():
                 stale_cache.unlink()
@@ -656,7 +656,7 @@ def run_self_test() -> int:
                 request_type="analysis",
                 portfolio_json=str(portfolio_path),
                 financial_cache_path="",
-                news_cache_path="",
+                symbol_news_cache_path="",
                 main_events="",
                 date="2026-06-18",
                 reuse_existing_artifacts=True,
@@ -666,11 +666,11 @@ def run_self_test() -> int:
         )
         if empty_cache_probe.collect_optional_cache("financial", ["005930"]):
             failures.append("empty financial cache should not be returned as partial data")
-        empty_news_path = empty_cache_probe.collect_optional_cache("news", ["005930"])
+        empty_news_path = empty_cache_probe.collect_optional_cache("symbol_news", ["005930"])
         if not empty_news_path:
             failures.append("empty news cache should be returned so zero usable articles can be reported")
         news_stage = empty_cache_probe.stages[-1] if empty_cache_probe.stages else {}
-        if news_stage.get("stage") != "news-cache" or "zero usable articles" not in str(news_stage.get("detail")):
+        if news_stage.get("stage") != "symbol-news-cache" or "zero usable articles" not in str(news_stage.get("detail")):
             failures.append(f"empty news cache stage did not describe zero usable articles: {news_stage}")
 
         retry_dir = workspace / "reports" / "runs" / "retry-probe"
@@ -729,7 +729,7 @@ def run_self_test() -> int:
                 request_type="analysis",
                 portfolio_json=str(portfolio_path),
                 financial_cache_path="",
-                news_cache_path="",
+                symbol_news_cache_path="",
                 main_events="",
                 date="2026-06-18",
                 reuse_existing_artifacts=True,
@@ -759,7 +759,7 @@ def run_self_test() -> int:
                 request_type="analysis",
                 portfolio_json=str(portfolio_path),
                 financial_cache_path="",
-                news_cache_path="",
+                symbol_news_cache_path="",
                 main_events="",
                 date="2026-06-18",
                 reuse_existing_artifacts=True,
@@ -846,7 +846,7 @@ def run_self_test() -> int:
                 request_type="analysis",
                 portfolio_json=str(portfolio_path),
                 financial_cache_path="",
-                news_cache_path="",
+                symbol_news_cache_path="",
                 main_events="",
                 date="2026-06-18",
                 reuse_existing_artifacts=True,
@@ -942,7 +942,7 @@ def run_self_test() -> int:
                 request_type="analysis",
                 portfolio_json=str(portfolio_path),
                 financial_cache_path="",
-                news_cache_path="",
+                symbol_news_cache_path="",
                 main_events="",
                 date="2026-06-18",
                 reuse_existing_artifacts=True,
@@ -1067,7 +1067,7 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
                     request_type="real-submit",
                     portfolio_json=str(portfolio_path),
                     financial_cache_path="",
-                    news_cache_path="",
+                    symbol_news_cache_path="",
                     main_events=str(main_events),
                     date="2026-06-18",
                     reuse_existing_artifacts=True,
@@ -1161,9 +1161,11 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
             decision_command = decision_commands[-1] if decision_commands else []
             if "--strategy-policy-config" not in decision_command:
                 failures.append(f"decision-brief command should receive strategy policy config: {decision_commands}")
-            expected_news_date_index = decision_command.index("--expected-news-date") if "--expected-news-date" in decision_command else -1
-            if expected_news_date_index < 0 or decision_command[expected_news_date_index + 1 : expected_news_date_index + 2] != ["2026-06-18"]:
+            expected_symbol_news_date_index = decision_command.index("--expected-symbol-news-date") if "--expected-symbol-news-date" in decision_command else -1
+            if expected_symbol_news_date_index < 0 or decision_command[expected_symbol_news_date_index + 1 : expected_symbol_news_date_index + 2] != ["2026-06-18"]:
                 failures.append(f"decision-brief command should receive the run news date: {decision_commands}")
+            if "--news-context-json" not in decision_command:
+                failures.append(f"decision-brief command should receive the deduplicated news context: {decision_commands}")
             execution_commands = [
                 item.get("command")
                 for item in command_log.get("commands", [])
@@ -1223,14 +1225,18 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
                 failures.append(f"pipeline summary omitted model usage artifact path: {artifacts}")
             if not str(artifacts.get("judge_debate", "")).endswith("judge-debate.json"):
                 failures.append(f"pipeline summary omitted judge debate artifact path: {artifacts}")
+            if not str(artifacts.get("news_context", "")).endswith("news-context.json"):
+                failures.append(f"pipeline summary omitted news context artifact path: {artifacts}")
             if not str(artifacts.get("html_report", "")).endswith("daily-trading-report.html"):
                 failures.append(f"pipeline summary omitted HTML report artifact path: {artifacts}")
             run_payload = load_json(run_dir / "run.json")
             if not str(run_payload.get("model_usage", "")).endswith("model-usage.jsonl"):
                 failures.append(f"run.json omitted model usage artifact path: {run_payload}")
             evidence_summary = summary.get("evidence_summary") if isinstance(summary.get("evidence_summary"), dict) else {}
-            if not isinstance(evidence_summary.get("news"), dict) or "display_text" not in evidence_summary.get("news", {}):
-                failures.append(f"pipeline summary omitted displayable news evidence status: {evidence_summary}")
+            if not isinstance(evidence_summary.get("symbol_news"), dict) or "display_text" not in evidence_summary.get("symbol_news", {}):
+                failures.append(f"pipeline summary omitted displayable symbol news evidence status: {evidence_summary}")
+            if not isinstance(evidence_summary.get("market_news"), dict) or "display_text" not in evidence_summary.get("market_news", {}):
+                failures.append(f"pipeline summary omitted displayable market news evidence status: {evidence_summary}")
             investor_flow_summary = evidence_summary.get("investor_flow") if isinstance(evidence_summary.get("investor_flow"), dict) else {}
             if (
                 investor_flow_summary.get("status") != "partial"
@@ -1269,6 +1275,12 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
             if current_run_submitted_view.get("scope") != "current_run_submitted_orders" or current_run_submitted_view.get("count") != 0:
                 failures.append(f"reporting_view current-run submitted scope was not truthfully named/counted: {current_run_submitted_view}")
             reporting_domains = reporting_view.get("evidence_domains") if isinstance(reporting_view.get("evidence_domains"), dict) else {}
+            reporting_symbol_news = reporting_domains.get("symbol_news") if isinstance(reporting_domains.get("symbol_news"), dict) else {}
+            reporting_market_news = reporting_domains.get("market_news") if isinstance(reporting_domains.get("market_news"), dict) else {}
+            if reporting_symbol_news.get("blocks_trading") is not False:
+                failures.append(f"reporting_view omitted symbol_news non-blocking contract: {reporting_symbol_news}")
+            if reporting_market_news.get("blocks_trading") is not False or reporting_market_news.get("scope") != "market_news_context_quality":
+                failures.append(f"reporting_view omitted market_news context contract: {reporting_market_news}")
             reporting_investor_flow = reporting_domains.get("investor_flow") if isinstance(reporting_domains.get("investor_flow"), dict) else {}
             if (
                 reporting_investor_flow.get("status") != "partial"
@@ -1364,7 +1376,7 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
                     request_type="analysis",
                     portfolio_json=str(portfolio_path),
                     financial_cache_path="",
-                    news_cache_path="",
+                    symbol_news_cache_path="",
                     main_events="",
                     date="2026-06-18",
                     reuse_existing_artifacts=True,
@@ -1512,7 +1524,7 @@ print(json.dumps(execution, ensure_ascii=False))
                     request_type="real-submit",
                     portfolio_json=str(portfolio_path),
                     financial_cache_path="",
-                    news_cache_path="",
+                    symbol_news_cache_path="",
                     main_events=str(main_events),
                     date="2026-06-18",
                     reuse_existing_artifacts=True,

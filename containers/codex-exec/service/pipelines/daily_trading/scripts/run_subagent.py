@@ -41,10 +41,9 @@ DEFAULT_SUBAGENT_MODEL_CONFIG = {
     "judge_review": {"model": "gpt-5.6-sol", "model_reasoning_effort": "xhigh"},
 }
 SUBAGENT_MODEL_CONFIG_KEYS = ("collection", "analyst_review", "judge_review")
-COLLECTION_STAGES = {"financial-collection", "news-collection"}
+COLLECTION_STAGES = {"financial-collection"}
 FINANCIAL_PATH_OUTPUT_STAGES = {"financial-collection"}
-NEWS_PATH_OUTPUT_STAGES = {"news-collection"}
-TEXT_OUTPUT_STAGES = FINANCIAL_PATH_OUTPUT_STAGES | NEWS_PATH_OUTPUT_STAGES
+TEXT_OUTPUT_STAGES = FINANCIAL_PATH_OUTPUT_STAGES
 OPTIONAL_GROUP_FAILURE_STAGES = TEXT_OUTPUT_STAGES
 REVIEW_STAGES = {"analyst-review", "judge-review"}
 DEBATE_STAGE = "judge-debate"
@@ -61,6 +60,7 @@ SELECTED_ANALYST_REVIEW_ROLES = {
     "analyst-momentum-news",
 }
 MARKET_INDEX_SNAPSHOT_AGENT_ROLES = {"analyst-quality-risk", "analyst-momentum-news", "judge"}
+MARKET_NEWS_CONTEXT_AGENT_ROLES = {"analyst-momentum-news", "judge"}
 COMBINED_ANALYST_REVIEW_ROLE_OUTPUTS = {
     "analyst-quality-risk": (
         "analyst-quality-value",
@@ -77,7 +77,6 @@ ANALYST_REVIEW_VIEW_INPUT_FIELDS = {
         "today_trade_price_context",
         "financial_summary",
         "etf_summary",
-        "news_summary",
     },
     "analyst-risk-allocation": {
         "price",
@@ -100,7 +99,7 @@ ANALYST_REVIEW_VIEW_INPUT_FIELDS = {
     "analyst-news-flow": {
         "price",
         "today_trade_price_context",
-        "news_summary",
+        "symbol_news_summary",
     },
 }
 ANALYST_REVIEW_ALWAYS_SYMBOL_FIELDS = {
@@ -773,6 +772,8 @@ def build_review_core_payload(payload: Any, symbol_ids: list[str], agent_role: s
     core = dict(filter_symbol_fields_for_agent(filtered, agent_role) if agent_role else filtered)
     if agent_role and safe_name(agent_role).lower() not in MARKET_INDEX_SNAPSHOT_AGENT_ROLES:
         core.pop("market_index_snapshot", None)
+    if agent_role and safe_name(agent_role).lower() not in MARKET_NEWS_CONTEXT_AGENT_ROLES:
+        core.pop("market_news_context", None)
     if agent_role and safe_name(agent_role).lower() != "judge":
         core.pop("strategy_context", None)
     core["slice_type"] = "review-core"
@@ -1690,7 +1691,7 @@ def launcher_model_effort(stage: str, agent_role: str) -> tuple[str, str]:
     role_key = agent_role.strip().lower()
     model_config = load_subagent_model_config()
 
-    if role_key in {"financial", "news"} or stage_key in COLLECTION_STAGES:
+    if role_key == "financial" or stage_key in COLLECTION_STAGES:
         entry = model_config["collection"]
         return entry["model"], entry["model_reasoning_effort"]
     if stage_key == "analyst-review":

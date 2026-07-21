@@ -4,9 +4,12 @@ from pathlib import Path
 from .skill_sync_filesystem import (
     copy_bundled_skill,
     remove_existing_skill,
-    remove_stale_daily_trading_skill,
+    remove_retired_bundled_skills,
 )
 from .skill_sync_marker import write_skills_marker
+
+
+RETIRED_BUNDLED_SKILLS = ("daily-trading", "collect-news-information")
 
 
 def sync_bundled_skills(
@@ -20,7 +23,7 @@ def sync_bundled_skills(
         return
 
     target_root.mkdir(parents=True, exist_ok=True)
-    remove_stale_daily_trading_skill(target_root)
+    remove_retired_bundled_skills(target_root, RETIRED_BUNDLED_SKILLS)
 
     copied = 0
     replaced = 0

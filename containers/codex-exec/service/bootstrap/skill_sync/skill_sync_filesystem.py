@@ -14,9 +14,10 @@ def remove_existing_skill(path: Path) -> None:
     shutil.rmtree(path)
 
 
-def remove_stale_daily_trading_skill(target_root: Path) -> None:
-    target = target_root / "daily-trading"
-    if not (target.exists() or target.is_symlink()):
-        return
-    remove_existing_skill(target)
-    logging.info("removed stale daily-trading Codex skill target=%s", target)
+def remove_retired_bundled_skills(target_root: Path, skill_names: tuple[str, ...]) -> None:
+    for skill_name in skill_names:
+        target = target_root / skill_name
+        if not (target.exists() or target.is_symlink()):
+            continue
+        remove_existing_skill(target)
+        logging.info("removed retired bundled Codex skill target=%s", target)

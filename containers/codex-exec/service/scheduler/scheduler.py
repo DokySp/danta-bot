@@ -16,6 +16,7 @@ from ..trading.daily_trading_direct import (
     format_direct_runner_error,
 )
 from ..pipelines.deferred_buy_retry.pipeline import run_due_deferred_buy_retries
+from ..pipelines.market_news.runner import MarketNewsDirectRunner
 from .config import parse_yaml_schedule
 from .cron import cron_matches
 
@@ -25,6 +26,7 @@ class Scheduler:
         self.config = config
         self.runner = runner
         self.daily_trading_direct_runner = DailyTradingDirectRunner(config, runner)
+        self.market_news_direct_runner = MarketNewsDirectRunner(config)
         self.gateway = gateway
         self.stop_event = threading.Event()
         self.last_run_keys: set[tuple[str, str]] = set()
@@ -57,7 +59,8 @@ class Scheduler:
             cron = str(item.get("cron", "")).strip()
             message = str(item.get("message", "")).strip()
             daily_trading_config = item.get("daily_trading")
-            if not cron or (not message and daily_trading_config is None):
+            market_news_config = item.get("market_news")
+            if not cron or (not message and daily_trading_config is None and market_news_config is None):
                 continue
             key = (job_id, minute_key)
             if key in self.last_run_keys:
@@ -76,6 +79,7 @@ class Scheduler:
                         model,
                         reasoning_effort,
                         daily_trading_config,
+                        market_news_config,
                     ),
                     name=f"schedule-{job_id}",
                     daemon=True,
@@ -91,22 +95,26 @@ class Scheduler:
         model: str | None,
         reasoning_effort: str | None,
         daily_trading_config: Any,
+        market_news_config: Any = None,
     ) -> None:
         chat_id_text = str(chat_id) if chat_id else None
         route_text = str(route) if route else None
         output_ready = False
         html_report_path = None
         try:
-            if daily_trading_config is None:
+            if daily_trading_config is None and market_news_config is None:
                 runtime_defaults = self.runner.runtime_defaults()
                 model = model or runtime_defaults.model
                 reasoning_effort = reasoning_effort or runtime_defaults.model_reasoning_effort
             logging.info(
                 "running scheduled job id=%s model=%s reasoning_effort=%s",
                 job_id,
-                model or "daily-trading-runtime",
-                reasoning_effort or "daily-trading-runtime",
+                model or ("deterministic" if market_news_config is not None else "daily-trading-runtime"),
+                reasoning_effort or ("none" if market_news_config is not None else "daily-trading-runtime"),
             )
+            if market_news_config is not None:
+                self.market_news_direct_runner.run(market_news_config)
+                return
             with TypingIndicator(
                 self.gateway,
                 chat_id_text,
@@ -151,6 +159,12 @@ class Scheduler:
                     format_direct_delivery_error(job_id, exc)
                     if delivery_failed
                     else format_direct_runner_error(job_id, exc)
+                )
+            elif market_news_config is not None:
+                fallback = (
+                    f"<b>market-news direct runner failed</b>\n"
+                    f"<code>{html.escape(job_id)}</code>\n"
+                    f"<pre>{html.escape(str(exc))}</pre>"
                 )
             message = error_message_with_run_context(exc, fallback)
             self.gateway.send_message(

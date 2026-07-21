@@ -518,7 +518,7 @@ def normalized_calendar_date(value: Any) -> str:
         return ""
 
 
-def news_cache_symbol_keys(path: Path, expected_date: str) -> set[str]:
+def symbol_news_cache_symbol_keys(path: Path, expected_date: str) -> set[str]:
     payload = load_json_if_exists(path) if path.suffix.lower() == ".json" else load_yaml_if_exists(path)
     if not isinstance(payload, dict):
         return set()
@@ -535,7 +535,7 @@ def news_cache_symbol_keys(path: Path, expected_date: str) -> set[str]:
             continue
         entries = value
         if isinstance(entries, dict):
-            entries = entries.get("items") or entries.get("news") or entries.get("articles") or []
+            entries = entries.get("items") or entries.get("articles") or []
         if not isinstance(entries, list):
             continue
         if any(
@@ -567,9 +567,9 @@ def cache_coverage(path: Path, symbols: list[str]) -> tuple[bool, list[str]]:
     return bool(wanted) and not missing, missing
 
 
-def news_cache_coverage(path: Path, symbols: list[str], expected_date: str) -> tuple[bool, list[str]]:
+def symbol_news_cache_coverage(path: Path, symbols: list[str], expected_date: str) -> tuple[bool, list[str]]:
     wanted = {normalize_symbol_key(symbol) for symbol in symbols if normalize_symbol_key(symbol)}
-    available = news_cache_symbol_keys(path, expected_date)
+    available = symbol_news_cache_symbol_keys(path, expected_date)
     missing = sorted(wanted - available)
     return bool(wanted) and not missing, missing
 
@@ -590,9 +590,9 @@ def cache_evidence_counts(path: Path, symbols: list[str]) -> dict[str, Any]:
     }
 
 
-def news_cache_evidence_counts(path: Path, symbols: list[str], expected_date: str) -> dict[str, Any]:
+def symbol_news_cache_evidence_counts(path: Path, symbols: list[str], expected_date: str) -> dict[str, Any]:
     wanted = {normalize_symbol_key(symbol) for symbol in symbols if normalize_symbol_key(symbol)}
-    available = news_cache_symbol_keys(path, expected_date)
+    available = symbol_news_cache_symbol_keys(path, expected_date)
     present = cache_symbol_all_keys(path)
     usable = wanted & available
     present_wanted = wanted & present
@@ -790,6 +790,12 @@ class Pipeline:
             return Path(configured)
         return script_dir().parent.parent / "market_index_snapshot" / "cli.py"
 
+    def news_context_script(self) -> Path:
+        configured = os.getenv("DAILY_TRADING_NEWS_CONTEXT_SCRIPT", "").strip()
+        if configured:
+            return Path(configured)
+        return script_dir().parent.parent / "news_context" / "cli.py"
+
     def main_evidence_script(self) -> str:
         return str(script_dir() / "collect_main_evidence.py")
 
@@ -816,7 +822,10 @@ class Pipeline:
         date = self.optional_cache_date()
         if domain == "financial":
             return f"financial-{date}.yaml"
-        return f"news-{date}.yaml"
+        return f"symbol-news-{date}.yaml"
+
+    def optional_cache_stage_name(self, domain: str) -> str:
+        return "financial-cache" if domain == "financial" else "symbol-news-cache"
 
     def expected_cache_path(self, domain: str) -> Path:
         return self.optional_cache_candidate_paths(domain)[0]
@@ -828,8 +837,8 @@ class Pipeline:
             configured = os.environ.get("COLLECT_FINANCIAL_INFORMATION_MEMORY_DIR")
             subdir = "collect-financial-information"
         else:
-            configured = os.environ.get("COLLECT_NEWS_INFORMATION_MEMORY_DIR")
-            subdir = "collect-news-information"
+            configured = os.environ.get("SYMBOL_NEWS_CACHE_MEMORY_DIR")
+            subdir = "symbol-news-cache"
         if configured:
             paths.append(Path(configured).expanduser() / filename)
         memory_root = os.environ.get("DAILY_TRADING_MEMORY_DIR")
@@ -848,17 +857,23 @@ class Pipeline:
         if domain == "financial":
             skill_name = "collect-financial-information"
             script_name = "financial_cache.py"
-        else:
-            skill_name = "collect-news-information"
-            script_name = "news_cache.py"
+            candidates = [
+                Path("/app/skills") / skill_name / "scripts" / script_name,
+                Path("/codex-home/skills") / skill_name / "scripts" / script_name,
+            ]
+            codex_home = os.environ.get("CODEX_HOME")
+            if codex_home:
+                candidates.insert(1, Path(codex_home).expanduser() / "skills" / skill_name / "scripts" / script_name)
+            return candidates
 
+        configured = os.environ.get("DAILY_TRADING_SYMBOL_NEWS_SCRIPT", "").strip()
         candidates = [
-            Path("/app/skills") / skill_name / "scripts" / script_name,
-            Path("/codex-home/skills") / skill_name / "scripts" / script_name,
+            script_dir().parent.parent / "symbol_news" / "cli.py",
+            Path("/app/service/pipelines/symbol_news/cli.py"),
+            self.repo_root / "containers/codex-exec/service/pipelines/symbol_news/cli.py",
         ]
-        codex_home = os.environ.get("CODEX_HOME")
-        if codex_home:
-            candidates.insert(1, Path(codex_home).expanduser() / "skills" / skill_name / "scripts" / script_name)
+        if configured:
+            candidates.insert(0, Path(configured).expanduser())
         return candidates
 
     def optional_cache_script(self, domain: str) -> Path | None:
@@ -907,9 +922,10 @@ class Pipeline:
 
     def covered_cache_path(self, domain: str, path_text: str, symbols: list[str], *, detail: str) -> str:
         path = resolve_workspace_path(self.workspace_dir, path_text)
-        if domain == "news":
+        stage_name = self.optional_cache_stage_name(domain)
+        if domain == "symbol_news":
             expected_date = self.optional_cache_date()
-            covered, missing = news_cache_coverage(path, symbols, expected_date)
+            covered, missing = symbol_news_cache_coverage(path, symbols, expected_date)
         else:
             covered, missing = cache_coverage(path, symbols)
         if covered:
@@ -917,7 +933,7 @@ class Pipeline:
             if etf_symbols and not self.cache_has_etf_nav_evidence(path, etf_symbols):
                 self.logs.append(
                     {
-                        "stage": f"{domain}-cache-coverage",
+                        "stage": f"{stage_name}-coverage",
                         "path": str(path),
                         "missing_etf_nav_symbol_count": len(etf_symbols),
                         "missing_etf_nav_symbols_sample": etf_symbols[:20],
@@ -926,11 +942,11 @@ class Pipeline:
                 )
                 write_json(self.command_log_path, {"commands": self.logs})
                 return ""
-            self.add_stage(f"{domain}-cache", "success", detail=detail, required=False, path=path)
+            self.add_stage(stage_name, "success", detail=detail, required=False, path=path)
             return str(path)
         self.logs.append(
             {
-                "stage": f"{domain}-cache-coverage",
+                "stage": f"{stage_name}-coverage",
                 "path": str(path),
                 "missing_symbol_count": len(missing),
                 "missing_symbols_sample": missing[:20],
@@ -972,9 +988,9 @@ class Pipeline:
             seen.add(resolved)
             if not resolved.exists():
                 continue
-            if domain == "news":
+            if domain == "symbol_news":
                 expected_date = self.optional_cache_date()
-                available = news_cache_symbol_keys(resolved, expected_date)
+                available = symbol_news_cache_symbol_keys(resolved, expected_date)
             else:
                 available = cache_symbol_keys(resolved)
             if available & wanted:
@@ -992,12 +1008,12 @@ class Pipeline:
                 return resolved
         return None
 
-    def zero_usable_news_cache_path(self, paths: list[Path], symbols: list[str]) -> Path | None:
+    def zero_usable_symbol_news_cache_path(self, paths: list[Path], symbols: list[str]) -> Path | None:
         path = self.first_existing_cache_file_path(paths)
         if path is None:
             return None
         expected_date = self.optional_cache_date()
-        counts = news_cache_evidence_counts(path, symbols, expected_date)
+        counts = symbol_news_cache_evidence_counts(path, symbols, expected_date)
         if counts["wanted_symbol_count"] > 0 and counts["usable_symbol_count"] == 0:
             return path
         return None
@@ -1102,7 +1118,8 @@ class Pipeline:
         return lifecycle
 
     def collect_optional_cache(self, domain: str, symbols: list[str]) -> str:
-        configured = self.args.financial_cache_path if domain == "financial" else self.args.news_cache_path
+        configured = self.args.financial_cache_path if domain == "financial" else self.args.symbol_news_cache_path
+        stage_name = self.optional_cache_stage_name(domain)
         candidate_paths: list[Path] = []
         if configured:
             configured_path = resolve_workspace_path(self.workspace_dir, configured)
@@ -1124,23 +1141,23 @@ class Pipeline:
         if cache_script is None:
             partial = self.first_existing_cache_path(candidate_paths, symbols, domain)
             if partial:
-                self.add_stage(f"{domain}-cache", "partial", detail="optional cache script not found; using existing incomplete cache", required=False, path=partial)
+                self.add_stage(stage_name, "partial", detail="optional cache script not found; using existing incomplete cache", required=False, path=partial)
                 return str(partial)
-            zero_news = self.zero_usable_news_cache_path(candidate_paths, symbols) if domain == "news" else None
+            zero_news = self.zero_usable_symbol_news_cache_path(candidate_paths, symbols) if domain == "symbol_news" else None
             if zero_news:
                 self.add_stage(
-                    "news-cache",
+                    "symbol-news-cache",
                     "partial",
                     detail="optional news cache script not found; cache exists but zero usable articles",
                     required=False,
                     path=zero_news,
                 )
                 return str(zero_news)
-            self.add_stage(f"{domain}-cache", "skipped", detail="optional cache script not found", required=False)
+            self.add_stage(stage_name, "skipped", detail="optional cache script not found", required=False)
             return ""
         date = self.optional_cache_date()
         get_cmd = [sys.executable, str(cache_script), "get", "--date", date]
-        get_result = self.run_cmd(f"{domain}-cache-get", get_cmd, required=False)
+        get_result = self.run_cmd(f"{stage_name}-get", get_cmd, required=False)
         get_path = self.parse_existing_cache_path(get_result.stdout)
         if get_path:
             get_cache_path = resolve_workspace_path(self.workspace_dir, get_path)
@@ -1160,7 +1177,7 @@ class Pipeline:
         ]
         if domain == "financial" and self.has_etf_or_etn_price_rows():
             cmd.append("--include-etf")
-        result = self.run_cmd(f"{domain}-cache-collect", cmd, required=False)
+        result = self.run_cmd(f"{stage_name}-collect", cmd, required=False)
         if result.returncode == 0:
             path_text = self.parse_cache_collect_path(result.stdout)
             if path_text:
@@ -1168,7 +1185,7 @@ class Pipeline:
                 candidate_paths.insert(0, collected_path)
             else:
                 collected_path = None
-            second_get_result = self.run_cmd(f"{domain}-cache-get", get_cmd, required=False)
+            second_get_result = self.run_cmd(f"{stage_name}-get", get_cmd, required=False)
             second_get_path = self.parse_existing_cache_path(second_get_result.stdout)
             if second_get_path:
                 second_path = resolve_workspace_path(self.workspace_dir, second_get_path)
@@ -1180,35 +1197,35 @@ class Pipeline:
                 return covered
             partial = self.first_existing_cache_path(candidate_paths, symbols, domain)
             if partial:
-                self.add_stage(f"{domain}-cache", "partial", detail="optional cache collected once but still missing universe symbols; using partial cache", required=False, path=partial)
+                self.add_stage(stage_name, "partial", detail="optional cache collected once but still missing universe symbols; using partial cache", required=False, path=partial)
                 return str(partial)
-            zero_news = self.zero_usable_news_cache_path(candidate_paths, symbols) if domain == "news" else None
+            zero_news = self.zero_usable_symbol_news_cache_path(candidate_paths, symbols) if domain == "symbol_news" else None
             if zero_news:
                 self.add_stage(
-                    "news-cache",
+                    "symbol-news-cache",
                     "partial",
                     detail="optional news cache collected once; cache exists but zero usable articles",
                     required=False,
                     path=zero_news,
                 )
                 return str(zero_news)
-            self.add_stage(f"{domain}-cache", "partial", detail="optional cache collected once but no cache file was produced", required=False)
+            self.add_stage(stage_name, "partial", detail="optional cache collected once but no cache file was produced", required=False)
             return ""
         partial = self.first_existing_cache_path(candidate_paths, symbols, domain)
         if partial:
-            self.add_stage(f"{domain}-cache", "partial", detail="optional cache collection failed once; using existing incomplete cache", required=False, path=partial)
+            self.add_stage(stage_name, "partial", detail="optional cache collection failed once; using existing incomplete cache", required=False, path=partial)
             return str(partial)
-        zero_news = self.zero_usable_news_cache_path(candidate_paths, symbols) if domain == "news" else None
+        zero_news = self.zero_usable_symbol_news_cache_path(candidate_paths, symbols) if domain == "symbol_news" else None
         if zero_news:
             self.add_stage(
-                "news-cache",
+                "symbol-news-cache",
                 "partial",
                 detail="optional news cache collection failed once; cache exists but zero usable articles",
                 required=False,
                 path=zero_news,
             )
             return str(zero_news)
-        self.add_stage(f"{domain}-cache", "partial", detail="optional cache collection failed once", required=False, path=self.command_log_path)
+        self.add_stage(stage_name, "partial", detail="optional cache collection failed once", required=False, path=self.command_log_path)
         return ""
 
     def has_etf_or_etn_price_rows(self) -> bool:
@@ -1244,6 +1261,50 @@ class Pipeline:
             self.add_stage("market-index-snapshot", "success", detail="collected five market indexes", required=False, path=output)
             return str(output)
         self.add_stage("market-index-snapshot", "partial", detail=f"optional market index snapshot status={status or 'unknown'}", required=False, path=output)
+        return str(output)
+
+    def build_news_context(self, symbol_news_cache: str) -> str:
+        script = self.news_context_script()
+        output = self.output_dir / "news-context.json"
+        if not script.exists():
+            self.add_stage("news-context", "skipped", detail="optional news context script not found", required=False)
+            return ""
+        command = [
+            sys.executable,
+            str(script),
+            "build",
+            "--workspace-dir",
+            str(self.workspace_dir),
+            "--run-id",
+            self.run_id,
+            "--started-at",
+            self.started_at,
+            "--output",
+            str(output),
+        ]
+        if symbol_news_cache:
+            command.extend(["--symbol-news-cache-path", symbol_news_cache])
+        result = self.run_cmd("news-context", command, required=False)
+        payload = load_json_if_exists(output)
+        if result.returncode != 0 or not isinstance(payload, dict):
+            self.add_stage(
+                "news-context",
+                "partial",
+                detail="optional news context construction failed",
+                required=False,
+                path=self.command_log_path,
+            )
+            return ""
+        status = str(payload.get("status") or "partial")
+        market_news = payload.get("market_news") if isinstance(payload.get("market_news"), dict) else {}
+        selected_count = as_int(market_news.get("selected_count"))
+        self.add_stage(
+            "news-context",
+            "success" if status == "success" else "partial",
+            detail=f"status={status}, market_news_items={selected_count}",
+            required=False,
+            path=output,
+        )
         return str(output)
 
     def run_artifact_command(self, stage: str, args: list[str], *, required: bool = True) -> dict[str, Any] | None:
@@ -2326,8 +2387,13 @@ class Pipeline:
     def build_evidence_summary(self, decision_brief: dict[str, Any], stages: list[dict[str, Any]], symbols: list[str]) -> dict[str, Any]:
         stage_by_name = {item.get("stage"): item for item in stages if isinstance(item, dict)}
         decision_symbols = decision_brief.get("symbols") if isinstance(decision_brief.get("symbols"), list) else []
+        market_news_context = (
+            decision_brief.get("market_news_context")
+            if isinstance(decision_brief.get("market_news_context"), dict)
+            else {}
+        )
         financial_supplied = 0
-        news_with_articles = 0
+        symbol_news_with_articles = 0
         investor_flow_usable = 0
         price_only = 0
         for item in decision_symbols:
@@ -2336,9 +2402,9 @@ class Pipeline:
             financial_summary = item.get("financial_summary") if isinstance(item.get("financial_summary"), dict) else {}
             if financial_summary.get("cache_status") == "supplied":
                 financial_supplied += 1
-            news_summary = item.get("news_summary") if isinstance(item.get("news_summary"), list) else []
-            if news_summary:
-                news_with_articles += 1
+            symbol_news_summary = item.get("symbol_news_summary") if isinstance(item.get("symbol_news_summary"), list) else []
+            if symbol_news_summary:
+                symbol_news_with_articles += 1
             investor_flow = item.get("investor_flow_summary") if isinstance(item.get("investor_flow_summary"), dict) else {}
             if any(
                 investor_flow.get(key) is not None
@@ -2360,10 +2426,29 @@ class Pipeline:
                 "symbol_count_with_summary": financial_supplied,
                 "display_text": f"재무: {financial_supplied}개 종목 반영" if financial_supplied else "재무: 반영된 요약 없음",
             },
-            "news": {
-                "status": "supplied" if news_with_articles else "not_supplied",
-                "symbol_count_with_articles": news_with_articles,
-                "display_text": f"뉴스: {news_with_articles}개 종목 기사 반영" if news_with_articles else "뉴스: 반영된 기사 없음",
+            "symbol_news": {
+                "status": "supplied" if symbol_news_with_articles else "not_supplied",
+                "symbol_count_with_articles": symbol_news_with_articles,
+                "display_text": (
+                    f"종목뉴스: {symbol_news_with_articles}개 종목 기사 반영"
+                    if symbol_news_with_articles
+                    else "종목뉴스: 반영된 기사 없음"
+                ),
+            },
+            "market_news": {
+                "status": market_news_context.get("status") or "missing",
+                "article_count": as_int(market_news_context.get("selected_count")),
+                "window_start": market_news_context.get("window_start") or "",
+                "window_end": market_news_context.get("window_end") or "",
+                "window_source": market_news_context.get("window_source") or "",
+                "source_statuses": market_news_context.get("source_statuses")
+                if isinstance(market_news_context.get("source_statuses"), dict)
+                else {},
+                "display_text": (
+                    f"시장뉴스: {as_int(market_news_context.get('selected_count'))}건 반영"
+                    if as_int(market_news_context.get("selected_count"))
+                    else "시장뉴스: 반영된 기사 없음"
+                ),
             },
             "investor_flow": {
                 "status": (
@@ -2384,8 +2469,8 @@ class Pipeline:
                 ),
             },
         }
-        for domain in ("financial", "news"):
-            stage = stage_by_name.get(f"{domain}-cache")
+        for domain, stage_name in (("financial", "financial-cache"), ("symbol_news", "symbol-news-cache")):
+            stage = stage_by_name.get(stage_name)
             if not isinstance(stage, dict):
                 continue
             path_text = str(stage.get("path") or "").strip()
@@ -2396,22 +2481,22 @@ class Pipeline:
                 domain_summary["cache_path"] = path_text
                 path = resolve_workspace_path(self.workspace_dir, path_text)
                 if path.exists():
-                    if domain == "news":
+                    if domain == "symbol_news":
                         expected_date = self.optional_cache_date()
-                        domain_summary["cache_counts"] = news_cache_evidence_counts(path, symbols, expected_date)
+                        domain_summary["cache_counts"] = symbol_news_cache_evidence_counts(path, symbols, expected_date)
                     else:
                         domain_summary["cache_counts"] = cache_evidence_counts(path, symbols)
-            if domain == "news":
+            if domain == "symbol_news":
                 counts = domain_summary.get("cache_counts") if isinstance(domain_summary.get("cache_counts"), dict) else {}
                 if counts and as_int(counts.get("usable_symbol_count")) == 0:
                     domain_summary["status"] = "cache_exists_zero_usable_articles"
-                    domain_summary["display_text"] = "뉴스: 캐시 파일은 있으나 사용 가능한 기사 0건"
+                    domain_summary["display_text"] = "종목뉴스: 캐시 파일은 있으나 사용 가능한 기사 0건"
                 elif not path_text:
                     domain_summary["status"] = "cache_missing"
-                    domain_summary["display_text"] = "뉴스: 캐시 파일 없음"
-                elif news_with_articles and news_with_articles < len(symbols):
+                    domain_summary["display_text"] = "종목뉴스: 캐시 파일 없음"
+                elif symbol_news_with_articles and symbol_news_with_articles < len(symbols):
                     domain_summary["status"] = "partial"
-                    domain_summary["display_text"] = f"뉴스: {news_with_articles}개 종목 기사 반영, 일부 종목 기사 없음"
+                    domain_summary["display_text"] = f"종목뉴스: {symbol_news_with_articles}개 종목 기사 반영, 일부 종목 기사 없음"
             elif domain == "financial":
                 if not path_text:
                     domain_summary["status"] = "cache_missing"
@@ -2419,6 +2504,23 @@ class Pipeline:
                 elif financial_supplied and financial_supplied < len(symbols):
                     domain_summary["status"] = "partial"
                     domain_summary["display_text"] = f"재무: {financial_supplied}개 종목 반영, 일부 종목 요약 없음"
+        market_stage = stage_by_name.get("news-context")
+        if isinstance(market_stage, dict):
+            summary["market_news"]["context_stage_status"] = market_stage.get("status")
+            summary["market_news"]["context_stage_detail"] = market_stage.get("detail")
+            if market_stage.get("path"):
+                summary["market_news"]["context_path"] = market_stage.get("path")
+        market_article_count = as_int(summary["market_news"].get("article_count"))
+        if market_article_count and summary["market_news"]["status"] not in {"supplied", "partial"}:
+            summary["market_news"]["status"] = "partial"
+        if summary["market_news"]["status"] == "partial" and market_article_count:
+            summary["market_news"]["display_text"] = f"시장뉴스: {market_article_count}건 반영, 일부 수집원 실패"
+        elif summary["market_news"]["status"] == "missing":
+            summary["market_news"]["display_text"] = "시장뉴스: 저장 DB 없음"
+        elif summary["market_news"]["status"] == "failed":
+            summary["market_news"]["display_text"] = "시장뉴스: 최근 수집 실패"
+        elif summary["market_news"]["status"] == "empty":
+            summary["market_news"]["display_text"] = "시장뉴스: 조회 구간 내 기사 없음"
         return summary
 
     def build_reporting_view(
@@ -2461,6 +2563,16 @@ class Pipeline:
 
         def evidence_domain_view(name: str) -> dict[str, Any]:
             domain = evidence_summary.get(name) if isinstance(evidence_summary.get(name), dict) else {}
+            if name == "market_news":
+                return {
+                    "scope": "market_news_context_quality",
+                    "status": domain.get("status") or "not_supplied",
+                    "coverage_text": domain.get("display_text") or "",
+                    "usable_item_count": domain.get("article_count"),
+                    "window_start": domain.get("window_start") or "",
+                    "window_end": domain.get("window_end") or "",
+                    "blocks_trading": False,
+                }
             counts = domain.get("cache_counts") if isinstance(domain.get("cache_counts"), dict) else {}
             usable = counts.get("usable_symbol_count") if counts else domain.get("usable_symbol_count")
             wanted = counts.get("wanted_symbol_count") if counts else domain.get("wanted_symbol_count") or evidence_summary.get("symbol_count")
@@ -2478,11 +2590,17 @@ class Pipeline:
             }
 
         financial_view = evidence_domain_view("financial")
-        news_view = evidence_domain_view("news")
+        symbol_news_view = evidence_domain_view("symbol_news")
+        market_news_view = evidence_domain_view("market_news")
         investor_flow_view = evidence_domain_view("investor_flow")
         supplied_like = {"supplied", "success", "complete"}
         partial_like = {"partial", "cache_exists_zero_usable_articles"}
-        domain_statuses = {financial_view["status"], news_view["status"], investor_flow_view["status"]}
+        domain_statuses = {
+            financial_view["status"],
+            symbol_news_view["status"],
+            market_news_view["status"],
+            investor_flow_view["status"],
+        }
         if domain_statuses <= supplied_like:
             evidence_collection_status = "success"
         elif domain_statuses & (supplied_like | partial_like):
@@ -2537,7 +2655,8 @@ class Pipeline:
             },
             "evidence_domains": {
                 "financial": financial_view,
-                "news": news_view,
+                "symbol_news": symbol_news_view,
+                "market_news": market_news_view,
                 "investor_flow": investor_flow_view,
             },
             "run_status": {
@@ -2718,13 +2837,14 @@ class Pipeline:
             f"- 실행 디렉터리: {summary.get('run_dir', '')}",
             "",
             "## 1. 수집 상태",
-            "| 도메인 | 상태 | 전체 종목 수 | 오류 종목 수 | 핵심 오류 |",
+            "| 도메인 | 상태 | 대상/기사 수 | 누락/오류 수 | 핵심 오류 |",
             "|---|---|---:|---:|---|",
         ]
         for domain, stage_name, evidence_key in (
             ("시장", "main-evidence", None),
             ("재무", "financial-cache", "financial"),
-            ("뉴스", "news-cache", "news"),
+            ("종목뉴스", "symbol-news-cache", "symbol_news"),
+            ("시장뉴스", "news-context", "market_news"),
             ("수급", "", "investor_flow"),
         ):
             stage = stage_by_name.get(stage_name, {}) if stage_name else {}
@@ -2739,9 +2859,11 @@ class Pipeline:
                 detail = domain_view.get("display_text") or detail
                 if not status_text:
                     status_text = domain_view.get("status") or ""
-            lines.append(
-                f"| {domain} | {status_text} | {(summary.get('portfolio_counts') or {}).get('universe', 0)} | {error_count} | {md_cell(detail)} |"
-            )
+            total_count = (summary.get("portfolio_counts") or {}).get("universe", 0)
+            if evidence_key == "market_news":
+                market_summary = evidence_summary.get("market_news") if isinstance(evidence_summary.get("market_news"), dict) else {}
+                total_count = as_int(market_summary.get("article_count"))
+            lines.append(f"| {domain} | {status_text} | {total_count} | {error_count} | {md_cell(detail)} |")
 
         lines.extend(
             [
@@ -3167,7 +3289,7 @@ class Pipeline:
                 ],
                 "today_trade_amount_policy": "Show today_buy_amount/today_sell_amount and today_fills_summary.fill_count only under a separate 당일 거래 누계 label when relevant, explicitly marked as this run's pre-order snapshot (account-before-order.json / collection-time today-fills.json), never as values current at Telegram delivery time; never present them as newly caused by this command unless execution.json confirms submitted orders.",
                 "gate_label": "주문 전 기존 미체결/예약 주문",
-                "evidence_policy": "Report evidence_summary.financial.display_text, evidence_summary.news.display_text, and evidence_summary.investor_flow.display_text; distinguish missing cache from cache_exists_zero_usable_articles.",
+                "evidence_policy": "Report evidence_summary.financial.display_text, evidence_summary.symbol_news.display_text, evidence_summary.market_news.display_text, and evidence_summary.investor_flow.display_text; keep per-symbol KIS news distinct from market-wide stored news and distinguish missing cache from cache_exists_zero_usable_articles.",
                 "review_policy": "Mention judge/judge-review outcome using review_summary.final_sell_count/final_buy_count/final_hold_count (final decisions derived from current->final holding quantity direction) and unresolved_candidate_count; never present sell_candidate_count/buy_candidate_count/hold_symbol_count as final verdicts. Highlight submitted or final-quantity-changed symbols, including final holding quantity and one_line_reason when available.",
             },
             "artifacts": {
@@ -3177,6 +3299,7 @@ class Pipeline:
                 "account_asset_snapshot": str(self.output_dir / "account-asset-snapshot.json"),
                 "today_fills": str(self.output_dir / "today-fills.json"),
                 "order_lifecycle": str(self.output_dir / "order-lifecycle.json"),
+                "news_context": str(self.output_dir / "news-context.json"),
                 "decision_brief": str(self.output_dir / "decision-brief.json"),
                 "analyst_review": str(self.output_dir / "analyst-review.json"),
                 "judge_debate": str(self.output_dir / "judge-debate.json"),
@@ -3247,7 +3370,8 @@ class Pipeline:
         if getattr(self.args, "submit_orders", False) and self.args.request_type in {"demo-submit", "real-submit"}:
             self.run_order_lifecycle_preflight()
         financial_cache = self.collect_optional_cache("financial", symbols)
-        news_cache = self.collect_optional_cache("news", symbols)
+        symbol_news_cache = self.collect_optional_cache("symbol_news", symbols)
+        news_context = self.build_news_context(symbol_news_cache)
         market_index_snapshot = self.collect_market_index_snapshot()
 
         decision_args = [
@@ -3258,13 +3382,15 @@ class Pipeline:
             str(portfolio_path),
             "--strategy-policy-config",
             str(self.strategy_policy_config_path),
-            "--expected-news-date",
+            "--expected-symbol-news-date",
             self.optional_cache_date(),
         ]
         if financial_cache:
             decision_args.extend(["--financial-cache-path", financial_cache])
-        if news_cache:
-            decision_args.extend(["--news-cache-path", news_cache])
+        if symbol_news_cache:
+            decision_args.extend(["--symbol-news-cache-path", symbol_news_cache])
+        if news_context:
+            decision_args.extend(["--news-context-json", news_context])
         if market_index_snapshot:
             decision_args.extend(["--market-index-snapshot-json", market_index_snapshot])
         decision = self.run_artifact_command("decision-brief", decision_args)
@@ -3384,7 +3510,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--request-type", default="analysis", choices=["analysis", "prepare", "demo-submit", "real-submit"])
     run.add_argument("--portfolio-json", default="")
     run.add_argument("--financial-cache-path", default="")
-    run.add_argument("--news-cache-path", default="")
+    run.add_argument("--symbol-news-cache-path", default="")
     run.add_argument("--main-events", default="", help="Optional Codex JSONL events path for Main-agent token accounting.")
     run.add_argument("--submit-orders", action="store_true", help="For explicit demo-submit/real-submit runs, execute immediate or reservation orders through execute_orders.py.")
     run.add_argument("--review-extra-instructions-file", default="", help="Optional JSON file with analyst_review/judge_review supplemental instructions.")

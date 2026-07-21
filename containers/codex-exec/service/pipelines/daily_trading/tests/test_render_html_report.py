@@ -54,10 +54,11 @@ def make_run(runs_root: Path, run_id: str, started_at: str, *, target: bool) -> 
                 "status": "supplied",
                 "cache_counts": {"usable_symbol_count": 2, "wanted_symbol_count": 2},
             },
-            "news": {
+            "symbol_news": {
                 "status": "supplied",
                 "cache_counts": {"usable_symbol_count": 2, "wanted_symbol_count": 2},
             },
+            "market_news": {"status": "supplied", "article_count": 1},
             "investor_flow": {
                 "status": "partial" if target else "supplied",
                 "usable_symbol_count": 1 if target else 2,
@@ -99,7 +100,7 @@ def make_run(runs_root: Path, run_id: str, started_at: str, *, target: bool) -> 
                 "quality_value_usable": True,
                 "items": ["업종 반도체", "PER 12.3", "영업이익 증가"],
             },
-            "news_summary": [
+            "symbol_news_summary": [
                 {
                     "article_date": "2026-07-15 08:30",
                     "content": "신규 수주 공시",
@@ -117,7 +118,7 @@ def make_run(runs_root: Path, run_id: str, started_at: str, *, target: bool) -> 
                 "quality_value_usable": True,
                 "items": ["업종 반도체", "부채비율 안정"],
             },
-            "news_summary": [
+            "symbol_news_summary": [
                 {
                     "article_date": "2026-07-15 09:10",
                     "content": "원가 부담 확대",
@@ -477,13 +478,15 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
                     "evidence_summary": {
                         "symbol_count": 2,
                         "financial": {"status": "supplied", "display_text": "legacy stale text", "cache_counts": {"usable_symbol_count": 2, "wanted_symbol_count": 2}},
-                        "news": {"status": "supplied", "display_text": "legacy stale text", "cache_counts": {"usable_symbol_count": 2, "wanted_symbol_count": 2}},
+                        "symbol_news": {"status": "supplied", "display_text": "legacy stale text", "cache_counts": {"usable_symbol_count": 2, "wanted_symbol_count": 2}},
+                        "market_news": {"status": "supplied", "display_text": "legacy stale market text", "article_count": 3},
                         "investor_flow": {"status": "supplied", "display_text": "legacy stale text"},
                     },
                     "reporting_view": {
                         "evidence_domains": {
                             "financial": {"status": "supplied", "coverage_text": "재무: 2개 종목 반영", "usable_symbol_count": 2, "wanted_symbol_count": 2},
-                            "news": {"status": "cache_missing", "coverage_text": "뉴스: 캐시 파일 없음", "usable_symbol_count": 0, "wanted_symbol_count": 2},
+                            "symbol_news": {"status": "cache_missing", "coverage_text": "종목뉴스: 캐시 파일 없음", "usable_symbol_count": 0, "wanted_symbol_count": 2},
+                            "market_news": {"status": "partial", "coverage_text": "시장뉴스: 2건 반영, 일부 수집원 실패", "usable_item_count": 2},
                             "investor_flow": {"status": "partial", "coverage_text": "장중 수급: 1개 종목 추정치 반영, 일부 종목 수급 없음", "usable_symbol_count": 1, "wanted_symbol_count": 2},
                         }
                     },
@@ -491,8 +494,10 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
                 },
             )
 
-        self.assertIn("뉴스 수집 cache_missing", rendered)
-        self.assertIn("뉴스: 캐시 파일 없음", rendered)
+        self.assertIn("종목뉴스 수집 cache_missing", rendered)
+        self.assertIn("종목뉴스: 캐시 파일 없음", rendered)
+        self.assertIn("시장뉴스 수집 partial", rendered)
+        self.assertIn("시장뉴스 기사</span><strong>2건", rendered)
         self.assertIn("장중 수급 수집 partial", rendered)
         self.assertIn("수급 coverage</span><strong>1 / 2", rendered)
         self.assertNotIn("legacy stale text", rendered)

@@ -1234,6 +1234,7 @@ def render_market_and_quality(target_dir: Path, summary: dict[str, Any]) -> str:
                 "display_text": view.get("coverage_text"),
                 "usable_symbol_count": view.get("usable_symbol_count"),
                 "wanted_symbol_count": view.get("wanted_symbol_count"),
+                "usable_item_count": view.get("usable_item_count"),
             }
         raw = evidence.get(key) if isinstance(evidence.get(key), dict) else {}
         counts = raw.get("cache_counts") if isinstance(raw.get("cache_counts"), dict) else {}
@@ -1242,11 +1243,13 @@ def render_market_and_quality(target_dir: Path, summary: dict[str, Any]) -> str:
             "display_text": raw.get("display_text"),
             "usable_symbol_count": counts.get("usable_symbol_count", raw.get("usable_symbol_count")),
             "wanted_symbol_count": counts.get("wanted_symbol_count", default_wanted),
+            "usable_item_count": raw.get("article_count"),
         }
 
     symbol_count = evidence.get("symbol_count")
     financial = domain_view("financial", symbol_count)
-    news = domain_view("news", symbol_count)
+    symbol_news = domain_view("symbol_news", symbol_count)
+    market_news = domain_view("market_news", None)
     investor_flow = domain_view("investor_flow", symbol_count)
     investor_flow_usable = investor_flow.get("usable_symbol_count")
     investor_flow_wanted = investor_flow.get("wanted_symbol_count")
@@ -1261,9 +1264,13 @@ def render_market_and_quality(target_dir: Path, summary: dict[str, Any]) -> str:
     )
     warnings = []
     normal_evidence_statuses = {None, "", "success", "complete", "supplied"}
-    if news.get("status") not in normal_evidence_statuses:
+    if symbol_news.get("status") not in normal_evidence_statuses:
         warnings.append(
-            f'<div class="warning"><strong>뉴스 수집 {esc(news.get("status"))}</strong><p>{esc(news.get("display_text") or "일부 뉴스 근거를 사용할 수 없습니다.")}</p></div>'
+            f'<div class="warning"><strong>종목뉴스 수집 {esc(symbol_news.get("status"))}</strong><p>{esc(symbol_news.get("display_text") or "일부 종목뉴스 근거를 사용할 수 없습니다.")}</p></div>'
+        )
+    if market_news.get("status") not in normal_evidence_statuses:
+        warnings.append(
+            f'<div class="warning"><strong>시장뉴스 수집 {esc(market_news.get("status"))}</strong><p>{esc(market_news.get("display_text") or "일부 국내·해외 시장뉴스 근거를 사용할 수 없습니다.")}</p></div>'
         )
     if financial.get("status") not in normal_evidence_statuses:
         warnings.append(
@@ -1301,7 +1308,8 @@ def render_market_and_quality(target_dir: Path, summary: dict[str, Any]) -> str:
       <div class="table-wrap"><table><thead><tr><th>지수</th><th>값</th><th>등락률</th><th>출처</th><th>판정</th></tr></thead><tbody>{''.join(index_rows)}</tbody></table></div>
       <div class="coverage">
         <article><span>재무 coverage</span><strong>{number(financial.get('usable_symbol_count'))} / {number(financial.get('wanted_symbol_count'))}</strong><small>{esc(financial.get('status'))}</small></article>
-        <article><span>뉴스 coverage</span><strong>{number(news.get('usable_symbol_count'))} / {number(news.get('wanted_symbol_count'))}</strong><small>{esc(news.get('status'))}</small></article>
+        <article><span>종목뉴스 coverage</span><strong>{number(symbol_news.get('usable_symbol_count'))} / {number(symbol_news.get('wanted_symbol_count'))}</strong><small>{esc(symbol_news.get('status'))}</small></article>
+        <article><span>시장뉴스 기사</span><strong>{number(market_news.get('usable_item_count'))}건</strong><small>{esc(market_news.get('status'))}</small></article>
         <article><span>수급 coverage</span><strong>{number(investor_flow_usable)} / {number(investor_flow_wanted)}</strong><small>{esc(investor_flow.get('status'))}</small></article>
         <article><span>가격 전용 종목</span><strong>{number(evidence.get('price_only_symbol_count'))}</strong><small>전체 {number(evidence.get('symbol_count'))}종목</small></article>
       </div>
@@ -1352,7 +1360,7 @@ def render_news_timeline(runs: list[dict[str, Any]]) -> str:
         for symbol in decision.get("symbols", []):
             if not isinstance(symbol, dict):
                 continue
-            for news in symbol.get("news_summary", []):
+            for news in symbol.get("symbol_news_summary", []):
                 if not isinstance(news, dict):
                     continue
                 current.add(
@@ -1365,8 +1373,8 @@ def render_news_timeline(runs: list[dict[str, Any]]) -> str:
                 )
         new_items = sorted(current - seen, key=lambda item: (item[2], item[0], item[3]))
         seen.update(current)
-        news_summary = ((summary.get("evidence_summary") or {}).get("news") or {})
-        counts = news_summary.get("cache_counts") if isinstance(news_summary.get("cache_counts"), dict) else {}
+        symbol_news_summary = ((summary.get("evidence_summary") or {}).get("symbol_news") or {})
+        counts = symbol_news_summary.get("cache_counts") if isinstance(symbol_news_summary.get("cache_counts"), dict) else {}
         articles = []
         for symbol_id, symbol_name, article_date, content in new_items:
             articles.append(
@@ -1383,8 +1391,75 @@ def render_news_timeline(runs: list[dict[str, Any]]) -> str:
         )
     return f"""
     <section class="panel" id="news-timeline">
-      <div class="section-head"><div><p class="kicker">NEWS COLLECTION TIMELINE</p><h2>시간별 뉴스 수집 이력</h2></div><span class="badge info">고유 신규 관측 {len(seen)}건</span></div>
-      <p class="section-note">각 run의 수집 시각, 종목 coverage, 해당 run의 기사 수와 이전 run들에서 관측되지 않았던 신규 기사를 구분합니다. 기사 발행시각과 pipeline 수집시각을 함께 볼 수 있습니다.</p>
+      <div class="section-head"><div><p class="kicker">SYMBOL NEWS TIMELINE</p><h2>시간별 종목뉴스 수집 이력</h2></div><span class="badge info">고유 신규 관측 {len(seen)}건</span></div>
+      <p class="section-note">각 run에서 KIS 종목번호로 수집한 뉴스만 표시합니다. 종목 coverage, 기사 수와 이전 run들에서 관측되지 않았던 신규 기사를 구분합니다.</p>
+      <div class="news-timeline">{''.join(blocks)}</div>
+    </section>
+    """
+
+
+def render_market_news_timeline(runs: list[dict[str, Any]]) -> str:
+    seen: set[str] = set()
+    blocks = []
+    for run in runs:
+        summary = run["summary"]
+        decision = run["decision"]
+        context = decision.get("market_news_context") if isinstance(decision.get("market_news_context"), dict) else {}
+        items = context.get("items") if isinstance(context.get("items"), list) else []
+        current: dict[str, dict[str, Any]] = {}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            title = " ".join(str(item.get("title") or "").split())
+            if not title:
+                continue
+            url = str(item.get("url") or "").strip()
+            key = f"url:{url}" if url else f"title:{title.casefold()}"
+            current[key] = item
+        new_keys = [key for key in current if key not in seen]
+        seen.update(current)
+        articles = []
+        for key in sorted(
+            new_keys,
+            key=lambda item_key: str(current[item_key].get("published_at") or current[item_key].get("collected_at") or ""),
+            reverse=True,
+        ):
+            item = current[key]
+            title = str(item.get("title") or "")
+            url = str(item.get("url") or "")
+            title_html = (
+                f'<a href="{esc(url)}" target="_blank" rel="noopener noreferrer">{esc(title)}</a>'
+                if url.startswith(("http://", "https://"))
+                else esc(title)
+            )
+            classifications = item.get("classifications") if isinstance(item.get("classifications"), list) else []
+            meta = " · ".join(
+                value
+                for value in (
+                    str(item.get("domain") or ""),
+                    str(item.get("source_country") or ""),
+                    ", ".join(str(value) for value in classifications),
+                )
+                if value
+            )
+            articles.append(
+                f'<article class="news-item"><div><strong>{title_html}</strong>'
+                f'<time>{esc(item.get("published_at") or item.get("collected_at"))}</time></div>'
+                f'<p>{esc(meta)}</p></article>'
+            )
+        if not articles:
+            articles.append('<div class="empty-state">직전 run 이후 새로 선택된 시장뉴스 없음</div>')
+        blocks.append(
+            f'<section class="news-run"><div class="news-run-head"><div><span class="news-time">{esc(time_text(summary.get("started_at")))}</span>'
+            f'<strong>{esc(context.get("status") or "missing")}</strong></div>'
+            f'<div><span>구간 {esc(full_time_text(context.get("window_start")))} ~ {esc(full_time_text(context.get("window_end")))}</span>'
+            f'<span class="badge {"ok" if new_keys else "info"}">신규 선택 {len(new_keys)}건</span></div></div>'
+            f'<div class="news-run-body">{"".join(articles)}</div></section>'
+        )
+    return f"""
+    <section class="panel" id="market-news-timeline">
+      <div class="section-head"><div><p class="kicker">MARKET NEWS TIMELINE</p><h2>국내·해외 시장뉴스 구간 이력</h2></div><span class="badge info">고유 선택 {len(seen)}건</span></div>
+      <p class="section-note">저장 DB에서 직전 거래 run 이후 현재 run까지 선택된 시장·거시·지정학 뉴스를 표시합니다. 이 뉴스는 전체 재검토 신호이며 개별 종목 자동 주문 신호가 아닙니다.</p>
       <div class="news-timeline">{''.join(blocks)}</div>
     </section>
     """
@@ -1525,7 +1600,7 @@ def build_html(runs_root: Path, target_run: str) -> str:
     trade_html, submitted_orders = render_trade_ledger(runs, fills, fill_status, fill_scope)
     overview = render_header(summary, len(runs), fills, submitted_orders) + render_combined_chart(runs)
     trades = trade_html + render_time_symbol_inspector(runs, fills)
-    evidence = render_news_timeline(runs) + render_financial_details(target_dir)
+    evidence = render_news_timeline(runs) + render_market_news_timeline(runs) + render_financial_details(target_dir)
     operations = render_run_timeline(runs) + render_holdings(target_dir, summary) + render_market_and_quality(target_dir, summary)
 
     tab_buttons = [

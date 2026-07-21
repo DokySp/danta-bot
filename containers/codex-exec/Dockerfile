@@ -18,6 +18,7 @@ ENV SCHEDULE_FILE=/app/config/schedules.yaml
 ENV TOUCH_POINT_CONFIG_FILE=/app/config/touch-points.yaml
 ENV PORTFOLIO_FILE=/app/config/portfolio.txt
 ENV EXECUTE_TRADE_CONFIG_FILE=/app/config/execute-trade.yaml
+ENV MARKET_NEWS_CONFIG_FILE=/app/config/market-news.yaml
 ENV BUNDLED_SKILLS_DIR=/app/skills
 ENV CODEX_CONFIG_SNIPPET_DIR=/app/codex-config.d
 ENV CODEX_CONFIG_FILE=/codex-home/config.toml

@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Collect and retrieve KIS news YAML caches."""
+"""Collect and retrieve KIS per-symbol news YAML caches (symbol_news pipeline).
+
+This is a deterministic service pipeline, not a shared skill. Collection never
+invokes Codex/an LLM; it only calls the KIS Open API and writes a date-keyed
+YAML cache.
+"""
 
 from __future__ import annotations
 
@@ -20,6 +25,11 @@ from zoneinfo import ZoneInfo
 import yaml
 
 
+CODEX_EXEC_ROOT = Path(__file__).resolve().parents[3]
+if str(CODEX_EXEC_ROOT) not in sys.path:
+    sys.path.insert(0, str(CODEX_EXEC_ROOT))
+
+
 KST = ZoneInfo("Asia/Seoul")
 KIS_BASE_URL = "https://openapi.koreainvestment.com:9443"
 NEWS_PATH = "/uapi/domestic-stock/v1/quotations/news-title"
@@ -31,7 +41,7 @@ class QuotedString(str):
     """YAML scalar that must be emitted with quotes."""
 
 
-class NewsYamlDumper(yaml.SafeDumper):
+class SymbolNewsYamlDumper(yaml.SafeDumper):
     pass
 
 
@@ -39,7 +49,7 @@ def quoted_string_representer(dumper: yaml.Dumper, value: QuotedString) -> yaml.
     return dumper.represent_scalar("tag:yaml.org,2002:str", str(value), style='"')
 
 
-NewsYamlDumper.add_representer(QuotedString, quoted_string_representer)
+SymbolNewsYamlDumper.add_representer(QuotedString, quoted_string_representer)
 
 
 def find_repo_root(start: Path | None = None) -> Path | None:
@@ -61,14 +71,14 @@ def memory_root() -> Path:
 
 
 def cache_dir() -> Path:
-    configured = os.environ.get("COLLECT_NEWS_INFORMATION_MEMORY_DIR")
+    configured = os.environ.get("SYMBOL_NEWS_CACHE_MEMORY_DIR")
     if configured:
         return Path(configured).expanduser()
-    return memory_root() / "collect-news-information"
+    return memory_root() / "symbol-news-cache"
 
 
-def news_cache_path(date_hyphen: str) -> Path:
-    return cache_dir() / f"news-{date_hyphen}.yaml"
+def symbol_news_cache_path(date_hyphen: str) -> Path:
+    return cache_dir() / f"symbol-news-{date_hyphen}.yaml"
 
 
 def today_kst() -> str:
@@ -112,7 +122,7 @@ def write_yaml(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     with open(tmp, "w", encoding="utf-8") as handle:
-        yaml.dump(canonical_cache(payload), handle, Dumper=NewsYamlDumper, allow_unicode=True, sort_keys=False)
+        yaml.dump(canonical_cache(payload), handle, Dumper=SymbolNewsYamlDumper, allow_unicode=True, sort_keys=False)
     tmp.replace(path)
 
 
@@ -551,7 +561,7 @@ def filter_rows(rows: list[dict[str, Any]], symbol_id: str, symbol_name: str, da
 
 def command_get(args: argparse.Namespace) -> int:
     date_hyphen = normalize_date(args.date)
-    path = news_cache_path(date_hyphen)
+    path = symbol_news_cache_path(date_hyphen)
     if not path.exists():
         print(MISSING_CACHE_MESSAGE)
         return 1
@@ -577,26 +587,22 @@ def command_collect(args: argparse.Namespace) -> int:
             args.max_pages,
         )
         collected.append((symbol_id, symbol_name, filter_rows(rows, symbol_id, symbol_name, date_hyphen), errors))
-    path = news_cache_path(date_hyphen)
+    path = symbol_news_cache_path(date_hyphen)
     output = merge_cache(date_hyphen, path, collected)
     write_yaml(path, output)
     print(path)
     return 0
 
 
-def command_self_test(args: argparse.Namespace) -> int:
+def command_self_test(_args: argparse.Namespace) -> int:
     """Run the extracted test suite through the legacy CLI contract."""
-    test_path = Path(__file__).resolve().parents[1] / "tests" / "test_news_cache.py"
-    spec = importlib.util.spec_from_file_location("news_cache_self_test", test_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"unable to load self-test module: {test_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.command_self_test(args)
+    from service.pipelines.symbol_news.tests.test_cli import command_self_test as run_external_self_test
+
+    return run_external_self_test()
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Collect and retrieve KIS news YAML caches.")
+    parser = argparse.ArgumentParser(description="Collect and retrieve per-symbol KIS news YAML caches.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     get_parser = subparsers.add_parser("get", help="Return the date cache path.")

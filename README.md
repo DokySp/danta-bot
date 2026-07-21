@@ -149,7 +149,6 @@ containers/
     shared-skills/
       check-holiday/
       collect-financial-information/
-      collect-news-information/
       trading-schedule-toggle/
     pipelines/
       daily-trading/

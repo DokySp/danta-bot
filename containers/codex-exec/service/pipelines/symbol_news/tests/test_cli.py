@@ -1,34 +1,29 @@
-"""Tests for KIS news cache collection and serialization."""
+"""Tests for KIS symbol-news cache collection and serialization."""
 
 from __future__ import annotations
 
 import argparse
 import os
-import sys
 import unittest
 from pathlib import Path
 
-SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
-if str(SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_DIR))
-
-from news_cache import (  # noqa: E402
+from ..cli import (
     QuotedString,
     canonical_cache,
     load_symbols,
     merge_cache,
-    news_cache_path,
     normalize_date,
     row_date,
     row_text,
+    symbol_news_cache_path,
     write_yaml,
 )
 
 
-def command_self_test(_args: argparse.Namespace) -> int:
+def command_self_test() -> int:
     date_hyphen = normalize_date("20260610")
     assert date_hyphen == "2026-06-10"
-    assert news_cache_path(date_hyphen).name == "news-2026-06-10.yaml"
+    assert symbol_news_cache_path(date_hyphen).name == "symbol-news-2026-06-10.yaml"
     item = {
         "hts_titl_cntt": "삼성전자 수주 증가",
         "data_dt": "20260610",
@@ -38,7 +33,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
     }
     assert row_date(item) == "2026-06-10T09:30:00+09:00"
     assert row_text(item) == "삼성전자 수주 증가"
-    cache = merge_cache(date_hyphen, Path("/tmp/nonexistent-news-cache.yaml"), [("005930", "삼성전자", [item], [])])
+    cache = merge_cache(date_hyphen, Path("/tmp/nonexistent-symbol-news-cache.yaml"), [("005930", "삼성전자", [item], [])])
     assert list(cache["symbols"]["005930"].keys()) == ["symbol_name", "articles"]
     assert set(cache["symbols"]["005930"]["articles"][0]) == {"article_date", "content"}
     assert cache["symbols"]["005930"]["articles"][0]["article_date"] == "2026-06-10T09:30:00+09:00"
@@ -65,7 +60,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
             "005930": {"symbol_name": "OLD", "articles": []},
         },
     }
-    temp = Path(os.environ.get("TMPDIR", "/tmp")) / "collect-news-information-self-test.yaml"
+    temp = Path(os.environ.get("TMPDIR", "/tmp")) / "symbol-news-self-test.yaml"
     write_yaml(temp, existing)
     merged = merge_cache(date_hyphen, temp, [("005930", "삼성전자", [item], [])])
     assert "000660" in merged["symbols"]
@@ -99,6 +94,6 @@ def command_self_test(_args: argparse.Namespace) -> int:
     return 0
 
 
-class NewsCacheSelfTest(unittest.TestCase):
+class SymbolNewsCliSelfTest(unittest.TestCase):
     def test_self_test_suite(self) -> None:
-        self.assertEqual(command_self_test(argparse.Namespace()), 0)
+        self.assertEqual(command_self_test(), 0)

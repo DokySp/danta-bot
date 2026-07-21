@@ -445,6 +445,67 @@ def compact_market_index_snapshot(path: str | None) -> dict[str, Any]:
     }
 
 
+def compact_market_news_context(path: str | None) -> dict[str, Any]:
+    if not path:
+        return {
+            "status": "missing",
+            "window_start": "",
+            "window_end": "",
+            "window_source": "",
+            "selected_count": 0,
+            "items": [],
+        }
+    payload = load_json(Path(path))
+    market_news = payload.get("market_news") if isinstance(payload.get("market_news"), dict) else {}
+    items: list[dict[str, Any]] = []
+    for item in market_news.get("items", []) if isinstance(market_news.get("items"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        title = " ".join(str(item.get("title") or "").split())[:500]
+        if not title:
+            continue
+        items.append(
+            {
+                "title": title,
+                "published_at": item.get("published_at") or "",
+                "collected_at": item.get("collected_at") or "",
+                "url": item.get("url") or "",
+                "domain": item.get("domain") or "",
+                "source_country": item.get("source_country") or "",
+                "source_language": item.get("source_language") or "",
+                "source_ids": list(item.get("source_ids") or [])[:5],
+                "providers": list(item.get("providers") or [])[:5],
+                "classifications": list(item.get("classifications") or [])[:5],
+            }
+        )
+    source_statuses: dict[str, Any] = {}
+    for source_id, raw_status in (
+        market_news.get("source_statuses", {}).items()
+        if isinstance(market_news.get("source_statuses"), dict)
+        else []
+    ):
+        status = raw_status if isinstance(raw_status, dict) else {}
+        source_statuses[str(source_id)] = {
+            "status": status.get("status") or "unknown",
+            "window_start": status.get("window_start") or "",
+            "window_end": status.get("window_end") or "",
+            "error": str(status.get("error") or "")[:300],
+        }
+    return {
+        "schema_version": payload.get("schema_version") or "1",
+        "status": market_news.get("status") or "missing",
+        "context_status": payload.get("status") or "unknown",
+        "window_start": payload.get("window_start") or "",
+        "window_end": payload.get("window_end") or "",
+        "window_source": payload.get("window_source") or "",
+        "deduplicated_count": as_int(payload.get("deduplicated_count")),
+        "raw_count": as_int(market_news.get("raw_count")),
+        "selected_count": len(items),
+        "source_statuses": source_statuses,
+        "items": items[:30],
+    }
+
+
 def tracked_index_changes(
     market_index_snapshot: dict[str, Any],
     tracked_indexes: list[str],
@@ -954,7 +1015,7 @@ def expected_news_calendar_date(expected_date: Any, started_at: Any) -> str:
     return parsed.date().isoformat()
 
 
-def news_summary_for(cache: Any, symbol_id: str, cache_path: str, expected_date: str) -> list[dict[str, Any]]:
+def symbol_news_summary_for(cache: Any, symbol_id: str, cache_path: str, expected_date: str) -> list[dict[str, Any]]:
     if not cache_path or not isinstance(cache, dict):
         return []
     expected_calendar_date = normalized_calendar_date(expected_date)
@@ -964,7 +1025,7 @@ def news_summary_for(cache: Any, symbol_id: str, cache_path: str, expected_date:
     symbols = cache.get("symbols") if isinstance(cache.get("symbols"), dict) else cache
     entries = symbols.get(symbol_id) if isinstance(symbols, dict) else None
     if isinstance(entries, dict):
-        entries = entries.get("items") or entries.get("news") or entries.get("articles") or []
+        entries = entries.get("items") or entries.get("articles") or []
     if not isinstance(entries, list):
         return []
     result: list[dict[str, Any]] = []
@@ -1128,7 +1189,7 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
     fills_by_id = fills_by_symbol(today_fills)
     run_id = args.run_id or price_chart.get("run_id") or account.get("run_id") or output_dir.name
     started_at = args.started_at or price_chart.get("started_at") or account.get("started_at") or ""
-    expected_news_date = expected_news_calendar_date(getattr(args, "expected_news_date", ""), started_at)
+    expected_symbol_news_date = expected_news_calendar_date(getattr(args, "expected_symbol_news_date", ""), started_at)
 
     account_by_symbol = indexed_symbols(account.get("symbols"))
     source_artifacts = ["price-chart.json", "account-before-order.json", "check-portfolio JSON"]
@@ -1136,17 +1197,21 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
         source_artifacts.append(str(today_fills_path))
     if args.financial_cache_path:
         source_artifacts.append(args.financial_cache_path)
-    if args.news_cache_path:
-        source_artifacts.append(args.news_cache_path)
+    if args.symbol_news_cache_path:
+        source_artifacts.append(args.symbol_news_cache_path)
+    news_context_json = getattr(args, "news_context_json", "")
+    if news_context_json:
+        source_artifacts.append(news_context_json)
     if args.market_index_snapshot_json:
         source_artifacts.append(args.market_index_snapshot_json)
 
     financial_cache = load_yaml(Path(args.financial_cache_path)) if args.financial_cache_path else None
-    news_cache = load_yaml(Path(args.news_cache_path)) if args.news_cache_path else None
+    symbol_news_cache = load_yaml(Path(args.symbol_news_cache_path)) if args.symbol_news_cache_path else None
     strategy_policy, strategy_policy_path = load_strategy_policy_config(
         getattr(args, "strategy_policy_config", "")
     )
     market_index_snapshot = compact_market_index_snapshot(args.market_index_snapshot_json)
+    market_news_context = compact_market_news_context(news_context_json)
     account_exposure_summary = account_summary(account)
     strategy_context = build_strategy_context(strategy_policy, strategy_policy_path, market_index_snapshot)
 
@@ -1162,6 +1227,7 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
                 "universe": portfolio.get("universe", []),
             },
             "market_index_snapshot": market_index_snapshot,
+            "market_news_context": market_news_context,
             "account_exposure_summary": account_exposure_summary,
             "strategy_context": strategy_context,
         }
@@ -1218,7 +1284,7 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
             "investor_flow_summary": compact_optional_dict(item, "investor_flow_summary"),
             "financial_summary": financial_summary,
             "etf_summary": etf_summary,
-            "news_summary": news_summary_for(news_cache, symbol_id, args.news_cache_path, expected_news_date),
+            "symbol_news_summary": symbol_news_summary_for(symbol_news_cache, symbol_id, args.symbol_news_cache_path, expected_symbol_news_date),
             "account_exposure": account_exposure,
             "symbol_strategy_context": build_symbol_strategy_context(
                 strategy_policy,
@@ -1454,13 +1520,13 @@ def expanded_first_scores(role: str, item: dict[str, Any]) -> list[dict[str, Any
     return scores
 
 
-def has_usable_news_summary(symbol: dict[str, Any]) -> bool:
-    news_summary = symbol.get("news_summary")
-    return isinstance(news_summary, list) and any(isinstance(item, dict) for item in news_summary)
+def has_usable_symbol_news_summary(symbol: dict[str, Any]) -> bool:
+    symbol_news_summary = symbol.get("symbol_news_summary")
+    return isinstance(symbol_news_summary, list) and any(isinstance(item, dict) for item in symbol_news_summary)
 
 
-def mark_news_flow_excluded_without_news(score_item: dict[str, Any], brief_symbol: dict[str, Any]) -> dict[str, Any]:
-    if str(score_item.get("agent_role") or "") != "analyst-news-flow" or has_usable_news_summary(brief_symbol):
+def mark_news_flow_excluded_without_symbol_news(score_item: dict[str, Any], brief_symbol: dict[str, Any]) -> dict[str, Any]:
+    if str(score_item.get("agent_role") or "") != "analyst-news-flow" or has_usable_symbol_news_summary(brief_symbol):
         return score_item
     normalized = dict(score_item)
     normalized["score"] = 5
@@ -1470,8 +1536,8 @@ def mark_news_flow_excluded_without_news(score_item: dict[str, Any], brief_symbo
     missing_data = normalized.get("missing_data")
     if not isinstance(missing_data, list):
         missing_data = []
-    if "news_summary" not in missing_data:
-        missing_data = [*missing_data, "news_summary"]
+    if "symbol_news_summary" not in missing_data:
+        missing_data = [*missing_data, "symbol_news_summary"]
     normalized["missing_data"] = missing_data
     return normalized
 
@@ -1502,7 +1568,7 @@ def mark_quality_value_excluded_without_financial(score_item: dict[str, Any], br
 
 
 def mark_optional_view_exclusions(score_item: dict[str, Any], brief_symbol: dict[str, Any]) -> dict[str, Any]:
-    score_item = mark_news_flow_excluded_without_news(score_item, brief_symbol)
+    score_item = mark_news_flow_excluded_without_symbol_news(score_item, brief_symbol)
     return mark_quality_value_excluded_without_financial(score_item, brief_symbol)
 
 
@@ -2047,8 +2113,9 @@ def build_parser() -> argparse.ArgumentParser:
     decision.add_argument("--account-before-order")
     decision.add_argument("--today-fills")
     decision.add_argument("--financial-cache-path", default="")
-    decision.add_argument("--news-cache-path", default="")
-    decision.add_argument("--expected-news-date", default="")
+    decision.add_argument("--symbol-news-cache-path", default="")
+    decision.add_argument("--news-context-json", default="")
+    decision.add_argument("--expected-symbol-news-date", default="")
     decision.add_argument("--market-index-snapshot-json", default="")
     decision.add_argument("--strategy-policy-config", default="")
     decision.add_argument("--run-id")

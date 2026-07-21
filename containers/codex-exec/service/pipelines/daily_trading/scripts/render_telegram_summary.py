@@ -201,6 +201,7 @@ def render(summary: dict[str, Any]) -> str:
                 "display_text": view.get("coverage_text"),
                 "usable_symbol_count": view.get("usable_symbol_count"),
                 "wanted_symbol_count": view.get("wanted_symbol_count"),
+                "usable_item_count": view.get("usable_item_count"),
             }
         raw = evidence.get(key) if isinstance(evidence.get(key), dict) else {}
         counts = raw.get("cache_counts") if isinstance(raw.get("cache_counts"), dict) else {}
@@ -209,10 +210,12 @@ def render(summary: dict[str, Any]) -> str:
             "display_text": raw.get("display_text"),
             "usable_symbol_count": counts.get("usable_symbol_count", raw.get("usable_symbol_count")),
             "wanted_symbol_count": counts.get("wanted_symbol_count", raw.get("wanted_symbol_count")),
+            "usable_item_count": raw.get("article_count"),
         }
 
     financial = domain_view("financial")
-    news = domain_view("news")
+    symbol_news = domain_view("symbol_news")
+    market_news = domain_view("market_news")
     investor_flow = domain_view("investor_flow")
     today_fills = summary.get("today_fills_summary") if isinstance(summary.get("today_fills_summary"), dict) else {}
     execution = summary.get("execution") if isinstance(summary.get("execution"), dict) else {}
@@ -305,16 +308,29 @@ def render(summary: dict[str, Any]) -> str:
             f" · 미선정 {as_int(review.get('hold_symbol_count'))}"
         )
     def domain_issue_text(label: str, payload: dict[str, Any]) -> str:
+        usable_items = payload.get("usable_item_count")
+        if usable_items is not None:
+            return f"{label} {as_int(usable_items)}건"
         usable = payload.get("usable_symbol_count")
         wanted = payload.get("wanted_symbol_count")
         if usable is not None and wanted is not None:
             return f"{label} {as_int(usable)}/{as_int(wanted)}"
         return label
 
-    domain_labels = {"financial": "재무", "news": "뉴스", "investor_flow": "수급"}
+    domain_labels = {
+        "financial": "재무",
+        "symbol_news": "종목뉴스",
+        "market_news": "시장뉴스",
+        "investor_flow": "수급",
+    }
     issue_domains = [
         domain_issue_text(domain_labels[key], payload)
-        for key, payload in (("financial", financial), ("news", news), ("investor_flow", investor_flow))
+        for key, payload in (
+            ("financial", financial),
+            ("symbol_news", symbol_news),
+            ("market_news", market_news),
+            ("investor_flow", investor_flow),
+        )
         if text(payload.get("status")) not in {"", "success", "complete", "supplied"}
     ]
     if issue_domains:
