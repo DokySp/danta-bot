@@ -132,6 +132,14 @@ class MarketNewsStore:
                     owner_token TEXT NOT NULL DEFAULT ''
                 );
                 INSERT OR IGNORE INTO process_lock (id, locked_until) VALUES (1, NULL);
+
+                CREATE TABLE IF NOT EXISTS provider_state (
+                    provider TEXT PRIMARY KEY,
+                    status TEXT NOT NULL DEFAULT 'healthy',
+                    cooldown_until TEXT,
+                    alerted INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
             lock_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(process_lock)").fetchall()}
@@ -310,6 +318,78 @@ class MarketNewsStore:
                 """,
                 (source_id, window_end, now_iso()),
             )
+
+    def get_provider_state(self, provider: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT provider, status, cooldown_until, alerted, updated_at FROM provider_state WHERE provider = ?",
+                (provider,),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "provider": row[0],
+            "status": row[1],
+            "cooldown_until": row[2],
+            "alerted": bool(row[3]),
+            "updated_at": row[4],
+        }
+
+    def mark_provider_rate_limited(self, provider: str, cooldown_until_iso: str) -> bool:
+        """Persist a rate-limit cooldown; return True iff this is a new alertable transition."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT status, alerted FROM provider_state WHERE provider = ?", (provider,)
+                ).fetchone()
+                was_healthy = row is None or str(row[0]) != "rate_limited"
+                already_alerted = bool(row[1]) if row else False
+                should_alert = was_healthy and not already_alerted
+                connection.execute(
+                    """
+                    INSERT INTO provider_state (provider, status, cooldown_until, alerted, updated_at)
+                    VALUES (?, 'rate_limited', ?, ?, ?)
+                    ON CONFLICT(provider) DO UPDATE SET
+                        status = 'rate_limited',
+                        cooldown_until = excluded.cooldown_until,
+                        alerted = excluded.alerted,
+                        updated_at = excluded.updated_at
+                    """,
+                    (provider, cooldown_until_iso, 1 if (should_alert or already_alerted) else 0, now_iso()),
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        return should_alert
+
+    def mark_provider_healthy(self, provider: str) -> bool:
+        """Reset provider state to healthy; return True iff it was previously rate-limited."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT status FROM provider_state WHERE provider = ?", (provider,)
+                ).fetchone()
+                was_rate_limited = bool(row) and str(row[0]) == "rate_limited"
+                connection.execute(
+                    """
+                    INSERT INTO provider_state (provider, status, cooldown_until, alerted, updated_at)
+                    VALUES (?, 'healthy', NULL, 0, ?)
+                    ON CONFLICT(provider) DO UPDATE SET
+                        status = 'healthy',
+                        cooldown_until = NULL,
+                        alerted = 0,
+                        updated_at = excluded.updated_at
+                    """,
+                    (provider, now_iso()),
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        return was_rate_limited
 
     def latest_run_statuses(self) -> dict[str, dict[str, Any]]:
         with self._connect() as connection:

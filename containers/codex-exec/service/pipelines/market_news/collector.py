@@ -5,10 +5,12 @@ from __future__ import annotations
 import hashlib
 import html
 import json
+import math
 import os
 import re
 import time
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
@@ -23,6 +25,38 @@ from .storage import MarketNewsStore, now_iso, parse_iso
 DEFAULT_CONFIG_PATH = Path("/app/config/market-news.yaml")
 TRACKING_QUERY_PREFIXES = ("utm_",)
 TRACKING_QUERY_KEYS = {"fbclid", "gclid", "mc_cid", "mc_eid"}
+DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS = 1800
+
+
+class GdeltRateLimitedError(RuntimeError):
+    """Raised on the first GDELT HTTP 429; never retried within fetch_gdelt."""
+
+    def __init__(self, retry_after_seconds: float | None = None) -> None:
+        super().__init__("GDELT rate limited (HTTP 429)")
+        self.retry_after_seconds = retry_after_seconds
+        self.request_count = 0
+
+
+def parse_retry_after(value: Any, *, now: datetime | None = None) -> float | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        seconds = float(text)
+    except ValueError:
+        seconds = None
+    if seconds is not None:
+        return seconds if math.isfinite(seconds) and seconds >= 0 else None
+    try:
+        parsed = parsedate_to_datetime(text)
+        if parsed is None:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        delta = (parsed - precise_utc_datetime(now)).total_seconds()
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+    return max(0.0, delta)
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -64,6 +98,14 @@ def utc_datetime(value: datetime | None = None) -> datetime:
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
     return current.astimezone(timezone.utc).replace(microsecond=0)
+
+
+def precise_utc_datetime(value: datetime | None = None) -> datetime:
+    """UTC normalizer for operational cooldown timing; preserves microseconds unlike utc_datetime."""
+    current = value or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return current.astimezone(timezone.utc)
 
 
 def gdelt_datetime(value: datetime) -> str:
@@ -188,8 +230,13 @@ def fetch_gdelt(
                 timeout_seconds=max(1, int(request_config.get("timeout_seconds", 20))),
             )
         except HTTPError as exc:
+            if exc.code == 429:
+                headers = getattr(exc, "headers", None)
+                getter = getattr(headers, "get", None)
+                retry_after_value = getter("Retry-After") if callable(getter) else None
+                raise GdeltRateLimitedError(parse_retry_after(retry_after_value)) from exc
             last_error = exc
-            if exc.code != 429 and exc.code < 500:
+            if exc.code < 500:
                 raise
         except (TimeoutError, URLError, OSError, json.JSONDecodeError, ValueError) as exc:
             last_error = exc
@@ -223,13 +270,18 @@ def fetch_source_windowed(
             unresolved.extend(pending)
             break
         current_start, current_end = pending.pop()
-        payload = fetcher(
-            request_config=request_config,
-            query=query,
-            window_start=current_start,
-            window_end=current_end,
-            sleep=sleep,
-        )
+        try:
+            payload = fetcher(
+                request_config=request_config,
+                query=query,
+                window_start=current_start,
+                window_end=current_end,
+                sleep=sleep,
+            )
+        except GdeltRateLimitedError as exc:
+            request_count += 1
+            exc.request_count = request_count
+            raise
         request_count += 1
         parsed = parse_gdelt_articles(payload, source_id=source_id, collected_at=now_iso())
         for article in parsed:
@@ -259,6 +311,7 @@ def collect_market_news(
     current_time: datetime | None = None,
     fetcher: Callable[..., dict[str, Any]] = fetch_gdelt,
     sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], datetime] = precise_utc_datetime,
 ) -> dict[str, Any]:
     config = load_config(config_path)
     request_config = config["request"]
@@ -271,6 +324,10 @@ def collect_market_news(
     lock_timeout = max(1, int(config.get("lock_timeout_seconds", 900)))
     min_window_minutes = max(1, int(config.get("min_request_window_minutes", 15)))
     max_requests = max(1, int(config.get("max_requests_per_source", 16)))
+    provider = str(config.get("provider") or "gdelt_doc_2")
+    fallback_cooldown_seconds = max(
+        1, int(config.get("rate_limit_cooldown_seconds", DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS))
+    )
     results: list[dict[str, Any]] = []
 
     with store.acquire_run_lock(timeout_seconds=lock_timeout) as acquired:
@@ -283,6 +340,30 @@ def collect_market_news(
                 "sources": [],
                 "errors": [],
             }
+
+        provider_state = store.get_provider_state(provider)
+        if provider_state and provider_state["status"] == "rate_limited":
+            cooldown_until = parse_iso(str(provider_state.get("cooldown_until") or ""))
+            if cooldown_until and cooldown_until > precise_utc_datetime(clock()):
+                return {
+                    "status": "skipped_rate_limited",
+                    "started_at": started_at,
+                    "finished_at": now_iso(),
+                    "db_path": str(db_path),
+                    "sources": [],
+                    "fetched_count": 0,
+                    "inserted_count": 0,
+                    "duplicate_count": 0,
+                    "request_count": 0,
+                    "saturated_window_count": 0,
+                    "errors": [],
+                    "provider": provider,
+                    "rate_limited_until": provider_state.get("cooldown_until"),
+                    "alert": False,
+                    "recovered": False,
+                }
+
+        rate_limited_info: dict[str, Any] | None = None
         for raw_source in config["sources"]:
             source = raw_source if isinstance(raw_source, dict) else {}
             source_id = str(source.get("id") or "").strip()
@@ -302,7 +383,7 @@ def collect_market_news(
                     min_window_minutes=min_window_minutes,
                     max_requests=max_requests,
                 )
-                upsert = store.upsert_articles(source_id, str(config.get("provider") or "gdelt_doc_2"), articles)
+                upsert = store.upsert_articles(source_id, provider, articles)
                 if unresolved_windows:
                     status = "partial"
                     error = (
@@ -313,35 +394,120 @@ def collect_market_news(
                     status = "success"
                     error = ""
                     store.set_cursor(source_id, end.isoformat())
+                result = {
+                    "source_id": source_id,
+                    "status": status,
+                    "window_start": start.isoformat(),
+                    "window_end": end.isoformat(),
+                    "fetched_count": len(articles),
+                    "inserted_count": upsert.inserted_count,
+                    "duplicate_count": upsert.duplicate_count,
+                    "request_count": request_count,
+                    "saturated_window_count": len(unresolved_windows),
+                    "error": error,
+                }
+                store.record_run(
+                    source_id=source_id,
+                    started_at=source_started_at,
+                    finished_at=now_iso(),
+                    **{key: result[key] for key in (
+                        "status", "window_start", "window_end", "fetched_count",
+                        "inserted_count", "duplicate_count", "error",
+                    )},
+                )
+                results.append(result)
+            except GdeltRateLimitedError as exc:
+                request_count = int(getattr(exc, "request_count", 0))
+                cooldown_seconds = (
+                    exc.retry_after_seconds if exc.retry_after_seconds is not None and exc.retry_after_seconds >= 0
+                    else fallback_cooldown_seconds
+                )
+                rate_limited_at = precise_utc_datetime(clock())
+                try:
+                    cooldown_until_dt = rate_limited_at + timedelta(seconds=cooldown_seconds)
+                except (OverflowError, ValueError):
+                    cooldown_until_dt = rate_limited_at + timedelta(seconds=fallback_cooldown_seconds)
+                should_alert = store.mark_provider_rate_limited(provider, cooldown_until_dt.isoformat())
+                result = {
+                    "source_id": source_id,
+                    "status": "skipped_rate_limited",
+                    "window_start": start.isoformat(),
+                    "window_end": end.isoformat(),
+                    "fetched_count": 0,
+                    "inserted_count": 0,
+                    "duplicate_count": 0,
+                    "request_count": request_count,
+                    "saturated_window_count": 0,
+                    "error": f"GDELT rate limited (HTTP 429); cooldown until {cooldown_until_dt.isoformat()}",
+                }
+                store.record_run(
+                    source_id=source_id,
+                    started_at=source_started_at,
+                    finished_at=now_iso(),
+                    **{key: result[key] for key in (
+                        "status", "window_start", "window_end", "fetched_count",
+                        "inserted_count", "duplicate_count", "error",
+                    )},
+                )
+                results.append(result)
+                rate_limited_info = {"cooldown_until": cooldown_until_dt.isoformat(), "alert": should_alert}
+                break
             except Exception as exc:  # noqa: BLE001 - one source must not stop the other
-                upsert = None
-                articles = []
-                request_count = 0
-                unresolved_windows = []
                 status = "failed"
                 error = str(exc)[:500]
-            result = {
-                "source_id": source_id,
-                "status": status,
-                "window_start": start.isoformat(),
-                "window_end": end.isoformat(),
-                "fetched_count": len(articles),
-                "inserted_count": upsert.inserted_count if upsert else 0,
-                "duplicate_count": upsert.duplicate_count if upsert else 0,
-                "request_count": request_count,
-                "saturated_window_count": len(unresolved_windows),
-                "error": error,
+                result = {
+                    "source_id": source_id,
+                    "status": status,
+                    "window_start": start.isoformat(),
+                    "window_end": end.isoformat(),
+                    "fetched_count": 0,
+                    "inserted_count": 0,
+                    "duplicate_count": 0,
+                    "request_count": 0,
+                    "saturated_window_count": 0,
+                    "error": error,
+                }
+                store.record_run(
+                    source_id=source_id,
+                    started_at=source_started_at,
+                    finished_at=now_iso(),
+                    **{key: result[key] for key in (
+                        "status", "window_start", "window_end", "fetched_count",
+                        "inserted_count", "duplicate_count", "error",
+                    )},
+                )
+                results.append(result)
+
+        if rate_limited_info is not None:
+            genuine_results = [item for item in results if item["status"] != "skipped_rate_limited"]
+            if any(item["status"] == "failed" for item in genuine_results):
+                overall_status = "failed"
+            elif any(item["status"] == "partial" for item in genuine_results):
+                overall_status = "partial"
+            else:
+                overall_status = "skipped_rate_limited"
+            genuine_errors = [f"{item['source_id']}: {item['error']}" for item in genuine_results if item["error"]]
+            return {
+                "status": overall_status,
+                "started_at": started_at,
+                "finished_at": now_iso(),
+                "db_path": str(db_path),
+                "sources": results,
+                "fetched_count": sum(int(item["fetched_count"]) for item in results),
+                "inserted_count": sum(int(item["inserted_count"]) for item in results),
+                "duplicate_count": sum(int(item["duplicate_count"]) for item in results),
+                "request_count": sum(int(item["request_count"]) for item in results),
+                "saturated_window_count": sum(int(item["saturated_window_count"]) for item in results),
+                "errors": genuine_errors,
+                "provider": provider,
+                "rate_limited_until": rate_limited_info["cooldown_until"],
+                "alert": rate_limited_info["alert"],
+                "recovered": False,
             }
-            store.record_run(
-                source_id=source_id,
-                started_at=source_started_at,
-                finished_at=now_iso(),
-                **{key: result[key] for key in (
-                    "status", "window_start", "window_end", "fetched_count",
-                    "inserted_count", "duplicate_count", "error",
-                )},
-            )
-            results.append(result)
+
+        recovered = False
+        if any(item["status"] == "success" for item in results):
+            recovered = store.mark_provider_healthy(provider)
 
     statuses = {str(item["status"]) for item in results}
     status = (
@@ -363,4 +529,7 @@ def collect_market_news(
         "request_count": sum(int(item["request_count"]) for item in results),
         "saturated_window_count": sum(int(item["saturated_window_count"]) for item in results),
         "errors": [f"{item['source_id']}: {item['error']}" for item in results if item["error"]],
+        "provider": provider,
+        "alert": False,
+        "recovered": recovered,
     }

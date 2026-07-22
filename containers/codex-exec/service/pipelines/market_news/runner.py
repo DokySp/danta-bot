@@ -27,6 +27,8 @@ class MarketNewsDirectRunner:
             result.get("inserted_count", 0),
             result.get("duplicate_count", 0),
         )
+        if result.get("recovered"):
+            logging.info("market-news provider recovered provider=%s", result.get("provider"))
         if result.get("status") in {"partial", "failed"}:
             errors = "; ".join(str(item) for item in result.get("errors") or [])
             raise RuntimeError(f"market-news collection {result.get('status')}: {errors or 'unknown source failure'}")

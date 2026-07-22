@@ -4,6 +4,7 @@ initial_lookback_hours: 72
 max_lookback_hours: 72
 overlap_minutes: 30
 lock_timeout_seconds: 3600
+rate_limit_cooldown_seconds: 1800
 min_request_window_minutes: 15
 max_requests_per_source: 16
 context_max_items: 30
