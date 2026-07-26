@@ -12,10 +12,12 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+from ..scripts import run_subagent as run_subagent_module
 from ..scripts.run_subagent import (
     MODEL_USAGE_FILENAME,
     RUNTIME_CONFIG_ENV,
     account_holdings_by_symbol,
+    add_judge_review_holding_context,
     build_prompt,
     compact_position_cost_context,
     compact_prompt,
@@ -28,9 +30,11 @@ from ..scripts.run_subagent import (
     normalize_compact_review_payload,
     normalize_thesis_condition_id,
     prior_thesis_context,
+    RunArtifactJsonCache,
     recent_submitted_trade_context,
     run_group,
     run_one,
+    symbol_key,
     thesis_definition_is_valid,
     validate_spec,
     write_json,
@@ -2410,6 +2414,430 @@ class RunSubagentSelfTest(unittest.TestCase):
 
             other_symbol = next(item for item in core["symbols"] if item.get("symbol_id") == "000660")
             self.assertEqual(other_symbol.get("prior_thesis_context", {}).get("status"), "no_prior_thesis")
+
+    def test_run_artifact_json_cache_reads_stable_file_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            path = Path(tmp_name) / "execution.json"
+            write_json(path, {"run_id": "a", "orders": []})
+            cache = RunArtifactJsonCache()
+            real_json_load = json.load
+            with patch("json.load", side_effect=real_json_load) as mock_load:
+                first = cache.read(path)
+                second = cache.read(path)
+                self.assertEqual(mock_load.call_count, 1)
+            self.assertEqual(first, {"run_id": "a", "orders": []})
+            self.assertIs(first, second)
+
+    def test_run_artifact_json_cache_rereads_replaced_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            path = Path(tmp_name) / "execution.json"
+            write_json(path, {"run_id": "a", "orders": []})
+            cache = RunArtifactJsonCache()
+            first = cache.read(path)
+            self.assertEqual(first["run_id"], "a")
+            # Simulate an atomically-replaced artifact appearing mid-loop: force a
+            # distinct mtime/size so the cache's identity check cannot mistake this
+            # for the same file even on filesystems with coarse mtime resolution.
+            replacement = path.with_suffix(".tmp")
+            write_json(replacement, {"run_id": "b", "orders": [], "padding": "x" * 64})
+            os.utime(replacement, ns=(path.stat().st_mtime_ns + 5_000_000_000, path.stat().st_mtime_ns + 5_000_000_000))
+            replacement.replace(path)
+            second = cache.read(path)
+            self.assertEqual(second["run_id"], "b")
+
+    def test_run_artifact_json_cache_rereads_replacement_with_same_size_and_mtime(self) -> None:
+        # The project's writers use temp-file + os.replace(), which always installs a
+        # new inode at the target path even when the new content happens to be the
+        # same byte length and lands on the same mtime tick as the file it replaces.
+        # An identity keyed only on (mtime, size) would miss this; inode/device must
+        # be load-bearing for detecting the replace.
+        with tempfile.TemporaryDirectory() as tmp_name:
+            path = Path(tmp_name) / "execution.json"
+            write_json(path, {"run_id": "a", "orders": []})
+            cache = RunArtifactJsonCache()
+            first = cache.read(path)
+            self.assertEqual(first["run_id"], "a")
+
+            original_stat = path.stat()
+            original_length = len(path.read_bytes())
+            replacement = path.with_suffix(".tmp")
+            replacement_text = json.dumps({"run_id": "b", "orders": []}, sort_keys=True, separators=(",", ":")) + "\n"
+            padding_needed = original_length - len(replacement_text.encode("utf-8"))
+            self.assertGreaterEqual(padding_needed, 0, "replacement content must not exceed the original byte length")
+            replacement_text += " " * padding_needed
+            replacement.write_text(replacement_text, encoding="utf-8")
+            os.utime(replacement, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+            self.assertEqual(len(replacement.read_bytes()), original_length)
+            self.assertEqual(replacement.stat().st_mtime_ns, original_stat.st_mtime_ns)
+
+            replacement.replace(path)
+            self.assertEqual(path.stat().st_size, original_length)
+            self.assertEqual(path.stat().st_mtime_ns, original_stat.st_mtime_ns)
+            self.assertNotEqual(path.stat().st_ino, original_stat.st_ino)
+
+            second = cache.read(path)
+            self.assertEqual(second["run_id"], "b")
+
+    def test_run_artifact_json_cache_hit_survives_replace_immediately_after_open(self) -> None:
+        # The observation boundary is the opened file descriptor, matching how
+        # read_json_if_exists/load_json actually read a file. A replace that lands
+        # after this read's open() call must not disturb it: the descriptor still
+        # refers to the pre-replace inode, so a cache hit correctly keeps returning
+        # the old payload instead of racing ahead to content this read never
+        # actually opened.
+        with tempfile.TemporaryDirectory() as tmp_name:
+            path = Path(tmp_name) / "execution.json"
+            write_json(path, {"run_id": "a", "orders": []})
+            cache = RunArtifactJsonCache()
+            first = cache.read(path)
+            self.assertEqual(first["run_id"], "a")
+
+            real_fstat = os.fstat
+            state = {"replaced": False}
+
+            def fstat_then_replace(fd: int) -> os.stat_result:
+                if not state["replaced"]:
+                    state["replaced"] = True
+                    replacement = path.with_suffix(".tmp")
+                    write_json(replacement, {"run_id": "b", "orders": []})
+                    replacement.replace(path)
+                return real_fstat(fd)
+
+            with patch("os.fstat", side_effect=fstat_then_replace):
+                second = cache.read(path)
+
+            # The held descriptor's content is unaffected by the replace, so the
+            # correct (pre-replace) payload comes back either way. Unlinking the old
+            # path entry also bumps that inode's ctime, so this race may present as a
+            # safe re-parse through the same descriptor rather than a cache hit; both
+            # are correct, since neither ever returns the post-replace content this
+            # read never actually opened.
+            self.assertEqual(second["run_id"], "a")
+
+    def test_run_artifact_json_cache_skips_caching_when_mutated_in_place_during_parse(self) -> None:
+        # For an in-place mutation (as opposed to an atomic temp-file replace) that
+        # lands while a parse is in flight, the before/after fstat on the same
+        # descriptor will disagree (size/mtime change on the same inode). That read
+        # must not be cached, so the next call re-validates from disk.
+        with tempfile.TemporaryDirectory() as tmp_name:
+            path = Path(tmp_name) / "execution.json"
+            write_json(path, {"run_id": "a", "orders": []})
+            cache = RunArtifactJsonCache()
+
+            def mutate_in_place_during_parse(handle: Any) -> Any:
+                with open(path, "a", encoding="utf-8") as other:
+                    other.write(" ")
+                return {"run_id": "a", "orders": []}
+
+            with patch("json.load", side_effect=mutate_in_place_during_parse):
+                first = cache.read(path)
+            self.assertEqual(first["run_id"], "a")
+
+            second = cache.read(path)
+            self.assertEqual(second["run_id"], "a")
+            # Not cached: the second call re-parsed rather than returning the first
+            # call's payload object.
+            self.assertIsNot(first, second)
+
+    def test_run_artifact_json_cache_does_not_cache_missing_or_malformed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            path = Path(tmp_name) / "execution.json"
+            cache = RunArtifactJsonCache()
+            self.assertIsNone(cache.read(path))
+            path.write_text("{not valid json", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                cache.read(path)
+            # A malformed read must not poison the cache: fixing the file must be
+            # observed on the very next call within the same enrichment pass.
+            write_json(path, {"run_id": "fixed", "orders": []})
+            fixed = cache.read(path)
+            self.assertEqual(fixed["run_id"], "fixed")
+
+    def test_recent_submitted_trade_context_reuses_execution_json_across_symbols_in_one_call(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            runs_dir = Path(tmp_name) / "runs"
+            current = runs_dir / "current"
+            current.mkdir(parents=True)
+            write_json(
+                runs_dir / "previous" / "execution.json",
+                {
+                    "run_id": "previous",
+                    "started_at": "2026-06-07T09:00:00+09:00",
+                    "orders": [
+                        {
+                            "symbol_id": "005930",
+                            "direction": "buy",
+                            "result": "submitted",
+                            "order_or_reservation_id": "order-1",
+                            "validated_order_quantity": 3,
+                        },
+                        {
+                            "symbol_id": "000660",
+                            "direction": "sell",
+                            "result": "submitted",
+                            "order_or_reservation_id": "order-2",
+                            "validated_order_quantity": 5,
+                        },
+                    ],
+                },
+            )
+            cache = RunArtifactJsonCache()
+            real_json_load = json.load
+            with patch("json.load", side_effect=real_json_load) as mock_load:
+                first = recent_submitted_trade_context(current, "005930", run_limit=2, cache=cache)
+                second = recent_submitted_trade_context(current, "000660", run_limit=2, cache=cache)
+                # Two symbols share the same prior execution.json; the cache should
+                # parse it only once for both recent_submitted_trade_context calls.
+                self.assertEqual(mock_load.call_count, 1)
+            self.assertEqual(first["recent_submitted_trades"][0]["order_id"], "order-1")
+            self.assertEqual(second["recent_submitted_trades"][0]["order_id"], "order-2")
+
+    def test_recent_submitted_trade_context_distinguishes_missing_from_present_null_execution(self) -> None:
+        # A run directory with no execution.json at all is skipped outright (it never
+        # ran an execution stage). A run directory whose execution.json exists but
+        # parses to JSON null is a real, present-but-invalid artifact and must count
+        # against coverage, exactly like any other malformed execution payload.
+        with tempfile.TemporaryDirectory() as tmp_name:
+            runs_dir = Path(tmp_name) / "runs"
+            current = runs_dir / "current"
+            current.mkdir(parents=True)
+            missing_run = runs_dir / "missing-execution-run"
+            missing_run.mkdir(parents=True)
+            null_run = runs_dir / "null-execution-run"
+            null_run.mkdir(parents=True)
+            (null_run / "execution.json").write_text("null", encoding="utf-8")
+
+            context = recent_submitted_trade_context(current, "005930", run_limit=2)
+            self.assertEqual(context["invalid_execution_count"], 1)
+            self.assertEqual(context["inspected_run_count"], 0)
+            self.assertEqual(context["coverage_status"], "unavailable")
+
+            cached_context = recent_submitted_trade_context(
+                current, "005930", run_limit=2, cache=RunArtifactJsonCache()
+            )
+            self.assertEqual(cached_context, context)
+
+    def test_recent_submitted_trade_context_cache_optional_matches_uncached_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            runs_dir = Path(tmp_name) / "runs"
+            current = runs_dir / "current"
+            current.mkdir(parents=True)
+            write_json(
+                runs_dir / "previous" / "execution.json",
+                {
+                    "run_id": "previous",
+                    "started_at": "2026-06-07T09:00:00+09:00",
+                    "orders": [
+                        {
+                            "symbol_id": "005930",
+                            "direction": "buy",
+                            "result": "submitted",
+                            "order_or_reservation_id": "order-1",
+                            "validated_order_quantity": 3,
+                        }
+                    ],
+                },
+            )
+            uncached = recent_submitted_trade_context(current, "005930", run_limit=2)
+            cached = recent_submitted_trade_context(current, "005930", run_limit=2, cache=RunArtifactJsonCache())
+            self.assertEqual(uncached, cached)
+
+    def test_prior_thesis_context_cache_optional_matches_uncached_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            runs_dir = Path(tmp_name) / "runs"
+            current = runs_dir / "current"
+            current.mkdir(parents=True)
+            prior_dir = runs_dir / "prior-run"
+            prior_dir.mkdir(parents=True)
+            write_json(
+                prior_dir / "judge-review.json",
+                {
+                    "run_id": "prior-run",
+                    "started_at": "2026-06-01T09:00:00+09:00",
+                    "status": "success",
+                    "symbols": [
+                        {
+                            "symbol_id": "005930",
+                            "thesis_definition": {
+                                "core_rationale": "quality moat",
+                                "invalidation_conditions": [{"condition_id": "cond-a", "description": "description a"}],
+                            },
+                        }
+                    ],
+                },
+            )
+            current_started_at = "2026-06-02T09:00:00+09:00"
+            uncached = prior_thesis_context(current, "005930", current_started_at)
+            cached = prior_thesis_context(current, "005930", current_started_at, cache=RunArtifactJsonCache())
+            self.assertEqual(uncached, cached)
+
+    def test_write_review_input_slices_reuses_history_reads_across_symbols(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            write_sample_review_inputs(tmp)
+            prior_dir = tmp / "reports" / "runs" / "self-test-cache-thesis"
+            prior_dir.mkdir(parents=True, exist_ok=True)
+            write_json(
+                prior_dir / "judge-review.json",
+                {
+                    "run_id": "self-test-cache-thesis",
+                    "started_at": "2026-06-07T09:00:00+09:00",
+                    "status": "success",
+                    "symbols": [
+                        {
+                            "symbol_id": "005930",
+                            "thesis_definition": {
+                                "core_rationale": "quality moat",
+                                "invalidation_conditions": [{"condition_id": "cond-a", "description": "description a"}],
+                            },
+                        },
+                        {
+                            "symbol_id": "000660",
+                            "thesis_definition": {
+                                "core_rationale": "cyclical upswing",
+                                "invalidation_conditions": [{"condition_id": "cond-b", "description": "description b"}],
+                            },
+                        },
+                    ],
+                },
+            )
+            payload = compact_spec(tmp, stage="judge-review", agent_role="judge", task_name="cache-reuse-slice")
+            real_json_load = json.load
+            with patch("json.load", side_effect=real_json_load) as mock_load:
+                slice_paths = write_review_input_slices(payload)
+                judge_review_reads = [
+                    call.args[0]
+                    for call in mock_load.call_args_list
+                    if Path(getattr(call.args[0], "name", "")).name == "judge-review.json"
+                ]
+                # Both symbols resolve their prior thesis from the same run directory;
+                # the shared enrichment-call cache should parse it only once.
+                self.assertEqual(len(judge_review_reads), 1)
+            core = load_json(Path(slice_paths["review_core"]))
+            by_symbol = {item["symbol_id"]: item for item in core["symbols"]}
+            self.assertEqual(by_symbol["005930"]["prior_thesis_context"]["status"], "available")
+            self.assertEqual(by_symbol["000660"]["prior_thesis_context"]["status"], "available")
+
+    def test_add_judge_review_holding_context_dict_symbols_preserves_order_and_reuses_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            runs_dir = Path(tmp_name) / "runs"
+            current = runs_dir / "current"
+            current.mkdir(parents=True)
+            prior = runs_dir / "prior"
+            write_json(
+                prior / "execution.json",
+                {
+                    "run_id": "prior",
+                    "started_at": "2026-06-01T09:00:00+09:00",
+                    "orders": [],
+                },
+            )
+            write_json(
+                prior / "judge-review.json",
+                {
+                    "run_id": "prior",
+                    "started_at": "2026-06-01T09:00:00+09:00",
+                    "status": "success",
+                    "symbols": [
+                        {
+                            "symbol_id": symbol_id,
+                            "thesis_definition": {
+                                "core_rationale": f"rationale-{symbol_id}",
+                                "invalidation_conditions": [
+                                    {"condition_id": "cond-a", "description": "description a"}
+                                ],
+                            },
+                        }
+                        for symbol_id in ("005930", "000660")
+                    ],
+                },
+            )
+            payload = {
+                "symbols": {
+                    "005930": {"symbol_id": "005930", "marker": "first"},
+                    "000660": {"symbol_id": "000660", "marker": "second"},
+                }
+            }
+            real_json_load = json.load
+            with patch("json.load", side_effect=real_json_load) as mock_load:
+                enriched = add_judge_review_holding_context(
+                    payload,
+                    current,
+                    "2026-06-02T09:00:00+09:00",
+                )
+
+            symbols = enriched["symbols"]
+            self.assertEqual(list(symbols), ["005930", "000660"])
+            self.assertEqual(symbols["005930"]["marker"], "first")
+            self.assertEqual(symbols["000660"]["marker"], "second")
+            self.assertEqual(symbols["005930"]["prior_thesis_context"]["source_run_id"], "prior")
+            self.assertEqual(symbols["000660"]["prior_thesis_context"]["source_run_id"], "prior")
+            history_reads = [
+                Path(getattr(call.args[0], "name", "")).name
+                for call in mock_load.call_args_list
+                if Path(getattr(call.args[0], "name", "")).name in {"execution.json", "judge-review.json"}
+            ]
+            self.assertEqual(history_reads, ["execution.json", "judge-review.json"])
+
+    def test_add_judge_review_holding_context_observes_artifact_repaired_between_symbols(self) -> None:
+        # A frozen whole-call snapshot was explicitly rejected because overlapping
+        # runs/writers can finish while later symbols in the same call are still
+        # being processed. This proves the per-call cache does not recreate that
+        # frozen-snapshot behavior: a judge-review.json that is malformed when the
+        # first symbol is evaluated, then repaired via the project's atomic
+        # temp-file replace before the second symbol is evaluated, must be observed
+        # by that second symbol within the same add_judge_review_holding_context call.
+        with tempfile.TemporaryDirectory() as tmp_name:
+            runs_dir = Path(tmp_name) / "runs"
+            current = runs_dir / "current"
+            current.mkdir(parents=True)
+            late_run = runs_dir / "late-run"
+            late_run.mkdir(parents=True)
+            (late_run / "judge-review.json").write_text("{not valid json", encoding="utf-8")
+
+            original_build_holding_context = run_subagent_module.build_holding_quantity_context
+
+            def repair_before_second_symbol(symbol: dict[str, Any]) -> dict[str, Any]:
+                if symbol_key(symbol) == "000660":
+                    replacement = late_run / "judge-review.json.tmp"
+                    write_json(
+                        replacement,
+                        {
+                            "run_id": "late-run",
+                            "started_at": "2026-06-01T09:00:00+09:00",
+                            "status": "success",
+                            "symbols": [
+                                {
+                                    "symbol_id": "000660",
+                                    "thesis_definition": {
+                                        "core_rationale": "repaired between symbols",
+                                        "invalidation_conditions": [
+                                            {"condition_id": "cond-a", "description": "description a"}
+                                        ],
+                                    },
+                                }
+                            ],
+                        },
+                    )
+                    replacement.replace(late_run / "judge-review.json")
+                return original_build_holding_context(symbol)
+
+            payload = {"symbols": [{"symbol_id": "005930"}, {"symbol_id": "000660"}]}
+            with patch(
+                "service.pipelines.daily_trading.scripts.run_subagent.build_holding_quantity_context",
+                side_effect=repair_before_second_symbol,
+            ):
+                enriched = add_judge_review_holding_context(payload, current, "2026-06-02T09:00:00+09:00")
+
+            by_symbol = {item["symbol_id"]: item for item in enriched["symbols"]}
+            # 005930 is evaluated while the file is still malformed.
+            self.assertEqual(by_symbol["005930"]["prior_thesis_context"]["status"], "no_prior_thesis")
+            # 000660 is evaluated after the repair lands, within the same call.
+            self.assertEqual(by_symbol["000660"]["prior_thesis_context"]["status"], "available")
+            self.assertEqual(
+                by_symbol["000660"]["prior_thesis_context"]["thesis_definition"]["core_rationale"],
+                "repaired between symbols",
+            )
 
     def test_rebuttal_final_decision_issues_validate_action_and_quantity(self) -> None:
         spec = {

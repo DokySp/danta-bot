@@ -899,7 +899,74 @@ def run_started_sort_key(run_dir: Path, payload: dict[str, Any]) -> tuple[str, s
     return (started_at or run_dir.name, run_dir.name)
 
 
-def recent_submitted_trade_context(output_dir: Path, symbol_id: str, run_limit: int = 2) -> dict[str, Any]:
+class RunArtifactJsonCache:
+    """Reuses parsed JSON for unchanged files within one enrichment call.
+
+    Keyed by the exact Path object passed to read() (not resolved), entries
+    store the file identity (device, inode, mtime_ns, ctime_ns, size)
+    alongside the parsed payload. The observation boundary is an opened file
+    descriptor, matching how read_json_if_exists/load_json actually read a
+    file: identity is derived via os.fstat() on that descriptor, both before
+    and after parsing. If an atomic temp-file replace lands before this open,
+    the descriptor legitimately observes the new file, exactly like an
+    uncached read would; if it lands after this open, the descriptor still
+    refers to the old inode's content, so a cache hit or fresh parse both
+    correctly reflect the pre-replace snapshot instead of racing ahead of it.
+    A before/after identity mismatch on the same descriptor (in-place
+    mutation while a parse is in flight) means the read cannot be trusted as
+    one consistent snapshot, so that result is returned but never cached,
+    forcing the next call to revisit disk. A replace always installs a new
+    inode at the target path even when size and mtime coincidentally match
+    the prior file, so identity comparison still detects it. Missing or
+    unparseable files are never cached either. Instances must not be shared
+    across specs, worker threads, retries, or pipeline runs.
+    """
+
+    def __init__(self) -> None:
+        self._entries: dict[Path, tuple[tuple[int, int, int, int, int], Any]] = {}
+
+    @staticmethod
+    def _identity(stat_result: os.stat_result) -> tuple[int, int, int, int, int]:
+        return (
+            stat_result.st_dev,
+            stat_result.st_ino,
+            stat_result.st_mtime_ns,
+            stat_result.st_ctime_ns,
+            stat_result.st_size,
+        )
+
+    def read(self, path: Path) -> Any | None:
+        if not path.exists():
+            return None
+        handle = open(path, "r", encoding="utf-8")
+        try:
+            before_identity = self._identity(os.fstat(handle.fileno()))
+            cached = self._entries.get(path)
+            if cached is not None and cached[0] == before_identity:
+                return cached[1]
+            payload = json.load(handle)
+            after_identity = self._identity(os.fstat(handle.fileno()))
+            if after_identity == before_identity:
+                self._entries[path] = (after_identity, payload)
+            else:
+                self._entries.pop(path, None)
+            return payload
+        finally:
+            handle.close()
+
+
+def read_json_cached(path: Path, cache: RunArtifactJsonCache | None) -> Any | None:
+    if cache is None:
+        return read_json_if_exists(path)
+    return cache.read(path)
+
+
+def recent_submitted_trade_context(
+    output_dir: Path,
+    symbol_id: str,
+    run_limit: int = 2,
+    cache: RunArtifactJsonCache | None = None,
+) -> dict[str, Any]:
     unavailable = {
         "recent_submitted_trades": [],
         "inspected_run_ids": [],
@@ -914,7 +981,7 @@ def recent_submitted_trade_context(output_dir: Path, symbol_id: str, run_limit: 
     runs_dir = output_dir.parent
     if not runs_dir.is_dir():
         return unavailable
-    lifecycle = read_json_if_exists(output_dir / "order-lifecycle.json")
+    lifecycle = read_json_cached(output_dir / "order-lifecycle.json", cache)
     lifecycle_orders = (
         lifecycle.get("previous_submitted_cash_orders", [])
         if isinstance(lifecycle, dict)
@@ -935,7 +1002,7 @@ def recent_submitted_trade_context(output_dir: Path, symbol_id: str, run_limit: 
         if not execution_path.exists():
             continue
         try:
-            payload = read_json_if_exists(execution_path)
+            payload = read_json_cached(execution_path, cache)
         except (OSError, ValueError):
             invalid_execution_count += 1
             continue
@@ -1086,7 +1153,12 @@ def thesis_definition_is_valid(thesis: Any) -> bool:
     return False
 
 
-def prior_thesis_context(output_dir: Path, symbol_id: str, current_started_at: str = "") -> dict[str, Any]:
+def prior_thesis_context(
+    output_dir: Path,
+    symbol_id: str,
+    current_started_at: str = "",
+    cache: RunArtifactJsonCache | None = None,
+) -> dict[str, Any]:
     unavailable = {
         "thesis_definition": None,
         "source_run_id": "",
@@ -1107,7 +1179,7 @@ def prior_thesis_context(output_dir: Path, symbol_id: str, current_started_at: s
         if run_dir.resolve() == current:
             continue
         try:
-            payload = read_json_if_exists(run_dir / "judge-review.json")
+            payload = read_json_cached(run_dir / "judge-review.json", cache)
         except (OSError, ValueError):
             continue
         if not isinstance(payload, dict) or payload.get("status") != "success":
@@ -1146,6 +1218,7 @@ def add_judge_review_holding_context(payload: Any, output_dir: Path | None = Non
     if not isinstance(payload, dict):
         return payload
     context_output_dir = output_dir or Path("")
+    cache = RunArtifactJsonCache()
     symbols = payload.get("symbols")
     if isinstance(symbols, list):
         enriched: list[Any] = []
@@ -1153,8 +1226,12 @@ def add_judge_review_holding_context(payload: Any, output_dir: Path | None = Non
             if isinstance(item, dict):
                 copied = dict(item)
                 copied["holding_quantity_context"] = build_holding_quantity_context(copied)
-                copied["recent_trade_context"] = recent_submitted_trade_context(context_output_dir, symbol_key(copied))
-                copied["prior_thesis_context"] = prior_thesis_context(context_output_dir, symbol_key(copied), current_started_at)
+                copied["recent_trade_context"] = recent_submitted_trade_context(
+                    context_output_dir, symbol_key(copied), cache=cache
+                )
+                copied["prior_thesis_context"] = prior_thesis_context(
+                    context_output_dir, symbol_key(copied), current_started_at, cache=cache
+                )
                 enriched.append(copied)
             else:
                 enriched.append(item)
@@ -1167,8 +1244,10 @@ def add_judge_review_holding_context(payload: Any, output_dir: Path | None = Non
             symbol_id: dict(
                 item,
                 holding_quantity_context=build_holding_quantity_context(item),
-                recent_trade_context=recent_submitted_trade_context(context_output_dir, symbol_id),
-                prior_thesis_context=prior_thesis_context(context_output_dir, symbol_id, current_started_at),
+                recent_trade_context=recent_submitted_trade_context(context_output_dir, symbol_id, cache=cache),
+                prior_thesis_context=prior_thesis_context(
+                    context_output_dir, symbol_id, current_started_at, cache=cache
+                ),
             )
             if isinstance(item, dict)
             else item
