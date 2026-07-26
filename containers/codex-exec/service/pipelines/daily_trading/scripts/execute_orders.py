@@ -1138,16 +1138,21 @@ def order_lifecycle_preflight(args: argparse.Namespace, *, kis: Kis | None = Non
     return lifecycle
 
 
-def normalize_execution_order_prices(execution: dict[str, Any]) -> None:
+def normalize_execution_order_prices(execution: dict[str, Any], account: dict[str, Any]) -> None:
+    account_by_symbol = {symbol_key(item): item for item in account.get("symbols", []) if isinstance(item, dict)}
     for item in execution.get("orders", []):
         if not isinstance(item, dict):
             continue
-        side = str(item.get("direction") or "")
-        final_quantity = as_int(item.get("final_holding_quantity"))
-        expected = as_int(item.get("expected_holding_quantity"), as_int(item.get("current_live_holding_quantity")))
-        if side not in {"buy", "sell"}:
-            delta = final_quantity - expected
-            side = "buy" if delta > 0 else "sell" if delta < 0 else ""
+        symbol = symbol_key(item)
+        account_item = account_by_symbol.get(symbol, {})
+        current = as_int(account_item.get("current_live_holding_quantity"), as_int(item.get("current_live_holding_quantity")))
+        final_quantity = non_negative_int_value(item.get("final_holding_quantity"))
+        if final_quantity is None:
+            continue
+        delta = final_quantity - current
+        side = "buy" if delta > 0 else "sell" if delta < 0 else ""
+        if not side:
+            continue
         normalized = normalize_limit_price(item.get("order_price"), side)
         original = as_price(item.get("order_price"))
         if normalized > 0 and original != normalized:
@@ -1346,6 +1351,7 @@ def apply_quantity_gates(
     used_cash: int,
     cash_limit: int | None,
     local_sell_gate: bool,
+    require_sell_capacity: bool,
 ) -> tuple[int, int, bool]:
     if local_sell_gate and side == "sell":
         available_sell = max(0, current - active_sell_quantity)
@@ -1370,6 +1376,15 @@ def apply_quantity_gates(
             qty = available_sell
     if side == "sell":
         sell_cap = sell_capacities.get(symbol)
+        if local_sell_gate and require_sell_capacity and (not isinstance(sell_cap, dict) or "max_sell_qty" not in sell_cap):
+            block_order(
+                order,
+                reason="sell_quantity_capacity_missing",
+                gate="inquire_psbl_sell",
+                message="max_sell_qty unavailable from order-available lookup",
+                error_code="sell_gate",
+            )
+            return qty, 0, True
         if isinstance(sell_cap, dict) and "max_sell_qty" in sell_cap:
             max_sell_qty = as_int(sell_cap.get("max_sell_qty"))
             if qty > max_sell_qty:
@@ -1457,6 +1472,76 @@ def apply_quantity_gates(
             qty = affordable_qty
             required_cash = qty * price
     return qty, required_cash, False
+
+
+def active_buy_correction_gate(
+    order: dict[str, Any],
+    *,
+    conflict: dict[str, Any],
+    desired_qty: int,
+    price: int,
+    symbol: str,
+    capacities: dict[str, dict[str, int]],
+    used_cash: int,
+    cash_limit: int | None,
+) -> tuple[int, bool]:
+    conflict_qty = as_int(conflict.get("remaining_quantity"))
+    conflict_price = as_price(conflict.get("order_price"))
+    incremental_qty = max(0, desired_qty - conflict_qty)
+    incremental_cash = max(0, desired_qty * price - conflict_qty * conflict_price)
+    if incremental_qty <= 0 and incremental_cash <= 0:
+        return 0, False
+    cap = capacities.get(symbol)
+    cap_present = isinstance(cap, dict)
+    if incremental_qty > 0:
+        max_buy_qty = as_int(cap.get("max_buy_qty")) if cap_present else 0
+        if not cap_present or max_buy_qty <= 0:
+            block_order(
+                order,
+                reason="buy_cash_limit_missing",
+                gate="inquire_psbl_order",
+                message="max_buy_qty unavailable from order-available lookup",
+                error_code="cash_gate",
+            )
+            return 0, True
+        if incremental_qty > max_buy_qty:
+            block_order(
+                order,
+                reason="buy_quantity_exceeds_order_available_quantity",
+                gate="inquire_psbl_order",
+                message=f"max_buy_qty={max_buy_qty}",
+                error_code="cash_gate",
+            )
+            return 0, True
+    if incremental_cash > 0:
+        if not cap_present or as_int(cap.get("max_buy_amt")) <= 0:
+            block_order(
+                order,
+                reason="buy_cash_limit_missing",
+                gate="inquire_psbl_order",
+                message="max_buy_amt unavailable from order-available lookup",
+                error_code="cash_gate",
+            )
+            return 0, True
+        if cash_limit is None:
+            block_order(
+                order,
+                reason="buy_cash_limit_missing",
+                gate="inquire_psbl_order",
+                message="max_buy_amt unavailable from order-available lookup",
+                error_code="cash_gate",
+            )
+            return 0, True
+        if cash_limit and used_cash + incremental_cash > cash_limit:
+            block_order(
+                order,
+                reason="buy_cash_gate_reduced_reverse_rank",
+                gate="inquire_psbl_order",
+                message=f"incremental buy correction exceeded latest buy cash limit {cash_limit}",
+                error_code="cash_gate",
+            )
+            return 0, True
+    return incremental_cash, False
 
 
 def error(code: str, message: str) -> dict[str, Any]:
@@ -1596,6 +1681,12 @@ def refresh_gates(args: argparse.Namespace, account: dict[str, Any], execution: 
     if not start_date or not end_date:
         start_date, end_date = default_date_range()
     active = fetch_reservations(kis, start_date, end_date) + fetch_pending_orders(kis)
+    active_symbols_with_orders = {
+        symbol_key(item)
+        for item in active
+        if isinstance(item, dict) and item.get("active_status") == "active"
+    }
+    account_by_symbol = {symbol_key(item): item for item in account.get("symbols", []) if isinstance(item, dict)}
     capacities: dict[str, dict[str, int]] = {}
     sell_capacities: dict[str, dict[str, int]] = {}
     errors: list[dict[str, Any]] = []
@@ -1603,21 +1694,31 @@ def refresh_gates(args: argparse.Namespace, account: dict[str, Any], execution: 
         if not isinstance(item, dict):
             continue
         symbol = symbol_key(item)
-        price = as_price(item.get("order_price"))
         if not symbol:
             continue
         if item.get("active_cancel_only") is True or item.get("reconciliation_only") is True:
             continue
-        if item.get("direction") == "buy" and price > 0:
+        account_item = account_by_symbol.get(symbol, {})
+        current = as_int(account_item.get("current_live_holding_quantity"), as_int(item.get("current_live_holding_quantity")))
+        final_quantity = non_negative_int_value(item.get("final_holding_quantity"))
+        desired_side = ""
+        if final_quantity is not None:
+            desired_delta = final_quantity - current
+            desired_side = "buy" if desired_delta > 0 else "sell" if desired_delta < 0 else ""
+        price = normalize_limit_price(item.get("order_price"), desired_side or str(item.get("direction") or ""))
+        has_active_order = symbol in active_symbols_with_orders
+        if price > 0 and desired_side == "buy":
             try:
                 capacities[symbol] = buy_capacity(kis, symbol, price)
             except Exception as exc:  # noqa: BLE001
-                errors.append(error("order_available_lookup_failed", f"{symbol}: {redact(exc)}"))
-        if item.get("direction") == "sell":
+                if not has_active_order:
+                    errors.append(error("order_available_lookup_failed", f"{symbol}: {redact(exc)}"))
+        if desired_side == "sell":
             try:
                 sell_capacities[symbol] = sell_capacity(kis, symbol)
             except Exception as exc:  # noqa: BLE001
-                errors.append(error("sell_available_lookup_failed", f"{symbol}: {redact(exc)}"))
+                if not has_active_order:
+                    errors.append(error("sell_available_lookup_failed", f"{symbol}: {redact(exc)}"))
     return active, capacities, sell_capacities, errors, kis
 
 
@@ -1734,7 +1835,10 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
         order_path, order_api = order_path_api(order_path)
         order["order_path"] = order_path
         order["order_api"] = order_api
-        price = normalize_limit_price(order.get("order_price"), side)
+        desired_delta = final_quantity - current
+        desired_side = "buy" if desired_delta > 0 else "sell" if desired_delta < 0 else ""
+        desired_qty = abs(desired_delta)
+        price = normalize_limit_price(order.get("order_price"), desired_side or side)
         original_price = as_price(order.get("order_price"))
         if price > 0 and original_price != price:
             order["order_price"] = price
@@ -1743,9 +1847,6 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
                 "to": price,
                 "reason": "krx_tick_size",
             }
-        desired_delta = final_quantity - current
-        desired_side = "buy" if desired_delta > 0 else "sell" if desired_delta < 0 else ""
-        desired_qty = abs(desired_delta)
         if matching_active:
             if len(matching_active) > 1:
                 order["result"] = "blocked"
@@ -1909,6 +2010,7 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
                     used_cash=used_cash,
                     cash_limit=cash_limit,
                     local_sell_gate=True,
+                    require_sell_capacity=kis is not None,
                 )
                 if not active_adjustment_recorded:
                     order_adjustments.append(adjustment_row(conflict, action="keep", reason="same_direction_active_order_kept", result="skipped"))
@@ -1952,6 +2054,8 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
                 continue
 
             desired_order = None
+            correctable = False
+            required_cash = 0
             if desired_side:
                 if desired_qty <= 0 or price <= 0:
                     order["result"] = "blocked"
@@ -1964,65 +2068,86 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
                 desired_order["direction"] = desired_side
                 desired_order["validated_order_quantity"] = desired_qty
                 desired_order["additional_required_quantity"] = desired_delta
-                desired_qty, required_cash, quantity_blocked = apply_quantity_gates(
-                    desired_order,
-                    symbol=symbol,
-                    side=desired_side,
-                    qty=desired_qty,
-                    price=price,
-                    current=current,
-                    active_sell_quantity=active_item["sell"],
-                    capacities=capacities,
-                    sell_capacities=sell_capacities,
-                    used_cash=used_cash,
-                    cash_limit=cash_limit,
-                    local_sell_gate=False,
-                )
-                if quantity_blocked:
-                    order.update(
-                        {
-                            key: value
-                            for key, value in desired_order.items()
-                            if key
-                            in {
-                                "result",
-                                "reason",
-                                "direction",
-                                "requested_order_quantity",
-                                "requested_additional_required_quantity",
-                                "quantity_adjustment",
-                                "validated_order_quantity",
-                                "additional_required_quantity",
-                                "attempts",
+                correctable = can_correct(conflict, desired_side, order_path, order_api)
+                if correctable:
+                    # The active order can genuinely be corrected in place this run, so it is
+                    # about to be submitted -- gate its quantity/cash now. An uncorrectable
+                    # (opposite-direction or path/api-mismatched) order only gets cancelled this
+                    # run and its replacement is deferred to a later run with fresh capacity, so
+                    # gating it here would risk blocking a cancellation the future replacement's
+                    # own capacity has nothing to do with.
+                    if desired_side == "buy":
+                        required_cash, quantity_blocked = active_buy_correction_gate(
+                            desired_order,
+                            conflict=conflict,
+                            desired_qty=desired_qty,
+                            price=price,
+                            symbol=symbol,
+                            capacities=capacities,
+                            used_cash=used_cash,
+                            cash_limit=cash_limit,
+                        )
+                    else:
+                        desired_qty, required_cash, quantity_blocked = apply_quantity_gates(
+                            desired_order,
+                            symbol=symbol,
+                            side=desired_side,
+                            qty=desired_qty,
+                            price=price,
+                            current=current,
+                            active_sell_quantity=active_item["sell"],
+                            capacities=capacities,
+                            sell_capacities=sell_capacities,
+                            used_cash=used_cash,
+                            cash_limit=cash_limit,
+                            local_sell_gate=False,
+                            require_sell_capacity=kis is not None,
+                        )
+                    if quantity_blocked:
+                        order.update(
+                            {
+                                key: value
+                                for key, value in desired_order.items()
+                                if key
+                                in {
+                                    "result",
+                                    "reason",
+                                    "direction",
+                                    "requested_order_quantity",
+                                    "requested_additional_required_quantity",
+                                    "quantity_adjustment",
+                                    "validated_order_quantity",
+                                    "additional_required_quantity",
+                                    "attempts",
+                                }
                             }
-                        }
-                    )
-                    order["order_or_reservation_id"] = conflict.get("order_id", "")
-                    order_adjustments.append(adjustment_row(conflict, action="block", reason=order.get("reason") or "quantity_gate_blocked", result="blocked"))
-                    blocked += 1
-                    continue
-                desired_delta = desired_qty if desired_side == "buy" else -desired_qty
-                desired_order["validated_order_quantity"] = desired_qty
-                desired_order["additional_required_quantity"] = desired_delta
-                reduced_kept = matching_single_order([conflict], desired_side, desired_qty, price, order_path, order_api)
-                if reduced_kept:
-                    order["result"] = "skipped"
-                    order["reason"] = "existing_matching_reservation_kept" if order_path == "reservation" else "existing_matching_order_kept"
-                    order["direction"] = desired_side
-                    order["additional_required_quantity"] = desired_delta
-                    order["validated_order_quantity"] = desired_qty
-                    if "requested_order_quantity" in desired_order:
-                        order["requested_order_quantity"] = desired_order.get("requested_order_quantity")
-                        order["requested_additional_required_quantity"] = desired_order.get("requested_additional_required_quantity")
-                        order["quantity_adjustment"] = desired_order.get("quantity_adjustment")
-                    order["order_or_reservation_id"] = reduced_kept.get("order_id", "")
-                    order_adjustments.append(adjustment_row(reduced_kept, action="keep", reason="matches_reduced_final_delta", result="skipped"))
-                    continue
+                        )
+                        order["order_or_reservation_id"] = conflict.get("order_id", "")
+                        order_adjustments.append(adjustment_row(conflict, action="block", reason=order.get("reason") or "quantity_gate_blocked", result="blocked"))
+                        blocked += 1
+                        continue
+                    desired_delta = desired_qty if desired_side == "buy" else -desired_qty
+                    desired_order["validated_order_quantity"] = desired_qty
+                    desired_order["additional_required_quantity"] = desired_delta
+                    reduced_kept = matching_single_order([conflict], desired_side, desired_qty, price, order_path, order_api)
+                    if reduced_kept:
+                        order["result"] = "skipped"
+                        order["reason"] = "existing_matching_reservation_kept" if order_path == "reservation" else "existing_matching_order_kept"
+                        order["direction"] = desired_side
+                        order["additional_required_quantity"] = desired_delta
+                        order["validated_order_quantity"] = desired_qty
+                        if "requested_order_quantity" in desired_order:
+                            order["requested_order_quantity"] = desired_order.get("requested_order_quantity")
+                            order["requested_additional_required_quantity"] = desired_order.get("requested_additional_required_quantity")
+                            order["quantity_adjustment"] = desired_order.get("quantity_adjustment")
+                        order["order_or_reservation_id"] = reduced_kept.get("order_id", "")
+                        order_adjustments.append(adjustment_row(reduced_kept, action="keep", reason="matches_reduced_final_delta", result="skipped"))
+                        continue
             try:
                 request_id, action, message = adjust_active_order(
                     kis,
                     conflict,
-                    desired_order if desired_order and can_correct(conflict, desired_side, order_path, order_api) else None,
+                    desired_order if desired_order and correctable else None,
                 )
             except Exception as exc:  # noqa: BLE001
                 order["result"] = "blocked"
@@ -2064,37 +2189,12 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
                 continue
             if desired_order and action == "cancel":
                 row["replacement_required"] = True
-                order["direction"] = desired_side
-                order["additional_required_quantity"] = desired_delta
-                order["validated_order_quantity"] = desired_qty
-                if "requested_order_quantity" in desired_order:
-                    order["requested_order_quantity"] = desired_order.get("requested_order_quantity")
-                    order["requested_additional_required_quantity"] = desired_order.get("requested_additional_required_quantity")
-                    order["quantity_adjustment"] = desired_order.get("quantity_adjustment")
-                try:
-                    replacement_id = submit_order(kis, desired_order) if kis is not None else ""
-                except Exception as exc:  # noqa: BLE001
-                    order["result"] = "blocked"
-                    order["reason"] = "replacement_order_submission_failed"
-                    order["order_or_reservation_id"] = request_id
-                    order["attempts"].append(attempt(order_api, "blocked", redact(exc), "api_error"))
-                    blocked += 1
-                    continue
-                if not replacement_id:
-                    order["result"] = "blocked"
-                    order["reason"] = "replacement_order_submission_uncertain"
-                    order["order_or_reservation_id"] = request_id
-                    order["attempts"].append(attempt(order_api, "blocked", "replacement order accepted without order id", "uncertain_order_id"))
-                    blocked += 1
-                    continue
-                row["replacement_order_id"] = replacement_id
                 order["result"] = "submitted"
-                order["reason"] = "active_order_cancel_and_replacement_submitted"
-                order["order_or_reservation_id"] = replacement_id
-                order["cancel_request_id"] = request_id
-                order["attempts"].append(attempt(order_api, "submitted", f"replacement_order_id={replacement_id}" if replacement_id else "replacement order accepted"))
-                if desired_side == "buy":
-                    used_cash += required_cash
+                order["reason"] = "active_order_cancel_submitted"
+                order["direction"] = "none"
+                order["additional_required_quantity"] = 0
+                order["validated_order_quantity"] = 0
+                order["order_or_reservation_id"] = request_id
                 submitted += 1
                 continue
             order["result"] = "blocked"
@@ -2138,6 +2238,7 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
             used_cash=used_cash,
             cash_limit=cash_limit,
             local_sell_gate=True,
+            require_sell_capacity=kis is not None,
         )
         if quantity_blocked:
             blocked += 1
@@ -2204,7 +2305,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         write_json(account_path, account)
         write_json(execution_path, execution)
         return execution
-    normalize_execution_order_prices(execution)
+    normalize_execution_order_prices(execution, account)
     active, capacities, sell_capacities, gate_errors, kis = refresh_gates(args, account, execution)
     account["active_order_lookup_performed"] = True
     account["order_available_lookup_performed"] = not bool(gate_errors)

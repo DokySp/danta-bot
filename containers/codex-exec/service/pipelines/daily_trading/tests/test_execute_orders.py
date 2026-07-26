@@ -16,17 +16,21 @@ from ..scripts import execute_orders as execute_orders_module
 from ..scripts.execute_orders import (
     ENDPOINTS,
     PORTFOLIO_EXCEPT_ENV_VAR,
+    active_buy_correction_gate,
     adjust_reservation,
+    as_int,
     default_reservation_orgno,
     execute,
     fetch_reservations,
     load_json,
     normalize_limit_price,
     normalize_broker_reconciliation,
+    normalize_execution_order_prices,
     normalize_reservation,
     now_iso,
     order_lifecycle_preflight,
     reconcile,
+    refresh_gates,
     reconcile_submitted_cash_orders,
     write_json,
 )
@@ -56,6 +60,7 @@ def step_dry_run_gate_and_portfolio_except_checks(root: Path) -> list[str]:
         "symbols": [
             {"symbol_id": "005930", "symbol_name": "삼성전자", "current_live_holding_quantity": 8, "current_price": 70000},
             {"symbol_id": "000270", "symbol_name": "기아", "current_live_holding_quantity": 18, "current_price": 100000},
+            {"symbol_id": "035420", "symbol_name": "NAVER", "current_live_holding_quantity": 5, "current_price": 200000},
         ],
     }
     execution = {
@@ -67,6 +72,7 @@ def step_dry_run_gate_and_portfolio_except_checks(root: Path) -> list[str]:
         "orders": [
             {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 6, "order_price": 70000, "direction": "sell", "final_first_score": 3.5, "result": "blocked"},
             {"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 20, "order_price": 100000, "direction": "buy", "final_first_score": 6.5, "result": "blocked"},
+            {"symbol_id": "035420", "symbol_name": "NAVER", "final_holding_quantity": 4, "order_price": 200000, "direction": "sell", "final_first_score": 3.5, "result": "blocked"},
         ],
     }
     write_json(root / "account-before-order.json", account)
@@ -80,6 +86,8 @@ def step_dry_run_gate_and_portfolio_except_checks(root: Path) -> list[str]:
         failures.append("matching existing reservation not kept")
     if orders["000270"].get("reason") != "buy_cash_limit_missing":
         failures.append(f"dry-run buy without max_buy_amt was not blocked: {orders['000270']}")
+    if orders["035420"].get("reason") != "validated_dry_run_not_submitted":
+        failures.append(f"offline dry-run sell was incorrectly required to have live broker capacity: {orders['035420']}")
     account_after = load_json(root / "account-before-order.json")
     if account_after.get("active_order_lookup_performed") is not True or account_after.get("order_available_lookup_performed") is not True:
         failures.append("account gates not refreshed")
@@ -742,7 +750,10 @@ def step_active_sell_partial_and_cancel_only_checks(root: Path) -> list[str]:
 
 
 def step_active_sell_replacement_buy_checks(root: Path) -> list[str]:
-    """A covered active sell that flips direction is cancelled and replaced with the new-direction order."""
+    """A covered active sell that flips direction has its cancellation submitted, but the
+    replacement buy is deferred to a later run -- a cancel request id is only broker acceptance,
+    not confirmed release, so submitting a replacement in the same run would risk double
+    exposure."""
     failures: list[str] = []
     active_sell_base = {
         "symbol_id": "402340",
@@ -795,12 +806,21 @@ def step_active_sell_replacement_buy_checks(root: Path) -> list[str]:
         execute_orders_module.adjust_active_order = original_adjust_active_order
         execute_orders_module.submit_order = original_submit_order
     active_sell_replacement_buy_order = active_sell_replacement_buy_execution["orders"][0]
-    if active_sell_replacement_buy_order.get("result") != "submitted" or active_sell_replacement_buy_order.get("reason") != "active_order_cancel_and_replacement_submitted":
-        failures.append(f"active sell replacement-buy case did not cancel and buy: {active_sell_replacement_buy_order}")
-    if not replacement_buy_adjustments or replacement_buy_adjustments[0][1] is not None:
-        failures.append(f"active sell replacement-buy should cancel before replacement: {replacement_buy_adjustments}")
-    if not replacement_buy_submissions or replacement_buy_submissions[0].get("direction") != "buy" or replacement_buy_submissions[0].get("validated_order_quantity") != 1:
-        failures.append(f"active sell replacement buy used wrong replacement order: {replacement_buy_submissions}")
+    active_sell_replacement_buy_adjustment = (active_sell_replacement_buy_execution.get("order_adjustments") or [{}])[0]
+    if active_sell_replacement_buy_order.get("result") != "submitted" or active_sell_replacement_buy_order.get("reason") != "active_order_cancel_submitted":
+        failures.append(f"active sell replacement-buy case did not defer the replacement: {active_sell_replacement_buy_order}")
+    if active_sell_replacement_buy_order.get("direction") != "none" or active_sell_replacement_buy_order.get("validated_order_quantity") != 0:
+        failures.append(f"active sell replacement-buy should not claim a buy was submitted: {active_sell_replacement_buy_order}")
+    if active_sell_replacement_buy_order.get("order_or_reservation_id") != "cancel-before-buy":
+        failures.append(f"active sell replacement-buy should record the cancel request id, not a replacement id: {active_sell_replacement_buy_order}")
+    if len(replacement_buy_adjustments) != 1 or replacement_buy_adjustments[0][1] is not None:
+        failures.append(f"active sell replacement-buy should cancel exactly once with no desired order: {replacement_buy_adjustments}")
+    if replacement_buy_submissions:
+        failures.append(f"active sell replacement-buy should not submit a replacement in the same run: {replacement_buy_submissions}")
+    if active_sell_replacement_buy_adjustment.get("replacement_required") is not True:
+        failures.append(f"active sell replacement-buy should still flag replacement as required for a later run: {active_sell_replacement_buy_adjustment}")
+    if active_sell_replacement_buy_adjustment.get("replacement_order_id"):
+        failures.append(f"active sell replacement-buy should not record a replacement order id: {active_sell_replacement_buy_adjustment}")
     return failures
 
 
@@ -920,8 +940,880 @@ def step_active_order_additional_and_invalid_price_checks(root: Path) -> list[st
     return failures
 
 
+def _run_active_buy_correction_case(
+    *,
+    active_qty: int,
+    active_price: int,
+    final_holding_quantity: int,
+    current_holding: int,
+    order_price: int,
+    capacities: dict[str, dict[str, int]],
+) -> tuple[dict[str, Any], list[tuple[dict[str, Any], dict[str, Any] | None]], list[dict[str, Any]]]:
+    active_buy_base = {
+        "symbol_id": "078930",
+        "symbol_name": "GS",
+        "order_id": "0015300400",
+        "order_kind": "pending",
+        "direction": "buy",
+        "final_first_score": 6.5,
+        "remaining_quantity": active_qty,
+        "order_price": active_price,
+        "active_status": "active",
+        "order_api": "order_cash",
+        "order_path": "immediate",
+        "execution_environment": "real",
+        "observed_at": now_iso(),
+        "krx_fwdg_ord_orgno": "91252",
+        "orgn_odno": "0015300400",
+    }
+    execution = {
+        "orders": [
+            {
+                "symbol_id": "078930",
+                "symbol_name": "GS",
+                "final_holding_quantity": final_holding_quantity,
+                "final_first_score": 6.5,
+                "order_price": order_price,
+                "order_path": "immediate",
+            }
+        ]
+    }
+    original_adjust_active_order = execute_orders_module.adjust_active_order
+    original_submit_order = execute_orders_module.submit_order
+    correction_calls: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
+    submit_calls: list[dict[str, Any]] = []
+
+    def fake_adjust_active_order(kis: Any, active: dict[str, Any], desired: dict[str, Any] | None) -> tuple[str, str, str]:
+        correction_calls.append((dict(active), dict(desired) if desired else None))
+        return "correct-buy-078930", "correct", "fake active buy correction"
+
+    def fake_submit(kis: Any, order: dict[str, Any]) -> str:
+        submit_calls.append(dict(order))
+        return "unexpected-submit"
+
+    try:
+        execute_orders_module.adjust_active_order = fake_adjust_active_order
+        execute_orders_module.submit_order = fake_submit
+        reconcile(
+            {
+                "account_summary": {"cash_amount": 10_000_000},
+                "symbols": [{"symbol_id": "078930", "symbol_name": "GS", "current_live_holding_quantity": current_holding}],
+            },
+            execution,
+            [dict(active_buy_base)],
+            capacities,
+            {},
+            submit=True,
+            kis=FakeKis(),
+        )
+    finally:
+        execute_orders_module.adjust_active_order = original_adjust_active_order
+        execute_orders_module.submit_order = original_submit_order
+    return execution["orders"][0], correction_calls, submit_calls
+
+
+def step_active_buy_correction_checks(root: Path) -> list[str]:
+    """A covered active buy is corrected in place instead of being pushed through the gross new-buy gate."""
+    failures: list[str] = []
+
+    # GS replay: current holding 11, active pending buy 1 @ 82,300, final target 12 @ 83,200 --
+    # same quantity, price increase. Only the incremental notional (900) should be validated.
+    gs_replay_order, gs_replay_calls, gs_replay_submits = _run_active_buy_correction_case(
+        active_qty=1,
+        active_price=82_300,
+        final_holding_quantity=12,
+        current_holding=11,
+        order_price=83_200,
+        capacities={"078930": {"max_buy_qty": 5, "max_buy_amt": 5_000_000}},
+    )
+    if gs_replay_order.get("result") != "submitted" or gs_replay_order.get("reason") != "active_order_correction_submitted":
+        failures.append(f"GS replay same-quantity price increase was not corrected in place: {gs_replay_order}")
+    if gs_replay_order.get("validated_order_quantity") != 1 or gs_replay_order.get("additional_required_quantity") != 1:
+        failures.append(f"GS replay correction used wrong quantity: {gs_replay_order}")
+    if gs_replay_submits:
+        failures.append(f"GS replay correction should not call submit_order: {gs_replay_submits}")
+    if not gs_replay_calls or (gs_replay_calls[0][1] or {}).get("validated_order_quantity") != 1:
+        failures.append(f"GS replay correction used wrong desired order: {gs_replay_calls}")
+
+    # GS replay boundary: available cash exactly equal to the incremental notional (900) must
+    # still pass -- the gate only blocks when the incremental exceeds what is available.
+    gs_boundary_pass_order, _gs_boundary_pass_calls, gs_boundary_pass_submits = _run_active_buy_correction_case(
+        active_qty=1,
+        active_price=82_300,
+        final_holding_quantity=12,
+        current_holding=11,
+        order_price=83_200,
+        capacities={"078930": {"max_buy_qty": 5, "max_buy_amt": 900}},
+    )
+    if gs_boundary_pass_order.get("result") != "submitted" or gs_boundary_pass_order.get("reason") != "active_order_correction_submitted":
+        failures.append(f"incremental notional exactly at available cash (900) should pass: {gs_boundary_pass_order}")
+    if gs_boundary_pass_submits:
+        failures.append(f"boundary-pass correction should not call submit_order: {gs_boundary_pass_submits}")
+
+    # Same quantity, price decrease -- must not require gross new-buy capacity.
+    price_decrease_order, _price_decrease_calls, price_decrease_submits = _run_active_buy_correction_case(
+        active_qty=1,
+        active_price=100_000,
+        final_holding_quantity=11,
+        current_holding=10,
+        order_price=95_000,
+        capacities={},
+    )
+    if price_decrease_order.get("result") != "submitted" or price_decrease_order.get("reason") != "active_order_correction_submitted":
+        failures.append(f"same-quantity price decrease was not corrected without gross capacity: {price_decrease_order}")
+    if price_decrease_submits:
+        failures.append(f"price decrease correction should not call submit_order: {price_decrease_submits}")
+
+    # Quantity decrease -- must not require gross new-buy capacity.
+    qty_decrease_order, _qty_decrease_calls, qty_decrease_submits = _run_active_buy_correction_case(
+        active_qty=3,
+        active_price=100_000,
+        final_holding_quantity=13,
+        current_holding=11,
+        order_price=100_000,
+        capacities={},
+    )
+    if qty_decrease_order.get("result") != "submitted" or qty_decrease_order.get("reason") != "active_order_correction_submitted":
+        failures.append(f"quantity decrease was not corrected without gross capacity: {qty_decrease_order}")
+    if qty_decrease_order.get("validated_order_quantity") != 2:
+        failures.append(f"quantity decrease correction used wrong quantity: {qty_decrease_order}")
+    if qty_decrease_submits:
+        failures.append(f"quantity decrease correction should not call submit_order: {qty_decrease_submits}")
+
+    # Quantity decrease whose higher price still raises total notional -- the incremental
+    # notional (not the quantity direction alone) drives the gate, and it passes once the
+    # symbol's fresh capacity covers it.
+    notional_up_order, _notional_up_calls, notional_up_submits = _run_active_buy_correction_case(
+        active_qty=2,
+        active_price=100_000,
+        final_holding_quantity=11,
+        current_holding=10,
+        order_price=250_000,
+        capacities={"078930": {"max_buy_qty": 5, "max_buy_amt": 5_000_000}},
+    )
+    if notional_up_order.get("result") != "submitted" or notional_up_order.get("reason") != "active_order_correction_submitted":
+        failures.append(f"quantity decrease with higher total notional was not corrected with sufficient capacity: {notional_up_order}")
+    if notional_up_order.get("validated_order_quantity") != 1:
+        failures.append(f"quantity decrease with higher notional correction used wrong quantity: {notional_up_order}")
+    if notional_up_submits:
+        failures.append(f"quantity decrease with higher notional correction should not call submit_order: {notional_up_submits}")
+
+    # Quantity increase: the final delta now agrees with the active buy's direction, so it is
+    # kept and only the incremental quantity is submitted as an additional order (pre-existing
+    # invariant) -- this must keep working once buy corrections are gated incrementally too.
+    original_adjust_active_order = execute_orders_module.adjust_active_order
+    original_submit_order = execute_orders_module.submit_order
+    qty_increase_corrections: list[Any] = []
+    qty_increase_submissions: list[dict[str, Any]] = []
+
+    def fake_reject_correction(kis: Any, active: dict[str, Any], desired: dict[str, Any] | None) -> tuple[str, str, str]:
+        qty_increase_corrections.append((dict(active), dict(desired) if desired else None))
+        return "unexpected-correction", "correct", "unexpected correction"
+
+    def fake_submit_additional(kis: Any, order: dict[str, Any]) -> str:
+        qty_increase_submissions.append(dict(order))
+        return "additional-buy-078930"
+
+    qty_increase_execution = {
+        "orders": [
+            {"symbol_id": "078930", "symbol_name": "GS", "final_holding_quantity": 13, "final_first_score": 6.5, "order_price": 100_000, "order_path": "immediate"}
+        ]
+    }
+    try:
+        execute_orders_module.adjust_active_order = fake_reject_correction
+        execute_orders_module.submit_order = fake_submit_additional
+        reconcile(
+            {"account_summary": {"cash_amount": 10_000_000}, "symbols": [{"symbol_id": "078930", "symbol_name": "GS", "current_live_holding_quantity": 10}]},
+            qty_increase_execution,
+            [
+                {
+                    "symbol_id": "078930",
+                    "symbol_name": "GS",
+                    "order_id": "0015300400",
+                    "order_kind": "pending",
+                    "direction": "buy",
+                    "final_first_score": 6.5,
+                    "remaining_quantity": 1,
+                    "order_price": 100_000,
+                    "active_status": "active",
+                    "order_api": "order_cash",
+                    "order_path": "immediate",
+                    "execution_environment": "real",
+                    "observed_at": now_iso(),
+                }
+            ],
+            {"078930": {"max_buy_qty": 5, "max_buy_amt": 5_000_000}},
+            {},
+            submit=True,
+            kis=FakeKis(),
+        )
+    finally:
+        execute_orders_module.adjust_active_order = original_adjust_active_order
+        execute_orders_module.submit_order = original_submit_order
+    qty_increase_order = qty_increase_execution["orders"][0]
+    if qty_increase_order.get("result") != "submitted" or qty_increase_order.get("reason") != "active_order_kept_and_additional_order_submitted":
+        failures.append(f"quantity increase should keep the active order and submit only the increment: {qty_increase_order}")
+    if qty_increase_order.get("validated_order_quantity") != 2:
+        failures.append(f"quantity increase gated the wrong incremental quantity: {qty_increase_order}")
+    if qty_increase_corrections:
+        failures.append(f"quantity increase should not call active-order correction: {qty_increase_corrections}")
+    if not qty_increase_submissions or qty_increase_submissions[0].get("validated_order_quantity") != 2:
+        failures.append(f"quantity increase used wrong additional-order quantity: {qty_increase_submissions}")
+    return failures
+
+
+def step_active_buy_correction_capacity_gate_checks(root: Path) -> list[str]:
+    """Buy corrections that add exposure must fail closed without fresh incremental capacity evidence."""
+    failures: list[str] = []
+
+    # Missing capacity for a same-quantity price increase must fail closed, not fall through to
+    # the gross new-buy gate (this is the GS replay's `buy_cash_limit_missing` regression).
+    missing_capacity_order, missing_capacity_calls, missing_capacity_submits = _run_active_buy_correction_case(
+        active_qty=1,
+        active_price=82_300,
+        final_holding_quantity=12,
+        current_holding=11,
+        order_price=83_200,
+        capacities={},
+    )
+    if missing_capacity_order.get("result") != "blocked" or missing_capacity_order.get("reason") != "buy_cash_limit_missing":
+        failures.append(f"missing incremental capacity did not fail closed: {missing_capacity_order}")
+    if missing_capacity_order.get("order_or_reservation_id") != "0015300400":
+        failures.append(f"missing capacity block should retain the original active order id: {missing_capacity_order}")
+    if missing_capacity_calls:
+        failures.append(f"missing capacity should not call active-order correction: {missing_capacity_calls}")
+    if missing_capacity_submits:
+        failures.append(f"missing capacity should not call submit_order: {missing_capacity_submits}")
+
+    # Insufficient (but present) capacity for the same price increase must also fail closed.
+    insufficient_capacity_order, insufficient_capacity_calls, insufficient_capacity_submits = _run_active_buy_correction_case(
+        active_qty=1,
+        active_price=82_300,
+        final_holding_quantity=12,
+        current_holding=11,
+        order_price=83_200,
+        capacities={"078930": {"max_buy_qty": 5, "max_buy_amt": 500}},
+    )
+    if insufficient_capacity_order.get("result") != "blocked" or insufficient_capacity_order.get("reason") != "buy_cash_gate_reduced_reverse_rank":
+        failures.append(f"insufficient incremental capacity did not fail closed: {insufficient_capacity_order}")
+    if insufficient_capacity_calls:
+        failures.append(f"insufficient capacity should not call active-order correction: {insufficient_capacity_calls}")
+    if insufficient_capacity_submits:
+        failures.append(f"insufficient capacity should not call submit_order: {insufficient_capacity_submits}")
+
+    # GS replay boundary: available cash one short of the incremental notional (899 < 900) must
+    # block -- confirms the boundary is strictly ">" and not ">=".
+    gs_boundary_block_order, gs_boundary_block_calls, gs_boundary_block_submits = _run_active_buy_correction_case(
+        active_qty=1,
+        active_price=82_300,
+        final_holding_quantity=12,
+        current_holding=11,
+        order_price=83_200,
+        capacities={"078930": {"max_buy_qty": 5, "max_buy_amt": 899}},
+    )
+    if gs_boundary_block_order.get("result") != "blocked" or gs_boundary_block_order.get("reason") != "buy_cash_gate_reduced_reverse_rank":
+        failures.append(f"incremental notional one above available cash (899) should fail closed: {gs_boundary_block_order}")
+    if gs_boundary_block_calls or gs_boundary_block_submits:
+        failures.append(f"boundary-block case should not adjust or submit: calls={gs_boundary_block_calls}, submits={gs_boundary_block_submits}")
+
+    # A quantity decrease whose higher price still raises total notional must fail closed without
+    # capacity, even though the quantity direction alone is a decrease.
+    notional_up_missing_order, notional_up_missing_calls, notional_up_missing_submits = _run_active_buy_correction_case(
+        active_qty=2,
+        active_price=100_000,
+        final_holding_quantity=11,
+        current_holding=10,
+        order_price=250_000,
+        capacities={},
+    )
+    if notional_up_missing_order.get("result") != "blocked" or notional_up_missing_order.get("reason") != "buy_cash_limit_missing":
+        failures.append(f"quantity decrease with higher notional and missing capacity did not fail closed: {notional_up_missing_order}")
+    if notional_up_missing_order.get("order_or_reservation_id") != "0015300400":
+        failures.append(f"quantity-decrease/notional-up block should retain the original active order id: {notional_up_missing_order}")
+    if notional_up_missing_calls:
+        failures.append(f"quantity-decrease/notional-up missing capacity should not call active-order correction: {notional_up_missing_calls}")
+    if notional_up_missing_submits:
+        failures.append(f"quantity-decrease/notional-up missing capacity should not call submit_order: {notional_up_missing_submits}")
+
+    return failures
+
+
+def step_active_buy_correction_gate_independence_checks(root: Path) -> list[str]:
+    """Incremental quantity and incremental notional are independent checks inside
+    active_buy_correction_gate: a positive quantity increase must be validated against
+    max_buy_qty even if notional does not rise, and a positive notional increase must be
+    validated against max_buy_amt/cash even if quantity does not rise."""
+    failures: list[str] = []
+    conflict = {"remaining_quantity": 1, "order_price": 100_000}
+
+    # Quantity increase with a lower price (notional does not increase) must still be blocked by
+    # an insufficient max_buy_qty, even though max_buy_amt is ample.
+    qty_gate_order = {"attempts": []}
+    qty_gate_cash, qty_gate_blocked = active_buy_correction_gate(
+        qty_gate_order,
+        conflict=conflict,
+        desired_qty=3,
+        price=30_000,
+        symbol="078930",
+        capacities={"078930": {"max_buy_qty": 1, "max_buy_amt": 5_000_000}},
+        used_cash=0,
+        cash_limit=5_000_000,
+    )
+    if not qty_gate_blocked or qty_gate_order.get("reason") != "buy_quantity_exceeds_order_available_quantity":
+        failures.append(f"quantity increase with flat/lower notional did not gate on max_buy_qty independently: cash={qty_gate_cash}, blocked={qty_gate_blocked}, order={qty_gate_order}")
+
+    # The same quantity increase passes once max_buy_qty covers the incremental shares.
+    qty_gate_ok_order = {"attempts": []}
+    qty_gate_ok_cash, qty_gate_ok_blocked = active_buy_correction_gate(
+        qty_gate_ok_order,
+        conflict=conflict,
+        desired_qty=3,
+        price=30_000,
+        symbol="078930",
+        capacities={"078930": {"max_buy_qty": 5, "max_buy_amt": 5_000_000}},
+        used_cash=0,
+        cash_limit=5_000_000,
+    )
+    if qty_gate_ok_blocked or qty_gate_ok_cash != 0:
+        failures.append(f"quantity increase with sufficient max_buy_qty should pass with zero incremental cash: cash={qty_gate_ok_cash}, blocked={qty_gate_ok_blocked}, order={qty_gate_ok_order}")
+
+    # Notional increase with a flat/lower quantity must gate on cash even when max_buy_qty is
+    # zero, since no additional shares are being requested.
+    cash_gate_order = {"attempts": []}
+    cash_gate_cash, cash_gate_blocked = active_buy_correction_gate(
+        cash_gate_order,
+        conflict=conflict,
+        desired_qty=1,
+        price=250_000,
+        symbol="078930",
+        capacities={"078930": {"max_buy_qty": 0, "max_buy_amt": 5_000_000}},
+        used_cash=0,
+        cash_limit=5_000_000,
+    )
+    if cash_gate_blocked or cash_gate_cash != 150_000:
+        failures.append(f"notional increase with flat/lower quantity should not require max_buy_qty: cash={cash_gate_cash}, blocked={cash_gate_blocked}, order={cash_gate_order}")
+
+    # used_cash from earlier orders in the same run must be included in the boundary: exactly
+    # filling the remaining cash passes, one more than that blocks.
+    gs_conflict = {"remaining_quantity": 1, "order_price": 82_300}
+    used_cash_boundary_pass_order = {"attempts": []}
+    used_cash_boundary_pass_cash, used_cash_boundary_pass_blocked = active_buy_correction_gate(
+        used_cash_boundary_pass_order,
+        conflict=gs_conflict,
+        desired_qty=1,
+        price=83_200,
+        symbol="078930",
+        capacities={"078930": {"max_buy_qty": 5, "max_buy_amt": 5_000_000}},
+        used_cash=4_999_100,
+        cash_limit=5_000_000,
+    )
+    if used_cash_boundary_pass_blocked or used_cash_boundary_pass_cash != 900:
+        failures.append(f"used_cash + incremental exactly at cash_limit should pass: cash={used_cash_boundary_pass_cash}, blocked={used_cash_boundary_pass_blocked}, order={used_cash_boundary_pass_order}")
+
+    used_cash_boundary_block_order = {"attempts": []}
+    used_cash_boundary_block_cash, used_cash_boundary_block_blocked = active_buy_correction_gate(
+        used_cash_boundary_block_order,
+        conflict=gs_conflict,
+        desired_qty=1,
+        price=83_200,
+        symbol="078930",
+        capacities={"078930": {"max_buy_qty": 5, "max_buy_amt": 5_000_000}},
+        used_cash=4_999_101,
+        cash_limit=5_000_000,
+    )
+    if not used_cash_boundary_block_blocked or used_cash_boundary_block_order.get("reason") != "buy_cash_gate_reduced_reverse_rank":
+        failures.append(f"used_cash + incremental one above cash_limit should fail closed: cash={used_cash_boundary_block_cash}, blocked={used_cash_boundary_block_blocked}, order={used_cash_boundary_block_order}")
+
+    return failures
+
+
+def step_refresh_gates_active_buy_capacity_prefetch_checks(root: Path) -> list[str]:
+    """refresh_gates must prefetch buy capacity for a symbol with an active pending buy even when
+    the pre-reconcile order direction is 'none', so a later same-direction buy correction has
+    fresh capacity evidence to validate against instead of discovering it missing mid-reconcile."""
+    failures: list[str] = []
+    original_kis = execute_orders_module.Kis
+    original_fetch_reservations = execute_orders_module.fetch_reservations
+    original_fetch_pending_orders = execute_orders_module.fetch_pending_orders
+    original_buy_capacity = execute_orders_module.buy_capacity
+    capacity_calls: list[tuple[str, int]] = []
+
+    class FakeRefreshKis:
+        env = "real"
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+    def fake_fetch_reservations(kis: Any, start_date: str, end_date: str) -> list[dict[str, Any]]:
+        return []
+
+    def fake_fetch_pending_orders(kis: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "symbol_id": "078930",
+                "symbol_name": "GS",
+                "order_id": "0015300400",
+                "order_kind": "pending",
+                "direction": "buy",
+                "remaining_quantity": 1,
+                "order_price": 82_300,
+                "active_status": "active",
+                "order_api": "order_cash",
+                "order_path": "immediate",
+                "execution_environment": "real",
+                "observed_at": now_iso(),
+            }
+        ]
+
+    def fake_buy_capacity(kis: Any, symbol: str, price: int) -> dict[str, int]:
+        capacity_calls.append((symbol, price))
+        return {"max_buy_qty": 5, "max_buy_amt": 5_000_000}
+
+    try:
+        execute_orders_module.Kis = FakeRefreshKis
+        execute_orders_module.fetch_reservations = fake_fetch_reservations
+        execute_orders_module.fetch_pending_orders = fake_fetch_pending_orders
+        execute_orders_module.buy_capacity = fake_buy_capacity
+        active, capacities, sell_capacities, errors, kis = refresh_gates(
+            argparse.Namespace(env="real", retries=0, offline=False, reservation_start_date="20260701", reservation_end_date="20260731"),
+            {"account_summary": {"cash_amount": 10_000_000}, "symbols": [{"symbol_id": "078930", "symbol_name": "GS", "current_live_holding_quantity": 11}]},
+            {
+                "orders": [
+                    {
+                        "symbol_id": "078930",
+                        "symbol_name": "GS",
+                        "final_holding_quantity": 12,
+                        "final_first_score": 6.5,
+                        "order_price": 83_200,
+                        "order_path": "immediate",
+                        "direction": "none",
+                    }
+                ]
+            },
+        )
+    finally:
+        execute_orders_module.Kis = original_kis
+        execute_orders_module.fetch_reservations = original_fetch_reservations
+        execute_orders_module.fetch_pending_orders = original_fetch_pending_orders
+        execute_orders_module.buy_capacity = original_buy_capacity
+
+    if "078930" not in capacities:
+        failures.append(f"refresh_gates did not prefetch buy capacity for a symbol with an active pending buy: {capacities}")
+    if capacity_calls != [("078930", 83_200)]:
+        failures.append(f"refresh_gates fetched buy capacity with unexpected arguments: {capacity_calls}")
+    if errors:
+        failures.append(f"refresh_gates recorded unexpected errors: {errors}")
+    if len(active) != 1:
+        failures.append(f"refresh_gates did not return the fetched active orders: {active}")
+
+    # A prefetch failure for a symbol whose capacity is only opportunistically fetched (its
+    # pre-reconcile direction is 'none', not an initial new buy) must not become a required gate
+    # error -- a de-risking correction (price/quantity decrease) needs no capacity evidence at
+    # all, so it must still be able to proceed through reconcile() afterwards.
+    def fake_failing_buy_capacity(kis: Any, symbol: str, price: int) -> dict[str, int]:
+        raise RuntimeError("transient order-available lookup failure")
+
+    try:
+        execute_orders_module.Kis = FakeRefreshKis
+        execute_orders_module.fetch_reservations = fake_fetch_reservations
+        execute_orders_module.fetch_pending_orders = fake_fetch_pending_orders
+        execute_orders_module.buy_capacity = fake_failing_buy_capacity
+        _, failed_prefetch_capacities, _, failed_prefetch_errors, _ = refresh_gates(
+            argparse.Namespace(env="real", retries=0, offline=False, reservation_start_date="20260701", reservation_end_date="20260731"),
+            {"account_summary": {"cash_amount": 10_000_000}, "symbols": [{"symbol_id": "078930", "symbol_name": "GS", "current_live_holding_quantity": 11}]},
+            {
+                "orders": [
+                    {
+                        "symbol_id": "078930",
+                        "symbol_name": "GS",
+                        "final_holding_quantity": 12,
+                        "final_first_score": 6.5,
+                        "order_price": 80_000,
+                        "order_path": "immediate",
+                        "direction": "none",
+                    }
+                ]
+            },
+        )
+    finally:
+        execute_orders_module.Kis = original_kis
+        execute_orders_module.fetch_reservations = original_fetch_reservations
+        execute_orders_module.fetch_pending_orders = original_fetch_pending_orders
+        execute_orders_module.buy_capacity = original_buy_capacity
+
+    if failed_prefetch_errors:
+        failures.append(f"opportunistic active-buy capacity prefetch failure should not be a required gate error: {failed_prefetch_errors}")
+    if "078930" in failed_prefetch_capacities:
+        failures.append(f"failed prefetch should not leave stale/fabricated capacity data: {failed_prefetch_capacities}")
+
+    # With capacity absent, a de-risking correction (price decrease, same quantity) must still
+    # succeed through reconcile() -- it must not require the failed evidence at all.
+    de_risking_order, _de_risking_calls, de_risking_submits = _run_active_buy_correction_case(
+        active_qty=1,
+        active_price=100_000,
+        final_holding_quantity=11,
+        current_holding=10,
+        order_price=80_000,
+        capacities=failed_prefetch_capacities,
+    )
+    if de_risking_order.get("result") != "submitted" or de_risking_order.get("reason") != "active_order_correction_submitted":
+        failures.append(f"de-risking correction should proceed despite a failed opportunistic capacity prefetch: {de_risking_order}")
+    if de_risking_submits:
+        failures.append(f"de-risking correction after failed prefetch should not call submit_order: {de_risking_submits}")
+
+    return failures
+
+
+def _run_refresh_gates_case(
+    *,
+    active_orders: list[dict[str, Any]],
+    execution_orders: list[dict[str, Any]],
+    current_holding: int,
+    buy_capacity_impl: Any = None,
+    sell_capacity_impl: Any = None,
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, int]], dict[str, dict[str, int]], list[dict[str, Any]]]:
+    original_kis = execute_orders_module.Kis
+    original_fetch_reservations = execute_orders_module.fetch_reservations
+    original_fetch_pending_orders = execute_orders_module.fetch_pending_orders
+    original_buy_capacity = execute_orders_module.buy_capacity
+    original_sell_capacity = execute_orders_module.sell_capacity
+
+    class FakeRefreshKis:
+        env = "real"
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+    def fake_fetch_reservations(kis: Any, start_date: str, end_date: str) -> list[dict[str, Any]]:
+        return []
+
+    def fake_fetch_pending_orders(kis: Any) -> list[dict[str, Any]]:
+        return active_orders
+
+    def default_buy_capacity(kis: Any, symbol: str, price: int) -> dict[str, int]:
+        return {"max_buy_qty": 5, "max_buy_amt": 5_000_000}
+
+    def default_sell_capacity(kis: Any, symbol: str) -> dict[str, int]:
+        return {"max_sell_qty": 5}
+
+    try:
+        execute_orders_module.Kis = FakeRefreshKis
+        execute_orders_module.fetch_reservations = fake_fetch_reservations
+        execute_orders_module.fetch_pending_orders = fake_fetch_pending_orders
+        execute_orders_module.buy_capacity = buy_capacity_impl or default_buy_capacity
+        execute_orders_module.sell_capacity = sell_capacity_impl or default_sell_capacity
+        active, capacities, sell_capacities, errors, _kis = refresh_gates(
+            argparse.Namespace(env="real", retries=0, offline=False, reservation_start_date="20260701", reservation_end_date="20260731"),
+            {"account_summary": {"cash_amount": 10_000_000}, "symbols": [{"symbol_id": "078930", "symbol_name": "GS", "current_live_holding_quantity": current_holding}]},
+            {"orders": execution_orders},
+        )
+    finally:
+        execute_orders_module.Kis = original_kis
+        execute_orders_module.fetch_reservations = original_fetch_reservations
+        execute_orders_module.fetch_pending_orders = original_fetch_pending_orders
+        execute_orders_module.buy_capacity = original_buy_capacity
+        execute_orders_module.sell_capacity = original_sell_capacity
+    return active, capacities, sell_capacities, errors
+
+
+def step_refresh_gates_stale_direction_checks(root: Path) -> list[str]:
+    """refresh_gates must decide whether a capacity-lookup failure is globally required from the
+    fresh active orders it just fetched, not from the stale pre-reconcile execution.direction
+    field -- a stale label can no longer describe what the run is actually about to do once fresh
+    active orders are known."""
+    failures: list[str] = []
+
+    def gs_active_buy(price: int = 100_000, qty: int = 1) -> dict[str, Any]:
+        return {
+            "symbol_id": "078930",
+            "symbol_name": "GS",
+            "order_id": "0015300400",
+            "order_kind": "pending",
+            "direction": "buy",
+            "remaining_quantity": qty,
+            "order_price": price,
+            "active_status": "active",
+            "order_api": "order_cash",
+            "order_path": "immediate",
+            "execution_environment": "real",
+            "observed_at": now_iso(),
+        }
+
+    def gs_active_sell(price: int = 100_000, qty: int = 1) -> dict[str, Any]:
+        return {
+            "symbol_id": "078930",
+            "symbol_name": "GS",
+            "order_id": "0015300401",
+            "order_kind": "pending",
+            "direction": "sell",
+            "remaining_quantity": qty,
+            "order_price": price,
+            "active_status": "active",
+            "order_api": "order_cash",
+            "order_path": "immediate",
+            "execution_environment": "real",
+            "observed_at": now_iso(),
+        }
+
+    def failing_buy_capacity(kis: Any, symbol: str, price: int) -> dict[str, int]:
+        raise RuntimeError("transient buy-capacity lookup failure")
+
+    def failing_sell_capacity(kis: Any, symbol: str) -> dict[str, int]:
+        raise RuntimeError("transient sell-capacity lookup failure")
+
+    # Reproduction 1: stale direction=buy, current=10, final=11, fresh active buy 1@100000,
+    # desired 80000 -- a de-risk price correction. A transient buy-capacity failure must not
+    # globally abort.
+    _active1, _capacities1, _sell1, errors1 = _run_refresh_gates_case(
+        active_orders=[gs_active_buy(price=100_000, qty=1)],
+        execution_orders=[
+            {"symbol_id": "078930", "symbol_name": "GS", "final_holding_quantity": 11, "final_first_score": 6.5, "order_price": 80_000, "order_path": "immediate", "direction": "buy"}
+        ],
+        current_holding=10,
+        buy_capacity_impl=failing_buy_capacity,
+    )
+    if errors1:
+        failures.append(f"stale direction=buy de-risk correction should not globally abort on buy-capacity failure: {errors1}")
+
+    # Reproduction 2: stale direction=sell, current=10, final=9, fresh active buy 2 -- an
+    # active-buy shrink/correction. A transient sell-capacity failure must not globally abort.
+    _active2, _capacities2, _sell2, errors2 = _run_refresh_gates_case(
+        active_orders=[gs_active_buy(price=100_000, qty=2)],
+        execution_orders=[
+            {"symbol_id": "078930", "symbol_name": "GS", "final_holding_quantity": 9, "final_first_score": 6.5, "order_price": 100_000, "order_path": "immediate", "direction": "sell"}
+        ],
+        current_holding=10,
+        sell_capacity_impl=failing_sell_capacity,
+    )
+    if errors2:
+        failures.append(f"stale direction=sell active-buy shrink should not globally abort on sell-capacity failure: {errors2}")
+
+    # Reproduction 3: stale direction=buy with a fresh active sell that must be cancelled before
+    # a deferred buy replacement -- a buy-capacity failure must not block the cancel.
+    _active3, _capacities3, _sell3, errors3 = _run_refresh_gates_case(
+        active_orders=[gs_active_sell(price=100_000, qty=1)],
+        execution_orders=[
+            {"symbol_id": "078930", "symbol_name": "GS", "final_holding_quantity": 12, "final_first_score": 6.5, "order_price": 100_000, "order_path": "immediate", "direction": "buy"}
+        ],
+        current_holding=10,
+        buy_capacity_impl=failing_buy_capacity,
+    )
+    if errors3:
+        failures.append(f"stale direction=buy with a fresh active sell to cancel should not globally abort on buy-capacity failure: {errors3}")
+
+    # Genuine no-active buy must still retain a required lookup failure.
+    _active4, _capacities4, _sell4, errors4 = _run_refresh_gates_case(
+        active_orders=[],
+        execution_orders=[
+            {"symbol_id": "078930", "symbol_name": "GS", "final_holding_quantity": 5, "final_first_score": 6.5, "order_price": 100_000, "order_path": "immediate", "direction": "buy"}
+        ],
+        current_holding=0,
+        buy_capacity_impl=failing_buy_capacity,
+    )
+    if not errors4 or errors4[0].get("code") != "order_available_lookup_failed":
+        failures.append(f"genuine no-active buy should still retain a required buy-capacity lookup failure: {errors4}")
+
+    # Genuine no-active sell must still retain a required lookup failure.
+    _active5, _capacities5, _sell5, errors5 = _run_refresh_gates_case(
+        active_orders=[],
+        execution_orders=[
+            {"symbol_id": "078930", "symbol_name": "GS", "final_holding_quantity": 0, "final_first_score": 6.5, "order_price": 100_000, "order_path": "immediate", "direction": "sell"}
+        ],
+        current_holding=5,
+        sell_capacity_impl=failing_sell_capacity,
+    )
+    if not errors5 or errors5[0].get("code") != "sell_available_lookup_failed":
+        failures.append(f"genuine no-active sell should still retain a required sell-capacity lookup failure: {errors5}")
+
+    # A stale buy label must not add an unrelated required buy lookup to a genuine fresh sell.
+    _active6, capacities6, sell6, errors6 = _run_refresh_gates_case(
+        active_orders=[],
+        execution_orders=[
+            {"symbol_id": "078930", "symbol_name": "GS", "final_holding_quantity": 0, "final_first_score": 3.5, "order_price": 100_000, "order_path": "immediate", "direction": "buy"}
+        ],
+        current_holding=5,
+        buy_capacity_impl=failing_buy_capacity,
+    )
+    if errors6 or capacities6 or sell6.get("078930", {}).get("max_sell_qty") != 5:
+        failures.append(f"fresh sell should ignore a stale buy direction during gate lookup: capacities={capacities6}, sell={sell6}, errors={errors6}")
+
+    # A no-op must not perform a required lookup solely because a stale direction remains.
+    _active7, capacities7, sell7, errors7 = _run_refresh_gates_case(
+        active_orders=[],
+        execution_orders=[
+            {"symbol_id": "078930", "symbol_name": "GS", "final_holding_quantity": 5, "final_first_score": 5.0, "order_price": 100_000, "order_path": "immediate", "direction": "sell"}
+        ],
+        current_holding=5,
+        sell_capacity_impl=failing_sell_capacity,
+    )
+    if errors7 or capacities7 or sell7:
+        failures.append(f"fresh no-op should not run capacity lookup from a stale direction: capacities={capacities7}, sell={sell7}, errors={errors7}")
+
+    return failures
+
+
+def step_refresh_gates_and_correction_price_normalization_checks(root: Path) -> list[str]:
+    """A raw order price of 83250 must be normalized to the buy tick (83300) consistently for
+    both the refresh_gates buy-capacity lookup and the reconcile() correction payload sent to
+    adjust_active_order -- otherwise capacity evidence is checked against a different price than
+    what is actually submitted to the broker."""
+    failures: list[str] = []
+    capacity_calls: list[tuple[str, int]] = []
+
+    def recording_buy_capacity(kis: Any, symbol: str, price: int) -> dict[str, int]:
+        capacity_calls.append((symbol, price))
+        return {"max_buy_qty": 5, "max_buy_amt": 5_000_000}
+
+    _active, capacities, _sell, errors = _run_refresh_gates_case(
+        active_orders=[
+            {
+                "symbol_id": "078930",
+                "symbol_name": "GS",
+                "order_id": "0015300400",
+                "order_kind": "pending",
+                "direction": "buy",
+                "remaining_quantity": 1,
+                "order_price": 82_300,
+                "active_status": "active",
+                "order_api": "order_cash",
+                "order_path": "immediate",
+                "execution_environment": "real",
+                "observed_at": now_iso(),
+            }
+        ],
+        execution_orders=[
+            {"symbol_id": "078930", "symbol_name": "GS", "final_holding_quantity": 12, "final_first_score": 6.5, "order_price": 83_250, "order_path": "immediate", "direction": "none"}
+        ],
+        current_holding=11,
+        buy_capacity_impl=recording_buy_capacity,
+    )
+    if capacity_calls != [("078930", 83_300)]:
+        failures.append(f"refresh_gates should normalize 83250 to the buy tick 83300 for the capacity lookup: {capacity_calls}")
+    if errors:
+        failures.append(f"refresh_gates should not record errors for this correction scenario: {errors}")
+
+    correction_order, correction_calls, correction_submits = _run_active_buy_correction_case(
+        active_qty=1,
+        active_price=82_300,
+        final_holding_quantity=12,
+        current_holding=11,
+        order_price=83_250,
+        capacities=capacities,
+    )
+    if correction_order.get("result") != "submitted" or correction_order.get("reason") != "active_order_correction_submitted":
+        failures.append(f"83250 correction should submit using the capacity fetched at 83300: {correction_order}")
+    if not correction_calls or (correction_calls[0][1] or {}).get("order_price") != 83_300:
+        failures.append(f"correction payload should use the buy-tick-normalized 83300, not the raw 83250: {correction_calls}")
+    if correction_submits:
+        failures.append(f"normalized-price correction should not call submit_order: {correction_submits}")
+
+    return failures
+
+
+def step_pre_refresh_normalization_preserves_fresh_side_checks(root: Path) -> list[str]:
+    """Pre-refresh normalization must use the fresh account holding, not stale execution-side or
+    expected-holding fields, and must feed the same tick-normalized price to capacity and broker
+    correction paths."""
+    failures: list[str] = []
+    capacity_calls: list[tuple[str, int]] = []
+
+    def recording_buy_capacity(kis: Any, symbol: str, price: int) -> dict[str, int]:
+        capacity_calls.append((symbol, price))
+        return {"max_buy_qty": 5, "max_buy_amt": 5_000_000}
+
+    execution = {
+        "orders": [
+            {
+                "symbol_id": "078930",
+                "symbol_name": "GS",
+                "direction": "sell",
+                "current_live_holding_quantity": 11,
+                "expected_holding_quantity": 20,
+                "final_holding_quantity": 12,
+                "final_first_score": 6.5,
+                "order_price": 83_250,
+                "order_path": "immediate",
+            }
+        ]
+    }
+    fresh_buy_account = {
+        "symbols": [{"symbol_id": "078930", "symbol_name": "GS", "current_live_holding_quantity": 11}]
+    }
+    normalize_execution_order_prices(execution, fresh_buy_account)
+    if as_int(execution["orders"][0].get("order_price")) != 83_300:
+        failures.append(f"pre-refresh normalization should use fresh current-to-final buy side despite stale sell evidence: {execution['orders'][0]}")
+
+    _active, capacities, _sell, errors = _run_refresh_gates_case(
+        active_orders=[
+            {
+                "symbol_id": "078930",
+                "symbol_name": "GS",
+                "order_id": "0015300400",
+                "order_kind": "pending",
+                "direction": "buy",
+                "remaining_quantity": 1,
+                "order_price": 82_300,
+                "active_status": "active",
+                "order_api": "order_cash",
+                "order_path": "immediate",
+                "execution_environment": "real",
+                "observed_at": now_iso(),
+            }
+        ],
+        execution_orders=execution["orders"],
+        current_holding=11,
+        buy_capacity_impl=recording_buy_capacity,
+    )
+    if capacity_calls != [("078930", 83_300)]:
+        failures.append(f"fresh-side capacity lookup after pre-refresh normalization should use the buy tick 83300: {capacity_calls}")
+    if errors:
+        failures.append(f"refresh_gates should not record errors for this correction scenario: {errors}")
+
+    correction_order, correction_calls, correction_submits = _run_active_buy_correction_case(
+        active_qty=1,
+        active_price=82_300,
+        final_holding_quantity=12,
+        current_holding=11,
+        order_price=as_int(execution["orders"][0].get("order_price")),
+        capacities=capacities,
+    )
+    if correction_order.get("result") != "submitted" or correction_order.get("reason") != "active_order_correction_submitted":
+        failures.append(f"correction after pre-refresh normalization should still submit using the recovered buy tick: {correction_order}")
+    if not correction_calls or (correction_calls[0][1] or {}).get("order_price") != 83_300:
+        failures.append(f"correction payload after pre-refresh normalization should use 83300, not a stale-direction-rounded price: {correction_calls}")
+    if correction_submits:
+        failures.append(f"this correction should not call submit_order: {correction_submits}")
+
+    # Symmetric risk: stale buy evidence must not pre-round a fresh sell upward.
+    symmetric_execution = {
+        "orders": [
+            {
+                "symbol_id": "078930",
+                "symbol_name": "GS",
+                "direction": "buy",
+                "current_live_holding_quantity": 12,
+                "expected_holding_quantity": 5,
+                "final_holding_quantity": 11,
+                "final_first_score": 6.5,
+                "order_price": 83_250,
+                "order_path": "immediate",
+            }
+        ]
+    }
+    fresh_sell_account = {
+        "symbols": [{"symbol_id": "078930", "symbol_name": "GS", "current_live_holding_quantity": 12}]
+    }
+    normalize_execution_order_prices(symmetric_execution, fresh_sell_account)
+    if as_int(symmetric_execution["orders"][0].get("order_price")) != 83_200:
+        failures.append(f"pre-refresh normalization should use fresh current-to-final sell side despite stale buy evidence: {symmetric_execution['orders'][0]}")
+
+    return failures
+
+
 def step_active_order_replacement_checks(root: Path) -> list[str]:
-    """An opposite-direction active order is cancelled and replaced with the new order."""
+    """An opposite-direction active order has its cancellation submitted, but the replacement is
+    deferred to a later run instead of being submitted immediately -- a cancel request id is only
+    broker acceptance, not confirmed release of the held quantity/cash."""
     failures: list[str] = []
     replacement_execution = {
         "orders": [
@@ -974,19 +1866,25 @@ def step_active_order_replacement_checks(root: Path) -> list[str]:
         execute_orders_module.submit_order = original_submit_order
     replacement_order = replacement_execution["orders"][0]
     replacement_adjustment = (replacement_execution.get("order_adjustments") or [{}])[0]
-    if replacement_order.get("result") != "submitted" or replacement_order.get("reason") != "active_order_cancel_and_replacement_submitted":
-        failures.append(f"cancelled active order did not submit replacement: {replacement_order}")
-    if replacement_order.get("cancel_request_id") != "cancel1" or replacement_order.get("order_or_reservation_id") != "replace1":
-        failures.append(f"replacement ids were not recorded: {replacement_order}")
-    if not replacement_submissions or replacement_submissions[0].get("direction") != "sell" or replacement_submissions[0].get("validated_order_quantity") != 5:
-        failures.append(f"replacement sell order was not submitted with expected quantity: {replacement_submissions}")
-    if replacement_adjustment.get("replacement_order_id") != "replace1":
-        failures.append(f"replacement adjustment row did not record replacement order id: {replacement_adjustment}")
+    if replacement_order.get("result") != "submitted" or replacement_order.get("reason") != "active_order_cancel_submitted":
+        failures.append(f"cancelled active order should defer the replacement to a later run: {replacement_order}")
+    if replacement_order.get("direction") != "none" or replacement_order.get("validated_order_quantity") != 0:
+        failures.append(f"deferred replacement should not claim a sell was submitted: {replacement_order}")
+    if replacement_order.get("order_or_reservation_id") != "cancel1":
+        failures.append(f"deferred replacement should record the cancel request id: {replacement_order}")
+    if replacement_submissions:
+        failures.append(f"deferred replacement should not call submit_order in the same run: {replacement_submissions}")
+    if replacement_adjustment.get("replacement_required") is not True:
+        failures.append(f"replacement adjustment row should still flag replacement as required for a later run: {replacement_adjustment}")
+    if replacement_adjustment.get("replacement_order_id"):
+        failures.append(f"deferred replacement should not record a replacement order id: {replacement_adjustment}")
     return failures
 
 
 def step_active_order_replacement_edge_case_checks(root: Path) -> list[str]:
-    """Invalid price, empty order id, and submission exceptions during replacement all block safely."""
+    """Invalid price blocks safely before any adjustment; and once a cancel is submitted, the
+    deferred replacement path never calls submit_order in the same run, even if the stub would
+    fail or return an uncertain id -- there is no code path left where that stub can fire."""
     failures: list[str] = []
     original_adjust_active_order = execute_orders_module.adjust_active_order
     original_submit_order = execute_orders_module.submit_order
@@ -1049,21 +1947,23 @@ def step_active_order_replacement_edge_case_checks(root: Path) -> list[str]:
     if invalid_replacement_adjustments or invalid_replacement_submissions:
         failures.append(f"invalid replacement should not adjust or submit: adjustments={invalid_replacement_adjustments}, submissions={invalid_replacement_submissions}")
 
-    uncertain_replacement_execution = {
+    deferred_replacement_execution = {
         "orders": [
             {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 5, "final_first_score": 3.5, "order_price": 70000, "order_path": "immediate"}
         ]
     }
+    deferred_replacement_submissions: list[dict[str, Any]] = []
 
-    def fake_empty_submit_order(kis: Any, order: dict[str, Any]) -> str:
-        return ""
+    def fake_failing_submit_order(kis: Any, order: dict[str, Any]) -> str:
+        deferred_replacement_submissions.append(dict(order))
+        raise RuntimeError("submit_order should not be called for a deferred replacement")
 
     try:
         execute_orders_module.adjust_active_order = fake_cancel_active_order
-        execute_orders_module.submit_order = fake_empty_submit_order
+        execute_orders_module.submit_order = fake_failing_submit_order
         reconcile(
             {"account_summary": {"cash_amount": 1_000_000}, "symbols": [{"symbol_id": "005930", "symbol_name": "삼성전자", "current_live_holding_quantity": 10}]},
-            uncertain_replacement_execution,
+            deferred_replacement_execution,
             [
                 {
                     "symbol_id": "005930",
@@ -1089,35 +1989,57 @@ def step_active_order_replacement_edge_case_checks(root: Path) -> list[str]:
     finally:
         execute_orders_module.adjust_active_order = original_adjust_active_order
         execute_orders_module.submit_order = original_submit_order
-    uncertain_replacement_order = uncertain_replacement_execution["orders"][0]
-    if uncertain_replacement_order.get("result") != "blocked" or uncertain_replacement_order.get("reason") != "replacement_order_submission_uncertain":
-        failures.append(f"empty replacement order id was not blocked as uncertain: {uncertain_replacement_order}")
+    deferred_replacement_order = deferred_replacement_execution["orders"][0]
+    if deferred_replacement_order.get("result") != "submitted" or deferred_replacement_order.get("reason") != "active_order_cancel_submitted":
+        failures.append(f"opposite-direction cancel should defer replacement even when submit_order would fail: {deferred_replacement_order}")
+    if deferred_replacement_submissions:
+        failures.append(f"deferred replacement must never call submit_order, even one rigged to fail: {deferred_replacement_submissions}")
+    return failures
 
-    failed_replacement_execution = {
+
+def step_deferred_replacement_capacity_and_sell_increase_checks(root: Path) -> list[str]:
+    """Insufficient capacity for a deferred replacement must not block the cancellation of the
+    stale active order it is replacing, but missing capacity must still fail closed for a
+    genuine same-direction active-order increase."""
+    failures: list[str] = []
+    original_adjust_active_order = execute_orders_module.adjust_active_order
+    original_submit_order = execute_orders_module.submit_order
+
+    # An active buy must still be cancelled even though the deferred sell replacement's own
+    # capacity (max_sell_qty=0) is insufficient -- that capacity validation belongs to the later
+    # run, not to gating this run's cancellation.
+    insufficient_replacement_execution = {
         "orders": [
-            {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 5, "final_first_score": 3.5, "order_price": 70000, "order_path": "immediate"}
+            {"symbol_id": "078930", "symbol_name": "GS", "final_holding_quantity": 5, "final_first_score": 3.5, "order_price": 100_000, "order_path": "immediate"}
         ]
     }
+    insufficient_replacement_calls: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
+    insufficient_replacement_submits: list[dict[str, Any]] = []
 
-    def fake_failing_submit_order(kis: Any, order: dict[str, Any]) -> str:
-        raise RuntimeError("fake replacement submit failure")
+    def fake_cancel_active_buy(kis: Any, active: dict[str, Any], desired: dict[str, Any] | None) -> tuple[str, str, str]:
+        insufficient_replacement_calls.append((dict(active), dict(desired) if desired else None))
+        return "cancel-buy-for-sell", "cancel", "fake cancel"
+
+    def fake_submit_order(kis: Any, order: dict[str, Any]) -> str:
+        insufficient_replacement_submits.append(dict(order))
+        return "should-not-submit"
 
     try:
-        execute_orders_module.adjust_active_order = fake_cancel_active_order
-        execute_orders_module.submit_order = fake_failing_submit_order
+        execute_orders_module.adjust_active_order = fake_cancel_active_buy
+        execute_orders_module.submit_order = fake_submit_order
         reconcile(
-            {"account_summary": {"cash_amount": 1_000_000}, "symbols": [{"symbol_id": "005930", "symbol_name": "삼성전자", "current_live_holding_quantity": 10}]},
-            failed_replacement_execution,
+            {"account_summary": {"cash_amount": 1_000_000}, "symbols": [{"symbol_id": "078930", "symbol_name": "GS", "current_live_holding_quantity": 10}]},
+            insufficient_replacement_execution,
             [
                 {
-                    "symbol_id": "005930",
-                    "symbol_name": "삼성전자",
-                    "order_id": "old-buy-3",
+                    "symbol_id": "078930",
+                    "symbol_name": "GS",
+                    "order_id": "0015300400",
                     "order_kind": "pending",
                     "direction": "buy",
                     "final_first_score": 6.5,
                     "remaining_quantity": 1,
-                    "order_price": 70000,
+                    "order_price": 100_000,
                     "active_status": "active",
                     "order_api": "order_cash",
                     "order_path": "immediate",
@@ -1126,16 +2048,78 @@ def step_active_order_replacement_edge_case_checks(root: Path) -> list[str]:
                 }
             ],
             {},
-            {"005930": {"max_sell_qty": 5}},
+            {"078930": {"max_sell_qty": 0}},
             submit=True,
             kis=FakeKis(),
         )
     finally:
         execute_orders_module.adjust_active_order = original_adjust_active_order
         execute_orders_module.submit_order = original_submit_order
-    failed_replacement_order = failed_replacement_execution["orders"][0]
-    if failed_replacement_order.get("result") != "blocked" or failed_replacement_order.get("reason") != "replacement_order_submission_failed":
-        failures.append(f"replacement submit exception was not blocked: {failed_replacement_order}")
+    insufficient_replacement_order = insufficient_replacement_execution["orders"][0]
+    if insufficient_replacement_order.get("result") != "submitted" or insufficient_replacement_order.get("reason") != "active_order_cancel_submitted":
+        failures.append(f"insufficient future replacement capacity should not block cancelling the stale active order: {insufficient_replacement_order}")
+    if len(insufficient_replacement_calls) != 1:
+        failures.append(f"exactly one cancel/adjust call was expected: {insufficient_replacement_calls}")
+    if insufficient_replacement_submits:
+        failures.append(f"submit_order should remain zero when the deferred replacement's capacity is insufficient: {insufficient_replacement_submits}")
+
+    # Missing sell capacity must still fail closed for a genuine same-direction active-sell
+    # increase (the pre-existing "kept + additional order" invariant).
+    sell_increase_execution = {
+        "orders": [
+            {"symbol_id": "078930", "symbol_name": "GS", "final_holding_quantity": 5, "final_first_score": 3.5, "order_price": 100_000, "order_path": "immediate"}
+        ]
+    }
+    sell_increase_calls: list[Any] = []
+    sell_increase_submits: list[dict[str, Any]] = []
+
+    def fake_reject_sell_correction(kis: Any, active: dict[str, Any], desired: dict[str, Any] | None) -> tuple[str, str, str]:
+        sell_increase_calls.append((dict(active), dict(desired) if desired else None))
+        return "should-not-correct", "correct", "unexpected correction"
+
+    def fake_reject_sell_submit(kis: Any, order: dict[str, Any]) -> str:
+        sell_increase_submits.append(dict(order))
+        return "should-not-submit"
+
+    try:
+        execute_orders_module.adjust_active_order = fake_reject_sell_correction
+        execute_orders_module.submit_order = fake_reject_sell_submit
+        reconcile(
+            {"account_summary": {"cash_amount": 1_000_000}, "symbols": [{"symbol_id": "078930", "symbol_name": "GS", "current_live_holding_quantity": 10}]},
+            sell_increase_execution,
+            [
+                {
+                    "symbol_id": "078930",
+                    "symbol_name": "GS",
+                    "order_id": "0015300402",
+                    "order_kind": "pending",
+                    "direction": "sell",
+                    "final_first_score": 6.5,
+                    "remaining_quantity": 1,
+                    "order_price": 100_000,
+                    "active_status": "active",
+                    "order_api": "order_cash",
+                    "order_path": "immediate",
+                    "execution_environment": "real",
+                    "observed_at": now_iso(),
+                }
+            ],
+            {},
+            {},
+            submit=True,
+            kis=FakeKis(),
+        )
+    finally:
+        execute_orders_module.adjust_active_order = original_adjust_active_order
+        execute_orders_module.submit_order = original_submit_order
+    sell_increase_order = sell_increase_execution["orders"][0]
+    if sell_increase_order.get("result") != "blocked" or sell_increase_order.get("reason") != "sell_quantity_capacity_missing":
+        failures.append(f"missing sell capacity should still block a genuine same-direction active-sell increase: {sell_increase_order}")
+    if sell_increase_calls:
+        failures.append(f"missing sell capacity should not call active-order correction: {sell_increase_calls}")
+    if sell_increase_submits:
+        failures.append(f"missing sell capacity should not call submit_order: {sell_increase_submits}")
+
     return failures
 
 
@@ -1198,8 +2182,16 @@ class RunSelfTestStepsAreIndividuallyDiscoverableTest(unittest.TestCase):
         cls.active_sell_partial_and_cancel_only_failures = step_active_sell_partial_and_cancel_only_checks(cls.root)
         cls.active_sell_replacement_buy_failures = step_active_sell_replacement_buy_checks(cls.root)
         cls.active_order_additional_and_invalid_price_failures = step_active_order_additional_and_invalid_price_checks(cls.root)
+        cls.active_buy_correction_failures = step_active_buy_correction_checks(cls.root)
+        cls.active_buy_correction_capacity_gate_failures = step_active_buy_correction_capacity_gate_checks(cls.root)
+        cls.active_buy_correction_gate_independence_failures = step_active_buy_correction_gate_independence_checks(cls.root)
+        cls.refresh_gates_active_buy_capacity_prefetch_failures = step_refresh_gates_active_buy_capacity_prefetch_checks(cls.root)
+        cls.refresh_gates_stale_direction_failures = step_refresh_gates_stale_direction_checks(cls.root)
+        cls.refresh_gates_and_correction_price_normalization_failures = step_refresh_gates_and_correction_price_normalization_checks(cls.root)
+        cls.pre_refresh_normalization_preserves_fresh_side_failures = step_pre_refresh_normalization_preserves_fresh_side_checks(cls.root)
         cls.active_order_replacement_failures = step_active_order_replacement_checks(cls.root)
         cls.active_order_replacement_edge_case_failures = step_active_order_replacement_edge_case_checks(cls.root)
+        cls.deferred_replacement_capacity_and_sell_increase_failures = step_deferred_replacement_capacity_and_sell_increase_checks(cls.root)
 
     @classmethod
     def _restore_portfolio_except_env(cls) -> None:
@@ -1235,11 +2227,35 @@ class RunSelfTestStepsAreIndividuallyDiscoverableTest(unittest.TestCase):
     def test_step_active_order_additional_and_invalid_price_checks(self) -> None:
         self.assertEqual(self.active_order_additional_and_invalid_price_failures, [])
 
+    def test_step_active_buy_correction_checks(self) -> None:
+        self.assertEqual(self.active_buy_correction_failures, [])
+
+    def test_step_active_buy_correction_capacity_gate_checks(self) -> None:
+        self.assertEqual(self.active_buy_correction_capacity_gate_failures, [])
+
+    def test_step_active_buy_correction_gate_independence_checks(self) -> None:
+        self.assertEqual(self.active_buy_correction_gate_independence_failures, [])
+
+    def test_step_refresh_gates_active_buy_capacity_prefetch_checks(self) -> None:
+        self.assertEqual(self.refresh_gates_active_buy_capacity_prefetch_failures, [])
+
+    def test_step_refresh_gates_stale_direction_checks(self) -> None:
+        self.assertEqual(self.refresh_gates_stale_direction_failures, [])
+
+    def test_step_refresh_gates_and_correction_price_normalization_checks(self) -> None:
+        self.assertEqual(self.refresh_gates_and_correction_price_normalization_failures, [])
+
+    def test_step_pre_refresh_normalization_preserves_fresh_side_checks(self) -> None:
+        self.assertEqual(self.pre_refresh_normalization_preserves_fresh_side_failures, [])
+
     def test_step_active_order_replacement_checks(self) -> None:
         self.assertEqual(self.active_order_replacement_failures, [])
 
     def test_step_active_order_replacement_edge_case_checks(self) -> None:
         self.assertEqual(self.active_order_replacement_edge_case_failures, [])
+
+    def test_step_deferred_replacement_capacity_and_sell_increase_checks(self) -> None:
+        self.assertEqual(self.deferred_replacement_capacity_and_sell_increase_failures, [])
 
 
 class ExecuteOrdersSelfTest(unittest.TestCase):
