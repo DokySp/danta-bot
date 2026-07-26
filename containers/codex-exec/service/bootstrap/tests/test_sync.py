@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from .sync import sync_bundled_skills
+from ..skill_sync.sync import sync_bundled_skills
 
 
 class SkillSyncTest(unittest.TestCase):

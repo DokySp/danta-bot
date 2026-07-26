@@ -13,6 +13,29 @@
 - codex-exec: codex 예약 및 작업 수행 컨테이너. 프로필별로 스킬 및 스케줄링 관리.
 - kis-trading-mcp: 한국투자증권에서 제작한 컨테이너.
 
+## 테스트
+
+저장소 전체에서 추적하는 모든 unittest 스위트(codex-exec service, telegram-gateway,
+하이픈 스킬 3종)를 하나의 명령으로 실행하려면 repo root에서 다음을 실행합니다.
+
+```bash
+$ python3 scripts/run_tests.py
+```
+
+이 명령은 각 스위트를 독립된 `unittest discover`로 실행하고 스위트별 결과와 테스트
+개수를 요약한 뒤, 어느 스위트든 실패하거나 테스트를 0개 발견하면 0이 아닌 종료 코드로
+끝납니다. 외부 네트워크나 서드파티 테스트 의존성을 사용하지 않으며 tracked artifact나
+bytecode 캐시를 만들지 않습니다. `scripts/deploy-*.sh`는 `docker build` 전에 이 명령을
+먼저 실행해서 실패하면 빌드/푸시 없이 중단합니다(fail-closed 게이트).
+
+각 파이프라인 패키지의 `scripts/*.py ... self-test` / `--self-test` 명령은 별도의
+회귀 실행이 아니라, 배포된 컨테이너에서도 그대로 남아 있는 기존 CLI 호환 진입점입니다.
+실제 검증 로직과 fixture는 각 패키지의 `tests/test_*.py`에 있고, self-test 명령은 그
+테스트 모듈의 대표 함수를 그대로 호출하는 얇은 wrapper입니다. 검증 로직과 wrapper 호출
+구성은 위 `python3 scripts/run_tests.py`로 회귀 검증하고, 실제 CLI import·인자 경로는
+패키지별 self-test 명령으로 수동 점검합니다. 전체 회귀 확인에는 `scripts/run_tests.py`를
+사용합니다.
+
 ## Docker 이미지 빌드/배포
 
 편의 스크립트:
@@ -31,6 +54,8 @@ $ ./scripts/deploy-codex-exec-experimental.sh dokysp
 `APP_VERSION` 메타데이터는 `git describe --tags --always --dirty` 결과로 설정합니다.
 버전 태그를 직접 넘기면 Docker 이미지 태그와 `APP_VERSION` 모두 그 값으로 설정합니다.
 namespace 인자가 없으면 실행하지 않고 사용법을 출력한 뒤 실패합니다.
+세 스크립트 모두 `docker build` 전에 `python3 scripts/run_tests.py`(테스트 참고)를 먼저
+실행하고, 회귀 테스트가 실패하면 빌드/푸시 없이 중단합니다.
 
 수동 빌드:
 

@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 from ..scripts.run_subagent import (
     MODEL_USAGE_FILENAME,
@@ -1256,6 +1257,710 @@ def assert_event_diagnostics_wrapper(wrapper: dict[str, Any]) -> None:
         raise AssertionError(f"mixed usage events were not accumulated as current semantics: {wrapper}")
 
 
+def step_invalid_spec_and_compact_schema_checks(tmp: Path) -> list[str]:
+    """Stage/agent-role validation, invalid-spec rejection, and compact-review schema checks."""
+    failures: list[str] = []
+    try:
+        assert_all_supported_stages_use_expected_models()
+        assert_unsupported_stage_rejected()
+        assert_prompt_compaction()
+        assert_compact_review_prompt(tmp)
+        assert_review_input_slices(tmp)
+        assert_debate_optional_evidence_policy()
+        missing_brief = compact_spec(
+            tmp, stage="analyst-review", agent_role="analyst-momentum-news", task_name="missing-brief"
+        )
+        missing_brief["artifact_paths"].pop("decision_brief")
+        assert_invalid_spec(missing_brief, "artifact_paths.decision_brief")
+        missing_symbols = compact_spec(
+            tmp, stage="analyst-review", agent_role="analyst-momentum-news", task_name="missing-symbols"
+        )
+        missing_symbols["symbol_ids"] = []
+        assert_invalid_spec(missing_symbols, "symbol_ids")
+        missing_analyst_review = compact_spec(
+            tmp,
+            stage="judge-review",
+            agent_role="judge",
+            task_name="missing-analyst-review",
+        )
+        missing_analyst_review["artifact_paths"].pop("analyst_review")
+        assert_invalid_spec(missing_analyst_review, "artifact_paths.analyst_review")
+        missing_debate_artifact = compact_spec(
+            tmp,
+            stage="judge-review",
+            agent_role="judge",
+            task_name="missing-debate-artifact",
+        )
+        missing_debate_artifact["artifact_paths"].pop("debate_artifact")
+        assert_invalid_spec(missing_debate_artifact, "artifact_paths.debate_artifact")
+        missing_resume = compact_debate_spec(
+            tmp,
+            side="bull",
+            phase="rebuttal-1",
+            task_name="missing-resume",
+        )
+        assert_invalid_spec(missing_resume, "resume_session_id")
+        missing_opponent_opening = compact_debate_spec(
+            tmp,
+            side="bull",
+            phase="rebuttal-1",
+            task_name="missing-opponent-opening",
+            session_id="00000000-0000-4000-8000-000000000001",
+        )
+        missing_opponent_opening["artifact_paths"].pop("opponent_opening")
+        assert_invalid_spec(missing_opponent_opening, "artifact_paths.opponent_opening")
+        assert_invalid_spec(
+            compact_spec(
+                tmp,
+                stage="analyst-review",
+                agent_role="analyst-random",
+                task_name="analyst-random",
+            ),
+            "analyst-review agent_role must be one of",
+        )
+        assert_invalid_spec(
+            compact_spec(
+                tmp,
+                stage="judge-review",
+                agent_role="judge-longterm",
+                task_name="judge-longterm",
+            ),
+            "agent_role must be judge",
+        )
+        assert_invalid_spec(
+            compact_spec(
+                tmp,
+                stage="judge-review",
+                agent_role="judge-longterm",
+                task_name="judge-longterm-retry1",
+            ),
+            "agent_role must be judge",
+        )
+        assert_invalid_spec(
+            compact_spec(
+                tmp,
+                stage="judge-review",
+                agent_role="judge-random",
+                task_name="judge-random",
+            ),
+            "agent_role must be judge",
+        )
+        assert_invalid_spec(
+            compact_spec(
+                tmp,
+                stage="judge-review",
+                agent_role="judge",
+                task_name="judge-retry3",
+            ),
+            "at most 2 retries",
+        )
+        assert_invalid_spec(
+            compact_spec(
+                tmp,
+                stage="judge-review",
+                agent_role="judge",
+                task_name="judge-attempt3",
+            ),
+            "at most 2 retries",
+        )
+        assert_invalid_spec(
+            compact_spec(
+                tmp,
+                stage="judge-review",
+                agent_role="judge",
+                task_name="judge-retry-3",
+            ),
+            "at most 2 retries",
+        )
+        assert_invalid_spec(
+            compact_spec(
+                tmp,
+                stage="judge-review",
+                agent_role="judge",
+                task_name="judge-attempt-3",
+            ),
+            "at most 2 retries",
+        )
+        assert_invalid_spec(
+            compact_spec(
+                tmp,
+                stage="judge-review",
+                agent_role="judge",
+                task_name="judge-retry1-attempt3",
+            ),
+            "at most 2 retries",
+        )
+        compact_errors = compact_review_payload_errors(
+            {
+                "stage": "analyst-review",
+                "symbols": [
+                    {
+                        "symbol_id": "005930",
+                        "score": 5,
+                        "evidence": ["too long for compact review"],
+                    }
+                ],
+            },
+            "analyst-review",
+        )
+        if not compact_errors or compact_errors[0].get("code") != "disallowed_compact_review_key":
+            raise AssertionError(f"compact review disallowed keys were not rejected: {compact_errors}")
+        for invalid_score in ("unknown", 5.0, True, -1, 11):
+            invalid_score_errors = compact_review_payload_errors(
+                {
+                    "stage": "analyst-review",
+                    "symbols": [
+                        {
+                            "symbol_id": "005930",
+                            "symbol_name": "삼성전자",
+                            "views": {
+                                "analyst-quality-value": {
+                                    "score": invalid_score,
+                                    "reason_code": "hold_neutral",
+                                    "one_line_reason": "invalid score probe",
+                                },
+                                "analyst-risk-allocation": {
+                                    "score": 6,
+                                    "reason_code": "buy_candidate",
+                                    "one_line_reason": "valid score probe",
+                                },
+                            },
+                        }
+                    ],
+                },
+                "analyst-review",
+                "analyst-quality-risk",
+            )
+            if not any("score must be an integer from 0 to 10" in str(error.get("message")) for error in invalid_score_errors):
+                raise AssertionError(f"invalid analyst score was accepted: {invalid_score!r} {invalid_score_errors}")
+        invalid_second_errors = compact_review_payload_errors(
+            {"stage": "judge-review", "portfolio": {}, "symbols": [{}]},
+            "judge-review",
+        )
+        if not any(error.get("code") == "invalid_compact_review_schema" for error in invalid_second_errors):
+            raise AssertionError(f"invalid compact judge-review schema was accepted: {invalid_second_errors}")
+        target_value_errors = compact_review_payload_errors(
+            {
+                "stage": "judge-review",
+                "symbols": [
+                    {
+                        "symbol_id": "005930",
+                        "symbol_name": "삼성전자",
+                        "reason_code": "hold_neutral",
+                        "one_line_reason": "유지한다.",
+                        "target_position_value_krw": 560000,
+                        "relative_attractiveness_rank": 1,
+                    }
+                ],
+            },
+            "judge-review",
+        )
+        if target_value_errors:
+            raise AssertionError(f"target_position_value_krw judge-review schema was rejected: {target_value_errors}")
+        invalid_target_value_errors = compact_review_payload_errors(
+            {
+                "stage": "judge-review",
+                "symbols": [
+                    {
+                        "symbol_id": "005930",
+                        "symbol_name": "삼성전자",
+                        "reason_code": "hold_neutral",
+                        "one_line_reason": "유지한다.",
+                        "target_position_value_krw": -1,
+                        "relative_attractiveness_rank": 1,
+                    }
+                ],
+            },
+            "judge-review",
+        )
+        if not any("target_position_value_krw must be a non-negative number" in str(error.get("message")) for error in invalid_target_value_errors):
+            raise AssertionError(f"invalid target_position_value_krw was not rejected: {invalid_target_value_errors}")
+        reduce_to_zero_errors = compact_review_payload_errors(
+            {
+                "stage": "judge-review",
+                "symbols": [
+                    {
+                        "symbol_id": "005930",
+                        "symbol_name": "삼성전자",
+                        "reason_code": "exit_position",
+                        "one_line_reason": "명시적으로 청산한다.",
+                        "target_position_value_krw": 0,
+                        "relative_attractiveness_rank": 1,
+                    }
+                ],
+            },
+            "judge-review",
+        )
+        if reduce_to_zero_errors:
+            raise AssertionError(f"reduce-to-zero target_position_value_krw schema was rejected: {reduce_to_zero_errors}")
+        top_level_score_payload = normalize_compact_review_payload(
+            {
+                "stage": "analyst-review",
+                "symbols": [
+                    {
+                        "symbol_id": "005930",
+                        "symbol_name": "삼성전자",
+                        "score": 6,
+                        "confidence": 5,
+                        "reason_code": "hold_neutral",
+                        "one_line_reason": "top-level score output",
+                    }
+                ],
+            },
+            "analyst-review",
+        )
+        combined_old_shape_errors = compact_review_payload_errors(
+            top_level_score_payload, "analyst-review", "analyst-quality-risk"
+        )
+        if not any("must include views" in error.get("message", "") for error in combined_old_shape_errors):
+            raise AssertionError(f"combined analyst-review old shape was accepted: {combined_old_shape_errors}")
+        raw_with_artifacts = compact_spec(
+            tmp, stage="analyst-review", agent_role="analyst-momentum-news", task_name="raw-with-artifacts"
+        )
+        raw_with_artifacts["prompt"] = '{"return":"json only"}'
+        assert_invalid_spec(raw_with_artifacts, "raw prompt fallback is forbidden")
+    except AssertionError as exc:
+        failures.append(str(exc))
+    return failures
+
+
+def step_model_selection_checks(tmp: Path, argv_log: Path) -> list[str]:
+    """Each stage/agent-role pair launches with its configured model and effort."""
+    failures: list[str] = []
+    model_config = load_subagent_model_config()
+    cases = [
+        (
+            spec(tmp, stage="financial-collection", agent_role="financial", task_name="financial"),
+            model_config["collection"]["model"],
+            model_config["collection"]["model_reasoning_effort"],
+        ),
+        (
+            compact_spec(tmp, stage="analyst-review", agent_role="analyst-quality-risk", task_name="first"),
+            model_config["analyst_review"]["model"],
+            model_config["analyst_review"]["model_reasoning_effort"],
+        ),
+        (
+            compact_spec(tmp, stage="judge-review", agent_role="judge", task_name="second"),
+            model_config["judge_review"]["model"],
+            model_config["judge_review"]["model_reasoning_effort"],
+        ),
+    ]
+    for test_spec, model, effort in cases:
+        wrapper = run_one(test_spec)
+        if wrapper["status"] != "success":
+            failures.append(f"{test_spec['task_name']} returned {wrapper['status']}")
+        if wrapper.get("token_usage", {}).get("total_tokens") != 120:
+            failures.append(f"{test_spec['task_name']} missing token usage: {wrapper}")
+        try:
+            assert_argv(argv_log, model=model, effort=effort)
+        except AssertionError as exc:
+            failures.append(str(exc))
+    return failures
+
+
+def step_event_diagnostics_checks(tmp: Path) -> list[str]:
+    """Diagnostic event retention modes (always/anomaly-default) and MCP-degradation reporting."""
+    failures: list[str] = []
+    old_event_retention = os.environ.get("CODEX_SUBAGENT_EVENT_RETENTION")
+    os.environ["CODEX_SUBAGENT_EVENT_RETENTION"] = "always"
+    os.environ["FAKE_CODEX_DIAGNOSTIC_EVENTS"] = "1"
+    try:
+        diagnostic_wrapper = run_one(
+            compact_spec(
+                tmp,
+                stage="analyst-review",
+                agent_role="analyst-momentum-news",
+                task_name="event-diagnostics",
+            )
+        )
+        try:
+            assert_event_diagnostics_wrapper(diagnostic_wrapper)
+        except AssertionError as exc:
+            failures.append(str(exc))
+    finally:
+        os.environ.pop("FAKE_CODEX_DIAGNOSTIC_EVENTS", None)
+        if old_event_retention is None:
+            os.environ.pop("CODEX_SUBAGENT_EVENT_RETENTION", None)
+        else:
+            os.environ["CODEX_SUBAGENT_EVENT_RETENTION"] = old_event_retention
+
+    saved_event_retention = os.environ.pop("CODEX_SUBAGENT_EVENT_RETENTION", None)
+    try:
+        default_retention_wrapper = run_one(
+            compact_spec(
+                tmp,
+                stage="analyst-review",
+                agent_role="analyst-momentum-news",
+                task_name="event-default-retention",
+            )
+        )
+    finally:
+        if saved_event_retention is not None:
+            os.environ["CODEX_SUBAGENT_EVENT_RETENTION"] = saved_event_retention
+    if default_retention_wrapper.get("event_retention") != "anomaly":
+        failures.append(f"default event retention mode was not anomaly: {default_retention_wrapper}")
+    if default_retention_wrapper.get("event_retention_reason") != "no_anomaly":
+        failures.append(f"default anomaly event retention reason was not no_anomaly: {default_retention_wrapper}")
+    if default_retention_wrapper.get("event_log_retained") is not False:
+        failures.append(f"default anomaly event retention did not prune normal event log: {default_retention_wrapper}")
+    if default_retention_wrapper.get("stderr_retained") is not False:
+        failures.append(f"default anomaly event retention did not mark stderr pruned: {default_retention_wrapper}")
+    if Path(default_retention_wrapper["event_log_path"]).exists():
+        failures.append("default anomaly event retention left normal event log on disk")
+    if Path(default_retention_wrapper["stderr_path"]).exists():
+        failures.append("default anomaly event retention left normal stderr log on disk")
+
+    os.environ["FAKE_CODEX_MCP_INIT_ERROR"] = (
+        "2026-07-14T03:00:44Z ERROR rmcp::transport::worker: worker quit with fatal: "
+        "unexpected server response: HTTP 500, when send initialized notification"
+    )
+    try:
+        degraded_wrapper = run_one(
+            compact_spec(
+                tmp,
+                stage="analyst-review",
+                agent_role="analyst-momentum-news",
+                task_name="mcp-degraded",
+            )
+        )
+    finally:
+        os.environ.pop("FAKE_CODEX_MCP_INIT_ERROR", None)
+    if degraded_wrapper.get("status") != "success":
+        failures.append(f"MCP degradation incorrectly failed wrapper: {degraded_wrapper}")
+    degraded = degraded_wrapper.get("degraded_dependencies")
+    if not isinstance(degraded, list) or not degraded or degraded[0].get("dependency_id") != "mcp:unknown":
+        failures.append(f"MCP degradation missing from wrapper: {degraded_wrapper}")
+    if degraded_wrapper.get("event_diagnostics", {}).get("degraded_dependency_count") != 1:
+        failures.append(f"MCP degraded count missing from diagnostics: {degraded_wrapper}")
+    if degraded_wrapper.get("event_retention_reason") != "anomaly":
+        failures.append(f"MCP degradation did not retain diagnostics: {degraded_wrapper}")
+    return failures
+
+
+def step_custom_model_config_checks(tmp: Path, argv_log: Path) -> list[str]:
+    """A codex-runtime.yaml override is honored and recorded in the model usage log."""
+    failures: list[str] = []
+    custom_model_config = tmp / "codex-runtime.yaml"
+    custom_model_config.write_text(
+        "\n".join(
+            [
+                "defaults:",
+                "  model: gpt-5.6-sol",
+                "  model_reasoning_effort: medium",
+                "  new_session_prompt: new session",
+                "daily_trading:",
+                "  collection:",
+                "    model: gpt-5.4-mini",
+                "    model_reasoning_effort: low",
+                "  analyst_review:",
+                "    model: custom-model",
+                "    model_reasoning_effort: custom-effort",
+                "  judge_review:",
+                "    model: gpt-5.5",
+                "    model_reasoning_effort: medium",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    os.environ[RUNTIME_CONFIG_ENV] = str(custom_model_config)
+    custom_wrapper = run_one(
+        compact_spec(tmp, stage="analyst-review", agent_role="analyst-momentum-news", task_name="first-custom-model")
+    )
+    if custom_wrapper["status"] != "success":
+        failures.append(f"custom model config returned {custom_wrapper['status']}")
+    try:
+        assert_argv(argv_log, model="custom-model", effort="custom-effort")
+    except AssertionError as exc:
+        failures.append(str(exc))
+    model_usage_path = tmp / "reports" / "runs" / "self-test" / MODEL_USAGE_FILENAME
+    try:
+        model_usage_entries = [
+            json.loads(line)
+            for line in model_usage_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    except (OSError, json.JSONDecodeError) as exc:
+        failures.append(f"model usage log could not be read: {exc}")
+        model_usage_entries = []
+    custom_model_entries = [
+        item for item in model_usage_entries if item.get("task_name") == "first-custom-model"
+    ]
+    if len(custom_model_entries) != 1:
+        failures.append(f"custom model invocation was not recorded exactly once: {custom_model_entries}")
+    elif (
+        custom_model_entries[0].get("model") != "custom-model"
+        or custom_model_entries[0].get("model_reasoning_effort") != "custom-effort"
+        or custom_model_entries[0].get("stage") != "analyst-review"
+        or custom_model_entries[0].get("agent_role") != "analyst-momentum-news"
+    ):
+        failures.append(f"custom model invocation log was incorrect: {custom_model_entries[0]}")
+    if (
+        custom_wrapper.get("model") != "custom-model"
+        or custom_wrapper.get("model_reasoning_effort") != "custom-effort"
+        or custom_wrapper.get("model_usage_path") != str(model_usage_path)
+    ):
+        failures.append(f"custom wrapper omitted explicit model provenance: {custom_wrapper}")
+    os.environ.pop(RUNTIME_CONFIG_ENV, None)
+    return failures
+
+
+def step_debate_session_checks(tmp: Path, argv_log: Path) -> list[str]:
+    """Persistent debate sessions across opening and resumed rebuttal phases."""
+    failures: list[str] = []
+    write_sample_review_inputs(tmp)
+    opening_specs = [
+        compact_debate_spec(
+            tmp,
+            side=side,
+            phase="opening",
+            task_name=f"debate-{side}-opening",
+        )
+        for side in ("bull", "bear")
+    ]
+    opening_group = run_group(opening_specs, max_workers=2)
+    if opening_group.get("status") != "success" or len(opening_group.get("wrappers") or []) != 2:
+        failures.append(f"persistent debate opening group failed: {opening_group}")
+    opening_by_side = {
+        wrapper.get("agent_role", "").removeprefix("debate-"): wrapper
+        for wrapper in opening_group.get("wrappers", [])
+    }
+    expected_session_ids = {
+        "bull": "00000000-0000-4000-8000-000000000001",
+        "bear": "00000000-0000-4000-8000-000000000002",
+    }
+    if {side: wrapper.get("session_id") for side, wrapper in opening_by_side.items()} != expected_session_ids:
+        failures.append(f"opening did not capture stable debate session ids: {opening_by_side}")
+    for side, wrapper in opening_by_side.items():
+        write_json(
+            tmp / "reports" / "runs" / "self-test" / "debate" / f"opening-{side}-compact.json",
+            wrapper["parsed_json"],
+        )
+    for phase in ("rebuttal-1",):
+        phase_specs = []
+        for side in ("bull", "bear"):
+            opponent = "bear" if side == "bull" else "bull"
+            phase_spec = compact_debate_spec(
+                tmp,
+                side=side,
+                phase=phase,
+                task_name=f"debate-{side}-{phase}",
+                session_id=expected_session_ids[side],
+            )
+            phase_spec["artifact_paths"]["opponent_opening"] = str(
+                tmp / "reports" / "runs" / "self-test" / "debate" / f"opening-{opponent}-compact.json"
+            )
+            phase_specs.append(phase_spec)
+        phase_group = run_group(phase_specs, max_workers=2)
+        if phase_group.get("status") != "success":
+            failures.append(f"persistent debate {phase} group failed: {phase_group}")
+            break
+        phase_by_side = {
+            wrapper.get("agent_role", "").removeprefix("debate-"): wrapper
+            for wrapper in phase_group.get("wrappers", [])
+        }
+        if any(
+            wrapper.get("session_id") != expected_session_ids.get(side)
+            or wrapper.get("resume_session_id") != expected_session_ids.get(side)
+            or wrapper.get("event_retention") != "always"
+            or not wrapper.get("event_log_retained")
+            for side, wrapper in phase_by_side.items()
+        ):
+            failures.append(f"{phase} did not resume and retain the original sessions: {phase_by_side}")
+    debate_argv = [
+        json.loads(line)
+        for line in argv_log.read_text(encoding="utf-8").splitlines()
+        if "stage: judge-debate" in line
+    ]
+    resume_argv = [argv for argv in debate_argv if "resume" in argv]
+    if len(debate_argv) != 4 or len(resume_argv) != 2:
+        failures.append(f"fixed debate should use 2 openings and 2 resumed turns: {debate_argv}")
+    return failures
+
+
+def step_compact_review_checks(tmp: Path) -> list[str]:
+    """A compact-review spec produces a decision-brief input slice."""
+    failures: list[str] = []
+    write_sample_review_inputs(tmp)
+    compact_wrapper = run_one(
+        compact_spec(tmp, stage="analyst-review", agent_role="analyst-momentum-news", task_name="compact-first")
+    )
+    if compact_wrapper["status"] != "success" or compact_wrapper.get("prompt_mode") != "compact_review":
+        failures.append(f"compact review spec returned unexpected wrapper: {compact_wrapper}")
+    if not compact_wrapper.get("review_input_paths", {}).get("decision_brief"):
+        failures.append(f"compact review spec did not create decision brief slice: {compact_wrapper}")
+    return failures
+
+
+def step_wrapper_reuse_checks(tmp: Path, argv_log: Path) -> list[str]:
+    """Unchanged artifact content reuses a prior successful wrapper (single run and run-group); changed content does not."""
+    failures: list[str] = []
+    model_usage_path = tmp / "reports" / "runs" / "self-test" / MODEL_USAGE_FILENAME
+    write_sample_review_inputs(tmp)
+    reuse_spec = compact_spec(
+        tmp, stage="analyst-review", agent_role="analyst-momentum-news", task_name="reuse-first"
+    )
+    first_reuse_wrapper = run_one(reuse_spec)
+    argv_before = len(argv_log.read_text(encoding="utf-8").splitlines())
+    second_reuse_wrapper = run_one(reuse_spec)
+    argv_after = len(argv_log.read_text(encoding="utf-8").splitlines())
+    if first_reuse_wrapper.get("status") != "success":
+        failures.append(f"reuse setup wrapper failed: {first_reuse_wrapper}")
+    if not second_reuse_wrapper.get("reused_existing_wrapper") or argv_after != argv_before:
+        failures.append(f"successful wrapper was not reused: {second_reuse_wrapper}")
+    reuse_model_entries = [
+        json.loads(line)
+        for line in model_usage_path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and json.loads(line).get("task_name") == "reuse-first"
+    ]
+    if len(reuse_model_entries) != 1:
+        failures.append(f"reused wrapper recorded a non-executed model invocation: {reuse_model_entries}")
+    group_reuse_before = len(argv_log.read_text(encoding="utf-8").splitlines())
+    group_reuse = run_group([reuse_spec], max_workers=1)
+    group_reuse_after = len(argv_log.read_text(encoding="utf-8").splitlines())
+    if (
+        group_reuse.get("status") != "success"
+        or group_reuse_after != group_reuse_before
+        or not group_reuse.get("wrappers", [{}])[0].get("reused_existing_wrapper")
+    ):
+        failures.append(f"run-group did not pre-reuse successful wrapper: {group_reuse}")
+    changed_brief_path = tmp / "reports" / "runs" / "self-test" / "decision-brief.json"
+    changed_brief = load_json(changed_brief_path)
+    changed_brief["symbols"][0]["custom_detail"] = {"keep": "changed"}
+    write_json(changed_brief_path, changed_brief)
+    changed_reuse_before = len(argv_log.read_text(encoding="utf-8").splitlines())
+    changed_wrapper = run_one(reuse_spec)
+    changed_reuse_after = len(argv_log.read_text(encoding="utf-8").splitlines())
+    if changed_wrapper.get("reused_existing_wrapper") or changed_reuse_after != changed_reuse_before + 1:
+        failures.append(f"changed artifact content incorrectly reused wrapper: {changed_wrapper}")
+    return failures
+
+
+def step_judge_review_reuse_checks(tmp: Path, argv_log: Path) -> list[str]:
+    """judge-review wrapper reuse is sensitive to account-before-order.json content, not just decision-brief."""
+    failures: list[str] = []
+    write_sample_review_inputs(tmp)
+    judge_reuse_spec = compact_spec(tmp, stage="judge-review", agent_role="judge", task_name="judge-reuse")
+    first_judge_wrapper = run_one(judge_reuse_spec)
+    if first_judge_wrapper.get("status") != "success":
+        failures.append(f"judge-review reuse setup wrapper failed: {first_judge_wrapper}")
+    judge_reuse_before = len(argv_log.read_text(encoding="utf-8").splitlines())
+    second_judge_wrapper = run_one(judge_reuse_spec)
+    judge_reuse_after = len(argv_log.read_text(encoding="utf-8").splitlines())
+    if not second_judge_wrapper.get("reused_existing_wrapper") or judge_reuse_after != judge_reuse_before:
+        failures.append(f"unchanged judge-review wrapper was not reused: {second_judge_wrapper}")
+    account_before_order_path = tmp / "reports" / "runs" / "self-test" / "account-before-order.json"
+    account_before_order = load_json(account_before_order_path)
+    account_before_order["symbols"][0]["average_purchase_price"] = 61000.0
+    write_json(account_before_order_path, account_before_order)
+    judge_changed_before = len(argv_log.read_text(encoding="utf-8").splitlines())
+    judge_changed_wrapper = run_one(judge_reuse_spec)
+    judge_changed_after = len(argv_log.read_text(encoding="utf-8").splitlines())
+    if judge_changed_wrapper.get("reused_existing_wrapper") or judge_changed_after != judge_changed_before + 1:
+        failures.append(
+            f"changing only account-before-order.json average purchase price incorrectly reused judge-review wrapper: {judge_changed_wrapper}"
+        )
+    return failures
+
+
+def step_raw_retention_checks(tmp: Path) -> list[str]:
+    """CODEX_SUBAGENT_RAW_RETENTION=failed prunes raw output for successful runs."""
+    failures: list[str] = []
+    old_raw_retention = os.environ.get("CODEX_SUBAGENT_RAW_RETENTION")
+    os.environ["CODEX_SUBAGENT_RAW_RETENTION"] = "failed"
+    retained_wrapper = run_one(
+        compact_spec(tmp, stage="analyst-review", agent_role="analyst-momentum-news", task_name="raw-retention")
+    )
+    if retained_wrapper.get("raw_output_retained") is not False:
+        failures.append(f"successful raw output was not pruned with failed retention: {retained_wrapper}")
+    if Path(retained_wrapper["raw_output_path"]).exists():
+        failures.append("raw output path still exists after successful failed-retention run")
+    if old_raw_retention is None:
+        os.environ.pop("CODEX_SUBAGENT_RAW_RETENTION", None)
+    else:
+        os.environ["CODEX_SUBAGENT_RAW_RETENTION"] = old_raw_retention
+    return failures
+
+
+def step_text_output_checks(tmp: Path) -> list[str]:
+    """Non-JSON collection output is accepted as plain text without JSON parsing."""
+    failures: list[str] = []
+    text_spec = spec(tmp, stage="financial-collection", agent_role="financial", task_name="text-financial")
+    os.environ["FAKE_CODEX_INVALID_JSON"] = "1"
+    wrapper = run_one(text_spec)
+    if wrapper["status"] != "success" or wrapper["parsed_json"] is not None or wrapper.get("parsed_text") != "not json":
+        failures.append("text collection output was not accepted without JSON parsing")
+    os.environ.pop("FAKE_CODEX_INVALID_JSON", None)
+    return failures
+
+
+def step_group_execution_checks(tmp: Path) -> list[str]:
+    """run_group executes multiple tasks in parallel and records each one's model usage."""
+    failures: list[str] = []
+    model_usage_path = tmp / "reports" / "runs" / "self-test" / MODEL_USAGE_FILENAME
+    group = run_group(
+        [
+            spec(tmp, stage="financial-collection", agent_role="financial", task_name="g-financial-1"),
+            spec(tmp, stage="financial-collection", agent_role="financial", task_name="g-financial-2"),
+        ],
+        max_workers=3,
+    )
+    if group["status"] != "success" or group["count"] != 2:
+        failures.append(f"run-group returned unexpected result: {group}")
+    try:
+        group_model_entries = [
+            json.loads(line)
+            for line in model_usage_path.read_text(encoding="utf-8").splitlines()
+            if line.strip() and json.loads(line).get("task_name") in {"g-financial-1", "g-financial-2"}
+        ]
+    except json.JSONDecodeError as exc:
+        failures.append(f"parallel model usage writes produced invalid JSONL: {exc}")
+        group_model_entries = []
+    if {item.get("task_name") for item in group_model_entries} != {"g-financial-1", "g-financial-2"}:
+        failures.append(f"parallel model invocations were not recorded: {group_model_entries}")
+    wrapper_count = len(list((Path(group["wrappers"][0]["raw_output_path"]).parent).glob("g-*.wrapper.json")))
+    if wrapper_count != 2:
+        failures.append(f"expected 2 group wrapper files, got {wrapper_count}")
+    return failures
+
+
+def step_optional_and_required_group_checks(tmp: Path) -> list[str]:
+    """A failed optional task yields a partial group; a failed required task yields a failed group."""
+    failures: list[str] = []
+    os.environ["FAKE_CODEX_EMPTY_TASKS"] = "optional-financial"
+    optional_group = run_group(
+        [
+            spec(tmp, stage="financial-collection", agent_role="financial", task_name="optional-financial"),
+        ],
+        max_workers=2,
+    )
+    if (
+        optional_group["status"] != "partial"
+        or optional_group["failed_count"] != 1
+        or optional_group["required_failed_count"] != 0
+        or optional_group["optional_failed_count"] != 1
+    ):
+        failures.append(f"optional text failure did not produce partial group: {optional_group}")
+
+    os.environ["FAKE_CODEX_EMPTY_TASKS"] = "required-first"
+    required_group = run_group(
+        [
+            compact_spec(tmp, stage="analyst-review", agent_role="analyst-quality-risk", task_name="required-first"),
+            spec(tmp, stage="financial-collection", agent_role="financial", task_name="optional-financial-success"),
+        ],
+        max_workers=2,
+    )
+    if (
+        required_group["status"] != "failed"
+        or required_group["failed_count"] != 1
+        or required_group["required_failed_count"] != 1
+        or required_group["optional_failed_count"] != 0
+    ):
+        failures.append(f"required failure did not produce failed group: {required_group}")
+    os.environ.pop("FAKE_CODEX_EMPTY_TASKS", None)
+    return failures
+
+
 def run_self_test() -> int:
     failures: list[str] = []
     with tempfile.TemporaryDirectory() as tmp_name:
@@ -1268,647 +1973,18 @@ def run_self_test() -> int:
         os.environ["FAKE_CODEX_ARGV_LOG"] = str(argv_log)
         os.environ["CODEX_BYPASS_APPROVALS_AND_SANDBOX"] = "1"
         try:
-            try:
-                assert_all_supported_stages_use_expected_models()
-                assert_unsupported_stage_rejected()
-                assert_prompt_compaction()
-                assert_compact_review_prompt(tmp)
-                assert_review_input_slices(tmp)
-                assert_debate_optional_evidence_policy()
-                missing_brief = compact_spec(
-                    tmp, stage="analyst-review", agent_role="analyst-momentum-news", task_name="missing-brief"
-                )
-                missing_brief["artifact_paths"].pop("decision_brief")
-                assert_invalid_spec(missing_brief, "artifact_paths.decision_brief")
-                missing_symbols = compact_spec(
-                    tmp, stage="analyst-review", agent_role="analyst-momentum-news", task_name="missing-symbols"
-                )
-                missing_symbols["symbol_ids"] = []
-                assert_invalid_spec(missing_symbols, "symbol_ids")
-                missing_analyst_review = compact_spec(
-                    tmp,
-                    stage="judge-review",
-                    agent_role="judge",
-                    task_name="missing-analyst-review",
-                )
-                missing_analyst_review["artifact_paths"].pop("analyst_review")
-                assert_invalid_spec(missing_analyst_review, "artifact_paths.analyst_review")
-                missing_debate_artifact = compact_spec(
-                    tmp,
-                    stage="judge-review",
-                    agent_role="judge",
-                    task_name="missing-debate-artifact",
-                )
-                missing_debate_artifact["artifact_paths"].pop("debate_artifact")
-                assert_invalid_spec(missing_debate_artifact, "artifact_paths.debate_artifact")
-                missing_resume = compact_debate_spec(
-                    tmp,
-                    side="bull",
-                    phase="rebuttal-1",
-                    task_name="missing-resume",
-                )
-                assert_invalid_spec(missing_resume, "resume_session_id")
-                missing_opponent_opening = compact_debate_spec(
-                    tmp,
-                    side="bull",
-                    phase="rebuttal-1",
-                    task_name="missing-opponent-opening",
-                    session_id="00000000-0000-4000-8000-000000000001",
-                )
-                missing_opponent_opening["artifact_paths"].pop("opponent_opening")
-                assert_invalid_spec(missing_opponent_opening, "artifact_paths.opponent_opening")
-                assert_invalid_spec(
-                    compact_spec(
-                        tmp,
-                        stage="analyst-review",
-                        agent_role="analyst-random",
-                        task_name="analyst-random",
-                    ),
-                    "analyst-review agent_role must be one of",
-                )
-                assert_invalid_spec(
-                    compact_spec(
-                        tmp,
-                        stage="judge-review",
-                        agent_role="judge-longterm",
-                        task_name="judge-longterm",
-                    ),
-                    "agent_role must be judge",
-                )
-                assert_invalid_spec(
-                    compact_spec(
-                        tmp,
-                        stage="judge-review",
-                        agent_role="judge-longterm",
-                        task_name="judge-longterm-retry1",
-                    ),
-                    "agent_role must be judge",
-                )
-                assert_invalid_spec(
-                    compact_spec(
-                        tmp,
-                        stage="judge-review",
-                        agent_role="judge-random",
-                        task_name="judge-random",
-                    ),
-                    "agent_role must be judge",
-                )
-                assert_invalid_spec(
-                    compact_spec(
-                        tmp,
-                        stage="judge-review",
-                        agent_role="judge",
-                        task_name="judge-retry3",
-                    ),
-                    "at most 2 retries",
-                )
-                assert_invalid_spec(
-                    compact_spec(
-                        tmp,
-                        stage="judge-review",
-                        agent_role="judge",
-                        task_name="judge-attempt3",
-                    ),
-                    "at most 2 retries",
-                )
-                assert_invalid_spec(
-                    compact_spec(
-                        tmp,
-                        stage="judge-review",
-                        agent_role="judge",
-                        task_name="judge-retry-3",
-                    ),
-                    "at most 2 retries",
-                )
-                assert_invalid_spec(
-                    compact_spec(
-                        tmp,
-                        stage="judge-review",
-                        agent_role="judge",
-                        task_name="judge-attempt-3",
-                    ),
-                    "at most 2 retries",
-                )
-                assert_invalid_spec(
-                    compact_spec(
-                        tmp,
-                        stage="judge-review",
-                        agent_role="judge",
-                        task_name="judge-retry1-attempt3",
-                    ),
-                    "at most 2 retries",
-                )
-                compact_errors = compact_review_payload_errors(
-                    {
-                        "stage": "analyst-review",
-                        "symbols": [
-                            {
-                                "symbol_id": "005930",
-                                "score": 5,
-                                "evidence": ["too long for compact review"],
-                            }
-                        ],
-                    },
-                    "analyst-review",
-                )
-                if not compact_errors or compact_errors[0].get("code") != "disallowed_compact_review_key":
-                    raise AssertionError(f"compact review disallowed keys were not rejected: {compact_errors}")
-                for invalid_score in ("unknown", 5.0, True, -1, 11):
-                    invalid_score_errors = compact_review_payload_errors(
-                        {
-                            "stage": "analyst-review",
-                            "symbols": [
-                                {
-                                    "symbol_id": "005930",
-                                    "symbol_name": "삼성전자",
-                                    "views": {
-                                        "analyst-quality-value": {
-                                            "score": invalid_score,
-                                            "reason_code": "hold_neutral",
-                                            "one_line_reason": "invalid score probe",
-                                        },
-                                        "analyst-risk-allocation": {
-                                            "score": 6,
-                                            "reason_code": "buy_candidate",
-                                            "one_line_reason": "valid score probe",
-                                        },
-                                    },
-                                }
-                            ],
-                        },
-                        "analyst-review",
-                        "analyst-quality-risk",
-                    )
-                    if not any("score must be an integer from 0 to 10" in str(error.get("message")) for error in invalid_score_errors):
-                        raise AssertionError(f"invalid analyst score was accepted: {invalid_score!r} {invalid_score_errors}")
-                invalid_second_errors = compact_review_payload_errors(
-                    {"stage": "judge-review", "portfolio": {}, "symbols": [{}]},
-                    "judge-review",
-                )
-                if not any(error.get("code") == "invalid_compact_review_schema" for error in invalid_second_errors):
-                    raise AssertionError(f"invalid compact judge-review schema was accepted: {invalid_second_errors}")
-                target_value_errors = compact_review_payload_errors(
-                    {
-                        "stage": "judge-review",
-                        "symbols": [
-                            {
-                                "symbol_id": "005930",
-                                "symbol_name": "삼성전자",
-                                "reason_code": "hold_neutral",
-                                "one_line_reason": "유지한다.",
-                                "target_position_value_krw": 560000,
-                                "relative_attractiveness_rank": 1,
-                            }
-                        ],
-                    },
-                    "judge-review",
-                )
-                if target_value_errors:
-                    raise AssertionError(f"target_position_value_krw judge-review schema was rejected: {target_value_errors}")
-                invalid_target_value_errors = compact_review_payload_errors(
-                    {
-                        "stage": "judge-review",
-                        "symbols": [
-                            {
-                                "symbol_id": "005930",
-                                "symbol_name": "삼성전자",
-                                "reason_code": "hold_neutral",
-                                "one_line_reason": "유지한다.",
-                                "target_position_value_krw": -1,
-                                "relative_attractiveness_rank": 1,
-                            }
-                        ],
-                    },
-                    "judge-review",
-                )
-                if not any("target_position_value_krw must be a non-negative number" in str(error.get("message")) for error in invalid_target_value_errors):
-                    raise AssertionError(f"invalid target_position_value_krw was not rejected: {invalid_target_value_errors}")
-                reduce_to_zero_errors = compact_review_payload_errors(
-                    {
-                        "stage": "judge-review",
-                        "symbols": [
-                            {
-                                "symbol_id": "005930",
-                                "symbol_name": "삼성전자",
-                                "reason_code": "exit_position",
-                                "one_line_reason": "명시적으로 청산한다.",
-                                "target_position_value_krw": 0,
-                                "relative_attractiveness_rank": 1,
-                            }
-                        ],
-                    },
-                    "judge-review",
-                )
-                if reduce_to_zero_errors:
-                    raise AssertionError(f"reduce-to-zero target_position_value_krw schema was rejected: {reduce_to_zero_errors}")
-                top_level_score_payload = normalize_compact_review_payload(
-                    {
-                        "stage": "analyst-review",
-                        "symbols": [
-                            {
-                                "symbol_id": "005930",
-                                "symbol_name": "삼성전자",
-                                "score": 6,
-                                "confidence": 5,
-                                "reason_code": "hold_neutral",
-                                "one_line_reason": "top-level score output",
-                            }
-                        ],
-                    },
-                    "analyst-review",
-                )
-                combined_old_shape_errors = compact_review_payload_errors(
-                    top_level_score_payload, "analyst-review", "analyst-quality-risk"
-                )
-                if not any("must include views" in error.get("message", "") for error in combined_old_shape_errors):
-                    raise AssertionError(f"combined analyst-review old shape was accepted: {combined_old_shape_errors}")
-                raw_with_artifacts = compact_spec(
-                    tmp, stage="analyst-review", agent_role="analyst-momentum-news", task_name="raw-with-artifacts"
-                )
-                raw_with_artifacts["prompt"] = '{"return":"json only"}'
-                assert_invalid_spec(raw_with_artifacts, "raw prompt fallback is forbidden")
-            except AssertionError as exc:
-                failures.append(str(exc))
-
-            model_config = load_subagent_model_config()
-            cases = [
-                (
-                    spec(tmp, stage="financial-collection", agent_role="financial", task_name="financial"),
-                    model_config["collection"]["model"],
-                    model_config["collection"]["model_reasoning_effort"],
-                ),
-                (
-                    compact_spec(tmp, stage="analyst-review", agent_role="analyst-quality-risk", task_name="first"),
-                    model_config["analyst_review"]["model"],
-                    model_config["analyst_review"]["model_reasoning_effort"],
-                ),
-                (
-                    compact_spec(tmp, stage="judge-review", agent_role="judge", task_name="second"),
-                    model_config["judge_review"]["model"],
-                    model_config["judge_review"]["model_reasoning_effort"],
-                ),
-            ]
-            for test_spec, model, effort in cases:
-                wrapper = run_one(test_spec)
-                if wrapper["status"] != "success":
-                    failures.append(f"{test_spec['task_name']} returned {wrapper['status']}")
-                if wrapper.get("token_usage", {}).get("total_tokens") != 120:
-                    failures.append(f"{test_spec['task_name']} missing token usage: {wrapper}")
-                try:
-                    assert_argv(argv_log, model=model, effort=effort)
-                except AssertionError as exc:
-                    failures.append(str(exc))
-
-            old_event_retention = os.environ.get("CODEX_SUBAGENT_EVENT_RETENTION")
-            os.environ["CODEX_SUBAGENT_EVENT_RETENTION"] = "always"
-            os.environ["FAKE_CODEX_DIAGNOSTIC_EVENTS"] = "1"
-            try:
-                diagnostic_wrapper = run_one(
-                    compact_spec(
-                        tmp,
-                        stage="analyst-review",
-                        agent_role="analyst-momentum-news",
-                        task_name="event-diagnostics",
-                    )
-                )
-                try:
-                    assert_event_diagnostics_wrapper(diagnostic_wrapper)
-                except AssertionError as exc:
-                    failures.append(str(exc))
-            finally:
-                os.environ.pop("FAKE_CODEX_DIAGNOSTIC_EVENTS", None)
-                if old_event_retention is None:
-                    os.environ.pop("CODEX_SUBAGENT_EVENT_RETENTION", None)
-                else:
-                    os.environ["CODEX_SUBAGENT_EVENT_RETENTION"] = old_event_retention
-
-            saved_event_retention = os.environ.pop("CODEX_SUBAGENT_EVENT_RETENTION", None)
-            try:
-                default_retention_wrapper = run_one(
-                    compact_spec(
-                        tmp,
-                        stage="analyst-review",
-                        agent_role="analyst-momentum-news",
-                        task_name="event-default-retention",
-                    )
-                )
-            finally:
-                if saved_event_retention is not None:
-                    os.environ["CODEX_SUBAGENT_EVENT_RETENTION"] = saved_event_retention
-            if default_retention_wrapper.get("event_retention") != "anomaly":
-                failures.append(f"default event retention mode was not anomaly: {default_retention_wrapper}")
-            if default_retention_wrapper.get("event_retention_reason") != "no_anomaly":
-                failures.append(f"default anomaly event retention reason was not no_anomaly: {default_retention_wrapper}")
-            if default_retention_wrapper.get("event_log_retained") is not False:
-                failures.append(f"default anomaly event retention did not prune normal event log: {default_retention_wrapper}")
-            if default_retention_wrapper.get("stderr_retained") is not False:
-                failures.append(f"default anomaly event retention did not mark stderr pruned: {default_retention_wrapper}")
-            if Path(default_retention_wrapper["event_log_path"]).exists():
-                failures.append("default anomaly event retention left normal event log on disk")
-            if Path(default_retention_wrapper["stderr_path"]).exists():
-                failures.append("default anomaly event retention left normal stderr log on disk")
-
-            os.environ["FAKE_CODEX_MCP_INIT_ERROR"] = (
-                "2026-07-14T03:00:44Z ERROR rmcp::transport::worker: worker quit with fatal: "
-                "unexpected server response: HTTP 500, when send initialized notification"
-            )
-            try:
-                degraded_wrapper = run_one(
-                    compact_spec(
-                        tmp,
-                        stage="analyst-review",
-                        agent_role="analyst-momentum-news",
-                        task_name="mcp-degraded",
-                    )
-                )
-            finally:
-                os.environ.pop("FAKE_CODEX_MCP_INIT_ERROR", None)
-            if degraded_wrapper.get("status") != "success":
-                failures.append(f"MCP degradation incorrectly failed wrapper: {degraded_wrapper}")
-            degraded = degraded_wrapper.get("degraded_dependencies")
-            if not isinstance(degraded, list) or not degraded or degraded[0].get("dependency_id") != "mcp:unknown":
-                failures.append(f"MCP degradation missing from wrapper: {degraded_wrapper}")
-            if degraded_wrapper.get("event_diagnostics", {}).get("degraded_dependency_count") != 1:
-                failures.append(f"MCP degraded count missing from diagnostics: {degraded_wrapper}")
-            if degraded_wrapper.get("event_retention_reason") != "anomaly":
-                failures.append(f"MCP degradation did not retain diagnostics: {degraded_wrapper}")
-
-            custom_model_config = tmp / "codex-runtime.yaml"
-            custom_model_config.write_text(
-                "\n".join(
-                    [
-                        "defaults:",
-                        "  model: gpt-5.6-sol",
-                        "  model_reasoning_effort: medium",
-                        "  new_session_prompt: new session",
-                        "daily_trading:",
-                        "  collection:",
-                        "    model: gpt-5.4-mini",
-                        "    model_reasoning_effort: low",
-                        "  analyst_review:",
-                        "    model: custom-model",
-                        "    model_reasoning_effort: custom-effort",
-                        "  judge_review:",
-                        "    model: gpt-5.5",
-                        "    model_reasoning_effort: medium",
-                        "",
-                    ]
-                ),
-                encoding="utf-8",
-            )
-            os.environ[RUNTIME_CONFIG_ENV] = str(custom_model_config)
-            custom_wrapper = run_one(
-                compact_spec(tmp, stage="analyst-review", agent_role="analyst-momentum-news", task_name="first-custom-model")
-            )
-            if custom_wrapper["status"] != "success":
-                failures.append(f"custom model config returned {custom_wrapper['status']}")
-            try:
-                assert_argv(argv_log, model="custom-model", effort="custom-effort")
-            except AssertionError as exc:
-                failures.append(str(exc))
-            model_usage_path = tmp / "reports" / "runs" / "self-test" / MODEL_USAGE_FILENAME
-            try:
-                model_usage_entries = [
-                    json.loads(line)
-                    for line in model_usage_path.read_text(encoding="utf-8").splitlines()
-                    if line.strip()
-                ]
-            except (OSError, json.JSONDecodeError) as exc:
-                failures.append(f"model usage log could not be read: {exc}")
-                model_usage_entries = []
-            custom_model_entries = [
-                item for item in model_usage_entries if item.get("task_name") == "first-custom-model"
-            ]
-            if len(custom_model_entries) != 1:
-                failures.append(f"custom model invocation was not recorded exactly once: {custom_model_entries}")
-            elif (
-                custom_model_entries[0].get("model") != "custom-model"
-                or custom_model_entries[0].get("model_reasoning_effort") != "custom-effort"
-                or custom_model_entries[0].get("stage") != "analyst-review"
-                or custom_model_entries[0].get("agent_role") != "analyst-momentum-news"
-            ):
-                failures.append(f"custom model invocation log was incorrect: {custom_model_entries[0]}")
-            if (
-                custom_wrapper.get("model") != "custom-model"
-                or custom_wrapper.get("model_reasoning_effort") != "custom-effort"
-                or custom_wrapper.get("model_usage_path") != str(model_usage_path)
-            ):
-                failures.append(f"custom wrapper omitted explicit model provenance: {custom_wrapper}")
-            os.environ.pop(RUNTIME_CONFIG_ENV, None)
-
-            write_sample_review_inputs(tmp)
-            opening_specs = [
-                compact_debate_spec(
-                    tmp,
-                    side=side,
-                    phase="opening",
-                    task_name=f"debate-{side}-opening",
-                )
-                for side in ("bull", "bear")
-            ]
-            opening_group = run_group(opening_specs, max_workers=2)
-            if opening_group.get("status") != "success" or len(opening_group.get("wrappers") or []) != 2:
-                failures.append(f"persistent debate opening group failed: {opening_group}")
-            opening_by_side = {
-                wrapper.get("agent_role", "").removeprefix("debate-"): wrapper
-                for wrapper in opening_group.get("wrappers", [])
-            }
-            expected_session_ids = {
-                "bull": "00000000-0000-4000-8000-000000000001",
-                "bear": "00000000-0000-4000-8000-000000000002",
-            }
-            if {side: wrapper.get("session_id") for side, wrapper in opening_by_side.items()} != expected_session_ids:
-                failures.append(f"opening did not capture stable debate session ids: {opening_by_side}")
-            for side, wrapper in opening_by_side.items():
-                write_json(
-                    tmp / "reports" / "runs" / "self-test" / "debate" / f"opening-{side}-compact.json",
-                    wrapper["parsed_json"],
-                )
-            for phase in ("rebuttal-1",):
-                phase_specs = []
-                for side in ("bull", "bear"):
-                    opponent = "bear" if side == "bull" else "bull"
-                    phase_spec = compact_debate_spec(
-                        tmp,
-                        side=side,
-                        phase=phase,
-                        task_name=f"debate-{side}-{phase}",
-                        session_id=expected_session_ids[side],
-                    )
-                    phase_spec["artifact_paths"]["opponent_opening"] = str(
-                        tmp / "reports" / "runs" / "self-test" / "debate" / f"opening-{opponent}-compact.json"
-                    )
-                    phase_specs.append(phase_spec)
-                phase_group = run_group(phase_specs, max_workers=2)
-                if phase_group.get("status") != "success":
-                    failures.append(f"persistent debate {phase} group failed: {phase_group}")
-                    break
-                phase_by_side = {
-                    wrapper.get("agent_role", "").removeprefix("debate-"): wrapper
-                    for wrapper in phase_group.get("wrappers", [])
-                }
-                if any(
-                    wrapper.get("session_id") != expected_session_ids.get(side)
-                    or wrapper.get("resume_session_id") != expected_session_ids.get(side)
-                    or wrapper.get("event_retention") != "always"
-                    or not wrapper.get("event_log_retained")
-                    for side, wrapper in phase_by_side.items()
-                ):
-                    failures.append(f"{phase} did not resume and retain the original sessions: {phase_by_side}")
-            debate_argv = [
-                json.loads(line)
-                for line in argv_log.read_text(encoding="utf-8").splitlines()
-                if "stage: judge-debate" in line
-            ]
-            resume_argv = [argv for argv in debate_argv if "resume" in argv]
-            if len(debate_argv) != 4 or len(resume_argv) != 2:
-                failures.append(f"fixed debate should use 2 openings and 2 resumed turns: {debate_argv}")
-
-            write_sample_review_inputs(tmp)
-            compact_wrapper = run_one(
-                compact_spec(tmp, stage="analyst-review", agent_role="analyst-momentum-news", task_name="compact-first")
-            )
-            if compact_wrapper["status"] != "success" or compact_wrapper.get("prompt_mode") != "compact_review":
-                failures.append(f"compact review spec returned unexpected wrapper: {compact_wrapper}")
-            if not compact_wrapper.get("review_input_paths", {}).get("decision_brief"):
-                failures.append(f"compact review spec did not create decision brief slice: {compact_wrapper}")
-
-            write_sample_review_inputs(tmp)
-            reuse_spec = compact_spec(
-                tmp, stage="analyst-review", agent_role="analyst-momentum-news", task_name="reuse-first"
-            )
-            first_reuse_wrapper = run_one(reuse_spec)
-            argv_before = len(argv_log.read_text(encoding="utf-8").splitlines())
-            second_reuse_wrapper = run_one(reuse_spec)
-            argv_after = len(argv_log.read_text(encoding="utf-8").splitlines())
-            if first_reuse_wrapper.get("status") != "success":
-                failures.append(f"reuse setup wrapper failed: {first_reuse_wrapper}")
-            if not second_reuse_wrapper.get("reused_existing_wrapper") or argv_after != argv_before:
-                failures.append(f"successful wrapper was not reused: {second_reuse_wrapper}")
-            reuse_model_entries = [
-                json.loads(line)
-                for line in model_usage_path.read_text(encoding="utf-8").splitlines()
-                if line.strip() and json.loads(line).get("task_name") == "reuse-first"
-            ]
-            if len(reuse_model_entries) != 1:
-                failures.append(f"reused wrapper recorded a non-executed model invocation: {reuse_model_entries}")
-            group_reuse_before = len(argv_log.read_text(encoding="utf-8").splitlines())
-            group_reuse = run_group([reuse_spec], max_workers=1)
-            group_reuse_after = len(argv_log.read_text(encoding="utf-8").splitlines())
-            if (
-                group_reuse.get("status") != "success"
-                or group_reuse_after != group_reuse_before
-                or not group_reuse.get("wrappers", [{}])[0].get("reused_existing_wrapper")
-            ):
-                failures.append(f"run-group did not pre-reuse successful wrapper: {group_reuse}")
-            changed_brief_path = tmp / "reports" / "runs" / "self-test" / "decision-brief.json"
-            changed_brief = load_json(changed_brief_path)
-            changed_brief["symbols"][0]["custom_detail"] = {"keep": "changed"}
-            write_json(changed_brief_path, changed_brief)
-            changed_reuse_before = len(argv_log.read_text(encoding="utf-8").splitlines())
-            changed_wrapper = run_one(reuse_spec)
-            changed_reuse_after = len(argv_log.read_text(encoding="utf-8").splitlines())
-            if changed_wrapper.get("reused_existing_wrapper") or changed_reuse_after != changed_reuse_before + 1:
-                failures.append(f"changed artifact content incorrectly reused wrapper: {changed_wrapper}")
-
-            write_sample_review_inputs(tmp)
-            judge_reuse_spec = compact_spec(tmp, stage="judge-review", agent_role="judge", task_name="judge-reuse")
-            first_judge_wrapper = run_one(judge_reuse_spec)
-            if first_judge_wrapper.get("status") != "success":
-                failures.append(f"judge-review reuse setup wrapper failed: {first_judge_wrapper}")
-            judge_reuse_before = len(argv_log.read_text(encoding="utf-8").splitlines())
-            second_judge_wrapper = run_one(judge_reuse_spec)
-            judge_reuse_after = len(argv_log.read_text(encoding="utf-8").splitlines())
-            if not second_judge_wrapper.get("reused_existing_wrapper") or judge_reuse_after != judge_reuse_before:
-                failures.append(f"unchanged judge-review wrapper was not reused: {second_judge_wrapper}")
-            account_before_order_path = tmp / "reports" / "runs" / "self-test" / "account-before-order.json"
-            account_before_order = load_json(account_before_order_path)
-            account_before_order["symbols"][0]["average_purchase_price"] = 61000.0
-            write_json(account_before_order_path, account_before_order)
-            judge_changed_before = len(argv_log.read_text(encoding="utf-8").splitlines())
-            judge_changed_wrapper = run_one(judge_reuse_spec)
-            judge_changed_after = len(argv_log.read_text(encoding="utf-8").splitlines())
-            if judge_changed_wrapper.get("reused_existing_wrapper") or judge_changed_after != judge_changed_before + 1:
-                failures.append(
-                    f"changing only account-before-order.json average purchase price incorrectly reused judge-review wrapper: {judge_changed_wrapper}"
-                )
-
-            old_raw_retention = os.environ.get("CODEX_SUBAGENT_RAW_RETENTION")
-            os.environ["CODEX_SUBAGENT_RAW_RETENTION"] = "failed"
-            retained_wrapper = run_one(
-                compact_spec(tmp, stage="analyst-review", agent_role="analyst-momentum-news", task_name="raw-retention")
-            )
-            if retained_wrapper.get("raw_output_retained") is not False:
-                failures.append(f"successful raw output was not pruned with failed retention: {retained_wrapper}")
-            if Path(retained_wrapper["raw_output_path"]).exists():
-                failures.append("raw output path still exists after successful failed-retention run")
-            if old_raw_retention is None:
-                os.environ.pop("CODEX_SUBAGENT_RAW_RETENTION", None)
-            else:
-                os.environ["CODEX_SUBAGENT_RAW_RETENTION"] = old_raw_retention
-
-            text_spec = spec(tmp, stage="financial-collection", agent_role="financial", task_name="text-financial")
-            os.environ["FAKE_CODEX_INVALID_JSON"] = "1"
-            wrapper = run_one(text_spec)
-            if wrapper["status"] != "success" or wrapper["parsed_json"] is not None or wrapper.get("parsed_text") != "not json":
-                failures.append("text collection output was not accepted without JSON parsing")
-            os.environ.pop("FAKE_CODEX_INVALID_JSON", None)
-
-            group = run_group(
-                [
-                    spec(tmp, stage="financial-collection", agent_role="financial", task_name="g-financial-1"),
-                    spec(tmp, stage="financial-collection", agent_role="financial", task_name="g-financial-2"),
-                ],
-                max_workers=3,
-            )
-            if group["status"] != "success" or group["count"] != 2:
-                failures.append(f"run-group returned unexpected result: {group}")
-            try:
-                group_model_entries = [
-                    json.loads(line)
-                    for line in model_usage_path.read_text(encoding="utf-8").splitlines()
-                    if line.strip() and json.loads(line).get("task_name") in {"g-financial-1", "g-financial-2"}
-                ]
-            except json.JSONDecodeError as exc:
-                failures.append(f"parallel model usage writes produced invalid JSONL: {exc}")
-                group_model_entries = []
-            if {item.get("task_name") for item in group_model_entries} != {"g-financial-1", "g-financial-2"}:
-                failures.append(f"parallel model invocations were not recorded: {group_model_entries}")
-            wrapper_count = len(list((Path(group["wrappers"][0]["raw_output_path"]).parent).glob("g-*.wrapper.json")))
-            if wrapper_count != 2:
-                failures.append(f"expected 2 group wrapper files, got {wrapper_count}")
-
-            os.environ["FAKE_CODEX_EMPTY_TASKS"] = "optional-financial"
-            optional_group = run_group(
-                [
-                    spec(tmp, stage="financial-collection", agent_role="financial", task_name="optional-financial"),
-                ],
-                max_workers=2,
-            )
-            if (
-                optional_group["status"] != "partial"
-                or optional_group["failed_count"] != 1
-                or optional_group["required_failed_count"] != 0
-                or optional_group["optional_failed_count"] != 1
-            ):
-                failures.append(f"optional text failure did not produce partial group: {optional_group}")
-
-            os.environ["FAKE_CODEX_EMPTY_TASKS"] = "required-first"
-            required_group = run_group(
-                [
-                    compact_spec(tmp, stage="analyst-review", agent_role="analyst-quality-risk", task_name="required-first"),
-                    spec(tmp, stage="financial-collection", agent_role="financial", task_name="optional-financial-success"),
-                ],
-                max_workers=2,
-            )
-            if (
-                required_group["status"] != "failed"
-                or required_group["failed_count"] != 1
-                or required_group["required_failed_count"] != 1
-                or required_group["optional_failed_count"] != 0
-            ):
-                failures.append(f"required failure did not produce failed group: {required_group}")
-            os.environ.pop("FAKE_CODEX_EMPTY_TASKS", None)
+            failures.extend(step_invalid_spec_and_compact_schema_checks(tmp))
+            failures.extend(step_model_selection_checks(tmp, argv_log))
+            failures.extend(step_event_diagnostics_checks(tmp))
+            failures.extend(step_custom_model_config_checks(tmp, argv_log))
+            failures.extend(step_debate_session_checks(tmp, argv_log))
+            failures.extend(step_compact_review_checks(tmp))
+            failures.extend(step_wrapper_reuse_checks(tmp, argv_log))
+            failures.extend(step_judge_review_reuse_checks(tmp, argv_log))
+            failures.extend(step_raw_retention_checks(tmp))
+            failures.extend(step_text_output_checks(tmp))
+            failures.extend(step_group_execution_checks(tmp))
+            failures.extend(step_optional_and_required_group_checks(tmp))
         finally:
             os.environ.clear()
             os.environ.update(old_env)
@@ -1918,9 +1994,131 @@ def run_self_test() -> int:
     return 1 if failures else 0
 
 
+
+class RunSelfTestStepsAreIndividuallyDiscoverableTest(unittest.TestCase):
+    """Real (non-mocked) execution of every run_self_test step_* helper, so
+    each one is reachable from ordinary unittest discovery and not only from
+    the mocked wrapper-orchestration test below. Steps share one fake-codex
+    binary and env setup and have a genuine prerequisite order (later steps
+    reuse wrapper/session state earlier steps created), so setUpClass runs
+    them once in that order and each test method asserts on its own step's
+    stored result."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._temp_dir = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls._temp_dir.cleanup)
+        cls.tmp = Path(cls._temp_dir.name)
+        fake = cls.tmp / "codex"
+        cls.argv_log = cls.tmp / "argv.jsonl"
+        fake_codex_script(fake)
+        cls._old_env = os.environ.copy()
+        cls.addClassCleanup(cls._restore_environment)
+        os.environ["CODEX_BIN"] = str(fake)
+        os.environ["FAKE_CODEX_ARGV_LOG"] = str(cls.argv_log)
+        os.environ["CODEX_BYPASS_APPROVALS_AND_SANDBOX"] = "1"
+        cls.invalid_spec_failures = step_invalid_spec_and_compact_schema_checks(cls.tmp)
+        cls.model_selection_failures = step_model_selection_checks(cls.tmp, cls.argv_log)
+        cls.event_diagnostics_failures = step_event_diagnostics_checks(cls.tmp)
+        cls.custom_model_config_failures = step_custom_model_config_checks(cls.tmp, cls.argv_log)
+        cls.debate_session_failures = step_debate_session_checks(cls.tmp, cls.argv_log)
+        cls.compact_review_failures = step_compact_review_checks(cls.tmp)
+        cls.wrapper_reuse_failures = step_wrapper_reuse_checks(cls.tmp, cls.argv_log)
+        cls.judge_review_reuse_failures = step_judge_review_reuse_checks(cls.tmp, cls.argv_log)
+        cls.raw_retention_failures = step_raw_retention_checks(cls.tmp)
+        cls.text_output_failures = step_text_output_checks(cls.tmp)
+        cls.group_execution_failures = step_group_execution_checks(cls.tmp)
+        cls.optional_and_required_group_failures = step_optional_and_required_group_checks(cls.tmp)
+
+    @classmethod
+    def _restore_environment(cls) -> None:
+        os.environ.clear()
+        os.environ.update(cls._old_env)
+
+    def test_step_invalid_spec_and_compact_schema_checks(self) -> None:
+        self.assertEqual(self.invalid_spec_failures, [])
+
+    def test_step_model_selection_checks(self) -> None:
+        self.assertEqual(self.model_selection_failures, [])
+
+    def test_step_event_diagnostics_checks(self) -> None:
+        self.assertEqual(self.event_diagnostics_failures, [])
+
+    def test_step_custom_model_config_checks(self) -> None:
+        self.assertEqual(self.custom_model_config_failures, [])
+
+    def test_step_debate_session_checks(self) -> None:
+        self.assertEqual(self.debate_session_failures, [])
+
+    def test_step_compact_review_checks(self) -> None:
+        self.assertEqual(self.compact_review_failures, [])
+
+    def test_step_wrapper_reuse_checks(self) -> None:
+        self.assertEqual(self.wrapper_reuse_failures, [])
+
+    def test_step_judge_review_reuse_checks(self) -> None:
+        self.assertEqual(self.judge_review_reuse_failures, [])
+
+    def test_step_raw_retention_checks(self) -> None:
+        self.assertEqual(self.raw_retention_failures, [])
+
+    def test_step_text_output_checks(self) -> None:
+        self.assertEqual(self.text_output_failures, [])
+
+    def test_step_group_execution_checks(self) -> None:
+        self.assertEqual(self.group_execution_failures, [])
+
+    def test_step_optional_and_required_group_checks(self) -> None:
+        self.assertEqual(self.optional_and_required_group_failures, [])
+
+
 class RunSubagentSelfTest(unittest.TestCase):
-    def test_self_test_suite(self) -> None:
-        self.assertEqual(run_self_test(), 0)
+    def test_self_test_suite_runs_every_step_and_reports_success(self) -> None:
+        """Wrapper-orchestration check only: each step's real behavior is
+        covered by the granular tests below (and by directly invoking the
+        step_* functions), so this mocks every step instead of re-running
+        the whole fake-codex scenario a second time."""
+        step_names = [
+            "step_invalid_spec_and_compact_schema_checks",
+            "step_model_selection_checks",
+            "step_event_diagnostics_checks",
+            "step_custom_model_config_checks",
+            "step_debate_session_checks",
+            "step_compact_review_checks",
+            "step_wrapper_reuse_checks",
+            "step_judge_review_reuse_checks",
+            "step_raw_retention_checks",
+            "step_text_output_checks",
+            "step_group_execution_checks",
+            "step_optional_and_required_group_checks",
+        ]
+        patchers = [patch(f"{__name__}.{name}", return_value=[]) for name in step_names]
+        mocks = [patcher.start() for patcher in patchers]
+        self.addCleanup(lambda: [patcher.stop() for patcher in patchers])
+
+        result = run_self_test()
+
+        self.assertEqual(result, 0)
+        for mock in mocks:
+            mock.assert_called_once()
+
+    def test_self_test_suite_reports_failure_when_a_step_fails(self) -> None:
+        with patch(f"{__name__}.step_invalid_spec_and_compact_schema_checks", return_value=["boom"]), patch(
+            f"{__name__}.step_model_selection_checks", return_value=[]
+        ), patch(f"{__name__}.step_event_diagnostics_checks", return_value=[]), patch(
+            f"{__name__}.step_custom_model_config_checks", return_value=[]
+        ), patch(f"{__name__}.step_debate_session_checks", return_value=[]), patch(
+            f"{__name__}.step_compact_review_checks", return_value=[]
+        ), patch(f"{__name__}.step_wrapper_reuse_checks", return_value=[]), patch(
+            f"{__name__}.step_judge_review_reuse_checks", return_value=[]
+        ), patch(f"{__name__}.step_raw_retention_checks", return_value=[]), patch(
+            f"{__name__}.step_text_output_checks", return_value=[]
+        ), patch(f"{__name__}.step_group_execution_checks", return_value=[]), patch(
+            f"{__name__}.step_optional_and_required_group_checks", return_value=[]
+        ):
+            result = run_self_test()
+
+        self.assertEqual(result, 1)
 
     def test_named_mcp_server_is_preserved_in_degraded_dependency(self) -> None:
         dependencies = mcp_degraded_dependencies(
@@ -2253,3 +2451,25 @@ class RunSubagentSelfTest(unittest.TestCase):
                 "missing_debate_evidence_refs",
             },
         )
+
+    def test_step_text_output_checks_accepts_non_json_collection_output(self) -> None:
+        """A representative direct call into one of run_self_test's extracted
+        step_* functions, proving each step is independently callable against
+        its own fake-codex fixture rather than only reachable via the full
+        umbrella."""
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            fake = tmp / "codex"
+            argv_log = tmp / "argv.jsonl"
+            fake_codex_script(fake)
+            old_env = os.environ.copy()
+            os.environ["CODEX_BIN"] = str(fake)
+            os.environ["FAKE_CODEX_ARGV_LOG"] = str(argv_log)
+            os.environ["CODEX_BYPASS_APPROVALS_AND_SANDBOX"] = "1"
+            try:
+                failures = step_text_output_checks(tmp)
+            finally:
+                os.environ.clear()
+                os.environ.update(old_env)
+
+        self.assertEqual(failures, [])

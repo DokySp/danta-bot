@@ -10,7 +10,7 @@ Telegram으로 전송하는 HTML 문서명은 각 실행을 구분할 수 있도
 
 명시적 주문 run은 Judge 전에 `order-lifecycle.json`을 생성해 같은 날 이전 제출 주문의 최신 KIS 상태와 현재 pending/reserved 주문을 복원한다. 확인 체결량이 계좌·당일체결 스냅샷보다 앞선 종목은 수량 상태가 일치할 때까지 주문을 차단하고, 이번 Judge 대상에서 빠진 이전 active 주문은 현재 수량을 목표로 한 정리 전용 실행 행으로 취소한다. `pipeline-summary.json`의 `order_lifecycle`과 Telegram의 `사전 주문상태`가 이 결과를 요약한다.
 
-Repository checkout에서 전체 테스트는 `PYTHONPATH=containers/codex-exec python3 -m unittest discover -s containers/codex-exec/service/pipelines/daily_trading/tests -t containers/codex-exec -p 'test_*.py'`로 실행한다.
+Repository checkout에서 daily-trading tests만 실행하려면 `PYTHONPATH=containers/codex-exec python3 -m unittest discover -s containers/codex-exec/service/pipelines/daily_trading/tests -t containers/codex-exec -p 'test_*.py'`로 실행한다. 저장소 전체 회귀(telegram-gateway, 하이픈 스킬 포함)는 repo root의 `python3 scripts/run_tests.py`로 실행한다.
 
 Routine command:
 

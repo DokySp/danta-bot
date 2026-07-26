@@ -20,7 +20,8 @@ def window(used_percent: float, duration_mins: int | None = None) -> dict:
 
 RUNTIME_USAGE_PATH = Path(__file__).resolve().parents[3] / "runtime" / "codex_usage.py"
 RUNTIME_USAGE_SPEC = importlib.util.spec_from_file_location("runtime_codex_usage", RUNTIME_USAGE_PATH)
-assert RUNTIME_USAGE_SPEC is not None and RUNTIME_USAGE_SPEC.loader is not None
+if RUNTIME_USAGE_SPEC is None or RUNTIME_USAGE_SPEC.loader is None:
+    raise AssertionError()
 runtime_codex_usage = importlib.util.module_from_spec(RUNTIME_USAGE_SPEC)
 RUNTIME_USAGE_SPEC.loader.exec_module(runtime_codex_usage)
 

@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-"""Tests for the cumulative single-file daily-trading HTML report."""
+"""Tests for the cumulative single-file daily-trading HTML report.
+
+`self_test` is the compatibility body invoked by the production CLI's
+`--self-test` command and must keep its exact contract: print a
+`{"status": "success"}` or `{"status": "failed", ...}` JSON line and
+return `0`/`1`. Its two scenarios (the three-run cumulative report, and
+the no-KOSPI combined chart) now live in `scenario_*` helpers, and each
+of their checks lives in its own `check_*` helper. `self_test` and the
+granular `TestCase` methods below both call those same helpers, so each
+behavior has exactly one implementation. The wrapper-orchestration test
+mocks the helpers rather than re-rendering the report, so discovery
+does not execute the real work twice. The large set of independent
+granular tests that already existed below the umbrella is unchanged.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +20,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from ..scripts.render_html_report import (
     analyst_score_class,
@@ -298,124 +312,210 @@ def make_run(runs_root: Path, run_id: str, started_at: str, *, target: bool) -> 
     return run_dir
 
 
-def self_test() -> int:
-    with tempfile.TemporaryDirectory() as temporary:
-        runs_root = Path(temporary) / "reports" / "runs"
-        make_run(runs_root, "run-0900", "2026-07-15T09:00:00+09:00", target=False)
-        make_run(runs_root, "run-0900-second", "2026-07-15T09:00:30+09:00", target=False)
-        make_run(runs_root, "run-1000", "2026-07-15T10:00:00+09:00", target=True)
-        rendered = build_html(runs_root, "run-1000")
-        required = [
-            "10:00까지의 당일 전체 거래",
-            "data-time-target=\"run-0-0900\"",
-            "data-time-target=\"run-1-0900\"",
-            "data-time-target=\"run-2-1000\"",
-            "알파전자",
-            "베타소재",
-            "Analyst only",
-            "Final Judge",
-            "추세가 유지됩니다.",
-            "수주 모멘텀",
-            "권고 행동 buy",
-            "목표 보유 3주",
-            "이전 thesis (이번 run 평가 대상)",
-            "run-0900",
-            "메모리 사이클 반등과 원가 경쟁력 유지",
-            "margin-compression",
-            "매출총이익률이 직전 가이던스 아래로 하락",
-            "훼손 근거 일치",
-            "000001-bear-opening-1",
-            "손실 보유 종목 감축 요건",
-            "훼손 근거 검증 완료",
-            "damaged_evidence_confirmed",
-            "신규/후속 thesis",
-            "재고 정상화 이후 신규 성장 사이클 진입",
-            "demand-collapse",
-            "외부종목",
-            "계좌 전체 일별 체결 조회",
-            "주문·체결 통합 원장",
-            'class="time-wheel"',
-            'role="listbox"',
-            "scroll-snap-type:y mandatory",
-            "selector.addEventListener('scroll'",
-            "event.key === 'ArrowUp'",
-            "신규 수주 공시",
-            "원가 부담 확대",
-            "KOSPI 3210.50 (+1.25%)",
-            "regimeLabel&quot;:&quot;강세",
-            "regime&quot;:&quot;risk_on",
-            "KIS 총자산 10,500,000원",
-            'class="series-line asset-line"',
-            "asset&quot;:10500000",
-            "'KIS 총자산 ' + Number(point.asset)",
-            'class="trade-symbol-button score-low"',
-            'class="trade-symbol-button score-high active"',
-            'class="chart-range-slider"',
-            'max="2"',
-            "slider.addEventListener('input'",
-            "같은 업종 종목은 같은 색상",
-            "<th>수량</th><th>현재가</th><th>평가액</th>",
-            "<td>2주</td><td>100,000원</td><td>200,000원</td>",
-            "주문 생명주기 사전조회 partial",
-            "현재 미체결 1건 · 같은 날 이전 제출 2건 · 보유수량 확인 필요 1건",
-            "KIS 거절 1주",
-            "row.textContent = value",
-            "수급 coverage",
-            "1 / 2",
-            "장중 수급 수집 partial",
-            "장중 수급: 1개 종목 추정치 반영, 일부 종목 수급 없음",
-        ]
-        forbidden = [
-            "2026-07-14",
-            "14:30",
-            "초기 원금",
-            "계좌 누적수익률",
-            "https://",
-            str(runs_root),
-            'class="series-line pnl-line"',
-            "innerHTML",
-            "재무 수집 supplied",
-            "확인된 체결 전체",
-            "봇이 제출한 주문 전체",
-            'class="sentiment',
-            "sentiment positive",
-            "sentiment negative",
-        ]
-        missing = [value for value in required if value not in rendered]
-        present = [value for value in forbidden if value in rendered]
-        selector_start = rendered.rfind("전체 Analyst 대상 종목")
-        score_order_ok = rendered.find("베타소재", selector_start) < rendered.find("알파전자", selector_start)
-        no_kospi_chart = render_combined_chart(
-            [
-                {
-                    "summary": {
-                        "started_at": "2026-07-15T10:00:00+09:00",
-                        "account_display_summary": {
-                            "total_evaluation_amount": 10_100_000,
-                            "total_pnl_amount": 110_000,
-                        },
+REQUIRED_CUMULATIVE_REPORT_STRINGS = [
+    "10:00까지의 당일 전체 거래",
+    "data-time-target=\"run-0-0900\"",
+    "data-time-target=\"run-1-0900\"",
+    "data-time-target=\"run-2-1000\"",
+    "알파전자",
+    "베타소재",
+    "Analyst only",
+    "Final Judge",
+    "추세가 유지됩니다.",
+    "수주 모멘텀",
+    "권고 행동 buy",
+    "목표 보유 3주",
+    "이전 thesis (이번 run 평가 대상)",
+    "run-0900",
+    "메모리 사이클 반등과 원가 경쟁력 유지",
+    "margin-compression",
+    "매출총이익률이 직전 가이던스 아래로 하락",
+    "훼손 근거 일치",
+    "000001-bear-opening-1",
+    "손실 보유 종목 감축 요건",
+    "훼손 근거 검증 완료",
+    "damaged_evidence_confirmed",
+    "신규/후속 thesis",
+    "재고 정상화 이후 신규 성장 사이클 진입",
+    "demand-collapse",
+    "외부종목",
+    "계좌 전체 일별 체결 조회",
+    "주문·체결 통합 원장",
+    'class="time-wheel"',
+    'role="listbox"',
+    "scroll-snap-type:y mandatory",
+    "selector.addEventListener('scroll'",
+    "event.key === 'ArrowUp'",
+    "신규 수주 공시",
+    "원가 부담 확대",
+    "KOSPI 3210.50 (+1.25%)",
+    "regimeLabel&quot;:&quot;강세",
+    "regime&quot;:&quot;risk_on",
+    "KIS 총자산 10,500,000원",
+    'class="series-line asset-line"',
+    "asset&quot;:10500000",
+    "'KIS 총자산 ' + Number(point.asset)",
+    'class="trade-symbol-button score-low"',
+    'class="trade-symbol-button score-high active"',
+    'class="chart-range-slider"',
+    'max="2"',
+    "slider.addEventListener('input'",
+    "같은 업종 종목은 같은 색상",
+    "<th>수량</th><th>현재가</th><th>평가액</th>",
+    "<td>2주</td><td>100,000원</td><td>200,000원</td>",
+    "주문 생명주기 사전조회 partial",
+    "현재 미체결 1건 · 같은 날 이전 제출 2건 · 보유수량 확인 필요 1건",
+    "KIS 거절 1주",
+    "row.textContent = value",
+    "수급 coverage",
+    "1 / 2",
+    "장중 수급 수집 partial",
+    "장중 수급: 1개 종목 추정치 반영, 일부 종목 수급 없음",
+]
+
+FORBIDDEN_CUMULATIVE_REPORT_STRINGS = [
+    "2026-07-14",
+    "14:30",
+    "초기 원금",
+    "계좌 누적수익률",
+    "https://",
+    'class="series-line pnl-line"',
+    "innerHTML",
+    "재무 수집 supplied",
+    "확인된 체결 전체",
+    "봇이 제출한 주문 전체",
+    'class="sentiment',
+    "sentiment positive",
+    "sentiment negative",
+]
+
+
+def scenario_build_cumulative_report() -> tuple[str, Path, tempfile.TemporaryDirectory]:
+    """Build a 3-run cumulative HTML report (2 baseline runs + 1 target run).
+
+    Returns the temp dir handle too so callers control cleanup timing
+    (the checks below need the directory to still exist).
+    """
+    temp_dir = tempfile.TemporaryDirectory()
+    runs_root = Path(temp_dir.name) / "reports" / "runs"
+    make_run(runs_root, "run-0900", "2026-07-15T09:00:00+09:00", target=False)
+    make_run(runs_root, "run-0900-second", "2026-07-15T09:00:30+09:00", target=False)
+    make_run(runs_root, "run-1000", "2026-07-15T10:00:00+09:00", target=True)
+    rendered = build_html(runs_root, "run-1000")
+    return rendered, runs_root, temp_dir
+
+
+def check_cumulative_report_contains_required_strings(rendered: str) -> list[str]:
+    return [value for value in REQUIRED_CUMULATIVE_REPORT_STRINGS if value not in rendered]
+
+
+def check_cumulative_report_excludes_forbidden_strings(rendered: str, runs_root: Path) -> list[str]:
+    forbidden = [*FORBIDDEN_CUMULATIVE_REPORT_STRINGS, str(runs_root)]
+    return [value for value in forbidden if value in rendered]
+
+
+def check_cumulative_report_orders_analyst_symbols_by_score(rendered: str) -> bool:
+    selector_start = rendered.rfind("전체 Analyst 대상 종목")
+    return rendered.find("베타소재", selector_start) < rendered.find("알파전자", selector_start)
+
+
+def scenario_render_combined_chart_without_kospi() -> str:
+    return render_combined_chart(
+        [
+            {
+                "summary": {
+                    "started_at": "2026-07-15T10:00:00+09:00",
+                    "account_display_summary": {
+                        "total_evaluation_amount": 10_100_000,
+                        "total_pnl_amount": 110_000,
                     },
-                    "market": {},
-                    "decision": {"strategy_context": {"regime": "neutral"}},
-                }
-            ]
-        )
-        no_kospi_ok = (
-            "10,100,000" in no_kospi_chart
-            and "KOSPI 조회 실패" in no_kospi_chart
-            and "KIS 총자산 조회 실패" in no_kospi_chart
-            and 'class="series-line asset-line"' not in no_kospi_chart
-        )
-        if missing or present or not score_order_ok or not no_kospi_ok:
-            print(json.dumps({"status": "failed", "missing": missing, "forbidden_present": present, "score_order_ok": score_order_ok, "no_kospi_ok": no_kospi_ok}, ensure_ascii=False))
-            return 1
+                },
+                "market": {},
+                "decision": {"strategy_context": {"regime": "neutral"}},
+            }
+        ]
+    )
+
+
+def check_combined_chart_falls_back_when_kospi_and_asset_missing(no_kospi_chart: str) -> bool:
+    return (
+        "10,100,000" in no_kospi_chart
+        and "KOSPI 조회 실패" in no_kospi_chart
+        and "KIS 총자산 조회 실패" in no_kospi_chart
+        and 'class="series-line asset-line"' not in no_kospi_chart
+    )
+
+
+def self_test() -> int:
+    rendered, runs_root, temp_dir = scenario_build_cumulative_report()
+    try:
+        missing = check_cumulative_report_contains_required_strings(rendered)
+        present = check_cumulative_report_excludes_forbidden_strings(rendered, runs_root)
+        score_order_ok = check_cumulative_report_orders_analyst_symbols_by_score(rendered)
+    finally:
+        temp_dir.cleanup()
+
+    no_kospi_chart = scenario_render_combined_chart_without_kospi()
+    no_kospi_ok = check_combined_chart_falls_back_when_kospi_and_asset_missing(no_kospi_chart)
+
+    if missing or present or not score_order_ok or not no_kospi_ok:
+        print(json.dumps({"status": "failed", "missing": missing, "forbidden_present": present, "score_order_ok": score_order_ok, "no_kospi_ok": no_kospi_ok}, ensure_ascii=False))
+        return 1
     print(json.dumps({"status": "success"}, ensure_ascii=False))
     return 0
 
 
 class RenderHtmlReportSelfTest(unittest.TestCase):
-    def test_self_test_suite(self) -> None:
-        self.assertEqual(self_test(), 0)
+    def test_self_test_suite_runs_every_check_and_reports_success(self) -> None:
+        """Wrapper-orchestration check only: real behavior is covered by the
+        granular tests below, so this mocks every helper instead of
+        re-rendering the cumulative report and combined chart a second
+        time."""
+        with patch(f"{__name__}.scenario_build_cumulative_report") as scenario, patch(
+            f"{__name__}.check_cumulative_report_contains_required_strings", return_value=[]
+        ) as check_missing, patch(
+            f"{__name__}.check_cumulative_report_excludes_forbidden_strings", return_value=[]
+        ) as check_forbidden, patch(
+            f"{__name__}.check_cumulative_report_orders_analyst_symbols_by_score", return_value=True
+        ) as check_order, patch(
+            f"{__name__}.scenario_render_combined_chart_without_kospi", return_value=""
+        ) as chart_scenario, patch(
+            f"{__name__}.check_combined_chart_falls_back_when_kospi_and_asset_missing", return_value=True
+        ) as check_chart:
+            temp_dir = tempfile.TemporaryDirectory()
+            self.addCleanup(temp_dir.cleanup)
+            scenario.return_value = ("<html></html>", Path(temp_dir.name), temp_dir)
+
+            result = self_test()
+
+        self.assertEqual(result, 0)
+        scenario.assert_called_once_with()
+        check_missing.assert_called_once()
+        check_forbidden.assert_called_once()
+        check_order.assert_called_once()
+        chart_scenario.assert_called_once_with()
+        check_chart.assert_called_once()
+
+    def test_cumulative_report_contains_required_strings(self) -> None:
+        rendered, runs_root, temp_dir = scenario_build_cumulative_report()
+        self.addCleanup(temp_dir.cleanup)
+        missing = check_cumulative_report_contains_required_strings(rendered)
+        self.assertEqual(missing, [])
+
+    def test_cumulative_report_excludes_forbidden_strings(self) -> None:
+        rendered, runs_root, temp_dir = scenario_build_cumulative_report()
+        self.addCleanup(temp_dir.cleanup)
+        present = check_cumulative_report_excludes_forbidden_strings(rendered, runs_root)
+        self.assertEqual(present, [])
+
+    def test_cumulative_report_orders_analyst_symbols_by_score(self) -> None:
+        rendered, _runs_root, temp_dir = scenario_build_cumulative_report()
+        self.addCleanup(temp_dir.cleanup)
+        self.assertTrue(check_cumulative_report_orders_analyst_symbols_by_score(rendered))
+
+    def test_combined_chart_falls_back_when_kospi_and_asset_missing(self) -> None:
+        no_kospi_chart = scenario_render_combined_chart_without_kospi()
+        self.assertTrue(check_combined_chart_falls_back_when_kospi_and_asset_missing(no_kospi_chart))
 
     def test_render_header_prefers_reporting_view_over_conflicting_legacy_fields(self) -> None:
         rendered = render_header(

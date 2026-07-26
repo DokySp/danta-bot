@@ -44,6 +44,12 @@ fi
 local_image="${image_name}:${image_tag}"
 remote_image="${dockerhub_namespace}/${image_name}:${image_tag}"
 
+echo "Running repo-wide regression suite before build..." >&2
+if ! python3 "${repo_root}/scripts/run_tests.py"; then
+  echo "Regression suite failed; aborting deploy." >&2
+  exit 1
+fi
+
 docker build \
   -f "${repo_root}/containers/codex-exec/Dockerfile" \
   --build-arg "APP_VERSION=${app_version}" \

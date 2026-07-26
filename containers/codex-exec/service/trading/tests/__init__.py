@@ -1,0 +1,1 @@
+"""trading module tests."""
