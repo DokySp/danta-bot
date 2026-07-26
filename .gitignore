@@ -1,12 +1,11 @@
 /secret.py
 /secret
 
+/images
+
 /reports
 
 /samples
-
-/containers/images
-/containers/*images
 
 # Local environment files
 containers/telegram-gateway/config/routes.yaml
