@@ -39,6 +39,23 @@ class TelegramWorkerDailyTradingAttachmentTest(unittest.TestCase):
             filename="daily-trading-report-run-20260715.html",
         )
 
+    @patch("service.telegram.worker.load_execute_trade_config", return_value={"env": "acct"})
+    @patch("service.telegram.worker.TypingIndicator", return_value=nullcontext())
+    def test_execute_trade_is_routed_as_manual_invocation(self, _typing: Mock, _load_config: Mock) -> None:
+        """$execute-trade must stay force-full: it always routes as manual,
+        never scheduled, so the broker-preflight gate can never skip it.
+        """
+        worker = self.worker()
+        worker.daily_trading_direct_runner.run.return_value = DailyTradingDirectResult(
+            output="short summary", html_report_path=None
+        )
+
+        worker._handle(TelegramTask(chat_id="chat", route="route", text="$execute-trade"))
+
+        worker.daily_trading_direct_runner.run.assert_called_once_with(
+            {"env": "acct"}, invocation_type="manual"
+        )
+
     @patch("service.telegram.worker.load_execute_trade_config", return_value={})
     @patch("service.telegram.worker.TypingIndicator", return_value=nullcontext())
     def test_document_failure_is_classified_as_delivery_failure(self, _typing: Mock, _load_config: Mock) -> None:

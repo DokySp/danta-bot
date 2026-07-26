@@ -107,7 +107,9 @@ class TelegramWorker:
                 task.route,
                 self.config.telegram_typing_interval_seconds,
             ):
-                result = self.daily_trading_direct_runner.run(load_execute_trade_config(self.config))
+                result = self.daily_trading_direct_runner.run(
+                    load_execute_trade_config(self.config), invocation_type="manual"
+                )
             try:
                 self.gateway.send_message(result.output, task.chat_id, task.route)
                 if result.html_report_path is not None:

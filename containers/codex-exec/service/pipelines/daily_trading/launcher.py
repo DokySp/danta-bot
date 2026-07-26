@@ -99,7 +99,13 @@ def load_execute_trade_config(config: Any) -> dict[str, Any]:
     raise RuntimeError(f"execute-trade config not found; searched: {searched}")
 
 
-def build_daily_trading_command(config: Any, context: Any, raw_config: Any, run_dir: Path) -> tuple[list[str], DailyTradingScheduleConfig]:
+def build_daily_trading_command(
+    config: Any,
+    context: Any,
+    raw_config: Any,
+    run_dir: Path,
+    invocation_type: str = "manual",
+) -> tuple[list[str], DailyTradingScheduleConfig]:
     schedule_config = validate_daily_trading_config(raw_config)
     cmd = [
         sys.executable,
@@ -119,6 +125,8 @@ def build_daily_trading_command(config: Any, context: Any, raw_config: Any, run_
         schedule_config.request_type,
         "--order-path",
         schedule_config.order_path,
+        "--invocation-type",
+        invocation_type,
     ]
     if schedule_config.submit_orders:
         cmd.append("--submit-orders")

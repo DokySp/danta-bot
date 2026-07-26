@@ -21,6 +21,12 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import review_policy  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import collect_main_evidence  # noqa: E402
+
 
 KST = ZoneInfo("Asia/Seoul")
 TOKEN_USAGE_FIELDS = (
@@ -694,8 +700,10 @@ class Pipeline:
                 self.order_path, self.order_path_reason = "reservation", "auto_unresolved_non_submit"
             else:
                 raise
+        self.invocation_type = str(getattr(args, "invocation_type", "") or "manual").strip().lower()
         self.logs: list[dict[str, Any]] = []
         self.stages: list[dict[str, Any]] = []
+        self._review_gate: dict[str, Any] | None = None
 
     def resolve_optional_path(self, value: str) -> Path | None:
         text = str(value or "").strip()
@@ -1046,7 +1054,7 @@ class Pipeline:
         self.add_stage("check-portfolio", "failed", detail="no check-portfolio script found")
         raise RuntimeError("no check-portfolio script found; pass --portfolio-json")
 
-    def collect_main_evidence(self, symbols: list[str]) -> None:
+    def collect_main_evidence(self, symbols: list[str], *, reuse_account_and_fills: bool = False) -> None:
         price_path = self.output_dir / "price-chart.json"
         account_path = self.output_dir / "account-before-order.json"
         if self.args.reuse_existing_artifacts and price_path.exists() and account_path.exists():
@@ -1072,6 +1080,11 @@ class Pipeline:
         ]
         if self.args.skip_account:
             cmd.append("--skip-account")
+        if reuse_account_and_fills:
+            # The broker-preflight gate already collected and lifecycle-reconciled
+            # account-before-order.json/today-fills.json for this run_id; only
+            # collect price/chart and the optional account-asset snapshot here.
+            cmd.append("--reuse-account")
         result = self.run_cmd("main-evidence", cmd)
         price = load_json_if_exists(price_path)
         if result.returncode == 0 and isinstance(price, dict) and price.get("status") != "failed":
@@ -1080,7 +1093,7 @@ class Pipeline:
         self.add_stage("main-evidence", "failed", detail="required price/account collection failed", path=self.command_log_path)
         raise RuntimeError("main evidence collection failed")
 
-    def run_order_lifecycle_preflight(self) -> dict[str, Any]:
+    def run_order_lifecycle_preflight(self, *, required: bool = True) -> dict[str, Any]:
         lifecycle_path = self.output_dir / "order-lifecycle.json"
         result = self.run_cmd(
             "order-lifecycle-preflight",
@@ -1093,21 +1106,26 @@ class Pipeline:
                 "--env",
                 self.args.env,
             ],
+            required=required,
         )
         lifecycle = load_json_if_exists(lifecycle_path) or {}
         status = str(lifecycle.get("status") or "failed")
         if result.returncode != 0 or status == "failed":
             self.add_stage(
                 "order-lifecycle-preflight",
-                "failed",
+                "failed" if required else "partial",
+                required=required,
                 detail=compact_text(result.stderr or result.stdout) or f"status={status}",
                 path=lifecycle_path,
             )
-            raise RuntimeError("order lifecycle preflight failed")
+            if required:
+                raise RuntimeError("order lifecycle preflight failed")
+            return lifecycle
         stage_status = "partial" if status == "partial" else "success"
         self.add_stage(
             "order-lifecycle-preflight",
             stage_status,
+            required=required,
             detail=(
                 f"active={lifecycle.get('active_order_count', 0)}, "
                 f"prior_submitted={lifecycle.get('previous_submitted_cash_order_count', 0)}, "
@@ -1116,6 +1134,381 @@ class Pipeline:
             path=lifecycle_path,
         )
         return lifecycle
+
+    def env_dv_for_review_state(self) -> str:
+        return "demo" if self.args.env in {"paper", "demo"} else "real"
+
+    def resolve_full_review_times(self) -> tuple[list[str], Path]:
+        path = review_policy.resolve_full_review_times_config_path(
+            workspace_dir=self.workspace_dir,
+            workspace_repo_root=self.repo_root,
+            code_repo_root=repo_root_from(script_dir()),
+            configured=str(getattr(self.args, "full_review_times_config", "") or ""),
+        )
+        return review_policy.load_full_review_times(path), path
+
+    def compute_config_fingerprint(self, full_review_times_path: Path) -> str:
+        review_extra_sha256 = ""
+        if self.review_extra_instructions_path is not None and self.review_extra_instructions_path.exists():
+            review_extra_sha256 = file_sha256(self.review_extra_instructions_path)
+        return review_policy.fingerprint_hash(
+            {
+                "strategy_policy_config": file_sha256(self.strategy_policy_config_path),
+                "full_review_times_config": file_sha256(full_review_times_path),
+                "review_extra_instructions": review_extra_sha256,
+            }
+        )
+
+    def broker_preflight_gate_applicable(self) -> bool:
+        return getattr(self.args, "submit_orders", False) and self.args.request_type in {"demo-submit", "real-submit"}
+
+    def run_broker_preflight_gate(self, symbols: list[str], portfolio_except: list[str]) -> dict[str, Any] | None:
+        """Minimal broker snapshot + due-slot/fingerprint decision for scheduled submit runs.
+
+        Returns None to continue into the full review, or a completed pipeline
+        summary dict if the run ends after preflight (decision skipped/safety_block).
+        """
+        account_path = self.output_dir / "account-before-order.json"
+        today_fills_path = self.output_dir / "today-fills.json"
+        # Both branches below apply the same strict identity/completeness
+        # validators used by the full-review reuse contract in
+        # collect_main_evidence.py: exact run_id, non-partial/non-failed
+        # status, and (for today-fills) non-skipped account scope. A stale or
+        # wrong-run artifact must never be silently trusted -- it is treated
+        # as a failed collection, which forces a safety_block below.
+        if self.args.reuse_existing_artifacts and account_path.exists():
+            account = load_json_if_exists(account_path) or {}
+            collection_ok = collect_main_evidence.valid_reused_account_artifact(account, run_id=self.run_id)
+            self.add_stage(
+                "broker-preflight-snapshot",
+                "success" if collection_ok else "failed",
+                required=False,
+                detail=(
+                    "reused existing account-before-order artifact"
+                    if collection_ok
+                    else "reused account-before-order artifact missing or invalid for this run"
+                ),
+                path=account_path,
+            )
+        else:
+            cmd = [
+                sys.executable,
+                self.main_evidence_script(),
+                "collect",
+                "--run-id",
+                self.run_id,
+                "--started-at",
+                self.started_at,
+                "--symbols",
+                ",".join(symbols),
+                "--output-dir",
+                str(self.output_dir),
+                "--env",
+                self.args.env,
+                "--request-type",
+                self.args.request_type,
+                "--skip-price-chart",
+                "--skip-account-asset",
+            ]
+            result = self.run_cmd("broker-preflight-snapshot", cmd)
+            account = load_json_if_exists(account_path) or {}
+            collection_ok = result.returncode == 0 and collect_main_evidence.valid_reused_account_artifact(
+                account, run_id=self.run_id
+            )
+            self.add_stage(
+                "broker-preflight-snapshot",
+                "success" if collection_ok else "failed",
+                required=False,
+                detail=f"status={account.get('status')}",
+                path=account_path,
+            )
+        account_status = str(account.get("status") or "") if collection_ok else "failed"
+
+        lifecycle: dict[str, Any] = {}
+        if collection_ok:
+            lifecycle = self.run_order_lifecycle_preflight(required=False)
+            account = load_json_if_exists(account_path) or {}
+
+        today_fills = load_json_if_exists(today_fills_path) or {}
+        today_fills_complete = collection_ok and collect_main_evidence.valid_reused_today_fills_artifact(
+            today_fills, run_id=self.run_id
+        )
+        lookup_complete = collection_ok and bool(lifecycle.get("lookup_complete"))
+        holding_state_issue_count = int(lifecycle.get("holding_state_issue_count") or 0)
+        account_summary = account.get("account_summary") if isinstance(account, dict) else {}
+        orderable_cash_amount = (account_summary or {}).get("orderable_cash_amount")
+        unexpected_non_universe_symbols = review_policy.unexpected_non_universe_holdings(account, portfolio_except)
+
+        safety = review_policy.evaluate_safety(
+            lookup_complete=lookup_complete,
+            orderable_cash_amount=orderable_cash_amount,
+            holding_state_issue_count=holding_state_issue_count,
+            account_status=account_status,
+            today_fills_complete=today_fills_complete,
+            unexpected_non_universe_symbols=unexpected_non_universe_symbols,
+        )
+
+        full_review_times, full_review_times_path = self.resolve_full_review_times()
+        config_fingerprint = self.compute_config_fingerprint(full_review_times_path)
+        fingerprint_payload = review_policy.build_fingerprint_payload(
+            universe=symbols,
+            account=account,
+            lifecycle=lifecycle,
+            today_fills=today_fills,
+            config_fingerprint=config_fingerprint,
+        )
+        fingerprint = review_policy.fingerprint_hash(fingerprint_payload)
+
+        env_dv = self.env_dv_for_review_state()
+        state_path = review_policy.review_trigger_state_path(self.workspace_dir, env_dv)
+        prior_state = review_policy.load_review_trigger_state(state_path)
+        today = report_date_from(self.started_at)
+        started_kst = parse_kst_datetime(self.started_at)
+        now_minutes = started_kst.hour * 60 + started_kst.minute
+        prior_fingerprint_payload = prior_state.fingerprint_payload if prior_state.date == today else {}
+        changed_components = review_policy.changed_components(prior_fingerprint_payload, fingerprint_payload)
+
+        if not safety.safe:
+            decision_info: dict[str, Any] = {
+                "decision": "safety_block",
+                "reasons": safety.reasons,
+                "due_slot": review_policy.due_slot(full_review_times, now_minutes),
+            }
+        else:
+            decision_info = review_policy.decide_full_review(
+                now_minutes=now_minutes,
+                full_review_times=full_review_times,
+                today=today,
+                state=prior_state,
+                fingerprint=fingerprint,
+                invocation_type=self.invocation_type,
+            )
+
+        self._review_gate = {
+            "decision_info": decision_info,
+            "universe": list(symbols),
+            "config_fingerprint": config_fingerprint,
+            "state_path": state_path,
+            "today": today,
+            "prior_state": prior_state,
+        }
+
+        review_trigger_path = self.output_dir / "review-trigger.json"
+        write_json(
+            review_trigger_path,
+            {
+                "schema_version": "2",
+                "run_id": self.run_id,
+                "invocation_type": self.invocation_type,
+                "env": env_dv,
+                "decision": decision_info["decision"],
+                "reasons": decision_info["reasons"],
+                "due_slot": decision_info["due_slot"],
+                "prior_state": prior_state.to_json(),
+                "fingerprint": fingerprint,
+                "fingerprint_payload": fingerprint_payload,
+                "changed_components": changed_components,
+                "safety": {
+                    "safe": safety.safe,
+                    "reasons": safety.reasons,
+                    "lookup_complete": lookup_complete,
+                    "orderable_cash_available": orderable_cash_amount is not None,
+                    "holding_state_issue_count": holding_state_issue_count,
+                    "today_fills_complete": today_fills_complete,
+                    "unexpected_non_universe_symbols": unexpected_non_universe_symbols,
+                },
+                "full_review_selected": decision_info["decision"] == "full",
+                "full_review_completed": False,
+            },
+        )
+        self.add_stage(
+            "review-trigger",
+            "success",
+            detail=f"decision={decision_info['decision']} reasons={','.join(decision_info['reasons']) or 'none'}",
+            path=review_trigger_path,
+        )
+
+        # Rule 2: persist the new fingerprint immediately only for a completed
+        # `skipped` preflight. A `full` decision updates state only after the
+        # full review actually finishes (see finalize_review_gate_state), so a
+        # crash/failure after selecting `full` leaves the prior fingerprint in
+        # place and the same broker change is still detected next invocation.
+        if safety.safe and decision_info["decision"] == "skipped":
+            self.save_review_trigger_state_safely(
+                state_path,
+                review_policy.ReviewTriggerState(
+                    date=today,
+                    fingerprint=fingerprint,
+                    last_satisfied_time=prior_state.last_satisfied_time if prior_state.date == today else "",
+                    fingerprint_payload=fingerprint_payload,
+                ),
+                stage_detail="persisted skipped-preflight fingerprint",
+            )
+
+        if decision_info["decision"] == "full":
+            return None
+        return self.finalize_short_circuit_summary(decision_info, account, lifecycle, today_fills, safety)
+
+    def save_review_trigger_state_safely(
+        self, state_path: Path, state: "review_policy.ReviewTriggerState", *, stage_detail: str
+    ) -> None:
+        """Persist review-trigger state without letting a write failure fail the run.
+
+        A persistence error must not turn an otherwise-completed trading run
+        into a runner failure; it leaves the prior state on disk, which keeps
+        the next invocation conservatively eligible for a full review (a stale
+        date/fingerprint reads as first-run-of-day or a broker-fingerprint
+        change) rather than silently trusting an unwritten decision.
+        """
+        try:
+            review_policy.save_review_trigger_state(state_path, state)
+        except OSError as exc:
+            self.add_stage(
+                "review-trigger-state-persist",
+                "partial",
+                required=False,
+                detail=f"{stage_detail} failed: {exc}",
+                path=state_path,
+            )
+            return
+        self.add_stage(
+            "review-trigger-state-persist", "success", required=False, detail=stage_detail, path=state_path
+        )
+
+    def finalize_short_circuit_summary(
+        self,
+        decision_info: dict[str, Any],
+        account: dict[str, Any],
+        lifecycle: dict[str, Any],
+        today_fills: dict[str, Any],
+        safety: "review_policy.SafetyCheck",
+    ) -> dict[str, Any]:
+        account_summary = account.get("account_summary") if isinstance(account, dict) else {}
+        # A safety_block is a deliberate, successfully-completed short-circuit,
+        # but it did skip a would-be-due review; report it as partial (not
+        # success) so run.json/pipeline-summary.json stay consistent with the
+        # required=False lifecycle stage recorded during the gate. Either way
+        # the run still exits 0 (see summarized status handling in command_run).
+        status = "partial" if decision_info["decision"] == "safety_block" else "success"
+        # Render the telegram summary (which adds its own stage) before taking
+        # the final stage snapshot, so pipeline-summary.json/run.json are
+        # written exactly once with a status that matches every stage's
+        # required flag -- no later add_stage call can drift them apart.
+        self.write_short_circuit_telegram_summary(decision_info, account_summary, lifecycle, safety)
+        stages = self.load_summary_stages()
+        self.stages = stages
+        summary = {
+            "schema_version": "1",
+            "run_id": self.run_id,
+            "started_at": self.started_at,
+            "status": status,
+            "run_dir": str(self.output_dir),
+            "summary_path": str(self.summary_path),
+            "command_log_path": str(self.command_log_path),
+            "telegram_summary_path": str(self.output_dir / "telegram-summary.txt"),
+            "html_report_path": str(self.output_dir / "daily-trading-report.html"),
+            "html_report_available": False,
+            "stages": stages,
+            "review_trigger": {
+                "decision": decision_info["decision"],
+                "reasons": decision_info["reasons"],
+                "due_slot": decision_info["due_slot"],
+            },
+            "account_summary": account_summary,
+            "order_lifecycle": {
+                "status": lifecycle.get("status") if isinstance(lifecycle, dict) else "not_run",
+                "lookup_complete": bool(lifecycle.get("lookup_complete")) if isinstance(lifecycle, dict) else False,
+                "active_order_count": int(lifecycle.get("active_order_count") or 0) if isinstance(lifecycle, dict) else 0,
+                "holding_state_issue_count": int(lifecycle.get("holding_state_issue_count") or 0)
+                if isinstance(lifecycle, dict)
+                else 0,
+            },
+            "today_fills_summary": {
+                "fill_count": len(today_fills.get("fills", [])) if isinstance(today_fills.get("fills"), list) else 0,
+            },
+            "safety": {"safe": safety.safe, "reasons": safety.reasons},
+            "token_usage": {"main": zero_usage(), "subagents": zero_usage(), "total": zero_usage()},
+        }
+        write_json(self.summary_path, summary)
+        self.write_run_json(status=status)
+        return summary
+
+    def write_short_circuit_telegram_summary(
+        self,
+        decision_info: dict[str, Any],
+        account_summary: dict[str, Any],
+        lifecycle: dict[str, Any],
+        safety: "review_policy.SafetyCheck",
+    ) -> None:
+        path = self.output_dir / "telegram-summary.txt"
+        decision = decision_info["decision"]
+        if decision == "safety_block":
+            header = "<b>daily-trading 안전 차단 (전체 리뷰 미실행)</b>"
+        else:
+            header = "<b>daily-trading 사전점검 완료 (전체 리뷰 생략)</b>"
+        lines = [
+            header,
+            f"run_id: {self.run_id}",
+            f"결정: {decision}",
+            f"사유: {', '.join(decision_info['reasons']) or '-'}",
+        ]
+        if decision == "safety_block":
+            lines.append(f"안전 문제: {', '.join(safety.reasons) or '-'}")
+        cash = (account_summary or {}).get("orderable_cash_amount")
+        if cash is not None:
+            lines.append(f"주문가능금액: {format_number(cash)}")
+        active_count = lifecycle.get("active_order_count") if isinstance(lifecycle, dict) else None
+        if active_count is not None:
+            lines.append(f"활성 주문: {active_count}건")
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.stages = [item for item in self.stages if item.get("stage") != "telegram-summary"]
+        self.add_stage(
+            "telegram-summary", "success", required=False, detail="rendered short-circuit telegram-summary.txt", path=path
+        )
+
+    def finalize_review_gate_state(self, summary: dict[str, Any]) -> None:
+        gate = self._review_gate
+        if gate is None or gate["decision_info"]["decision"] != "full":
+            return
+        if summary.get("status") == "failed":
+            # A crashed/failed full review must not satisfy the due slot or
+            # overwrite the fingerprint the gate compared against; the next
+            # invocation re-evaluates from the same prior state (rule 6).
+            return
+        account = load_json_if_exists(self.output_dir / "account-before-order.json") or {}
+        lifecycle = load_json_if_exists(self.output_dir / "order-lifecycle.json") or {}
+        today_fills = load_json_if_exists(self.output_dir / "today-fills.json") or {}
+        fingerprint_payload = review_policy.build_fingerprint_payload(
+            universe=gate["universe"],
+            account=account,
+            lifecycle=lifecycle,
+            today_fills=today_fills,
+            config_fingerprint=gate["config_fingerprint"],
+        )
+        fingerprint = review_policy.fingerprint_hash(fingerprint_payload)
+        due = gate["decision_info"]["due_slot"]
+        prior_state = gate["prior_state"]
+        last_satisfied = prior_state.last_satisfied_time if prior_state.date == gate["today"] else ""
+        if due is not None and (
+            not last_satisfied or review_policy.parse_time_minutes(last_satisfied) < review_policy.parse_time_minutes(due)
+        ):
+            last_satisfied = due
+        self.save_review_trigger_state_safely(
+            gate["state_path"],
+            review_policy.ReviewTriggerState(
+                date=gate["today"],
+                fingerprint=fingerprint,
+                last_satisfied_time=last_satisfied,
+                fingerprint_payload=fingerprint_payload,
+            ),
+            stage_detail="persisted post-full-review fingerprint",
+        )
+        trigger_path = self.output_dir / "review-trigger.json"
+        trigger = load_json_if_exists(trigger_path) or {}
+        trigger["full_review_completed"] = True
+        trigger["completed_fingerprint"] = fingerprint
+        trigger["completed_fingerprint_payload"] = fingerprint_payload
+        write_json(trigger_path, trigger)
 
     def collect_optional_cache(self, domain: str, symbols: list[str]) -> str:
         configured = self.args.financial_cache_path if domain == "financial" else self.args.symbol_news_cache_path
@@ -3366,9 +3759,18 @@ class Pipeline:
             raise RuntimeError("check-portfolio universe is empty")
         self.add_stage("portfolio-universe", "success", detail=f"{len(symbols)} symbols", path=portfolio_path)
 
-        self.collect_main_evidence(symbols)
-        if getattr(self.args, "submit_orders", False) and self.args.request_type in {"demo-submit", "real-submit"}:
-            self.run_order_lifecycle_preflight()
+        gate_ran = self.broker_preflight_gate_applicable()
+        if gate_ran:
+            portfolio_except = normalize_symbol_ids(portfolio.get("portfolio_except"))
+            short_circuit_summary = self.run_broker_preflight_gate(symbols, portfolio_except)
+            if short_circuit_summary is not None:
+                return short_circuit_summary
+
+        # When the gate ran and selected "full", it already collected and
+        # lifecycle-reconciled account-before-order.json/today-fills.json for
+        # this run_id; the continuation only needs price/chart + the optional
+        # account-asset snapshot, and must not re-run lifecycle preflight.
+        self.collect_main_evidence(symbols, reuse_account_and_fills=gate_ran)
         financial_cache = self.collect_optional_cache("financial", symbols)
         symbol_news_cache = self.collect_optional_cache("symbol_news", symbols)
         news_context = self.build_news_context(symbol_news_cache)
@@ -3480,7 +3882,16 @@ class Pipeline:
         if token_summary is not None:
             detail = "main/sub-agent token summary built" if self.args.main_events else "sub-agent token summary built"
             self.add_stage("token-summary", "success", detail=detail, required=False, path=self.output_dir / "token-summary.json")
-        return self.build_summary(portfolio)
+        summary = self.build_summary(portfolio)
+        self.finalize_review_gate_state(summary)
+        # finalize_review_gate_state may have added a non-required
+        # trigger-state-persist stage after build_summary's final write; take
+        # a fresh snapshot and re-assert the already-decided status so
+        # run.json/pipeline-summary.json never drift from what was returned.
+        summary["stages"] = self.load_summary_stages()
+        write_json(self.summary_path, summary)
+        self.write_run_json(status=summary["status"])
+        return summary
 
 
 def run_self_test() -> int:
@@ -3525,6 +3936,17 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--reuse-existing-artifacts", action="store_true")
     run.add_argument("--skip-account", action="store_true")
     run.add_argument("--max-workers", type=int, default=2)
+    run.add_argument(
+        "--invocation-type",
+        choices=["scheduled", "manual"],
+        default="manual",
+        help="scheduled invocations run a deterministic broker preflight before deciding on a full review; manual always runs full after a safe preflight.",
+    )
+    run.add_argument(
+        "--full-review-times-config",
+        default="",
+        help="Optional YAML file listing fixed KST full-review times; defaults to the profile config.",
+    )
 
     summarize = subparsers.add_parser("summarize", help="Rebuild pipeline-summary.json and the portfolio Markdown report from existing run artifacts.")
     summarize.add_argument("--workspace-dir", default=".")

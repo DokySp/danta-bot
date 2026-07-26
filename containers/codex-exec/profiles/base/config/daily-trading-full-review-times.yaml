@@ -1,0 +1,16 @@
+# Fixed KST times at which a scheduled daily-trading invocation must run the
+# full review (universe evidence, Analyst, Debate, Judge, execution) even if
+# the deterministic broker preflight otherwise finds nothing due.
+#
+# Every scheduled invocation still runs the cheap broker preflight first; the
+# times below are the slots that preflight alone cannot satisfy. Keep this
+# list strictly increasing HH:MM (24h, KST) and in sync with the schedules in
+# containers/codex-exec/profiles/base/config/schedules.yaml.
+full_review_times:
+  - "07:00"
+  - "09:05"
+  - "10:00"
+  - "11:30"
+  - "13:00"
+  - "14:00"
+  - "15:15"

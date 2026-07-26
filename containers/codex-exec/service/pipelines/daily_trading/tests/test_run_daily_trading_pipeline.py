@@ -237,7 +237,7 @@ def write_self_test_fixtures(workspace: Path, run_dir: Path) -> Path:
         run_dir / "price-chart.json",
         {
             "schema_version": "1",
-            "run_id": "pipeline-self-test",
+            "run_id": run_dir.name,
             "started_at": "2026-06-18T09:00:00+09:00",
             "status": "success",
             "symbols": [
@@ -274,7 +274,7 @@ def write_self_test_fixtures(workspace: Path, run_dir: Path) -> Path:
         run_dir / "account-before-order.json",
         {
             "schema_version": "1",
-            "run_id": "pipeline-self-test",
+            "run_id": run_dir.name,
             "started_at": "2026-06-18T09:00:00+09:00",
             "status": "success",
             "order_gate_status": "not_run",
@@ -296,7 +296,7 @@ def write_self_test_fixtures(workspace: Path, run_dir: Path) -> Path:
         run_dir / "account-asset-snapshot.json",
         {
             "schema_version": "1",
-            "run_id": "pipeline-self-test",
+            "run_id": run_dir.name,
             "started_at": "2026-06-18T09:00:00+09:00",
             "generated_at": "2026-06-18T09:00:05+09:00",
             "observed_at": "2026-06-18T09:00:05+09:00",
@@ -328,7 +328,7 @@ def write_self_test_fixtures(workspace: Path, run_dir: Path) -> Path:
         run_dir / "today-fills.json",
         {
             "schema_version": "1",
-            "run_id": "pipeline-self-test",
+            "run_id": run_dir.name,
             "started_at": "2026-06-18T09:00:00+09:00",
             "stage": "today-fills",
             "status": "success",

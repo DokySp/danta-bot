@@ -1,3 +1,4 @@
+import fcntl
 import html
 import logging
 import os
@@ -34,6 +35,30 @@ class DailyTradingDirectResult:
     html_report_path: Path | None
 
 
+_DIRECT_RUN_LOCK_RELATIVE_PATH = Path("reports") / "daily-trading-direct.lock"
+
+
+def _acquire_direct_run_lock(workspace_dir: Path) -> Any:
+    """Serialize daily-trading direct executions across scheduler/Telegram threads.
+
+    Blocks until any other in-flight scheduled/manual daily-trading run
+    releases the lock, so the broker-preflight review-trigger state file is
+    never read/updated by two overlapping runs at once.
+    """
+    lock_path = workspace_dir / _DIRECT_RUN_LOCK_RELATIVE_PATH
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(lock_path, "a", encoding="utf-8")
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    return handle
+
+
+def _release_direct_run_lock(handle: Any) -> None:
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
 def daily_trading_report_attachment_filename(path: Path) -> str:
     run_id = path.parent.name.strip()
     if not run_id:
@@ -51,12 +76,28 @@ class DailyTradingDirectRunner:
         raw_config: Any,
         chat_id: str | None = None,
         route: str | None = None,
+        invocation_type: str = "manual",
+    ) -> DailyTradingDirectResult:
+        lock_handle = _acquire_direct_run_lock(self.config.workspace_dir)
+        try:
+            return self._run_locked(raw_config, chat_id, route, invocation_type)
+        finally:
+            _release_direct_run_lock(lock_handle)
+
+    def _run_locked(
+        self,
+        raw_config: Any,
+        chat_id: str | None,
+        route: str | None,
+        invocation_type: str,
     ) -> DailyTradingDirectResult:
         context = new_codex_run_context()
         run_dir = self.config.workspace_dir / "reports" / "runs" / context.run_id
         run_dir.mkdir(parents=True, exist_ok=True)
         usage_before = read_usage_snapshot(self.config)
-        cmd, schedule_config = build_daily_trading_command(self.config, context, raw_config, run_dir)
+        cmd, schedule_config = build_daily_trading_command(
+            self.config, context, raw_config, run_dir, invocation_type=invocation_type
+        )
         logging.info("running scheduled daily-trading pipeline command=%s", shlex.join(cmd))
         env = os.environ.copy()
         env["CODEX_MCP_TRADING_ENV"] = schedule_config.env

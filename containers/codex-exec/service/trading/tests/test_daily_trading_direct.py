@@ -9,15 +9,17 @@ orchestration logic, not just its mocks.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import subprocess
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from ..daily_trading_direct import DailyTradingDirectRunner
+from ..daily_trading_direct import DailyTradingDirectRunner, _DIRECT_RUN_LOCK_RELATIVE_PATH
 
 
 def make_config(workspace_dir: Path) -> Mock:
@@ -80,6 +82,51 @@ class DailyTradingDirectRunnerTest(unittest.TestCase):
         self.assertIsNotNone(result.html_report_path)
         self.assertTrue(result.html_report_path.is_file())
         self.assertIn("작업 시작:", result.output)
+
+    def test_scheduled_invocation_type_is_forwarded_to_the_pipeline_command(self) -> None:
+        """The cost reduction is disabled if the scheduler ever forgets to
+        pass invocation_type="scheduled" -- assert the exact flag reaches the
+        constructed pipeline command, not just that run() succeeds.
+        """
+        def fake_subprocess_run(cmd, **kwargs):
+            output_dir = output_dir_from_cmd(cmd)
+            (output_dir / "telegram-summary.txt").write_text("요약")
+            return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+        with patch("service.trading.daily_trading_direct.subprocess.run", side_effect=fake_subprocess_run) as run_mock:
+            self.runner.run(self.raw_config(), invocation_type="scheduled")
+
+        cmd = run_mock.call_args.args[0]
+        self.assertIn("--invocation-type", cmd)
+        self.assertEqual(cmd[cmd.index("--invocation-type") + 1], "scheduled")
+
+    def test_manual_invocation_type_is_forwarded_to_the_pipeline_command(self) -> None:
+        """$execute-trade must stay force-full: assert the exact "manual" flag
+        reaches the constructed pipeline command.
+        """
+        def fake_subprocess_run(cmd, **kwargs):
+            output_dir = output_dir_from_cmd(cmd)
+            (output_dir / "telegram-summary.txt").write_text("요약")
+            return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+        with patch("service.trading.daily_trading_direct.subprocess.run", side_effect=fake_subprocess_run) as run_mock:
+            self.runner.run(self.raw_config(), invocation_type="manual")
+
+        cmd = run_mock.call_args.args[0]
+        self.assertIn("--invocation-type", cmd)
+        self.assertEqual(cmd[cmd.index("--invocation-type") + 1], "manual")
+
+    def test_default_invocation_type_is_manual_when_caller_omits_it(self) -> None:
+        def fake_subprocess_run(cmd, **kwargs):
+            output_dir = output_dir_from_cmd(cmd)
+            (output_dir / "telegram-summary.txt").write_text("요약")
+            return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+        with patch("service.trading.daily_trading_direct.subprocess.run", side_effect=fake_subprocess_run) as run_mock:
+            self.runner.run(self.raw_config())
+
+        cmd = run_mock.call_args.args[0]
+        self.assertEqual(cmd[cmd.index("--invocation-type") + 1], "manual")
 
     def test_successful_run_without_html_report_returns_none_path(self) -> None:
         def fake_subprocess_run(cmd, **kwargs):
@@ -225,6 +272,63 @@ class DailyTradingDirectRunnerTest(unittest.TestCase):
         self.assertLessEqual(created_at, after)
         self.assertAlmostEqual((due_at - created_at).total_seconds(), 120, delta=2)
         self.assertAlmostEqual((expires_at - due_at).total_seconds(), 300, delta=2)
+
+
+class DailyTradingDirectRunnerSerializationTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.workspace_dir = Path(self._tmp.name)
+        stub_pipeline_script(self.workspace_dir)
+        self.config = make_config(self.workspace_dir)
+        self.runner = DailyTradingDirectRunner(self.config, codex_runner=Mock())
+
+    def raw_config(self, **overrides) -> dict:
+        base = {"env": "acct", "request_type": "analysis", "order_path": "auto"}
+        base.update(overrides)
+        return base
+
+    def test_scheduler_and_manual_runs_are_serialized_via_workspace_lock(self) -> None:
+        entered_first_run = threading.Event()
+        release_first_run = threading.Event()
+
+        def blocking_subprocess_run(cmd, **kwargs):
+            output_dir = output_dir_from_cmd(cmd)
+            entered_first_run.set()
+            release_first_run.wait(timeout=5)
+            (output_dir / "telegram-summary.txt").write_text("첫 실행 요약")
+            return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+        with patch("service.trading.daily_trading_direct.subprocess.run", side_effect=blocking_subprocess_run):
+            first_thread = threading.Thread(
+                target=self.runner.run, args=(self.raw_config(),), kwargs={"invocation_type": "scheduled"}
+            )
+            first_thread.start()
+            self.assertTrue(entered_first_run.wait(timeout=5), "first run never reached subprocess.run")
+
+            lock_path = self.workspace_dir / _DIRECT_RUN_LOCK_RELATIVE_PATH
+            self.assertTrue(lock_path.exists())
+            probe_handle = open(lock_path, "a", encoding="utf-8")
+            try:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(probe_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                probe_handle.close()
+
+            release_first_run.set()
+            first_thread.join(timeout=5)
+            self.assertFalse(first_thread.is_alive())
+
+            # Once the first (scheduled) run releases the lock, a second (manual)
+            # run can acquire it immediately.
+            def immediate_subprocess_run(cmd, **kwargs):
+                output_dir = output_dir_from_cmd(cmd)
+                (output_dir / "telegram-summary.txt").write_text("두번째 실행 요약")
+                return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+            with patch("service.trading.daily_trading_direct.subprocess.run", side_effect=immediate_subprocess_run):
+                result = self.runner.run(self.raw_config(), invocation_type="manual")
+            self.assertIn("두번째 실행 요약", result.output)
 
 
 if __name__ == "__main__":

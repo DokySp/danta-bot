@@ -156,7 +156,9 @@ class Scheduler:
                 self.config.telegram_typing_interval_seconds,
             ):
                 if daily_trading_config is not None:
-                    result = self.daily_trading_direct_runner.run(daily_trading_config, chat_id_text, route_text)
+                    result = self.daily_trading_direct_runner.run(
+                        daily_trading_config, chat_id_text, route_text, invocation_type="scheduled"
+                    )
                     output = result.output
                     html_report_path = result.html_report_path
                 else:

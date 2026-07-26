@@ -200,6 +200,24 @@ Run 아티팩트는 `reports/runs/<run_id>/` 아래에 둔다.
 
 목록은 파일을 직접 수정하거나 Telegram `/add_portfolio_except_ticker`, `/remove_portfolio_except_ticker` 명령으로 관리하며, 변경은 다음 run부터 반영된다(`/app/config` bind mount). 이미 접수된 미체결/예약 주문은 자동 취소하지 않으므로 필요하면 사용자가 직접 정리한다.
 
+## 스케줄 daily-trading broker-preflight gate
+
+`schedules.yaml`의 `daily_trading` submit(`demo-submit`/`real-submit`, `--submit-orders`) run은 전체 리뷰(universe 증거 수집, `analyst-review`, `judge-debate`, `judge-review`, 주문 실행) 전에 결정론적 broker-preflight gate를 거친다. `service/telegram/worker.py`의 `$execute-trade`는 `invocation_type=manual`, `service/scheduler/scheduler.py`가 실행하는 schedule job은 `invocation_type=scheduled`로 `run_daily_trading_pipeline.py run --invocation-type`에 전달한다. `analysis`/`prepare` request-type이나 `--submit-orders` 없는 run은 gate를 타지 않고 기존 동작 그대로 실행된다(오프라인 분석/unit test가 broker 접근을 요구하지 않도록 유지).
+
+Gate는 `scripts/collect_main_evidence.py collect --skip-price-chart --skip-account-asset`로 전체 universe 가격/차트와 optional account-asset snapshot 없이 계좌(`account-before-order.json`)와 당일 체결(`today-fills.json`)만 수집하고, `scripts/execute_orders.py preflight`(non-required)로 기존 active pending/reserved 주문과 같은 날 이전 cash 주문의 최신 상태를 반영한다. 이 preflight는 새 주문을 제출하지 않는다.
+
+**Safety 판정** — 다음 중 하나라도 해당하면 안전하지 않은 것으로 보고 `decision=safety_block`을 기록하며, LLM을 호출하지 않고 새 주문도 제출하지 않는다: 계좌 조회 실패, active order lifecycle lookup 불완전, 주문가능금액 조회 불가, `holding_state_issue_count>0`, 당일 체결(`today-fills.json`) 조회가 `status=success`·`skipped=false`·`fill_scope=account`가 아닌 경우, 또는 universe 밖 실보유 종목이 현재 `portfolio_except`에 명시되지 않은 경우(`unexpected_non_universe_holding`). safety_block은 실패한 실행이 아니라 완료된 실행이며 `run.json`/`pipeline-summary.json` status는 `partial`로 남아 경고 요약과 함께 성공 종료한다.
+
+**Full-review 판정** — 안전한 preflight에서만 판단한다. `invocation_type=manual`은 항상 full이다. scheduled는 다음 중 하나면 full이다: 그 날의 첫 안전 run(`first_safe_run_of_day`), 직전 같은 날짜/환경 preflight 대비 broker fingerprint 변경(`broker_fingerprint_changed`), 또는 `daily-trading-full-review-times.yaml`의 고정 KST 시각 중 현재 시각 이하 최신 시각이 아직 성공적으로 완료된 full review로 충족되지 않은 경우(`fixed_review_time_due`) — 이 규칙 덕분에 09:05 full review가 실패/누락되면 실제 시작 분과 무관하게 다음 invocation(예: 09:20)이 다시 full을 선택한다. 셋 다 아니면 `decision=skipped`로 전체 증거 수집/optional cache/LLM/실행 이전에 종료한다.
+
+Fingerprint는 `universe`, holdings(`current_live_holding_quantity`/당일 매수·매도수량), `active_status=active`인 active order만(identity/방향/가격/잔여수량/status), 당일 체결(identity/종목/방향/체결수량), 주문가능금액, 그리고 `daily-trading-strategy-policy.yaml`/fixed-time config/`review-extra-instructions` sha256을 합친 `config_fingerprint`로 구성한다. `observed_at`/`generated_at` 등 변동 timestamp는 제외해 같은 broker 상태의 두 preflight가 항상 같은 해시를 만들도록 한다.
+
+State 저장은 `memory/daily-trading/review-trigger-state-<real|demo>.json`(env별 분리)에 `date`, `fingerprint`, `fingerprint_payload`(sanitized canonical payload), `last_satisfied_time`을 원자적/fcntl-lock으로 기록한다. `decision=skipped`는 즉시 fingerprint를 저장한다. `decision=full`은 이 시점에 저장하지 않고, 전체 리뷰가 성공적으로 끝난 뒤(`finalize_review_gate_state`, 실행 후 관측된 broker 상태로 재계산한 fingerprint 사용)에만 fingerprint와 `last_satisfied_time`을 갱신한다 — crash/실패한 full review는 due slot도 fingerprint도 충족시키지 않으며, 다음 invocation은 저장된 이전 state와 다시 비교해 같은 broker 변경을 또 감지한다. state 파일 쓰기 자체가 실패해도 완료된 거래 run을 실패로 바꾸지 않고 non-required `review-trigger-state-persist` partial stage만 남기며(다음 invocation은 이전 state와 비교하므로 보수적으로 재판정된다), full review 대상 KST 고정 시각은 `daily-trading-full-review-times.yaml`(env `DAILY_TRADING_FULL_REVIEW_TIMES_CONFIG`로 override 가능)에서 읽고 오름차순 HH:MM인지 로드 시 검증한다.
+
+각 run은 `reports/runs/<run_id>/review-trigger.json`에 `decision`, `reasons`, `due_slot`, `prior_state`, `fingerprint`, `fingerprint_payload`, `changed_components`(직전 payload 대비 달라진 top-level 구성요소: `holdings`/`active_orders`/`fills`/`cash`/`universe`/`config`), `safety`, `full_review_selected`, `full_review_completed`를 기록한다(계좌번호·credential·raw broker response는 포함하지 않음). `full_review_selected`와 `full_review_completed`를 분리해 "이 gate가 full을 선택했다"와 "그 full review가 실제로 성공 완료됐다"를 구분하므로, crash한 full review가 due slot을 충족한 것으로 잘못 기록되지 않는다.
+
+Gate가 `full`을 선택하면 이미 수집·lifecycle-reconcile된 `account-before-order.json`/`today-fills.json`을 그대로 이어받는다 — 이어지는 `collect_main_evidence()` 호출은 `--reuse-account`로 계좌/체결을 재수집하지 않고 가격/차트와 optional account-asset snapshot만 수집하며(run_id/status 일치 여부를 확인한 뒤 재사용), lifecycle preflight도 다시 실행하지 않는다. 4/6 analyst-review 선정, judge-debate, judge-review, `execute_orders.py`의 주문 전 gate 재확인(`refresh_gates`)과 모든 실행 gate는 기존과 동일하게 유지된다.
+
 ## 유지보수 계약
 
 이 섹션은 사람이 보는 유지보수 계약이다. Runtime에서 이 문장을 직접 읽지 않으며, 실제 동작은 `scripts/` 아래 Python 코드에 구현되어 있다. LLM review sub-agent가 runtime에서 읽는 Markdown은 `prompts/` 아래 파일뿐이다.
