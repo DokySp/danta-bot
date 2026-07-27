@@ -73,17 +73,17 @@ For `analyst-momentum-news`, use the same shape with `views.analyst-momentum-cyc
 
 The two views in each combined execution agent must be evaluated independently. Do not copy one view's score, reason_code, or one_line_reason into the other view.
 
-Score scale:
+Score scale (evidence polarity/strength only; this is not a buy/sell/order decision or an action precondition):
 
 | Score | Meaning |
 |---:|---|
-| `9-10` | strong buy candidate |
-| `7-8` | buy candidate |
-| `5-6` | hold / neutral |
-| `3-4` | reduce / sell candidate |
-| `0-2` | strong sell candidate |
+| `9-10` | strongly positive evidence |
+| `7-8` | positive evidence |
+| `5-6` | hold / neutral evidence |
+| `3-4` | negative evidence |
+| `0-2` | strongly negative evidence |
 
-Every `score` must be a JSON integer from `0` to `10`; malformed, fractional, boolean, string, or out-of-range values invalidate the review output. The score itself must carry the directional strength of the supplied usable evidence: keep the score close to neutral `5` only when that evidence is genuinely weakly directional, stale, mixed, or conflicting. Missing optional-domain coverage alone must not pull an included view toward `5`. Do not express uncertainty anywhere else; there is no separate confidence field.
+Every `score` must be a JSON integer from `0` to `10`; malformed, fractional, boolean, string, or out-of-range values invalidate the review output. The score itself must carry the directional strength of the supplied usable evidence: keep the score close to neutral `5` only when that evidence is genuinely weakly directional, stale, mixed, or conflicting. Missing optional-domain coverage alone must not pull an included view toward `5`. Do not express uncertainty anywhere else; there is no separate confidence field. Scores are advisory/ranking/reporting inputs only: they never gate, select, or authorize any order, and they never assign a candidate/target/order direction.
 
 Return JSON:
 
@@ -134,4 +134,4 @@ final_first_score = mean_score
 ```
 
 In the normal successful path, the aggregation uses four canonical views: `analyst-quality-value`, `analyst-risk-allocation`, `analyst-momentum-cycle`, and `analyst-news-flow`. If `analyst-quality-value` has no usable stock financial summary or ETF/ETN summary, preserve its row with `reason_code="no_financial_excluded"` and `excluded_from_aggregation=true`. If `analyst-news-flow` has no usable news/disclosure summary, preserve its row with `reason_code="no_news_excluded"` and `excluded_from_aggregation=true`. Aggregate the remaining included views only. If any other view score is missing or unusable, keep the valid-score aggregation rule above and surface the missing score as an artifact error.
-If no valid score exists, exclude that symbol from `judge-review` and trading.
+If no valid score exists, preserve the artifact error. An eligible held symbol still enters `judge-review` because all eligible holdings are reviewed; an unheld symbol without a valid score cannot enter the score-ranked top-K.

@@ -188,6 +188,12 @@ else:
             }
         elif "stage: analyst-review" in prompt or "stage: judge-review" in prompt:
             stage = "judge-review" if "stage: judge-review" in prompt else "analyst-review"
+            symbol_line = next((line for line in prompt.splitlines() if line.startswith("symbol_ids: ")), "symbol_ids: 005930")
+            review_symbols = (
+                [value.strip() for value in symbol_line.split(":", 1)[1].split(",") if value.strip()]
+                if stage == "judge-review"
+                else ["005930"]
+            )
             if "agent_role: analyst-quality-risk" in prompt:
                 first_payload = {
                     "views": {
@@ -235,16 +241,22 @@ else:
                 "human_markdown_path": "",
                 "symbols": [
                     {
-                        "symbol_id": "005930",
-                        "symbol_name": "삼성전자",
+                        "symbol_id": symbol,
+                        "symbol_name": "삼성전자" if symbol == "005930" else symbol,
                         "reason_code": "hold_neutral",
                         "one_line_reason": "self-test",
                         **(
-                            {"target_position_value_krw": 70000, "relative_attractiveness_rank": 1}
+                            {
+                                "target_position_value_krw": 70000,
+                                "relative_attractiveness_rank": 1,
+                                "decision_basis": "none",
+                                "evidence_refs": ["analyst-review:005930:analyst-quality-value"],
+                            }
                             if stage == "judge-review"
                             else first_payload
                         ),
                     }
+                    for symbol in review_symbols
                 ],
                 "errors": [],
             }
@@ -350,7 +362,7 @@ def compact_debate_spec(
             "debate_format": "prompts/debate-format.md",
         },
         "symbol_ids": ["005930", "000660"],
-        "candidate_directions": {"005930": "buy", "000660": "sell"},
+        "review_scope_reasons": {"005930": "held_position", "000660": "unheld_score_rank"},
     }
     if phase == "opening":
         payload["artifact_paths"].update(
@@ -670,11 +682,11 @@ def assert_compact_review_prompt(tmp: Path) -> None:
         "stage: judge-review",
         "analyst_review:",
         "For judge-review, use the selected-symbol analyst-review slice from analyst_review; agent_scores excluded from aggregation are intentionally omitted from this judgment input.",
-        "The supplied symbols are pre-selected candidates by score band: sell candidates are held symbols with final_first_score <= 4, buy candidates have final_first_score >= 6.",
-        "Direction preconditions are hard constraints: a sell candidate may only be sold (partial or full) or held (target_position_value_krw <= baseline); a buy candidate may only be bought or held (target_position_value_krw >= baseline).",
-        "When the supplied usable evidence itself is insufficient or conflicting, the default decision is hold at the baseline.",
+        "The supplied symbols are every eligible held symbol (review_scope_reasons=held_position, regardless of score or missing score) plus the top-ranked unheld symbols by score (review_scope_reasons=unheld_score_rank).",
+        "Return no separate action. Return target_position_value_krw plus decision_basis (none|thesis|profit_protection|concentration_rebalance), evidence_refs (compact string list), reason_code, and one_line_reason.",
+        "When the supplied usable evidence itself is insufficient or conflicting, the default decision is hold at the baseline with decision_basis=none.",
         "final_first_score is the simple mean of the included analyst view scores",
-        "For held sell candidates, an intact long-term thesis favors holding despite the low score",
+        "For a held symbol with a low score, an intact long-term thesis favors holding despite the low score",
         "Use strategy_context and symbol_strategy_context as advisory inputs for target_position_value_krw, not as order allow/block rules.",
         "Use position_cost_context (average_purchase_price, purchase_amount, current_review_price, pct_distance_from_average_price) as reference information for profit/loss, risk, and position adjustments.",
         "Determine final direction and target exposure by considering thesis, market evidence, and portfolio risk together.",
@@ -734,17 +746,18 @@ def assert_compact_review_prompt(tmp: Path) -> None:
         or "target_holding_quantity must be a non-negative integer" not in rebuttal_prompt
     ):
         raise AssertionError(f"compact resumed rebuttal prompt missing session contract: {rebuttal_prompt}")
-    banded_spec = compact_spec(tmp, stage="judge-review", agent_role="judge", task_name="second-banded")
-    banded_spec["candidate_directions"] = {"005930": "sell", "000660": "buy"}
-    banded_spec["score_band_thresholds"] = {"sell_below": 4.0, "buy_above": 6.0}
-    banded_spec["portfolio_snapshot"] = [
-        {"symbol_id": "005930", "symbol_name": "삼성전자", "final_first_score": 3.5, "current_live_holding_quantity": 5, "valuation_amount": 350000, "pnl_rate": -3.2, "candidate_direction": "sell"}
+    scoped_spec = compact_spec(tmp, stage="judge-review", agent_role="judge", task_name="second-scoped")
+    scoped_spec["review_scope_reasons"] = {"005930": "held_position", "000660": "unheld_score_rank"}
+    scoped_spec["portfolio_snapshot"] = [
+        {"symbol_id": "005930", "symbol_name": "삼성전자", "final_first_score": 3.5, "current_live_holding_quantity": 5, "valuation_amount": 350000, "pnl_rate": -3.2}
     ]
-    banded_prompt = build_prompt(banded_spec)
-    if "candidate_directions: 000660=buy,005930=sell" not in banded_prompt:
-        raise AssertionError(f"candidate directions missing from judge prompt: {banded_prompt}")
-    if "portfolio_snapshot: " not in banded_prompt or '"final_first_score":3.5' not in banded_prompt.replace(" ", ""):
-        raise AssertionError(f"portfolio snapshot missing from judge prompt: {banded_prompt}")
+    scoped_prompt = build_prompt(scoped_spec)
+    if "review_scope_reasons: 000660=unheld_score_rank,005930=held_position" not in scoped_prompt:
+        raise AssertionError(f"review_scope_reasons missing from judge prompt: {scoped_prompt}")
+    if "candidate_directions" in scoped_prompt or "score_band" in scoped_prompt:
+        raise AssertionError(f"removed candidate-direction/score-band language leaked into judge prompt: {scoped_prompt}")
+    if "portfolio_snapshot: " not in scoped_prompt or '"final_first_score":3.5' not in scoped_prompt.replace(" ", ""):
+        raise AssertionError(f"portfolio snapshot missing from judge prompt: {scoped_prompt}")
 
 
 def assert_review_input_slices(tmp: Path) -> None:
@@ -1047,6 +1060,11 @@ def assert_review_input_slices(tmp: Path) -> None:
         raise AssertionError(f"one of two requested prior runs should produce partial coverage: {partial_context}")
     if partial_context.get("recent_submitted_trades") or "only when coverage_status=complete" not in str(partial_context.get("policy")):
         raise AssertionError(f"partial empty recent-trade history should remain explicitly unknown: {partial_context}")
+    if any(
+        phrase in str(partial_context.get("policy") or "").lower()
+        for phrase in ("score-band", "allowed candidate direction", "direction preconditions")
+    ):
+        raise AssertionError(f"retired score/direction gate leaked into recent-trade context: {partial_context}")
     write_json(coverage_probe / "invalid-orders" / "execution.json", {"run_id": "invalid-orders"})
     malformed_path = coverage_probe / "malformed" / "execution.json"
     malformed_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1454,6 +1472,8 @@ def step_invalid_spec_and_compact_schema_checks(tmp: Path) -> list[str]:
                         "one_line_reason": "유지한다.",
                         "target_position_value_krw": 560000,
                         "relative_attractiveness_rank": 1,
+                        "decision_basis": "none",
+                        "evidence_refs": ["analyst-review:005930:analyst-quality-value"],
                     }
                 ],
             },
@@ -1461,6 +1481,68 @@ def step_invalid_spec_and_compact_schema_checks(tmp: Path) -> list[str]:
         )
         if target_value_errors:
             raise AssertionError(f"target_position_value_krw judge-review schema was rejected: {target_value_errors}")
+        missing_symbol_errors = compact_review_payload_errors(
+            {
+                "stage": "judge-review",
+                "symbols": [
+                    {
+                        "symbol_id": "005930",
+                        "symbol_name": "삼성전자",
+                        "reason_code": "hold_neutral",
+                        "one_line_reason": "유지한다.",
+                        "target_position_value_krw": 560000,
+                        "relative_attractiveness_rank": 1,
+                        "decision_basis": "none",
+                        "evidence_refs": [],
+                    }
+                ],
+            },
+            "judge-review",
+            expected_symbol_ids=["005930", "000660"],
+        )
+        if not any(
+            "missing symbols: 000660" in str(error.get("message"))
+            for error in missing_symbol_errors
+        ):
+            raise AssertionError(
+                f"judge-review missing expected symbol was accepted: {missing_symbol_errors}"
+            )
+        duplicate_symbol_errors = compact_review_payload_errors(
+            {
+                "stage": "judge-review",
+                "symbols": [
+                    {
+                        "symbol_id": "005930",
+                        "symbol_name": "삼성전자",
+                        "reason_code": "hold_neutral",
+                        "one_line_reason": "유지한다.",
+                        "target_position_value_krw": 560000,
+                        "relative_attractiveness_rank": 1,
+                        "decision_basis": "none",
+                        "evidence_refs": [],
+                    },
+                    {
+                        "symbol_id": "005930",
+                        "symbol_name": "삼성전자",
+                        "reason_code": "hold_neutral",
+                        "one_line_reason": "유지한다.",
+                        "target_position_value_krw": 560000,
+                        "relative_attractiveness_rank": 1,
+                        "decision_basis": "none",
+                        "evidence_refs": [],
+                    },
+                ],
+            },
+            "judge-review",
+            expected_symbol_ids=["005930"],
+        )
+        if not any(
+            "duplicate judge-review symbol 005930" in str(error.get("message"))
+            for error in duplicate_symbol_errors
+        ):
+            raise AssertionError(
+                f"duplicate judge-review symbol was accepted: {duplicate_symbol_errors}"
+            )
         invalid_target_value_errors = compact_review_payload_errors(
             {
                 "stage": "judge-review",
@@ -1490,6 +1572,8 @@ def step_invalid_spec_and_compact_schema_checks(tmp: Path) -> list[str]:
                         "one_line_reason": "명시적으로 청산한다.",
                         "target_position_value_krw": 0,
                         "relative_attractiveness_rank": 1,
+                        "decision_basis": "thesis",
+                        "evidence_refs": ["analyst-review:005930:analyst-quality-value"],
                     }
                 ],
             },
@@ -2843,7 +2927,6 @@ class RunSubagentSelfTest(unittest.TestCase):
         spec = {
             "debate_phase": "rebuttal-1",
             "symbol_ids": ["005930"],
-            "candidate_directions": {"005930": "buy"},
             "portfolio_snapshot": [
                 {"symbol_id": "005930", "current_live_holding_quantity": 2}
             ],
@@ -2875,7 +2958,6 @@ class RunSubagentSelfTest(unittest.TestCase):
             codes,
             {
                 "inconsistent_debate_action_quantity",
-                "invalid_debate_candidate_direction",
                 "missing_debate_evidence_refs",
             },
         )

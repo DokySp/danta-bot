@@ -51,9 +51,10 @@ ORDER_REASON_LABELS = {
     "replacement_order_submission_failed": "대체주문 제출 실패",
     "order_submission_blocked": "주문 제출 차단",
     "submit_requires_explicit_execution_request": "명시적 실행 요청 필요",
-    "sell_blocked_score_band": "점수 밴드 매도 차단",
-    "buy_blocked_score_band": "점수 밴드 매수 차단",
-    "score_band_value_missing": "점수 확인 불가 차단",
+    "decision_guard_not_allowed": "정책 가드 차단",
+    "profit_protection_pnl_recheck_failed": "이익보호 손익 재확인 실패",
+    "profit_protection_reduction_bound_recheck_failed": "이익보호 축소 한도 재확인 실패",
+    "concentration_rebalance_recheck_failed": "집중도 재확인 실패",
     "holding_state_not_verified": "보유수량 상태 불일치",
     "stale_active_order_requires_cancellation": "이전 미체결 주문 정리 필요",
     "unverified_holding_requires_active_order_cancellation": "수량 불일치로 기존 미체결 주문 취소 필요",
@@ -812,10 +813,21 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
                 decision_evidence_html = render_decision_evidence(
                     final_item.get("one_line_reason"), debate_argument_index, run_index, symbol_id
                 )
+                decision_guard = final_item.get("decision_guard") if isinstance(final_item.get("decision_guard"), dict) else {}
+                guard_status = str(decision_guard.get("status") or "")
+                guard_reason = str(decision_guard.get("reason_code") or "")
+                guard_html = (
+                    f"<span class=\"badge {'warn' if guard_status == 'blocked' else 'info'}\">guard {esc(guard_status)}{(': ' + esc(guard_reason)) if guard_reason else ''}</span>"
+                    if guard_status
+                    else ""
+                )
                 judge_html = (
-                    f"<article class=\"final-card full\"><div><h3>Final Judge</h3><span class=\"badge info\">rank {number(final_item.get('relative_attractiveness_rank'))}</span></div>"
+                    f"<article class=\"final-card full\"><div><h3>Final Judge</h3><span class=\"badge info\">rank {number(final_item.get('relative_attractiveness_rank'))}</span>"
+                    f"<span class=\"badge info\">basis {esc(final_item.get('decision_basis') or 'none')}</span>{guard_html}</div>"
                     f"<div class=\"final-numbers\"><span>현재 {number(account_exposure.get('current_live_holding_quantity'))}주</span>"
-                    f"<span>최종 {number(final_item.get('final_holding_quantity'))}주</span><span>목표 {number(final_item.get('target_position_value_krw'))}원</span></div>"
+                    f"<span>최종 {number(final_item.get('final_holding_quantity'))}주</span>"
+                    f"<span>요청목표 {number(final_item.get('requested_target_position_value_krw'))}원 → 확정목표 {number(final_item.get('target_position_value_krw'))}원</span>"
+                    f"<span>{esc(final_item.get('requested_action') or 'hold')} → {esc(final_item.get('canonical_action') or 'hold')}</span></div>"
                     f"<p><code>{esc(final_item.get('reason_code'))}</code></p><p>{esc(final_item.get('one_line_reason'))}</p>"
                     f"{decision_evidence_html}{render_thesis_section(final_item)}</article>{''.join(phase_blocks)}"
                 )

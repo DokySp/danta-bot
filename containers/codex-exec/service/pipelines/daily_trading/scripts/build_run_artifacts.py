@@ -52,6 +52,11 @@ CHART_RECENT_ROW_LIMITS = {
     "monthly": 4,
     "intraday": 5,
 }
+# Bumped when the judge-review/execution contract changes shape. Version 2
+# replaces the legacy score-band direction fields with
+# review_scope_reasons/decision_basis/decision_guard, so a cached spec or
+# artifact built under the old contract can never masquerade as the new one.
+REVIEW_CONTRACT_VERSION = 2
 STRATEGY_POLICY_CONFIG_ENV = "DAILY_TRADING_STRATEGY_POLICY_CONFIG"
 STRATEGY_POLICY_CONFIG_FILENAME = "daily-trading-strategy-policy.yaml"
 STRATEGY_ADVISORY_LABELS = {
@@ -210,6 +215,23 @@ def validate_strategy_policy_config(payload: Any, source: Path) -> dict[str, Any
     if low is None or moderate is None or low < 0 or moderate < low:
         raise ValueError(f"strategy policy concentration_levels are invalid: {source}")
 
+    guards = payload.get("execution_guards") if isinstance(payload.get("execution_guards"), dict) else {}
+    top_k = guards.get("unheld_review_top_k")
+    if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 0:
+        raise ValueError(f"strategy policy execution_guards.unheld_review_top_k must be a non-negative integer: {source}")
+    profit_protection_max_reduction_pct = finite_float_value(guards.get("profit_protection_max_reduction_pct"))
+    concentration_rebalance_cap_pct = finite_float_value(guards.get("concentration_rebalance_cap_pct"))
+    concentration_rebalance_max_reduction_pct = finite_float_value(guards.get("concentration_rebalance_max_reduction_pct"))
+    max_daily_turnover_pct = finite_float_value(guards.get("max_daily_turnover_pct"))
+    for name, value in (
+        ("profit_protection_max_reduction_pct", profit_protection_max_reduction_pct),
+        ("concentration_rebalance_cap_pct", concentration_rebalance_cap_pct),
+        ("concentration_rebalance_max_reduction_pct", concentration_rebalance_max_reduction_pct),
+        ("max_daily_turnover_pct", max_daily_turnover_pct),
+    ):
+        if value is None or value <= 0 or value > 100:
+            raise ValueError(f"strategy policy execution_guards.{name} must be a number in (0, 100]: {source}")
+
     return {
         "schema_version": str(payload.get("schema_version") or "1"),
         "tracked_indexes": [str(item).strip() for item in tracked if str(item).strip()],
@@ -220,6 +242,13 @@ def validate_strategy_policy_config(payload: Any, source: Path) -> dict[str, Any
         "concentration_levels": {
             "low_lte_pct": low,
             "moderate_lte_pct": moderate,
+        },
+        "execution_guards": {
+            "unheld_review_top_k": top_k,
+            "profit_protection_max_reduction_pct": profit_protection_max_reduction_pct,
+            "concentration_rebalance_cap_pct": concentration_rebalance_cap_pct,
+            "concentration_rebalance_max_reduction_pct": concentration_rebalance_max_reduction_pct,
+            "max_daily_turnover_pct": max_daily_turnover_pct,
         },
     }
 
@@ -1652,13 +1681,13 @@ def build_analyst_review(args: argparse.Namespace) -> dict[str, Any]:
                     "required": True,
                 }
             )
-        if not scores:
-            continue
         aggregation_scores = [item for item in scores if not item.get("excluded_from_aggregation")]
-        if not aggregation_scores:
-            continue
-        mean_score = sum(item["score"] for item in aggregation_scores) / len(aggregation_scores)
         brief_symbol = symbols_by_id.get(symbol_id, {})
+        mean_score = (
+            sum(item["score"] for item in aggregation_scores) / len(aggregation_scores)
+            if aggregation_scores
+            else None
+        )
         artifact["symbols"].append(
             {
                 "symbol_id": symbol_id,
@@ -1679,16 +1708,17 @@ def build_second_spec(args: argparse.Namespace) -> dict[str, Any]:
     decision_brief = load_json(Path(args.decision_brief or output_dir / "decision-brief.json"))
     analyst_review = load_json(Path(args.analyst_review or output_dir / "analyst-review.json"))
     portfolio = read_json_arg(args.portfolio_json)
+    strategy_policy, _ = load_strategy_policy_config(getattr(args, "strategy_policy_config", ""))
+    unheld_review_top_k = int(strategy_policy["execution_guards"]["unheld_review_top_k"])
     eligible = set(eligible_symbol_ids(decision_brief))
     holding_set = {symbol_id for symbol_id in normalize_symbol_ids(portfolio.get("holding", [])) if symbol_id in eligible}
     brief_by_symbol = indexed_symbols(decision_brief.get("symbols"))
 
-    # Score bands are action preconditions: sell decisions only for held symbols
-    # scoring at or below sell_max_score, buy decisions only at or above buy_min_score.
-    # Symbols between the bands never reach the judge, so holding them is the
-    # only possible outcome.
-    selected: list[str] = []
-    candidate_directions: dict[str, str] = {}
+    # No score band and no assigned candidate direction: every eligible held
+    # symbol is always in scope (even with a missing/unusable score), and up to
+    # unheld_review_top_k unheld symbols with valid scores are added by
+    # deterministic descending-score-then-symbol-id rank. The judge proposes one
+    # target_position_value_krw per symbol; Python derives the action.
     scores_by_symbol: dict[str, float] = {}
     for item in analyst_review.get("symbols", []):
         symbol_id = symbol_key(item)
@@ -1696,14 +1726,19 @@ def build_second_spec(args: argparse.Namespace) -> dict[str, Any]:
         if not symbol_id or symbol_id not in eligible or final_first_score is None:
             continue
         scores_by_symbol[symbol_id] = final_first_score
-        if symbol_id in candidate_directions:
-            continue
-        if final_first_score >= args.buy_min_score:
-            candidate_directions[symbol_id] = "buy"
-            selected.append(symbol_id)
-        elif final_first_score <= args.sell_max_score and symbol_id in holding_set:
-            candidate_directions[symbol_id] = "sell"
-            selected.append(symbol_id)
+
+    review_scope_reasons: dict[str, str] = {}
+    for symbol_id in sorted(holding_set):
+        review_scope_reasons[symbol_id] = "held_position"
+
+    unheld_ranked = sorted(
+        (symbol_id for symbol_id in scores_by_symbol if symbol_id not in holding_set),
+        key=lambda symbol_id: (-scores_by_symbol[symbol_id], symbol_id),
+    )
+    for symbol_id in unheld_ranked[:unheld_review_top_k]:
+        review_scope_reasons[symbol_id] = "unheld_score_rank"
+
+    selected = sorted(review_scope_reasons)
 
     portfolio_snapshot: list[dict[str, Any]] = []
     for symbol_id in sorted(holding_set):
@@ -1717,7 +1752,6 @@ def build_second_spec(args: argparse.Namespace) -> dict[str, Any]:
                 "current_live_holding_quantity": as_int(exposure.get("current_live_holding_quantity")),
                 "valuation_amount": as_int(exposure.get("valuation_amount")),
                 "pnl_rate": as_number(exposure.get("pnl_rate")),
-                "candidate_direction": candidate_directions.get(symbol_id, "hold"),
             }
         )
 
@@ -1733,6 +1767,7 @@ def build_second_spec(args: argparse.Namespace) -> dict[str, Any]:
         "run_id": args.run_id or decision_brief.get("run_id") or output_dir.name,
         "started_at": args.started_at or decision_brief.get("started_at") or "",
         "stage": "judge-review",
+        "review_contract_version": REVIEW_CONTRACT_VERSION,
         "agent_role": "judge",
         "task_name": "second-judge",
         "workspace_dir": str(Path(args.workspace_dir).resolve()),
@@ -1748,8 +1783,7 @@ def build_second_spec(args: argparse.Namespace) -> dict[str, Any]:
             "debate_artifact": artifact_path(output_dir / "judge-debate.json", absolute_paths),
         },
         "symbol_ids": selected,
-        "candidate_directions": candidate_directions,
-        "score_band_thresholds": {"sell_below": args.sell_max_score, "buy_above": args.buy_min_score},
+        "review_scope_reasons": review_scope_reasons,
         "portfolio_snapshot": portfolio_snapshot,
     }
     if extra_instructions:
@@ -1800,6 +1834,10 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
     artifact = common_envelope(run_id, started_at, "execution")
     artifact.update(
         {
+            # Bumped: orders now carry requested/canonical target, decision_basis,
+            # decision_guard, and requested_action/canonical_action -- an old
+            # score-band-era execution.json can never be mistaken for this contract.
+            "schema_version": "2",
             "request_type": args.request_type,
             "requires_main_agent_order_execution": False,
             "required_main_agent_actions": [],
@@ -1815,10 +1853,34 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
     invalid_final_quantity = False
     refreshable_gate_blocked = False
     judge_symbol_ids: set[str] = set()
-    for item in judge_review.get("symbols", []):
-        if not isinstance(item, dict):
-            continue
+    judge_items = [
+        item
+        for item in judge_review.get("symbols", [])
+        if isinstance(item, dict) and symbol_key(item)
+    ]
+    judge_symbol_counts: dict[str, int] = {}
+    for item in judge_items:
+        item_symbol_id = symbol_key(item)
+        judge_symbol_counts[item_symbol_id] = judge_symbol_counts.get(item_symbol_id, 0) + 1
+    duplicate_judge_symbol_ids = {
+        symbol_id for symbol_id, count in judge_symbol_counts.items() if count > 1
+    }
+    for symbol_id in sorted(duplicate_judge_symbol_ids):
+        artifact["errors"].append(
+            {
+                "stage": "execution",
+                "source": "build_run_artifacts",
+                "code": "duplicate_judge_symbol",
+                "message": f"{symbol_id}: duplicate judge rows were rejected before order planning",
+                "required": True,
+            }
+        )
+    if duplicate_judge_symbol_ids:
+        blocked_any = True
+    for item in judge_items:
         symbol_id = symbol_key(item)
+        if symbol_id in duplicate_judge_symbol_ids:
+            continue
         judge_symbol_ids.add(symbol_id)
         account_item = account_by_symbol.get(symbol_id, {})
         brief_item = brief_by_symbol.get(symbol_id, {})
@@ -1900,6 +1962,12 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
                 "symbol_name": item.get("symbol_name") or account_item.get("symbol_name") or symbol_id,
                 "direction": direction,
                 "final_first_score": scores_by_symbol.get(symbol_id),
+                "requested_target_position_value_krw": item.get("requested_target_position_value_krw"),
+                "target_position_value_krw": item.get("target_position_value_krw"),
+                "requested_action": item.get("requested_action") or "hold",
+                "canonical_action": item.get("canonical_action") or "hold",
+                "decision_basis": item.get("decision_basis") or "none",
+                "decision_guard": item.get("decision_guard") if isinstance(item.get("decision_guard"), dict) else {},
                 "holding_state_status": holding_state_status,
                 "holding_state_reasons": list(account_item.get("holding_state_reasons") or []),
                 "current_live_holding_quantity": current_qty,
@@ -2147,8 +2215,7 @@ def build_parser() -> argparse.ArgumentParser:
     second_spec.add_argument("--analyst-review")
     second_spec.add_argument("--workspace-dir", default=".")
     second_spec.add_argument("--pipeline-dir", default=str(pipeline_dir()))
-    second_spec.add_argument("--buy-min-score", type=float, default=6.0, help="buy decisions require final_first_score at or above this")
-    second_spec.add_argument("--sell-max-score", type=float, default=4.0, help="sell decisions require final_first_score at or below this")
+    second_spec.add_argument("--strategy-policy-config", default="")
     second_spec.add_argument("--run-id")
     second_spec.add_argument("--started-at")
     second_spec.add_argument("--relative-paths", action="store_true")

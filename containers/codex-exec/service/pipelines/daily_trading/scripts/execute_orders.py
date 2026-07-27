@@ -16,6 +16,7 @@ import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -28,6 +29,8 @@ KST = ZoneInfo("Asia/Seoul")
 KIS_BASE_URL = "https://openapi.koreainvestment.com:9443"
 
 ENDPOINTS = {
+    "inquire_price": ("/uapi/domestic-stock/v1/quotations/inquire-price", "GET", "FHKST01010100", "FHKST01010100"),
+    "inquire_balance": ("/uapi/domestic-stock/v1/trading/inquire-balance", "GET", "TTTC8434R", "VTTC8434R"),
     "inquire_psbl_order": ("/uapi/domestic-stock/v1/trading/inquire-psbl-order", "GET", "TTTC8908R", "VTTC8908R"),
     "inquire_psbl_sell": ("/uapi/domestic-stock/v1/trading/inquire-psbl-sell", "GET", "TTTC8408R", "VTTC8408R"),
     "inquire_psbl_rvsecncl": ("/uapi/domestic-stock/v1/trading/inquire-psbl-rvsecncl", "GET", "TTTC0084R", "VTTC0084R"),
@@ -208,24 +211,269 @@ def load_portfolio_except_symbols() -> set[str]:
     return set()
 
 
-# Score-band gate: new submissions require the analyst-review score band that
-# selected the candidate (sell at or below SELL_MAX_SCORE, buy at or above
-# BUY_MIN_SCORE). Cancels and corrections of existing active orders are exempt.
-SELL_MAX_SCORE = 4.0
-BUY_MIN_SCORE = 6.0
-
-
-def score_band_block_reason(order: dict[str, Any], side: str) -> str:
+# Decision-guard gate: every genuinely new buy/sell submission (including
+# same-direction incremental exposure after active-order handling) requires a
+# matching decision_guard.status=="allowed" from the pipeline's policy guard.
+# Lifecycle-only cancellation/correction/reconciliation paths never call this.
+def decision_guard_block_reason(order: dict[str, Any], side: str) -> str:
+    """Fail closed unless the guard is allowed AND its canonical_action/basis actually
+    match this submission's side/decision_basis -- a forged, missing, or stale guard
+    (e.g. copied from a different decision) must never authorize an order."""
     if side not in {"buy", "sell"}:
         return ""
-    raw = order.get("final_first_score")
-    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw):
-        return "score_band_value_missing"
-    if side == "sell" and raw > SELL_MAX_SCORE:
-        return "sell_blocked_score_band"
-    if side == "buy" and raw < BUY_MIN_SCORE:
-        return "buy_blocked_score_band"
+    guard = order.get("decision_guard") if isinstance(order.get("decision_guard"), dict) else {}
+    status = str(guard.get("status") or "")
+    if status != "allowed":
+        return "decision_guard_not_allowed"
+    canonical_action = str(guard.get("canonical_action") or "")
+    if side == "buy" and canonical_action != "increase":
+        return "decision_guard_action_mismatch"
+    if side == "sell" and canonical_action not in {"reduce", "exit"}:
+        return "decision_guard_action_mismatch"
+    decision_basis = str(order.get("decision_basis") or "")
+    guard_basis = str(guard.get("basis") or "")
+    if not decision_basis or decision_basis != guard_basis:
+        return "decision_guard_basis_mismatch"
     return ""
+
+
+def fresh_balance_params(
+    cano: str,
+    product_code: str,
+    ctx_fk100: str = "",
+    ctx_nk100: str = "",
+) -> dict[str, str]:
+    return {
+        "CANO": cano,
+        "ACNT_PRDT_CD": product_code,
+        "AFHR_FLPR_YN": "N",
+        "OFL_YN": "",
+        "INQR_DVSN": "02",
+        "UNPR_DVSN": "01",
+        "FUND_STTL_ICLD_YN": "N",
+        "FNCG_AMT_AUTO_RDPT_YN": "N",
+        "PRCS_DVSN": "00",
+        "CTX_AREA_FK100": ctx_fk100,
+        "CTX_AREA_NK100": ctx_nk100,
+    }
+
+
+def fetch_fresh_domestic_balance(
+    kis: "Kis | None",
+    *,
+    max_pages: int = 20,
+) -> dict[str, Any] | None:
+    """One read-only KIS domestic inquire-balance snapshot per executor run.
+
+    Kept entirely separate from account-before-order.json/lifecycle state (this
+    is a fresh pre-submit recheck source, not a replacement for the pipeline's
+    account artifact). Returns None on any fetch/parse failure, missing total
+    evaluation amount, or non-dict per-symbol rows -- callers must fail closed
+    for profit_protection/concentration_rebalance new submissions rather than
+    fall back to a stale snapshot.
+    """
+    if kis is None:
+        return None
+    call_with_headers = getattr(kis, "call_with_headers", None)
+    ctx_fk100 = ""
+    ctx_nk100 = ""
+    tr_cont = ""
+    rows: list[dict[str, Any]] = []
+    summary_row: dict[str, Any] = {}
+    for _page in range(max_pages):
+        try:
+            params = fresh_balance_params(kis.cano, kis.product, ctx_fk100, ctx_nk100)
+            if callable(call_with_headers):
+                body, response_headers = call_with_headers(
+                    "inquire_balance",
+                    params=params,
+                    tr_cont=tr_cont,
+                )
+            else:
+                body = kis.call("inquire_balance", params=params)
+                response_headers = {}
+        except Exception:  # noqa: BLE001
+            return None
+        if not isinstance(body, dict):
+            return None
+        output1 = body.get("output1")
+        if not isinstance(output1, list) or not all(isinstance(row, dict) for row in output1):
+            return None
+        rows.extend(output1)
+        output2 = body.get("output2")
+        page_summary = (
+            output2[0]
+            if isinstance(output2, list) and output2 and isinstance(output2[0], dict)
+            else output2
+            if isinstance(output2, dict)
+            else {}
+        )
+        if not summary_row and page_summary:
+            summary_row = page_summary
+        next_tr_cont = str(response_headers.get("tr_cont") or "").strip()
+        if next_tr_cont not in {"F", "M"}:
+            break
+        ctx_fk100 = str(
+            body.get("ctx_area_fk100")
+            or body.get("CTX_AREA_FK100")
+            or page_summary.get("ctx_area_fk100")
+            or page_summary.get("CTX_AREA_FK100")
+            or ""
+        ).strip()
+        ctx_nk100 = str(
+            body.get("ctx_area_nk100")
+            or body.get("CTX_AREA_NK100")
+            or page_summary.get("ctx_area_nk100")
+            or page_summary.get("CTX_AREA_NK100")
+            or ""
+        ).strip()
+        if not (ctx_fk100 or ctx_nk100):
+            return None
+        tr_cont = "N"
+    else:
+        return None
+
+    symbols: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        symbol = symbol_key(row)
+        if not symbol:
+            continue
+        symbols[symbol] = {
+            "quantity": as_int(first(row, ("hldg_qty", "HLDG_QTY"))),
+            "average_purchase_price": as_number(first(row, ("pchs_avg_pric", "PCHS_AVG_PRIC"))),
+            "valuation_amount": as_number(first(row, ("evlu_amt", "EVLU_AMT"))),
+        }
+    total_evaluation_amount = as_number(first(summary_row, ("tot_evlu_amt", "TOT_EVLU_AMT")))
+    if total_evaluation_amount is None or total_evaluation_amount <= 0:
+        return None
+    return {"symbols": symbols, "total_evaluation_amount": total_evaluation_amount}
+
+
+def verify_concentration_rebalance(fresh_balance: dict[str, Any] | None, symbol: str, order: dict[str, Any]) -> bool:
+    """Fail-closed recheck against a fresh pre-submit balance snapshot.
+
+    Verifies the symbol is still above the approved cap (guard.cap_pct, stashed
+    on decision_guard by the pipeline) and that this order's validated
+    reduction, together with any already-pending sell, does not take the
+    post-trade valuation below the cap floor. The valuation uses the fresh
+    balance row's implied unit value, never a stale execution-plan order price.
+    Unavailable/incomplete fresh data, or a
+    concentration that has already fallen back within the cap, blocks rather
+    than trusting the earlier guard.
+    """
+    if not isinstance(fresh_balance, dict):
+        return False
+    total_evaluation_amount = as_number(fresh_balance.get("total_evaluation_amount"))
+    symbols = fresh_balance.get("symbols") if isinstance(fresh_balance.get("symbols"), dict) else {}
+    entry = symbols.get(symbol)
+    if total_evaluation_amount is None or total_evaluation_amount <= 0 or not isinstance(entry, dict):
+        return False
+    valuation_amount = as_number(entry.get("valuation_amount"))
+    fresh_qty = as_int(entry.get("quantity"))
+    if valuation_amount is None:
+        return False
+    guard = order.get("decision_guard") if isinstance(order.get("decision_guard"), dict) else {}
+    cap_pct = as_number(guard.get("cap_pct"))
+    if cap_pct is None or fresh_qty <= 0:
+        return False
+    current_pct = (valuation_amount / total_evaluation_amount) * 100
+    if current_pct <= cap_pct:
+        return False
+    validated_qty = as_int(order.get("validated_order_quantity"))
+    pending_sell_qty = as_int(order.get("pending_and_reserved_sell_quantity"))
+    post_trade_qty = fresh_qty - pending_sell_qty - validated_qty
+    if validated_qty <= 0 or post_trade_qty <= 0:
+        return False
+    # Revalue the post-trade quantity with the same fresh snapshot's implied
+    # per-share value. Using execution.order_price here could be stale and let a
+    # high old price understate the cap-floor quantity.
+    fresh_unit_value = valuation_amount / fresh_qty
+    cap_value = cap_pct / 100 * total_evaluation_amount
+    return post_trade_qty * fresh_unit_value >= cap_value
+
+
+def verify_profit_protection_pnl(kis: "Kis | None", fresh_balance: dict[str, Any] | None, symbol: str) -> bool:
+    """Immediate positive-PnL recheck for a profit_protection sell, right before submission.
+
+    Uses the freshest available account cost (average_purchase_price from this
+    run's fresh pre-submit balance snapshot, not account-before-order.json)
+    plus a fresh KIS current-price lookup. Inability to verify (no kis client,
+    missing fresh balance, missing cost, or a failed price lookup) blocks
+    rather than assuming the earlier positive PnL still holds.
+    """
+    if kis is None or not isinstance(fresh_balance, dict):
+        return False
+    symbols = fresh_balance.get("symbols") if isinstance(fresh_balance.get("symbols"), dict) else {}
+    entry = symbols.get(symbol)
+    if not isinstance(entry, dict):
+        return False
+    average_price = as_number(entry.get("average_purchase_price"))
+    if average_price is None or average_price <= 0:
+        return False
+    try:
+        current = kis.current_price(symbol)
+    except Exception:  # noqa: BLE001
+        return False
+    if current is None or current <= 0:
+        return False
+    return current > average_price
+
+
+def fresh_balance_quantity(fresh_balance: dict[str, Any] | None, symbol: str) -> int | None:
+    if not isinstance(fresh_balance, dict):
+        return None
+    symbols = fresh_balance.get("symbols") if isinstance(fresh_balance.get("symbols"), dict) else {}
+    entry = symbols.get(symbol)
+    if not isinstance(entry, dict):
+        return None
+    return non_negative_int_value(entry.get("quantity"))
+
+
+def verify_fresh_reduction_bounds(
+    fresh_balance: dict[str, Any] | None,
+    symbol: str,
+    order: dict[str, Any],
+) -> bool:
+    """Revalidate the approved partial-reduction bound against fresh holdings.
+
+    Existing pending sells and the new sell are one combined reduction from the
+    fresh holding. Missing bounds/data, a full exit, or a combined reduction
+    above the guard's max_reduction_pct all fail closed.
+    """
+    fresh_qty = fresh_balance_quantity(fresh_balance, symbol)
+    guard = order.get("decision_guard") if isinstance(order.get("decision_guard"), dict) else {}
+    max_reduction_pct = as_number(guard.get("max_reduction_pct"))
+    pending_sell_qty = as_int(order.get("pending_and_reserved_sell_quantity"))
+    new_sell_qty = as_int(order.get("validated_order_quantity"))
+    if (
+        fresh_qty is None
+        or fresh_qty <= 0
+        or max_reduction_pct is None
+        or not (0 < max_reduction_pct <= 100)
+        or pending_sell_qty < 0
+        or new_sell_qty <= 0
+    ):
+        return False
+    combined_reduction = pending_sell_qty + new_sell_qty
+    max_pct_reduction = int(
+        (
+            Decimal(fresh_qty)
+            * Decimal(str(max_reduction_pct))
+            / Decimal(100)
+        ).to_integral_value(rounding=ROUND_DOWN)
+    )
+    max_allowed_reduction = min(max_pct_reduction, fresh_qty - 1)
+    return 0 < combined_reduction <= max_allowed_reduction
+
+
+def as_number(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        parsed = float(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
 
 
 def env_dv(raw: str | None) -> str:
@@ -373,6 +621,12 @@ class Kis:
     def call(self, name: str, *, params: dict[str, str] | None = None, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         body, _ = self.call_with_headers(name, params=params, payload=payload)
         return body
+
+    def current_price(self, symbol: str) -> int | None:
+        body = self.call("inquire_price", params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": symbol})
+        output = body.get("output") if isinstance(body.get("output"), dict) else {}
+        price = as_int(output.get("stck_prpr"), 0)
+        return price if price > 0 else None
 
 
 def rows(body: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1457,7 +1711,7 @@ def apply_quantity_gates(
                     order,
                     reason="buy_cash_gate_reduced_reverse_rank",
                     gate="inquire_psbl_order",
-                    message=f"buy candidates exceeded latest buy cash limit {cash_limit}",
+                    message=f"buy orders exceeded latest buy cash limit {cash_limit}",
                     error_code="cash_gate",
                 )
                 return qty, 0, True
@@ -1722,7 +1976,7 @@ def refresh_gates(args: argparse.Namespace, account: dict[str, Any], execution: 
     return active, capacities, sell_capacities, errors, kis
 
 
-def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[dict[str, Any]], capacities: dict[str, dict[str, int]], sell_capacities: dict[str, dict[str, int]], *, submit: bool, kis: Kis | None) -> None:
+def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[dict[str, Any]], capacities: dict[str, dict[str, int]], sell_capacities: dict[str, dict[str, int]], *, submit: bool, kis: Kis | None, fresh_balance: dict[str, Any] | None = None) -> None:
     portfolio_except = load_portfolio_except_symbols()
     active_qty = active_quantities(active)
     active_by_symbol: dict[str, list[dict[str, Any]]] = {}
@@ -1735,14 +1989,46 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
     order_adjustments: list[dict[str, Any]] = []
     submitted = 0
     blocked = 0
+    execution_orders = [
+        order for order in execution.get("orders", []) if isinstance(order, dict)
+    ]
+    execution_symbol_counts: dict[str, int] = {}
+    for order in execution_orders:
+        order_symbol = symbol_key(order)
+        if order_symbol:
+            execution_symbol_counts[order_symbol] = (
+                execution_symbol_counts.get(order_symbol, 0) + 1
+            )
+    duplicate_execution_symbols = {
+        symbol for symbol, count in execution_symbol_counts.items() if count > 1
+    }
 
-    for order in execution.get("orders", []):
-        if not isinstance(order, dict):
-            continue
+    for order in execution_orders:
         symbol = symbol_key(order)
+        if symbol in duplicate_execution_symbols:
+            order["result"] = "blocked"
+            order["reason"] = "duplicate_execution_symbol"
+            order["attempts"] = (
+                order.get("attempts") if isinstance(order.get("attempts"), list) else []
+            )
+            order["attempts"].append(
+                attempt(
+                    "schema",
+                    "blocked",
+                    f"execution contains more than one order row for {symbol}",
+                    "duplicate_execution_symbol",
+                )
+            )
+            blocked += 1
+            continue
         account_item = account_by_symbol.get(symbol, {})
         active_item = active_qty.get(symbol, {"buy": 0, "sell": 0})
         current = as_int(account_item.get("current_live_holding_quantity"), as_int(order.get("current_live_holding_quantity")))
+        decision_basis = str(order.get("decision_basis") or "")
+        if decision_basis in {"profit_protection", "concentration_rebalance"}:
+            fresh_current = fresh_balance_quantity(fresh_balance, symbol)
+            if fresh_current is not None:
+                current = fresh_current
         expected = current + active_item["buy"] - active_item["sell"]
         holding_state_status = str(
             order.get("holding_state_status") or account_item.get("holding_state_status") or ""
@@ -1982,15 +2268,44 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
                 and conflict.get("order_path") == order_path
                 and conflict.get("order_api") == order_api
             ):
-                band_reason = score_band_block_reason(order, side)
-                if band_reason:
+                guard_reason = decision_guard_block_reason(order, side)
+                if guard_reason:
                     order["result"] = "blocked"
-                    order["reason"] = band_reason
-                    order["attempts"].append(attempt("score-band-gate", "blocked", f"final_first_score={order.get('final_first_score')} does not permit new {side} submission", band_reason))
+                    order["reason"] = guard_reason
+                    order["attempts"].append(attempt("decision-guard", "blocked", f"decision_guard={order.get('decision_guard')} does not permit new {side} submission", guard_reason))
                     if not active_adjustment_recorded:
                         order_adjustments.append(adjustment_row(conflict, action="keep", reason="same_direction_active_order_kept", result="skipped"))
                     blocked += 1
                     continue
+                if side == "sell" and decision_basis == "profit_protection":
+                    if not verify_profit_protection_pnl(kis, fresh_balance, symbol):
+                        order["result"] = "blocked"
+                        order["reason"] = "profit_protection_pnl_recheck_failed"
+                        order["attempts"].append(attempt("profit-protection-recheck", "blocked", "positive PnL could not be reverified immediately before submission", "profit_protection_pnl_recheck_failed"))
+                        if not active_adjustment_recorded:
+                            order_adjustments.append(adjustment_row(conflict, action="keep", reason="same_direction_active_order_kept", result="skipped"))
+                        blocked += 1
+                        continue
+                    if not verify_fresh_reduction_bounds(fresh_balance, symbol, order):
+                        order["result"] = "blocked"
+                        order["reason"] = "profit_protection_reduction_bound_recheck_failed"
+                        order["attempts"].append(attempt("profit-protection-recheck", "blocked", "fresh holdings no longer support the approved partial-reduction bound", "profit_protection_reduction_bound_recheck_failed"))
+                        if not active_adjustment_recorded:
+                            order_adjustments.append(adjustment_row(conflict, action="keep", reason="same_direction_active_order_kept", result="skipped"))
+                        blocked += 1
+                        continue
+                if side == "sell" and decision_basis == "concentration_rebalance":
+                    if (
+                        not verify_fresh_reduction_bounds(fresh_balance, symbol, order)
+                        or not verify_concentration_rebalance(fresh_balance, symbol, order)
+                    ):
+                        order["result"] = "blocked"
+                        order["reason"] = "concentration_rebalance_recheck_failed"
+                        order["attempts"].append(attempt("concentration-rebalance-recheck", "blocked", "latest quantities/valuation or approved reduction bound could not be reverified immediately before submission", "concentration_rebalance_recheck_failed"))
+                        if not active_adjustment_recorded:
+                            order_adjustments.append(adjustment_row(conflict, action="keep", reason="same_direction_active_order_kept", result="skipped"))
+                        blocked += 1
+                        continue
                 if qty <= 0 or price <= 0:
                     order["result"] = "blocked"
                     order["reason"] = "invalid_order_quantity_or_price"
@@ -2212,13 +2527,38 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
             order["reason"] = "final_equals_expected_holding_quantity"
             continue
 
-        band_reason = score_band_block_reason(order, side)
-        if band_reason:
+        guard_reason = decision_guard_block_reason(order, side)
+        if guard_reason:
             order["result"] = "blocked"
-            order["reason"] = band_reason
-            order["attempts"].append(attempt("score-band-gate", "blocked", f"final_first_score={order.get('final_first_score')} does not permit new {side} submission", band_reason))
+            order["reason"] = guard_reason
+            order["attempts"].append(attempt("decision-guard", "blocked", f"decision_guard={order.get('decision_guard')} does not permit new {side} submission", guard_reason))
             blocked += 1
             continue
+
+        if side == "sell" and decision_basis == "profit_protection":
+            if not verify_profit_protection_pnl(kis, fresh_balance, symbol):
+                order["result"] = "blocked"
+                order["reason"] = "profit_protection_pnl_recheck_failed"
+                order["attempts"].append(attempt("profit-protection-recheck", "blocked", "positive PnL could not be reverified immediately before submission", "profit_protection_pnl_recheck_failed"))
+                blocked += 1
+                continue
+            if not verify_fresh_reduction_bounds(fresh_balance, symbol, order):
+                order["result"] = "blocked"
+                order["reason"] = "profit_protection_reduction_bound_recheck_failed"
+                order["attempts"].append(attempt("profit-protection-recheck", "blocked", "fresh holdings no longer support the approved partial-reduction bound", "profit_protection_reduction_bound_recheck_failed"))
+                blocked += 1
+                continue
+
+        if side == "sell" and decision_basis == "concentration_rebalance":
+            if (
+                not verify_fresh_reduction_bounds(fresh_balance, symbol, order)
+                or not verify_concentration_rebalance(fresh_balance, symbol, order)
+            ):
+                order["result"] = "blocked"
+                order["reason"] = "concentration_rebalance_recheck_failed"
+                order["attempts"].append(attempt("concentration-rebalance-recheck", "blocked", "latest quantities/valuation or approved reduction bound could not be reverified immediately before submission", "concentration_rebalance_recheck_failed"))
+                blocked += 1
+                continue
 
         if qty <= 0 or price <= 0:
             order["result"] = "blocked"
@@ -2319,7 +2659,12 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         execution["requires_main_agent_order_execution"] = False
         execution["required_main_agent_actions"] = []
     else:
-        reconcile(account, execution, active, capacities, sell_capacities, submit=args.submit, kis=kis)
+        needs_fresh_balance = any(
+            isinstance(item, dict) and str(item.get("decision_basis") or "") in {"profit_protection", "concentration_rebalance"}
+            for item in execution.get("orders", [])
+        )
+        fresh_balance = fetch_fresh_domestic_balance(kis) if needs_fresh_balance else None
+        reconcile(account, execution, active, capacities, sell_capacities, submit=args.submit, kis=kis, fresh_balance=fresh_balance)
         if args.submit and kis is not None:
             reconcile_submitted_cash_orders(kis, execution)
     execution["order_execution_mode"] = "submit" if args.submit else "dry-run"

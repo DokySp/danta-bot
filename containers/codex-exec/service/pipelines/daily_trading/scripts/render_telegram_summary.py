@@ -46,9 +46,10 @@ REASON_LABELS = {
     "replacement_order_submission_failed": "대체주문 제출 실패",
     "order_submission_blocked": "주문 제출 차단",
     "submit_requires_explicit_execution_request": "명시적 실행 요청 필요",
-    "sell_blocked_score_band": "점수 밴드 매도 차단",
-    "buy_blocked_score_band": "점수 밴드 매수 차단",
-    "score_band_value_missing": "점수 확인 불가 차단",
+    "decision_guard_not_allowed": "정책 가드 차단",
+    "profit_protection_pnl_recheck_failed": "이익보호 손익 재확인 실패",
+    "profit_protection_reduction_bound_recheck_failed": "이익보호 축소 한도 재확인 실패",
+    "concentration_rebalance_recheck_failed": "집중도 재확인 실패",
     "holding_state_not_verified": "보유수량 상태 불일치",
     "stale_active_order_requires_cancellation": "이전 미체결 주문 정리 필요",
     "unverified_holding_requires_active_order_cancellation": "수량 불일치로 기존 미체결 주문 취소 필요",
@@ -297,14 +298,17 @@ def render(summary: dict[str, Any]) -> str:
             f" · 매수 {as_int(review.get('final_buy_count'))}"
             f" · 유지 {as_int(review.get('final_hold_count'))}"
         )
-        unresolved = as_int(review.get("unresolved_candidate_count"))
+        unresolved = as_int(review.get("unresolved_review_scope_count"))
         if unresolved > 0:
             final_line += f" · 미결 {unresolved}"
+        blocked_guard = as_int(review.get("blocked_guard_count"))
+        if blocked_guard > 0:
+            final_line += f" · 가드 차단 {blocked_guard}"
         lines.append(final_line)
-    elif any(key in review for key in ("sell_candidate_count", "buy_candidate_count", "hold_symbol_count")):
+    elif any(key in review for key in ("held_review_scope_count", "unheld_review_scope_count", "hold_symbol_count")):
         lines.append(
-            f"- Judge 검토: 매도 후보 {as_int(review.get('sell_candidate_count'))}"
-            f" · 매수 후보 {as_int(review.get('buy_candidate_count'))}"
+            f"- Judge 검토: 보유 심사대상 {as_int(review.get('held_review_scope_count'))}"
+            f" · 비보유 상위선정 {as_int(review.get('unheld_review_scope_count'))}"
             f" · 미선정 {as_int(review.get('hold_symbol_count'))}"
         )
     def domain_issue_text(label: str, payload: dict[str, Any]) -> str:

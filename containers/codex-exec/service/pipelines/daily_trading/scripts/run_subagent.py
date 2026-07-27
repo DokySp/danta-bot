@@ -1073,7 +1073,7 @@ def recent_submitted_trade_context(
         "requested_run_count": run_limit,
         "inspected_run_count": inspected_run_count,
         "invalid_execution_count": invalid_execution_count,
-        "policy": "Recent submitted trades are context for sizing within the allowed candidate direction; an empty list confirms no recent trades only when coverage_status=complete, and score-band direction preconditions still apply.",
+        "policy": "Recent submitted trades are context for sizing; an empty list confirms no recent trades only when coverage_status=complete. No candidate direction is preassigned, and analyst scores remain advisory ranking/reporting context only.",
     }
 
 
@@ -1594,10 +1594,7 @@ def compact_review_prompt(spec: dict[str, Any]) -> str | None:
             ]
         )
     if stage == "judge-review":
-        candidate_directions = spec.get("candidate_directions") if isinstance(spec.get("candidate_directions"), dict) else {}
-        thresholds = spec.get("score_band_thresholds") if isinstance(spec.get("score_band_thresholds"), dict) else {}
-        sell_below = thresholds.get("sell_below", 4)
-        buy_above = thresholds.get("buy_above", 6)
+        review_scope_reasons = spec.get("review_scope_reasons") if isinstance(spec.get("review_scope_reasons"), dict) else {}
         portfolio_snapshot = spec.get("portfolio_snapshot") if isinstance(spec.get("portfolio_snapshot"), list) else []
         debate_artifact = artifacts.get("debate_artifact")
         if debate_artifact:
@@ -1609,16 +1606,16 @@ def compact_review_prompt(spec: dict[str, Any]) -> str | None:
                 "Optional evidence marked missing, failed, empty, unavailable, or excluded_from_aggregation is non-directional: its absence must not affect debate claims, weaknesses, rebuttals, reason_code, one_line_reason, or target_position_value_krw.",
                 "Do not infer safety, risk, favorable news, thesis integrity, or thesis damage from the absence of optional evidence.",
                 "Do not use optional-domain coverage counts or completeness to decide evidence sufficiency; judge only the directional strength and conflict of supplied usable evidence.",
-                f"The supplied symbols are pre-selected candidates by score band: sell candidates are held symbols with final_first_score <= {sell_below}, buy candidates have final_first_score >= {buy_above}. Symbols between the bands are held by the pipeline and are not yours to decide.",
-                "Direction preconditions are hard constraints: a sell candidate may only be sold (partial or full) or held (target_position_value_krw <= baseline); a buy candidate may only be bought or held (target_position_value_krw >= baseline). Violations are rejected by the pipeline.",
-                "When the supplied usable evidence itself is insufficient or conflicting, the default decision is hold at the baseline.",
-                "final_first_score is the simple mean of the included analyst view scores; per-analyst scores in agent_scores carry the evidence behind it.",
+                "The supplied symbols are every eligible held symbol (review_scope_reasons=held_position, regardless of score or missing score) plus the top-ranked unheld symbols by score (review_scope_reasons=unheld_score_rank). There is no score band and no assigned buy/sell candidate direction: you may propose an increase or a decrease for any supplied symbol, held or unheld.",
+                "Return no separate action. Return target_position_value_krw plus decision_basis (none|thesis|profit_protection|concentration_rebalance), evidence_refs (compact string list), reason_code, and one_line_reason. The pipeline mechanically derives the actual buy/hold/sell action from target_position_value_krw versus baseline and independently re-verifies decision_basis; a reason string is never itself authorization, and a disallowed request is clamped back to baseline with an auditable decision_guard.",
+                "When the supplied usable evidence itself is insufficient or conflicting, the default decision is hold at the baseline with decision_basis=none.",
+                "final_first_score is the simple mean of the included analyst view scores; per-analyst scores in agent_scores carry the evidence behind it. It is advisory/ranking/reporting context only, never an order precondition.",
                 "Return target_position_value_krw for every supplied symbol as the target KRW position value after this decision.",
                 "The pipeline derives final_holding_quantity from target_position_value_krw / price.current_or_last with Decimal ROUND_HALF_UP; judge-supplied final_holding_quantity is optional and ignored for sizing.",
                 "No additional buy, no extra exposure, or 추가 확대 없음 means target_position_value_krw must stay at the baseline (holding_quantity_context.expected_holding_quantity * price.current_or_last), not 0.",
                 "If today_trade_timeline_context confirms a same-day buy, or its collection_status is partial/unavailable so same-day buy history is unknown, target_position_value_krw may exceed the baseline only when additional_buy_reason supplies new evidence or materially changed price/portfolio context.",
                 "Treat an empty recent_trade_context.recent_submitted_trades list as confirmed absence only when coverage_status=complete; otherwise recent trade history is unknown and its absence is non-directional.",
-                "For held sell candidates, an intact long-term thesis favors holding despite the low score; sell only when thesis damage, material adverse news/disclosure, or structural deterioration is supported by supplied evidence.",
+                "For a held symbol with a low score, an intact long-term thesis favors holding despite the low score; reduce or exit only when thesis damage, material adverse news/disclosure, or structural deterioration is supported by supplied evidence.",
                 "Use strategy_context and symbol_strategy_context as advisory inputs for target_position_value_krw, not as order allow/block rules.",
                 "Use position_cost_context (average_purchase_price, purchase_amount, current_review_price, pct_distance_from_average_price) as reference information for profit/loss, risk, and position adjustments. Determine final direction and target exposure by considering thesis, market evidence, and portfolio risk together.",
                 "prior_thesis_context reports whether an earlier run already recorded a structured thesis_definition (core_rationale and invalidation_conditions, each with a condition_id and description) for this symbol. Those prior conditions are immutable for evaluating a reduction in this run: a newly returned definition cannot be applied retroactively to that assessment, while a valid definition returned for an actual buy/increase becomes the successor prior for later runs.",
@@ -1632,12 +1629,12 @@ def compact_review_prompt(spec: dict[str, Any]) -> str | None:
                 "Reflect the decisive argument IDs (or why the sides cancelled out) in one_line_reason without returning the debate transcript.",
             ]
         )
-        if candidate_directions:
-            lines.append("candidate_directions: " + ",".join(f"{symbol}={direction}" for symbol, direction in sorted(candidate_directions.items())))
+        if review_scope_reasons:
+            lines.append("review_scope_reasons: " + ",".join(f"{symbol}={reason}" for symbol, reason in sorted(review_scope_reasons.items())))
         if portfolio_snapshot:
             lines.extend(
                 [
-                    "Read-only portfolio snapshot of every held symbol (score/quantity/valuation/pnl_rate/candidate_direction); use it for portfolio-level sizing context only and never return decisions for snapshot-only symbols:",
+                    "Read-only portfolio snapshot of every held symbol (score/quantity/valuation/pnl_rate); use it for portfolio-level sizing context only and never return decisions for snapshot-only symbols:",
                     "portfolio_snapshot: " + json.dumps(portfolio_snapshot, ensure_ascii=False, separators=(",", ":")),
                 ]
             )
@@ -1660,7 +1657,6 @@ def compact_debate_prompt(spec: dict[str, Any]) -> str | None:
     side = "bull" if role == "debate-bull" else "bear"
     artifacts = normalize_artifact_paths(spec.get("artifact_paths"))
     symbols = normalize_symbol_ids(spec.get("symbol_ids") or spec.get("symbols"))
-    candidate_directions = spec.get("candidate_directions") if isinstance(spec.get("candidate_directions"), dict) else {}
     portfolio_snapshot = spec.get("portfolio_snapshot") if isinstance(spec.get("portfolio_snapshot"), list) else []
     expected_kind = DEBATE_PHASE_ARGUMENT_KINDS[phase]
 
@@ -1713,11 +1709,6 @@ def compact_debate_prompt(spec: dict[str, Any]) -> str | None:
                 "The previous turn did not produce a valid stage result. Return one corrected result for the same phase without expanding scope.",
             ]
         )
-    if candidate_directions:
-        lines.append(
-            "candidate_directions: "
-            + ",".join(f"{symbol}={direction}" for symbol, direction in sorted(candidate_directions.items()))
-        )
     if portfolio_snapshot:
         lines.append(
             "portfolio_snapshot: "
@@ -1728,7 +1719,7 @@ def compact_debate_prompt(spec: dict[str, Any]) -> str | None:
             [
                 "For every symbol, final_position must be non-empty, recommended_action must be buy|hold|sell, and target_holding_quantity must be a non-negative integer.",
                 "recommended_action must match target_holding_quantity relative to portfolio_snapshot.current_live_holding_quantity; a missing snapshot means baseline quantity 0.",
-                "Respect candidate_directions: buy candidates may buy or hold, and sell candidates may sell or hold.",
+                "There is no assigned candidate direction: any symbol may be argued toward an increase or a decrease.",
                 "If usable evidence does not support a quantity change, use recommended_action=hold and the baseline target_holding_quantity.",
             ]
         )
@@ -1909,7 +1900,12 @@ def normalize_compact_review_payload(payload: Any, stage: str) -> Any:
     return normalized
 
 
-def compact_review_payload_errors(payload: Any, stage: str, agent_role: str = "") -> list[dict[str, Any]]:
+def compact_review_payload_errors(
+    payload: Any,
+    stage: str,
+    agent_role: str = "",
+    expected_symbol_ids: Any | None = None,
+) -> list[dict[str, Any]]:
     errors: list[dict[str, Any]] = []
 
     def walk(value: Any, path: str) -> None:
@@ -1949,6 +1945,9 @@ def compact_review_payload_errors(payload: Any, stage: str, agent_role: str = ""
             }
         )
         return errors
+    enforce_expected_symbols = stage == "judge-review" and expected_symbol_ids is not None
+    expected_symbols = normalize_symbol_ids(expected_symbol_ids) if enforce_expected_symbols else []
+    seen_judge_symbols: set[str] = set()
     for index, symbol in enumerate(symbols):
         if not isinstance(symbol, dict):
             errors.append(
@@ -1958,6 +1957,24 @@ def compact_review_payload_errors(payload: Any, stage: str, agent_role: str = ""
                 }
             )
             continue
+        if stage == "judge-review":
+            symbol_id = symbol_key(symbol)
+            if symbol_id:
+                if symbol_id in seen_judge_symbols:
+                    errors.append(
+                        {
+                            "code": "invalid_compact_review_schema",
+                            "message": f"duplicate judge-review symbol {symbol_id}",
+                        }
+                    )
+                seen_judge_symbols.add(symbol_id)
+                if enforce_expected_symbols and symbol_id not in expected_symbols:
+                    errors.append(
+                        {
+                            "code": "invalid_compact_review_schema",
+                            "message": f"unexpected judge-review symbol {symbol_id}",
+                        }
+                    )
         views = symbol.get("views")
         output_roles = COMBINED_ANALYST_REVIEW_ROLE_OUTPUTS.get(agent_role, ())
         requires_combined_views = stage == "analyst-review" and bool(output_roles)
@@ -2040,7 +2057,7 @@ def compact_review_payload_errors(payload: Any, stage: str, agent_role: str = ""
                         "message": f"symbols[{index}].final_holding_quantity must be a non-negative integer",
                     }
                 )
-            for field in ("relative_attractiveness_rank",):
+            for field in ("relative_attractiveness_rank", "decision_basis", "evidence_refs", "reason_code", "one_line_reason"):
                 if field not in symbol:
                     errors.append(
                         {
@@ -2048,6 +2065,33 @@ def compact_review_payload_errors(payload: Any, stage: str, agent_role: str = ""
                             "message": f"symbols[{index}] missing {field}",
                         }
                     )
+            if "decision_basis" in symbol and symbol.get("decision_basis") not in {"none", "thesis", "profit_protection", "concentration_rebalance"}:
+                errors.append(
+                    {
+                        "code": "invalid_compact_review_schema",
+                        "message": f"symbols[{index}].decision_basis must be one of none, thesis, profit_protection, concentration_rebalance",
+                    }
+                )
+            if "evidence_refs" in symbol:
+                refs = symbol.get("evidence_refs")
+                if not isinstance(refs, list) or not all(isinstance(ref, str) for ref in refs):
+                    errors.append(
+                        {
+                            "code": "invalid_compact_review_schema",
+                            "message": f"symbols[{index}].evidence_refs must be a string array",
+                        }
+                    )
+    if enforce_expected_symbols:
+        missing_symbols = [
+            symbol_id for symbol_id in expected_symbols if symbol_id not in seen_judge_symbols
+        ]
+        if missing_symbols:
+            errors.append(
+                {
+                    "code": "invalid_compact_review_schema",
+                    "message": "judge-review output missing symbols: " + ", ".join(missing_symbols),
+                }
+            )
     return errors
 
 
@@ -2098,11 +2142,6 @@ def debate_final_decision_issues(payload: Any, spec: dict[str, Any]) -> list[dic
 
     issues: list[dict[str, Any]] = []
     baselines = debate_baseline_quantities(spec)
-    candidate_directions = (
-        spec.get("candidate_directions")
-        if isinstance(spec.get("candidate_directions"), dict)
-        else {}
-    )
     for symbol in symbols:
         if not isinstance(symbol, dict):
             continue
@@ -2154,23 +2193,6 @@ def debate_final_decision_issues(payload: Any, spec: dict[str, Any]) -> list[dic
                             f"{symbol_id}.recommended_action={action} does not match "
                             f"baseline={baseline} and target_holding_quantity={target_quantity}"
                         ),
-                        "symbol_id": symbol_id,
-                    }
-                )
-            candidate_direction = str(candidate_directions.get(symbol_id) or "").strip().lower()
-            if candidate_direction == "buy" and target_quantity < baseline:
-                issues.append(
-                    {
-                        "code": "invalid_debate_candidate_direction",
-                        "message": f"{symbol_id}: buy candidate target cannot be below baseline {baseline}",
-                        "symbol_id": symbol_id,
-                    }
-                )
-            if candidate_direction == "sell" and target_quantity > baseline:
-                issues.append(
-                    {
-                        "code": "invalid_debate_candidate_direction",
-                        "message": f"{symbol_id}: sell candidate target cannot exceed baseline {baseline}",
                         "symbol_id": symbol_id,
                     }
                 )
@@ -2445,7 +2467,8 @@ def spec_fingerprint(spec: dict[str, Any]) -> str:
             "symbols",
             "debate_phase",
             "resume_session_id",
-            "candidate_directions",
+            "review_contract_version",
+            "review_scope_reasons",
             "portfolio_snapshot",
             "extra_instructions",
             "retry_of_task_name",
@@ -2603,7 +2626,14 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
         errors.extend(parse_errors)
         if stage in REVIEW_STAGES and prompt_mode == "compact_review" and parsed_json is not None:
             parsed_json = normalize_compact_review_payload(parsed_json, stage)
-            compact_review_errors = compact_review_payload_errors(parsed_json, stage, str(spec.get("agent_role") or ""))
+            compact_review_errors = compact_review_payload_errors(
+                parsed_json,
+                stage,
+                str(spec.get("agent_role") or ""),
+                normalize_symbol_ids(spec.get("symbol_ids") or spec.get("symbols"))
+                if stage == "judge-review"
+                else None,
+            )
             errors.extend(compact_review_errors)
         if stage == DEBATE_STAGE and prompt_mode == "compact_debate" and parsed_json is not None:
             compact_debate_errors = compact_debate_payload_errors(parsed_json, prompt_spec)

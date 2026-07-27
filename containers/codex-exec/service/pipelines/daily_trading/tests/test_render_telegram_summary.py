@@ -98,9 +98,9 @@ PAYLOAD_SUBMITTED = {
         "final_sell_count": 0,
         "final_buy_count": 1,
         "final_hold_count": 0,
-        "unresolved_candidate_count": 2,
-        "sell_candidate_count": 1,
-        "buy_candidate_count": 2,
+        "unresolved_review_scope_count": 2,
+        "held_review_scope_count": 1,
+        "unheld_review_scope_count": 2,
         "hold_symbol_count": 28,
         "symbols": [{"symbol_id": "005930", "symbol_name": "삼성전자", "current_live_holding_quantity": 0, "final_holding_quantity": 1, "one_line_reason": "테스트 <근거>"}]
     },
@@ -164,7 +164,7 @@ PAYLOAD_BLOCKED = {
         "final_sell_count": 1,
         "final_buy_count": 0,
         "final_hold_count": 0,
-        "unresolved_candidate_count": 0,
+        "unresolved_review_scope_count": 0,
         "symbols": [
             {
                 "symbol_id": "402340",
@@ -188,8 +188,8 @@ PAYLOAD_LEGACY = {
     "today_fills_summary": {"status": "success", "skipped": False, "fill_count": 0},
     "execution": {"request_type": "analysis", "status": "success", "orders": []},
     "review_summary": {
-        "sell_candidate_count": 2,
-        "buy_candidate_count": 3,
+        "held_review_scope_count": 2,
+        "unheld_review_scope_count": 3,
         "hold_symbol_count": 25,
     },
     "token_usage": {"total": {"total_tokens": 0}},
@@ -385,9 +385,9 @@ CASES = {
         PAYLOAD_LEGACY,
         [
             "<b>당일 누계</b>(이번 run 주문 전 기준) 매수 조회 실패 · 매도 조회 실패 · 체결 0건",
-            # hold_symbol_count(=scored_count - len(candidate_directions))는 Judge의 보유 판단이 아니라
-            # 후보로 선정되지 않은 scored 종목 수이므로 "유지"가 아닌 "미선정"으로 표기해야 한다.
-            "- Judge 검토: 매도 후보 2 · 매수 후보 3 · 미선정 25",
+            # hold_symbol_count(=scored_count - len(review_scope_reasons))는 Judge의 보유 판단이 아니라
+            # 심사대상으로 선정되지 않은 scored 종목 수이므로 "유지"가 아닌 "미선정"으로 표기해야 한다.
+            "- Judge 검토: 보유 심사대상 2 · 비보유 상위선정 3 · 미선정 25",
         ],
         ["최종 결정", "미결", "평결:", "Judge 후보", "유지"],
     ),

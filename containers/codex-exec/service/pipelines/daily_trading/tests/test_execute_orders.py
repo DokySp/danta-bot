@@ -19,8 +19,10 @@ from ..scripts.execute_orders import (
     active_buy_correction_gate,
     adjust_reservation,
     as_int,
+    decision_guard_block_reason,
     default_reservation_orgno,
     execute,
+    fetch_fresh_domestic_balance,
     fetch_reservations,
     load_json,
     normalize_limit_price,
@@ -32,6 +34,9 @@ from ..scripts.execute_orders import (
     reconcile,
     refresh_gates,
     reconcile_submitted_cash_orders,
+    verify_concentration_rebalance,
+    verify_fresh_reduction_bounds,
+    verify_profit_protection_pnl,
     write_json,
 )
 
@@ -70,9 +75,9 @@ def step_dry_run_gate_and_portfolio_except_checks(root: Path) -> list[str]:
         "required_main_agent_actions": ["refresh_active_order_lookup", "refresh_order_available_lookup", "continue_order_execution"],
         "errors": [{"code": "order_submission_blocked"}],
         "orders": [
-            {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 6, "order_price": 70000, "direction": "sell", "final_first_score": 3.5, "result": "blocked"},
-            {"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 20, "order_price": 100000, "direction": "buy", "final_first_score": 6.5, "result": "blocked"},
-            {"symbol_id": "035420", "symbol_name": "NAVER", "final_holding_quantity": 4, "order_price": 200000, "direction": "sell", "final_first_score": 3.5, "result": "blocked"},
+            {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 6, "order_price": 70000, "direction": "sell", "decision_basis": "thesis", "decision_guard": {"status": "allowed", "canonical_action": "reduce", "basis": "thesis"}, "result": "blocked"},
+            {"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 20, "order_price": 100000, "direction": "buy", "decision_basis": "thesis", "decision_guard": {"status": "allowed", "canonical_action": "increase", "basis": "thesis"}, "result": "blocked"},
+            {"symbol_id": "035420", "symbol_name": "NAVER", "final_holding_quantity": 4, "order_price": 200000, "direction": "sell", "decision_basis": "thesis", "decision_guard": {"status": "allowed", "canonical_action": "reduce", "basis": "thesis"}, "result": "blocked"},
         ],
     }
     write_json(root / "account-before-order.json", account)
@@ -93,7 +98,7 @@ def step_dry_run_gate_and_portfolio_except_checks(root: Path) -> list[str]:
         failures.append("account gates not refreshed")
     if account_after.get("order_gate_status") != "success":
         failures.append(f"successful gate refresh was not recorded: {account_after.get('order_gate_status')}")
-    write_json(root / "execution.json", {**execution, "orders": [{"symbol_id": "005930", "symbol_name": "삼성전자", "order_price": 70000, "direction": "sell", "final_first_score": 3.5, "result": "blocked"}]})
+    write_json(root / "execution.json", {**execution, "orders": [{"symbol_id": "005930", "symbol_name": "삼성전자", "order_price": 70000, "direction": "sell", "decision_basis": "thesis", "decision_guard": {"status": "allowed", "canonical_action": "reduce", "basis": "thesis"}, "result": "blocked"}]})
     invalid_final_payload = execute(argparse.Namespace(output_dir=str(root), execution_json="", account_before_order="", env="real", submit=False, offline=True, retries=0, reservation_start_date="", reservation_end_date=""))
     invalid_final_order = invalid_final_payload["orders"][0]
     if invalid_final_order.get("reason") != "invalid_final_holding_quantity":
@@ -103,8 +108,8 @@ def step_dry_run_gate_and_portfolio_except_checks(root: Path) -> list[str]:
     (root / "portfolio-except.txt").write_text("# excluded\n000270, 005930\n", encoding="utf-8")
     portfolio_except_execution = {
         "orders": [
-            {"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 20, "order_price": 100000, "direction": "buy", "final_first_score": 6.5},
-            {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 6, "order_price": 70000, "direction": "sell", "final_first_score": 3.5},
+            {"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 20, "order_price": 100000, "direction": "buy", "decision_basis": "thesis", "decision_guard": {"status": "allowed", "canonical_action": "increase", "basis": "thesis"}},
+            {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 6, "order_price": 70000, "direction": "sell", "decision_basis": "thesis", "decision_guard": {"status": "allowed", "canonical_action": "reduce", "basis": "thesis"}},
             {"symbol_id": "035420", "symbol_name": "NAVER", "final_holding_quantity": 1, "order_price": 200000, "direction": "none"},
         ]
     }
@@ -134,8 +139,8 @@ def step_dry_run_gate_and_portfolio_except_checks(root: Path) -> list[str]:
     return failures
 
 
-def step_score_band_and_reservation_normalization_checks(root: Path) -> list[str]:
-    """Score-band buy/sell gates, cancel-exempt active orders, reservation normalization, and KRX tick rounding."""
+def step_decision_guard_and_reservation_normalization_checks(root: Path) -> list[str]:
+    """decision_guard buy/sell gates, cancel-exempt active orders, reservation normalization, and KRX tick rounding."""
     failures: list[str] = []
     execution = {
         "schema_version": "1",
@@ -144,14 +149,14 @@ def step_score_band_and_reservation_normalization_checks(root: Path) -> list[str
         "required_main_agent_actions": ["refresh_active_order_lookup", "refresh_order_available_lookup", "continue_order_execution"],
         "errors": [{"code": "order_submission_blocked"}],
         "orders": [
-            {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 6, "order_price": 70000, "direction": "sell", "final_first_score": 3.5, "result": "blocked"},
-            {"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 20, "order_price": 100000, "direction": "buy", "final_first_score": 6.5, "result": "blocked"},
+            {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 6, "order_price": 70000, "direction": "sell", "decision_basis": "thesis", "decision_guard": {"status": "allowed", "canonical_action": "reduce", "basis": "thesis"}, "result": "blocked"},
+            {"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 20, "order_price": 100000, "direction": "buy", "decision_basis": "thesis", "decision_guard": {"status": "allowed", "canonical_action": "increase", "basis": "thesis"}, "result": "blocked"},
         ],
     }
-    score_band_execution = {
+    decision_guard_execution = {
         "orders": [
-            {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 6, "final_first_score": 4.0, "order_price": 70000, "order_path": "immediate"},
-            {"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 20, "final_first_score": 6.0, "order_price": 100000, "order_path": "immediate"},
+            {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 6, "decision_basis": "thesis", "decision_guard": {"status": "allowed", "canonical_action": "reduce", "basis": "thesis"}, "order_price": 70000, "order_path": "immediate"},
+            {"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 20, "decision_basis": "thesis", "decision_guard": {"status": "allowed", "canonical_action": "increase", "basis": "thesis"}, "order_price": 100000, "order_path": "immediate"},
             {"symbol_id": "000810", "symbol_name": "삼성화재", "final_holding_quantity": 0, "order_price": 400000, "order_path": "immediate"},
         ]
     }
@@ -161,39 +166,39 @@ def step_score_band_and_reservation_normalization_checks(root: Path) -> list[str
             {"symbol_id": "000270", "symbol_name": "기아", "current_live_holding_quantity": 18, "current_price": 100000},
             {"symbol_id": "000810", "symbol_name": "삼성화재", "current_live_holding_quantity": 1, "current_price": 400000},
         ]},
-        score_band_execution,
+        decision_guard_execution,
         [],
         {"000270": {"max_buy_qty": 5, "max_buy_amt": 1_000_000}},
         {"005930": {"max_sell_qty": 5}, "000810": {"max_sell_qty": 5}},
         submit=False,
         kis=None,
     )
-    score_band_orders = {item["symbol_id"]: item for item in score_band_execution["orders"]}
-    if score_band_orders["005930"].get("reason") != "validated_dry_run_not_submitted":
-        failures.append(f"sell at boundary score 4.0 was not allowed: {score_band_orders['005930']}")
-    if score_band_orders["000270"].get("reason") != "validated_dry_run_not_submitted":
-        failures.append(f"buy at boundary score 6.0 was not allowed: {score_band_orders['000270']}")
-    if score_band_orders["000810"].get("result") != "blocked" or score_band_orders["000810"].get("reason") != "score_band_value_missing":
-        failures.append(f"missing score did not fail safe: {score_band_orders['000810']}")
-    score_band_cancel_execution = {
+    decision_guard_orders = {item["symbol_id"]: item for item in decision_guard_execution["orders"]}
+    if decision_guard_orders["005930"].get("reason") != "validated_dry_run_not_submitted":
+        failures.append(f"sell with an allowed decision_guard was not allowed: {decision_guard_orders['005930']}")
+    if decision_guard_orders["000270"].get("reason") != "validated_dry_run_not_submitted":
+        failures.append(f"buy with an allowed decision_guard was not allowed: {decision_guard_orders['000270']}")
+    if decision_guard_orders["000810"].get("result") != "blocked" or decision_guard_orders["000810"].get("reason") != "decision_guard_not_allowed":
+        failures.append(f"missing decision_guard did not fail safe: {decision_guard_orders['000810']}")
+    decision_guard_cancel_execution = {
         "orders": [
-            {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 8, "final_first_score": 5.0, "order_price": 70000, "order_path": "reservation"},
+            {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 8, "order_price": 70000, "order_path": "reservation"},
         ]
     }
     reconcile(
         {"account_summary": {"cash_amount": 10_000_000}, "symbols": [
             {"symbol_id": "005930", "symbol_name": "삼성전자", "current_live_holding_quantity": 8, "current_price": 70000},
         ]},
-        score_band_cancel_execution,
+        decision_guard_cancel_execution,
         [{"symbol_id": "005930", "symbol_name": "삼성전자", "order_id": "r9", "order_kind": "reservation", "direction": "sell", "remaining_quantity": 2, "order_price": 70000, "active_status": "active", "order_api": "order_resv", "order_path": "reservation", "execution_environment": "real", "observed_at": now_iso()}],
         {},
         {"005930": {"max_sell_qty": 5}},
         submit=True,
         kis=None,
     )
-    cancel_order = score_band_cancel_execution["orders"][0]
-    if cancel_order.get("reason") in {"sell_blocked_score_band", "buy_blocked_score_band", "score_band_value_missing"}:
-        failures.append(f"cancel of an active order must be exempt from the score-band gate: {cancel_order}")
+    cancel_order = decision_guard_cancel_execution["orders"][0]
+    if cancel_order.get("reason") == "decision_guard_not_allowed":
+        failures.append(f"cancel of an active order must be exempt from the decision-guard gate: {cancel_order}")
     write_json(root / "execution.json", execution)
 
     reservation = normalize_reservation(
@@ -324,7 +329,7 @@ def step_active_order_conflict_checks(root: Path) -> list[str]:
             "requires_main_agent_order_execution": True,
             "required_main_agent_actions": ["continue_order_execution"],
             "errors": [],
-            "orders": [{"symbol_id": "000660", "symbol_name": "SK하이닉스", "final_holding_quantity": 2, "order_price": 150000, "direction": "buy", "final_first_score": 6.5, "result": "blocked"}],
+            "orders": [{"symbol_id": "000660", "symbol_name": "SK하이닉스", "final_holding_quantity": 2, "order_price": 150000, "direction": "buy", "decision_basis": "thesis", "decision_guard": {"status": "allowed", "canonical_action": "increase", "basis": "thesis"}, "result": "blocked"}],
         },
     )
     mismatch_payload = execute(argparse.Namespace(output_dir=str(root), execution_json="", account_before_order="", env="real", submit=False, offline=True, retries=0, reservation_start_date="", reservation_end_date=""))
@@ -342,7 +347,7 @@ def step_active_order_conflict_checks(root: Path) -> list[str]:
             "requires_main_agent_order_execution": True,
             "required_main_agent_actions": ["continue_order_execution"],
             "errors": [],
-            "orders": [{"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 6, "order_price": 70000, "direction": "sell", "final_first_score": 3.5, "result": "blocked"}],
+            "orders": [{"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 6, "order_price": 70000, "direction": "sell", "decision_basis": "thesis", "decision_guard": {"status": "allowed", "canonical_action": "reduce", "basis": "thesis"}, "result": "blocked"}],
         },
     )
     missing_field_payload = execute(argparse.Namespace(output_dir=str(root), execution_json="", account_before_order="", env="real", submit=False, offline=True, retries=0, reservation_start_date="", reservation_end_date=""))
@@ -360,7 +365,7 @@ def step_active_order_conflict_checks(root: Path) -> list[str]:
             "requires_main_agent_order_execution": True,
             "required_main_agent_actions": ["continue_order_execution"],
             "errors": [],
-            "orders": [{"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 20, "order_price": 100000, "order_path": "immediate", "direction": "buy", "final_first_score": 6.5, "result": "blocked"}],
+            "orders": [{"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 20, "order_price": 100000, "order_path": "immediate", "direction": "buy", "decision_basis": "thesis", "decision_guard": {"status": "allowed", "canonical_action": "increase", "basis": "thesis"}, "result": "blocked"}],
         },
     )
     immediate_payload = execute(argparse.Namespace(output_dir=str(root), execution_json="", account_before_order="", env="real", submit=False, offline=True, retries=0, reservation_start_date="", reservation_end_date=""))
@@ -383,7 +388,7 @@ def step_active_order_conflict_checks(root: Path) -> list[str]:
             "requires_main_agent_order_execution": True,
             "required_main_agent_actions": ["continue_order_execution"],
             "errors": [],
-            "orders": [{"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 20, "order_price": 100000, "order_path": "immediate", "direction": "buy", "final_first_score": 6.5, "result": "blocked"}],
+            "orders": [{"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 20, "order_price": 100000, "order_path": "immediate", "direction": "buy", "decision_basis": "thesis", "decision_guard": {"status": "allowed", "canonical_action": "increase", "basis": "thesis"}, "result": "blocked"}],
         },
     )
     multiple_payload = execute(argparse.Namespace(output_dir=str(root), execution_json="", account_before_order="", env="real", submit=False, offline=True, retries=0, reservation_start_date="", reservation_end_date=""))
@@ -406,9 +411,9 @@ def step_reduction_and_available_cash_checks(root: Path) -> list[str]:
     }
     reduction_execution = {
         "orders": [
-            {"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 12, "final_first_score": 6.5, "order_price": 100000, "order_path": "immediate"},
-            {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 4, "final_first_score": 3.5, "order_price": 70000, "order_path": "immediate"},
-            {"symbol_id": "000810", "symbol_name": "삼성화재", "final_holding_quantity": 3, "final_first_score": 6.5, "order_price": 400000, "order_path": "immediate"},
+            {"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 12, "decision_basis": "thesis", "decision_guard": {"status": "allowed", "canonical_action": "increase", "basis": "thesis"}, "order_price": 100000, "order_path": "immediate"},
+            {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 4, "decision_basis": "thesis", "decision_guard": {"status": "allowed", "canonical_action": "reduce", "basis": "thesis"}, "order_price": 70000, "order_path": "immediate"},
+            {"symbol_id": "000810", "symbol_name": "삼성화재", "final_holding_quantity": 3, "decision_basis": "thesis", "decision_guard": {"status": "allowed", "canonical_action": "increase", "basis": "thesis"}, "order_price": 400000, "order_path": "immediate"},
         ]
     }
     reconcile(
@@ -436,7 +441,7 @@ def step_reduction_and_available_cash_checks(root: Path) -> list[str]:
 
     order_available_cash_execution = {
         "orders": [
-            {"symbol_id": "000660", "symbol_name": "SK하이닉스", "final_holding_quantity": 1, "final_first_score": 6.5, "order_price": 2_955_000, "order_path": "immediate"}
+            {"symbol_id": "000660", "symbol_name": "SK하이닉스", "final_holding_quantity": 1, "decision_basis": "thesis", "decision_guard": {"status": "allowed", "canonical_action": "increase", "basis": "thesis"}, "order_price": 2_955_000, "order_path": "immediate"}
         ]
     }
     reconcile(
@@ -456,8 +461,8 @@ def step_reduction_and_available_cash_checks(root: Path) -> list[str]:
 
     order_available_multi_execution = {
         "orders": [
-            {"symbol_id": "000660", "symbol_name": "SK하이닉스", "final_holding_quantity": 1, "final_first_score": 6.5, "order_price": 2_000_000, "order_path": "immediate"},
-            {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 10, "final_first_score": 6.5, "order_price": 100_000, "order_path": "immediate"},
+            {"symbol_id": "000660", "symbol_name": "SK하이닉스", "final_holding_quantity": 1, "decision_basis": "thesis", "decision_guard": {"status": "allowed", "canonical_action": "increase", "basis": "thesis"}, "order_price": 2_000_000, "order_path": "immediate"},
+            {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 10, "decision_basis": "thesis", "decision_guard": {"status": "allowed", "canonical_action": "increase", "basis": "thesis"}, "order_price": 100_000, "order_path": "immediate"},
         ]
     }
     reconcile(
@@ -500,7 +505,7 @@ def step_max_buy_amt_and_zero_capacity_checks(root: Path) -> list[str]:
     }
     missing_max_buy_amt_execution = {
         "orders": [
-            {"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 3, "final_first_score": 6.5, "order_price": 100_000, "order_path": "immediate"}
+            {"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 3, "decision_basis": "thesis", "decision_guard": {"status": "allowed", "canonical_action": "increase", "basis": "thesis"}, "order_price": 100_000, "order_path": "immediate"}
         ]
     }
     reconcile(
@@ -520,8 +525,8 @@ def step_max_buy_amt_and_zero_capacity_checks(root: Path) -> list[str]:
 
     mixed_max_buy_amt_execution = {
         "orders": [
-            {"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 1, "final_first_score": 6.5, "order_price": 100_000, "order_path": "immediate"},
-            {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 1, "final_first_score": 6.5, "order_price": 70_000, "order_path": "immediate"},
+            {"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 1, "decision_basis": "thesis", "decision_guard": {"status": "allowed", "canonical_action": "increase", "basis": "thesis"}, "order_price": 100_000, "order_path": "immediate"},
+            {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 1, "decision_basis": "thesis", "decision_guard": {"status": "allowed", "canonical_action": "increase", "basis": "thesis"}, "order_price": 70_000, "order_path": "immediate"},
         ]
     }
     reconcile(
@@ -547,7 +552,7 @@ def step_max_buy_amt_and_zero_capacity_checks(root: Path) -> list[str]:
 
     zero_max_buy_amt_execution = {
         "orders": [
-            {"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 1, "final_first_score": 6.5, "order_price": 100_000, "order_path": "immediate"}
+            {"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 1, "decision_basis": "thesis", "decision_guard": {"status": "allowed", "canonical_action": "increase", "basis": "thesis"}, "order_price": 100_000, "order_path": "immediate"}
         ]
     }
     reconcile(
@@ -565,8 +570,8 @@ def step_max_buy_amt_and_zero_capacity_checks(root: Path) -> list[str]:
 
     zero_capacity_execution = {
         "orders": [
-            {"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 2, "final_first_score": 6.5, "order_price": 100000, "order_path": "immediate"},
-            {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 0, "final_first_score": 3.5, "order_price": 70000, "order_path": "immediate"},
+            {"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 2, "decision_basis": "thesis", "decision_guard": {"status": "allowed", "canonical_action": "increase", "basis": "thesis"}, "order_price": 100000, "order_path": "immediate"},
+            {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 0, "decision_basis": "thesis", "decision_guard": {"status": "allowed", "canonical_action": "exit", "basis": "thesis"}, "order_price": 70000, "order_path": "immediate"},
         ]
     }
     reconcile(
@@ -595,8 +600,7 @@ def step_active_sell_correction_checks(root: Path) -> list[str]:
         "order_id": "old-sell",
         "order_kind": "pending",
         "direction": "sell",
-        "final_first_score": 3.5,
-        "remaining_quantity": 1,
+        "decision_guard": {"status": "allowed"}, "remaining_quantity": 1,
         "order_price": 1_630_000,
         "active_status": "active",
         "order_api": "order_cash",
@@ -609,7 +613,7 @@ def step_active_sell_correction_checks(root: Path) -> list[str]:
 
     active_sell_correction_execution = {
         "orders": [
-            {"symbol_id": "402340", "symbol_name": "SK스퀘어", "final_holding_quantity": 0, "final_first_score": 3.5, "order_price": 1_595_000, "order_path": "immediate"}
+            {"symbol_id": "402340", "symbol_name": "SK스퀘어", "final_holding_quantity": 0, "decision_guard": {"status": "allowed"}, "order_price": 1_595_000, "order_path": "immediate"}
         ]
     }
     original_adjust_active_order = execute_orders_module.adjust_active_order
@@ -661,8 +665,7 @@ def step_active_sell_partial_and_cancel_only_checks(root: Path) -> list[str]:
         "order_id": "old-sell",
         "order_kind": "pending",
         "direction": "sell",
-        "final_first_score": 3.5,
-        "remaining_quantity": 1,
+        "decision_guard": {"status": "allowed"}, "remaining_quantity": 1,
         "order_price": 1_630_000,
         "active_status": "active",
         "order_api": "order_cash",
@@ -676,7 +679,7 @@ def step_active_sell_partial_and_cancel_only_checks(root: Path) -> list[str]:
     original_submit_order = execute_orders_module.submit_order
     partial_active_sell_execution = {
         "orders": [
-            {"symbol_id": "402340", "symbol_name": "SK스퀘어", "final_holding_quantity": 1, "final_first_score": 3.5, "order_price": 1_630_000, "order_path": "immediate"}
+            {"symbol_id": "402340", "symbol_name": "SK스퀘어", "final_holding_quantity": 1, "decision_basis": "thesis", "decision_guard": {"status": "allowed", "canonical_action": "reduce", "basis": "thesis"}, "order_price": 1_630_000, "order_path": "immediate"}
         ]
     }
     partial_submissions: list[dict[str, Any]] = []
@@ -710,7 +713,7 @@ def step_active_sell_partial_and_cancel_only_checks(root: Path) -> list[str]:
 
     active_sell_cancel_only_execution = {
         "orders": [
-            {"symbol_id": "402340", "symbol_name": "SK스퀘어", "final_holding_quantity": 1, "final_first_score": 6.5, "order_price": 1_595_000, "order_path": "immediate"}
+            {"symbol_id": "402340", "symbol_name": "SK스퀘어", "final_holding_quantity": 1, "decision_guard": {"status": "allowed"}, "order_price": 1_595_000, "order_path": "immediate"}
         ]
     }
     cancel_only_adjustments: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
@@ -761,8 +764,7 @@ def step_active_sell_replacement_buy_checks(root: Path) -> list[str]:
         "order_id": "old-sell",
         "order_kind": "pending",
         "direction": "sell",
-        "final_first_score": 3.5,
-        "remaining_quantity": 1,
+        "decision_guard": {"status": "allowed"}, "remaining_quantity": 1,
         "order_price": 1_630_000,
         "active_status": "active",
         "order_api": "order_cash",
@@ -776,7 +778,7 @@ def step_active_sell_replacement_buy_checks(root: Path) -> list[str]:
     original_submit_order = execute_orders_module.submit_order
     active_sell_replacement_buy_execution = {
         "orders": [
-            {"symbol_id": "402340", "symbol_name": "SK스퀘어", "final_holding_quantity": 2, "final_first_score": 6.5, "order_price": 1_595_000, "order_path": "immediate"}
+            {"symbol_id": "402340", "symbol_name": "SK스퀘어", "final_holding_quantity": 2, "decision_guard": {"status": "allowed"}, "order_price": 1_595_000, "order_path": "immediate"}
         ]
     }
     replacement_buy_adjustments: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
@@ -829,7 +831,7 @@ def step_active_order_additional_and_invalid_price_checks(root: Path) -> list[st
     failures: list[str] = []
     active_additional_execution = {
         "orders": [
-            {"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 5, "final_first_score": 6.5, "order_price": 100000, "order_path": "immediate"}
+            {"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 5, "decision_basis": "thesis", "decision_guard": {"status": "allowed", "canonical_action": "increase", "basis": "thesis"}, "order_price": 100000, "order_path": "immediate"}
         ]
     }
     original_adjust_active_order = execute_orders_module.adjust_active_order
@@ -857,8 +859,7 @@ def step_active_order_additional_and_invalid_price_checks(root: Path) -> list[st
                     "order_id": "a1",
                     "order_kind": "pending",
                     "direction": "buy",
-                    "final_first_score": 6.5,
-                    "remaining_quantity": 1,
+                    "decision_guard": {"status": "allowed"}, "remaining_quantity": 1,
                     "order_price": 100000,
                     "active_status": "active",
                     "order_api": "order_cash",
@@ -894,7 +895,7 @@ def step_active_order_additional_and_invalid_price_checks(root: Path) -> list[st
 
     invalid_additional_execution = {
         "orders": [
-            {"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 3, "final_first_score": 6.5, "order_price": 0, "order_path": "immediate"}
+            {"symbol_id": "000270", "symbol_name": "기아", "final_holding_quantity": 3, "decision_basis": "thesis", "decision_guard": {"status": "allowed", "canonical_action": "increase", "basis": "thesis"}, "order_price": 0, "order_path": "immediate"}
         ]
     }
     invalid_additional_submissions: list[dict[str, Any]] = []
@@ -915,8 +916,7 @@ def step_active_order_additional_and_invalid_price_checks(root: Path) -> list[st
                     "order_id": "a0",
                     "order_kind": "pending",
                     "direction": "buy",
-                    "final_first_score": 6.5,
-                    "remaining_quantity": 1,
+                    "decision_guard": {"status": "allowed"}, "remaining_quantity": 1,
                     "order_price": 100000,
                     "active_status": "active",
                     "order_api": "order_cash",
@@ -955,8 +955,7 @@ def _run_active_buy_correction_case(
         "order_id": "0015300400",
         "order_kind": "pending",
         "direction": "buy",
-        "final_first_score": 6.5,
-        "remaining_quantity": active_qty,
+        "decision_guard": {"status": "allowed"}, "remaining_quantity": active_qty,
         "order_price": active_price,
         "active_status": "active",
         "order_api": "order_cash",
@@ -972,8 +971,7 @@ def _run_active_buy_correction_case(
                 "symbol_id": "078930",
                 "symbol_name": "GS",
                 "final_holding_quantity": final_holding_quantity,
-                "final_first_score": 6.5,
-                "order_price": order_price,
+                "decision_guard": {"status": "allowed"}, "order_price": order_price,
                 "order_path": "immediate",
             }
         ]
@@ -1116,7 +1114,7 @@ def step_active_buy_correction_checks(root: Path) -> list[str]:
 
     qty_increase_execution = {
         "orders": [
-            {"symbol_id": "078930", "symbol_name": "GS", "final_holding_quantity": 13, "final_first_score": 6.5, "order_price": 100_000, "order_path": "immediate"}
+            {"symbol_id": "078930", "symbol_name": "GS", "final_holding_quantity": 13, "decision_basis": "thesis", "decision_guard": {"status": "allowed", "canonical_action": "increase", "basis": "thesis"}, "order_price": 100_000, "order_path": "immediate"}
         ]
     }
     try:
@@ -1132,8 +1130,7 @@ def step_active_buy_correction_checks(root: Path) -> list[str]:
                     "order_id": "0015300400",
                     "order_kind": "pending",
                     "direction": "buy",
-                    "final_first_score": 6.5,
-                    "remaining_quantity": 1,
+                    "decision_guard": {"status": "allowed"}, "remaining_quantity": 1,
                     "order_price": 100_000,
                     "active_status": "active",
                     "order_api": "order_cash",
@@ -1383,8 +1380,7 @@ def step_refresh_gates_active_buy_capacity_prefetch_checks(root: Path) -> list[s
                         "symbol_id": "078930",
                         "symbol_name": "GS",
                         "final_holding_quantity": 12,
-                        "final_first_score": 6.5,
-                        "order_price": 83_200,
+                        "decision_guard": {"status": "allowed"}, "order_price": 83_200,
                         "order_path": "immediate",
                         "direction": "none",
                     }
@@ -1427,8 +1423,7 @@ def step_refresh_gates_active_buy_capacity_prefetch_checks(root: Path) -> list[s
                         "symbol_id": "078930",
                         "symbol_name": "GS",
                         "final_holding_quantity": 12,
-                        "final_first_score": 6.5,
-                        "order_price": 80_000,
+                        "decision_guard": {"status": "allowed"}, "order_price": 80_000,
                         "order_path": "immediate",
                         "direction": "none",
                     }
@@ -1567,7 +1562,7 @@ def step_refresh_gates_stale_direction_checks(root: Path) -> list[str]:
     _active1, _capacities1, _sell1, errors1 = _run_refresh_gates_case(
         active_orders=[gs_active_buy(price=100_000, qty=1)],
         execution_orders=[
-            {"symbol_id": "078930", "symbol_name": "GS", "final_holding_quantity": 11, "final_first_score": 6.5, "order_price": 80_000, "order_path": "immediate", "direction": "buy"}
+            {"symbol_id": "078930", "symbol_name": "GS", "final_holding_quantity": 11, "decision_guard": {"status": "allowed", "canonical_action": "increase", "basis": "thesis"}, "order_price": 80_000, "order_path": "immediate", "direction": "buy"}
         ],
         current_holding=10,
         buy_capacity_impl=failing_buy_capacity,
@@ -1580,7 +1575,7 @@ def step_refresh_gates_stale_direction_checks(root: Path) -> list[str]:
     _active2, _capacities2, _sell2, errors2 = _run_refresh_gates_case(
         active_orders=[gs_active_buy(price=100_000, qty=2)],
         execution_orders=[
-            {"symbol_id": "078930", "symbol_name": "GS", "final_holding_quantity": 9, "final_first_score": 6.5, "order_price": 100_000, "order_path": "immediate", "direction": "sell"}
+            {"symbol_id": "078930", "symbol_name": "GS", "final_holding_quantity": 9, "decision_guard": {"status": "allowed", "canonical_action": "reduce", "basis": "thesis"}, "order_price": 100_000, "order_path": "immediate", "direction": "sell"}
         ],
         current_holding=10,
         sell_capacity_impl=failing_sell_capacity,
@@ -1593,7 +1588,7 @@ def step_refresh_gates_stale_direction_checks(root: Path) -> list[str]:
     _active3, _capacities3, _sell3, errors3 = _run_refresh_gates_case(
         active_orders=[gs_active_sell(price=100_000, qty=1)],
         execution_orders=[
-            {"symbol_id": "078930", "symbol_name": "GS", "final_holding_quantity": 12, "final_first_score": 6.5, "order_price": 100_000, "order_path": "immediate", "direction": "buy"}
+            {"symbol_id": "078930", "symbol_name": "GS", "final_holding_quantity": 12, "decision_guard": {"status": "allowed", "canonical_action": "increase", "basis": "thesis"}, "order_price": 100_000, "order_path": "immediate", "direction": "buy"}
         ],
         current_holding=10,
         buy_capacity_impl=failing_buy_capacity,
@@ -1605,7 +1600,7 @@ def step_refresh_gates_stale_direction_checks(root: Path) -> list[str]:
     _active4, _capacities4, _sell4, errors4 = _run_refresh_gates_case(
         active_orders=[],
         execution_orders=[
-            {"symbol_id": "078930", "symbol_name": "GS", "final_holding_quantity": 5, "final_first_score": 6.5, "order_price": 100_000, "order_path": "immediate", "direction": "buy"}
+            {"symbol_id": "078930", "symbol_name": "GS", "final_holding_quantity": 5, "decision_guard": {"status": "allowed", "canonical_action": "increase", "basis": "thesis"}, "order_price": 100_000, "order_path": "immediate", "direction": "buy"}
         ],
         current_holding=0,
         buy_capacity_impl=failing_buy_capacity,
@@ -1617,7 +1612,7 @@ def step_refresh_gates_stale_direction_checks(root: Path) -> list[str]:
     _active5, _capacities5, _sell5, errors5 = _run_refresh_gates_case(
         active_orders=[],
         execution_orders=[
-            {"symbol_id": "078930", "symbol_name": "GS", "final_holding_quantity": 0, "final_first_score": 6.5, "order_price": 100_000, "order_path": "immediate", "direction": "sell"}
+            {"symbol_id": "078930", "symbol_name": "GS", "final_holding_quantity": 0, "decision_guard": {"status": "allowed", "canonical_action": "reduce", "basis": "thesis"}, "order_price": 100_000, "order_path": "immediate", "direction": "sell"}
         ],
         current_holding=5,
         sell_capacity_impl=failing_sell_capacity,
@@ -1629,7 +1624,7 @@ def step_refresh_gates_stale_direction_checks(root: Path) -> list[str]:
     _active6, capacities6, sell6, errors6 = _run_refresh_gates_case(
         active_orders=[],
         execution_orders=[
-            {"symbol_id": "078930", "symbol_name": "GS", "final_holding_quantity": 0, "final_first_score": 3.5, "order_price": 100_000, "order_path": "immediate", "direction": "buy"}
+            {"symbol_id": "078930", "symbol_name": "GS", "final_holding_quantity": 0, "decision_guard": {"status": "allowed", "canonical_action": "increase", "basis": "thesis"}, "order_price": 100_000, "order_path": "immediate", "direction": "buy"}
         ],
         current_holding=5,
         buy_capacity_impl=failing_buy_capacity,
@@ -1641,7 +1636,7 @@ def step_refresh_gates_stale_direction_checks(root: Path) -> list[str]:
     _active7, capacities7, sell7, errors7 = _run_refresh_gates_case(
         active_orders=[],
         execution_orders=[
-            {"symbol_id": "078930", "symbol_name": "GS", "final_holding_quantity": 5, "final_first_score": 5.0, "order_price": 100_000, "order_path": "immediate", "direction": "sell"}
+            {"symbol_id": "078930", "symbol_name": "GS", "final_holding_quantity": 5, "decision_guard": {"status": "allowed", "canonical_action": "reduce", "basis": "thesis"}, "order_price": 100_000, "order_path": "immediate", "direction": "sell"}
         ],
         current_holding=5,
         sell_capacity_impl=failing_sell_capacity,
@@ -1682,7 +1677,7 @@ def step_refresh_gates_and_correction_price_normalization_checks(root: Path) -> 
             }
         ],
         execution_orders=[
-            {"symbol_id": "078930", "symbol_name": "GS", "final_holding_quantity": 12, "final_first_score": 6.5, "order_price": 83_250, "order_path": "immediate", "direction": "none"}
+            {"symbol_id": "078930", "symbol_name": "GS", "final_holding_quantity": 12, "decision_guard": {"status": "allowed"}, "order_price": 83_250, "order_path": "immediate", "direction": "none"}
         ],
         current_holding=11,
         buy_capacity_impl=recording_buy_capacity,
@@ -1730,8 +1725,7 @@ def step_pre_refresh_normalization_preserves_fresh_side_checks(root: Path) -> li
                 "current_live_holding_quantity": 11,
                 "expected_holding_quantity": 20,
                 "final_holding_quantity": 12,
-                "final_first_score": 6.5,
-                "order_price": 83_250,
+                "decision_guard": {"status": "allowed"}, "order_price": 83_250,
                 "order_path": "immediate",
             }
         ]
@@ -1794,8 +1788,7 @@ def step_pre_refresh_normalization_preserves_fresh_side_checks(root: Path) -> li
                 "current_live_holding_quantity": 12,
                 "expected_holding_quantity": 5,
                 "final_holding_quantity": 11,
-                "final_first_score": 6.5,
-                "order_price": 83_250,
+                "decision_guard": {"status": "allowed"}, "order_price": 83_250,
                 "order_path": "immediate",
             }
         ]
@@ -1817,7 +1810,7 @@ def step_active_order_replacement_checks(root: Path) -> list[str]:
     failures: list[str] = []
     replacement_execution = {
         "orders": [
-            {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 5, "final_first_score": 3.5, "order_price": 70000, "order_path": "immediate"}
+            {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 5, "decision_guard": {"status": "allowed"}, "order_price": 70000, "order_path": "immediate"}
         ]
     }
     replacement_submissions: list[dict[str, Any]] = []
@@ -1846,8 +1839,7 @@ def step_active_order_replacement_checks(root: Path) -> list[str]:
                     "order_id": "old-buy",
                     "order_kind": "pending",
                     "direction": "buy",
-                    "final_first_score": 6.5,
-                    "remaining_quantity": 1,
+                    "decision_guard": {"status": "allowed"}, "remaining_quantity": 1,
                     "order_price": 70000,
                     "active_status": "active",
                     "order_api": "order_cash",
@@ -1896,7 +1888,7 @@ def step_active_order_replacement_edge_case_checks(root: Path) -> list[str]:
 
     invalid_replacement_execution = {
         "orders": [
-            {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 5, "final_first_score": 3.5, "order_price": 0, "order_path": "immediate"}
+            {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 5, "decision_guard": {"status": "allowed"}, "order_price": 0, "order_path": "immediate"}
         ]
     }
     invalid_replacement_adjustments: list[tuple[str, dict[str, Any], dict[str, Any] | None]] = []
@@ -1923,8 +1915,7 @@ def step_active_order_replacement_edge_case_checks(root: Path) -> list[str]:
                     "order_id": "old-buy-zero-price",
                     "order_kind": "pending",
                     "direction": "buy",
-                    "final_first_score": 6.5,
-                    "remaining_quantity": 1,
+                    "decision_guard": {"status": "allowed"}, "remaining_quantity": 1,
                     "order_price": 70000,
                     "active_status": "active",
                     "order_api": "order_cash",
@@ -1949,7 +1940,7 @@ def step_active_order_replacement_edge_case_checks(root: Path) -> list[str]:
 
     deferred_replacement_execution = {
         "orders": [
-            {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 5, "final_first_score": 3.5, "order_price": 70000, "order_path": "immediate"}
+            {"symbol_id": "005930", "symbol_name": "삼성전자", "final_holding_quantity": 5, "decision_guard": {"status": "allowed"}, "order_price": 70000, "order_path": "immediate"}
         ]
     }
     deferred_replacement_submissions: list[dict[str, Any]] = []
@@ -1971,8 +1962,7 @@ def step_active_order_replacement_edge_case_checks(root: Path) -> list[str]:
                     "order_id": "old-buy-2",
                     "order_kind": "pending",
                     "direction": "buy",
-                    "final_first_score": 6.5,
-                    "remaining_quantity": 1,
+                    "decision_guard": {"status": "allowed"}, "remaining_quantity": 1,
                     "order_price": 70000,
                     "active_status": "active",
                     "order_api": "order_cash",
@@ -2010,7 +2000,7 @@ def step_deferred_replacement_capacity_and_sell_increase_checks(root: Path) -> l
     # run, not to gating this run's cancellation.
     insufficient_replacement_execution = {
         "orders": [
-            {"symbol_id": "078930", "symbol_name": "GS", "final_holding_quantity": 5, "final_first_score": 3.5, "order_price": 100_000, "order_path": "immediate"}
+            {"symbol_id": "078930", "symbol_name": "GS", "final_holding_quantity": 5, "decision_guard": {"status": "allowed"}, "order_price": 100_000, "order_path": "immediate"}
         ]
     }
     insufficient_replacement_calls: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
@@ -2037,8 +2027,7 @@ def step_deferred_replacement_capacity_and_sell_increase_checks(root: Path) -> l
                     "order_id": "0015300400",
                     "order_kind": "pending",
                     "direction": "buy",
-                    "final_first_score": 6.5,
-                    "remaining_quantity": 1,
+                    "decision_guard": {"status": "allowed"}, "remaining_quantity": 1,
                     "order_price": 100_000,
                     "active_status": "active",
                     "order_api": "order_cash",
@@ -2067,7 +2056,7 @@ def step_deferred_replacement_capacity_and_sell_increase_checks(root: Path) -> l
     # increase (the pre-existing "kept + additional order" invariant).
     sell_increase_execution = {
         "orders": [
-            {"symbol_id": "078930", "symbol_name": "GS", "final_holding_quantity": 5, "final_first_score": 3.5, "order_price": 100_000, "order_path": "immediate"}
+            {"symbol_id": "078930", "symbol_name": "GS", "final_holding_quantity": 5, "decision_basis": "thesis", "decision_guard": {"status": "allowed", "canonical_action": "reduce", "basis": "thesis"}, "order_price": 100_000, "order_path": "immediate"}
         ]
     }
     sell_increase_calls: list[Any] = []
@@ -2094,8 +2083,7 @@ def step_deferred_replacement_capacity_and_sell_increase_checks(root: Path) -> l
                     "order_id": "0015300402",
                     "order_kind": "pending",
                     "direction": "sell",
-                    "final_first_score": 6.5,
-                    "remaining_quantity": 1,
+                    "decision_guard": {"status": "allowed"}, "remaining_quantity": 1,
                     "order_price": 100_000,
                     "active_status": "active",
                     "order_api": "order_cash",
@@ -2132,7 +2120,7 @@ def self_test() -> int:
         os.environ[PORTFOLIO_EXCEPT_ENV_VAR] = str(root / "portfolio-except.txt")
         failures: list[str] = []
         failures.extend(step_dry_run_gate_and_portfolio_except_checks(root))
-        failures.extend(step_score_band_and_reservation_normalization_checks(root))
+        failures.extend(step_decision_guard_and_reservation_normalization_checks(root))
         failures.extend(step_reservation_cancel_request_checks(root))
         failures.extend(step_active_order_conflict_checks(root))
         failures.extend(step_reduction_and_available_cash_checks(root))
@@ -2174,7 +2162,7 @@ class RunSelfTestStepsAreIndividuallyDiscoverableTest(unittest.TestCase):
         cls.addClassCleanup(cls._restore_portfolio_except_env)
         os.environ[PORTFOLIO_EXCEPT_ENV_VAR] = str(cls.root / "portfolio-except.txt")
         cls.dry_run_gate_failures = step_dry_run_gate_and_portfolio_except_checks(cls.root)
-        cls.score_band_failures = step_score_band_and_reservation_normalization_checks(cls.root)
+        cls.decision_guard_failures = step_decision_guard_and_reservation_normalization_checks(cls.root)
         cls.active_order_conflict_failures = step_active_order_conflict_checks(cls.root)
         cls.reduction_and_available_cash_failures = step_reduction_and_available_cash_checks(cls.root)
         cls.max_buy_amt_and_zero_capacity_failures = step_max_buy_amt_and_zero_capacity_checks(cls.root)
@@ -2203,8 +2191,8 @@ class RunSelfTestStepsAreIndividuallyDiscoverableTest(unittest.TestCase):
     def test_step_dry_run_gate_and_portfolio_except_checks(self) -> None:
         self.assertEqual(self.dry_run_gate_failures, [])
 
-    def test_step_score_band_and_reservation_normalization_checks(self) -> None:
-        self.assertEqual(self.score_band_failures, [])
+    def test_step_decision_guard_and_reservation_normalization_checks(self) -> None:
+        self.assertEqual(self.decision_guard_failures, [])
 
     def test_step_active_order_conflict_checks(self) -> None:
         self.assertEqual(self.active_order_conflict_failures, [])
@@ -2266,7 +2254,7 @@ class ExecuteOrdersSelfTest(unittest.TestCase):
         the whole scenario a second time."""
         step_names = [
             "step_dry_run_gate_and_portfolio_except_checks",
-            "step_score_band_and_reservation_normalization_checks",
+            "step_decision_guard_and_reservation_normalization_checks",
             "step_reservation_cancel_request_checks",
             "step_active_order_conflict_checks",
             "step_reduction_and_available_cash_checks",
@@ -2290,7 +2278,7 @@ class ExecuteOrdersSelfTest(unittest.TestCase):
 
     def test_self_test_suite_reports_failure_when_a_step_fails(self) -> None:
         with patch(f"{__name__}.step_dry_run_gate_and_portfolio_except_checks", return_value=["boom"]), patch(
-            f"{__name__}.step_score_band_and_reservation_normalization_checks", return_value=[]
+            f"{__name__}.step_decision_guard_and_reservation_normalization_checks", return_value=[]
         ), patch(f"{__name__}.step_reservation_cancel_request_checks", return_value=[]), patch(
             f"{__name__}.step_active_order_conflict_checks", return_value=[]
         ), patch(f"{__name__}.step_reduction_and_available_cash_checks", return_value=[]), patch(
@@ -2854,3 +2842,465 @@ class ExecuteOrdersSelfTest(unittest.TestCase):
 
         self.assertEqual(kis.calls, 1)
         self.assertEqual(len(results), 1)
+
+
+class DecisionGuardActionBasisMismatchTest(unittest.TestCase):
+    """Regression coverage: decision_guard_block_reason must fail closed unless status,
+    canonical_action, and decision_basis all genuinely match this submission's side."""
+
+    def test_allowed_matching_action_and_basis_is_not_blocked(self) -> None:
+        order = {"decision_basis": "thesis", "decision_guard": {"status": "allowed", "canonical_action": "increase", "basis": "thesis"}}
+        self.assertEqual(decision_guard_block_reason(order, "buy"), "")
+
+    def test_action_mismatch_blocks_even_when_status_allowed(self) -> None:
+        # Guard says increase (a buy), but this submission is trying to sell -- must block.
+        order = {"decision_basis": "thesis", "decision_guard": {"status": "allowed", "canonical_action": "increase", "basis": "thesis"}}
+        self.assertEqual(decision_guard_block_reason(order, "sell"), "decision_guard_action_mismatch")
+
+    def test_reduce_and_exit_both_satisfy_a_sell_side(self) -> None:
+        for action in ("reduce", "exit"):
+            order = {"decision_basis": "thesis", "decision_guard": {"status": "allowed", "canonical_action": action, "basis": "thesis"}}
+            self.assertEqual(decision_guard_block_reason(order, "sell"), "", msg=action)
+
+    def test_basis_mismatch_blocks_even_with_matching_action(self) -> None:
+        # A forged/stale guard: canonical_action matches the side, but decision_basis on the
+        # order does not match what the guard was actually derived for.
+        order = {"decision_basis": "profit_protection", "decision_guard": {"status": "allowed", "canonical_action": "reduce", "basis": "thesis"}}
+        self.assertEqual(decision_guard_block_reason(order, "sell"), "decision_guard_basis_mismatch")
+
+    def test_missing_guard_blocks(self) -> None:
+        self.assertEqual(decision_guard_block_reason({}, "buy"), "decision_guard_not_allowed")
+
+    def test_none_side_is_always_exempt(self) -> None:
+        # Lifecycle-only cancellation/correction paths call this with side="none".
+        self.assertEqual(decision_guard_block_reason({}, "none"), "")
+
+
+class FreshBalanceRecheckTest(unittest.TestCase):
+    """Regression coverage: profit_protection/concentration_rebalance rechecks must use a
+    fresh KIS balance snapshot and fail closed when it is unavailable or no longer supports
+    the guard's approved bounds."""
+
+    class FakeBalanceKis:
+        cano = "12345678"
+        product = "01"
+        env = "real"
+
+        def __init__(self, body: dict[str, Any] | None = None, raise_error: bool = False) -> None:
+            self._body = body or {}
+            self._raise_error = raise_error
+
+        def call(self, name: str, *, params: dict[str, str] | None = None, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+            if self._raise_error:
+                raise RuntimeError("transient KIS balance lookup failure")
+            return self._body
+
+    def test_fetch_fresh_domestic_balance_returns_none_on_network_failure(self) -> None:
+        kis = self.FakeBalanceKis(raise_error=True)
+        self.assertIsNone(fetch_fresh_domestic_balance(kis))
+
+    def test_fetch_fresh_domestic_balance_returns_none_without_kis(self) -> None:
+        self.assertIsNone(fetch_fresh_domestic_balance(None))
+
+    def test_fetch_fresh_domestic_balance_returns_none_when_total_evaluation_missing(self) -> None:
+        kis = self.FakeBalanceKis({"output1": [{"pdno": "005930", "hldg_qty": "10", "pchs_avg_pric": "65000", "evlu_amt": "700000"}], "output2": [{}]})
+        self.assertIsNone(fetch_fresh_domestic_balance(kis))
+
+    def test_fetch_fresh_domestic_balance_parses_symbols_and_total(self) -> None:
+        kis = self.FakeBalanceKis(
+            {
+                "output1": [{"pdno": "005930", "hldg_qty": "10", "pchs_avg_pric": "65000", "evlu_amt": "700000"}],
+                "output2": [{"tot_evlu_amt": "10000000"}],
+            }
+        )
+        fresh = fetch_fresh_domestic_balance(kis)
+        self.assertIsNotNone(fresh)
+        self.assertEqual(fresh["total_evaluation_amount"], 10000000)
+        self.assertEqual(fresh["symbols"]["005930"]["quantity"], 10)
+        self.assertEqual(fresh["symbols"]["005930"]["average_purchase_price"], 65000)
+
+    def test_fetch_fresh_domestic_balance_collects_every_page(self) -> None:
+        class PaginatedBalanceKis:
+            cano = "12345678"
+            product = "01"
+
+            def __init__(self) -> None:
+                self.calls: list[tuple[dict[str, str], str]] = []
+
+            def call_with_headers(
+                self,
+                name: str,
+                *,
+                params: dict[str, str] | None = None,
+                payload: dict[str, Any] | None = None,
+                tr_cont: str = "",
+            ) -> tuple[dict[str, Any], dict[str, str]]:
+                self.calls.append((dict(params or {}), tr_cont))
+                if len(self.calls) == 1:
+                    return (
+                        {
+                            "output1": [
+                                {
+                                    "pdno": "005930",
+                                    "hldg_qty": "10",
+                                    "pchs_avg_pric": "65000",
+                                    "evlu_amt": "700000",
+                                }
+                            ],
+                            "output2": [
+                                {
+                                    "tot_evlu_amt": "10000000",
+                                    "ctx_area_fk100": "next-fk",
+                                    "ctx_area_nk100": "next-nk",
+                                }
+                            ],
+                        },
+                        {"tr_cont": "F"},
+                    )
+                return (
+                    {
+                        "output1": [
+                            {
+                                "pdno": "000660",
+                                "hldg_qty": "3",
+                                "pchs_avg_pric": "180000",
+                                "evlu_amt": "600000",
+                            }
+                        ],
+                        "output2": [],
+                    },
+                    {"tr_cont": ""},
+                )
+
+        kis = PaginatedBalanceKis()
+        fresh = fetch_fresh_domestic_balance(kis)
+        self.assertIsNotNone(fresh)
+        self.assertEqual(set(fresh["symbols"]), {"005930", "000660"})
+        self.assertEqual(len(kis.calls), 2)
+        self.assertEqual(kis.calls[1][0]["CTX_AREA_FK100"], "next-fk")
+        self.assertEqual(kis.calls[1][0]["CTX_AREA_NK100"], "next-nk")
+        self.assertEqual(kis.calls[1][1], "N")
+
+    def test_fetch_fresh_domestic_balance_fails_closed_on_unpageable_continuation(self) -> None:
+        class UnpageableBalanceKis:
+            cano = "12345678"
+            product = "01"
+
+            def call_with_headers(
+                self,
+                name: str,
+                *,
+                params: dict[str, str] | None = None,
+                payload: dict[str, Any] | None = None,
+                tr_cont: str = "",
+            ) -> tuple[dict[str, Any], dict[str, str]]:
+                return (
+                    {
+                        "output1": [],
+                        "output2": [{"tot_evlu_amt": "10000000"}],
+                    },
+                    {"tr_cont": "F"},
+                )
+
+        self.assertIsNone(fetch_fresh_domestic_balance(UnpageableBalanceKis()))
+
+    def test_verify_profit_protection_pnl_blocks_when_fresh_balance_unavailable(self) -> None:
+        kis = self.FakeBalanceKis({"output1": [], "output2": [{"tot_evlu_amt": "1"}]})
+        self.assertFalse(verify_profit_protection_pnl(kis, None, "005930"))
+
+    def test_verify_profit_protection_pnl_blocks_when_symbol_missing_from_fresh_balance(self) -> None:
+        class CurrentPriceKis:
+            def current_price(self, symbol: str) -> int:
+                return 80000
+
+        fresh_balance = {"symbols": {}, "total_evaluation_amount": 10_000_000}
+        self.assertFalse(verify_profit_protection_pnl(CurrentPriceKis(), fresh_balance, "005930"))
+
+    def test_verify_profit_protection_pnl_allows_when_current_price_above_fresh_average_cost(self) -> None:
+        class CurrentPriceKis:
+            def current_price(self, symbol: str) -> int:
+                return 80000
+
+        fresh_balance = {"symbols": {"005930": {"average_purchase_price": 65000}}, "total_evaluation_amount": 10_000_000}
+        self.assertTrue(verify_profit_protection_pnl(CurrentPriceKis(), fresh_balance, "005930"))
+
+    def test_verify_concentration_rebalance_blocks_when_fresh_concentration_now_within_cap(self) -> None:
+        # The pipeline's guard was derived from a stale, above-cap snapshot; the fresh
+        # snapshot shows the position has already fallen back within the approved cap.
+        fresh_balance = {
+            "symbols": {"005930": {"quantity": 10, "valuation_amount": 1_000_000}},  # 10% of total
+            "total_evaluation_amount": 10_000_000,
+        }
+        order = {
+            "order_price": 100_000,
+            "validated_order_quantity": 2,
+            "decision_guard": {"cap_pct": 15.0, "max_reduction_pct": 25.0},
+        }
+        self.assertFalse(verify_concentration_rebalance(fresh_balance, "005930", order))
+
+    def test_verify_concentration_rebalance_blocks_when_reduction_would_cross_below_cap_floor(self) -> None:
+        fresh_balance = {
+            "symbols": {"005930": {"quantity": 10, "valuation_amount": 2_000_000}},  # 20% of total, above 15% cap
+            "total_evaluation_amount": 10_000_000,
+        }
+        # Cap floor at 15% of 10,000,000 / 100,000 price = 15 shares; already below that at
+        # qty 10, so any further reduction should still be checked against the floor.
+        order = {
+            "order_price": 100_000,
+            "validated_order_quantity": 10,
+            "decision_guard": {"cap_pct": 15.0, "max_reduction_pct": 25.0},
+        }
+        self.assertFalse(verify_concentration_rebalance(fresh_balance, "005930", order))
+
+    def test_verify_concentration_rebalance_allows_reduction_within_cap_floor(self) -> None:
+        fresh_balance = {
+            "symbols": {"005930": {"quantity": 20, "valuation_amount": 2_000_000}},  # 20% of total, above 15% cap
+            "total_evaluation_amount": 10_000_000,
+        }
+        # Cap floor = 15% of 10,000,000 / 100,000 = 15 shares; reducing 2 shares leaves 18, still above floor.
+        order = {
+            "order_price": 100_000,
+            "validated_order_quantity": 2,
+            "decision_guard": {"cap_pct": 15.0, "max_reduction_pct": 25.0},
+        }
+        self.assertTrue(verify_concentration_rebalance(fresh_balance, "005930", order))
+
+    def test_verify_concentration_rebalance_uses_fresh_valuation_not_stale_order_price(self) -> None:
+        fresh_balance = {
+            "symbols": {"005930": {"quantity": 20, "valuation_amount": 1_800_000}},
+            "total_evaluation_amount": 10_000_000,
+        }
+        # Fresh implied price is 90,000 and the 15% floor is 1,500,000.
+        # Selling 4 leaves 1,440,000, below the floor. A stale 200,000
+        # order_price would incorrectly make the old quantity-floor check pass.
+        order = {
+            "order_price": 200_000,
+            "validated_order_quantity": 4,
+            "decision_guard": {"cap_pct": 15.0, "max_reduction_pct": 25.0},
+        }
+        self.assertFalse(verify_concentration_rebalance(fresh_balance, "005930", order))
+
+    def test_verify_concentration_rebalance_includes_existing_pending_sell(self) -> None:
+        fresh_balance = {
+            "symbols": {"005930": {"quantity": 3, "valuation_amount": 300_000}},
+            "total_evaluation_amount": 1_000_000,
+        }
+        # One pending sell plus one additional sell would leave 1 share
+        # (100,000, or 10%), below the approved 15% floor.
+        order = {
+            "validated_order_quantity": 1,
+            "pending_and_reserved_sell_quantity": 1,
+            "decision_guard": {"cap_pct": 15.0, "max_reduction_pct": 25.0},
+        }
+        self.assertFalse(verify_concentration_rebalance(fresh_balance, "005930", order))
+
+    def test_verify_fresh_reduction_bounds_counts_pending_and_new_sell(self) -> None:
+        fresh_balance = {
+            "symbols": {"005930": {"quantity": 8}},
+            "total_evaluation_amount": 10_000_000,
+        }
+        allowed = {
+            "validated_order_quantity": 1,
+            "pending_and_reserved_sell_quantity": 1,
+            "decision_guard": {"max_reduction_pct": 25.0},
+        }
+        excessive = {
+            **allowed,
+            "validated_order_quantity": 2,
+        }
+        self.assertTrue(verify_fresh_reduction_bounds(fresh_balance, "005930", allowed))
+        self.assertFalse(verify_fresh_reduction_bounds(fresh_balance, "005930", excessive))
+
+    def test_reconcile_uses_fresh_quantity_after_pending_sell_fills(self) -> None:
+        class CurrentPriceKis:
+            def current_price(self, symbol: str) -> int:
+                return 80_000
+
+        execution = {
+            "orders": [
+                {
+                    "symbol_id": "005930",
+                    "symbol_name": "삼성전자",
+                    "final_holding_quantity": 6,
+                    "order_price": 70_000,
+                    "order_path": "immediate",
+                    "decision_basis": "profit_protection",
+                    "decision_guard": {
+                        "status": "allowed",
+                        "canonical_action": "reduce",
+                        "basis": "profit_protection",
+                        "max_reduction_pct": 25.0,
+                    },
+                }
+            ]
+        }
+        fresh_balance = {
+            "symbols": {
+                "005930": {
+                    "quantity": 8,
+                    "average_purchase_price": 65_000,
+                    "valuation_amount": 640_000,
+                }
+            },
+            "total_evaluation_amount": 10_000_000,
+        }
+
+        reconcile(
+            {
+                "account_summary": {"cash_amount": 1_000_000},
+                "symbols": [
+                    {
+                        "symbol_id": "005930",
+                        "symbol_name": "삼성전자",
+                        # Stale snapshot from before a pending 2-share sell filled.
+                        "current_live_holding_quantity": 10,
+                    }
+                ],
+            },
+            execution,
+            [],
+            {},
+            {"005930": {"max_sell_qty": 8}},
+            submit=False,
+            kis=CurrentPriceKis(),
+            fresh_balance=fresh_balance,
+        )
+
+        order = execution["orders"][0]
+        self.assertEqual(order.get("current_live_holding_quantity"), 8)
+        self.assertEqual(order.get("validated_order_quantity"), 2)
+        self.assertEqual(order.get("reason"), "validated_dry_run_not_submitted")
+
+    def test_reconcile_blocks_fresh_reduction_above_approved_percentage(self) -> None:
+        class CurrentPriceKis:
+            def current_price(self, symbol: str) -> int:
+                return 80_000
+
+        execution = {
+            "orders": [
+                {
+                    "symbol_id": "005930",
+                    "symbol_name": "삼성전자",
+                    "final_holding_quantity": 8,
+                    "order_price": 70_000,
+                    "order_path": "immediate",
+                    "decision_basis": "profit_protection",
+                    "decision_guard": {
+                        "status": "allowed",
+                        "canonical_action": "reduce",
+                        "basis": "profit_protection",
+                        "max_reduction_pct": 25.0,
+                    },
+                }
+            ]
+        }
+        fresh_balance = {
+            "symbols": {
+                "005930": {
+                    "quantity": 12,
+                    "average_purchase_price": 65_000,
+                    "valuation_amount": 960_000,
+                }
+            },
+            "total_evaluation_amount": 10_000_000,
+        }
+
+        reconcile(
+            {
+                "account_summary": {"cash_amount": 1_000_000},
+                "symbols": [
+                    {
+                        "symbol_id": "005930",
+                        "symbol_name": "삼성전자",
+                        "current_live_holding_quantity": 10,
+                    }
+                ],
+            },
+            execution,
+            [],
+            {},
+            {"005930": {"max_sell_qty": 12}},
+            submit=False,
+            kis=CurrentPriceKis(),
+            fresh_balance=fresh_balance,
+        )
+
+        order = execution["orders"][0]
+        self.assertEqual(order.get("current_live_holding_quantity"), 12)
+        self.assertEqual(order.get("result"), "blocked")
+        self.assertEqual(
+            order.get("reason"),
+            "profit_protection_reduction_bound_recheck_failed",
+        )
+
+    def test_reconcile_blocks_profit_protection_sell_when_fresh_balance_unavailable(self) -> None:
+        execution = {
+            "orders": [
+                {
+                    "symbol_id": "005930",
+                    "symbol_name": "삼성전자",
+                    "final_holding_quantity": 8,
+                    "order_price": 70000,
+                    "order_path": "immediate",
+                    "decision_basis": "profit_protection",
+                    "decision_guard": {
+                        "status": "allowed",
+                        "canonical_action": "reduce",
+                        "basis": "profit_protection",
+                        "max_reduction_pct": 25.0,
+                    },
+                }
+            ]
+        }
+        reconcile(
+            {"account_summary": {"cash_amount": 1_000_000}, "symbols": [{"symbol_id": "005930", "symbol_name": "삼성전자", "current_live_holding_quantity": 10}]},
+            execution,
+            [],
+            {},
+            {"005930": {"max_sell_qty": 5}},
+            submit=False,
+            kis=self.FakeBalanceKis(raise_error=True),
+            fresh_balance=None,
+        )
+        order = execution["orders"][0]
+        self.assertEqual(order.get("result"), "blocked")
+        self.assertEqual(order.get("reason"), "profit_protection_pnl_recheck_failed")
+
+    def test_reconcile_blocks_every_duplicate_execution_symbol(self) -> None:
+        duplicate_order = {
+            "symbol_id": "005930",
+            "symbol_name": "삼성전자",
+            "final_holding_quantity": 1,
+            "order_price": 70_000,
+            "order_path": "immediate",
+            "decision_basis": "thesis",
+            "decision_guard": {
+                "status": "allowed",
+                "canonical_action": "increase",
+                "basis": "thesis",
+            },
+        }
+        execution = {"orders": [dict(duplicate_order), dict(duplicate_order)]}
+
+        reconcile(
+            {
+                "account_summary": {"cash_amount": 1_000_000},
+                "symbols": [
+                    {
+                        "symbol_id": "005930",
+                        "current_live_holding_quantity": 0,
+                    }
+                ],
+            },
+            execution,
+            [],
+            {"005930": {"max_buy_qty": 10, "max_buy_amt": 1_000_000}},
+            {},
+            submit=False,
+            kis=None,
+        )
+
+        self.assertEqual(
+            [order.get("reason") for order in execution["orders"]],
+            ["duplicate_execution_symbol", "duplicate_execution_symbol"],
+        )

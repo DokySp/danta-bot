@@ -764,7 +764,7 @@ def step_second_spec_checks(tmp: Path, run_dir: Path) -> list[str]:
     """build_second_spec judge-review sub-agent spec construction across score-band boundaries."""
     failures: list[str] = []
     try:
-        def second_spec_args(analyst_review_path: str, output_name: str) -> argparse.Namespace:
+        def second_spec_args(analyst_review_path: str, output_name: str, strategy_policy_config: str = "") -> argparse.Namespace:
             return argparse.Namespace(
                 output_dir=run_dir,
                 output=run_dir / output_name,
@@ -776,18 +776,19 @@ def step_second_spec_checks(tmp: Path, run_dir: Path) -> list[str]:
                 workspace_dir=tmp,
                 pipeline_dir=pipeline_dir(),
                 relative_paths=False,
-                buy_min_score=6.0,
-                sell_max_score=4.0,
+                strategy_policy_config=strategy_policy_config,
             )
 
         second_spec = build_second_spec(second_spec_args(str(run_dir / "analyst-review.json"), "judge-review-spec.json"))
-        if second_spec["symbol_ids"] != ["005930"]:
+        if second_spec["symbol_ids"] != ["000660", "005930"]:
             failures.append(f"unexpected second spec symbols: {second_spec}")
-        if second_spec.get("candidate_directions") != {"005930": "buy"}:
-            failures.append(f"buy candidate direction missing: {second_spec}")
+        if second_spec.get("review_scope_reasons") != {"005930": "held_position", "000660": "unheld_score_rank"}:
+            failures.append(f"review_scope_reasons missing held/unheld provenance: {second_spec}")
+        if "candidate_directions" in second_spec or "score_band_thresholds" in second_spec:
+            failures.append(f"removed score-band/candidate-direction fields must not reappear: {second_spec}")
         snapshot = second_spec.get("portfolio_snapshot") or []
-        if len(snapshot) != 1 or snapshot[0].get("symbol_id") != "005930" or snapshot[0].get("final_first_score") != 7.0 or snapshot[0].get("candidate_direction") != "buy":
-            failures.append(f"portfolio snapshot should describe every holding: {second_spec}")
+        if len(snapshot) != 1 or snapshot[0].get("symbol_id") != "005930" or snapshot[0].get("final_first_score") != 7.0 or "candidate_direction" in snapshot[0]:
+            failures.append(f"portfolio snapshot should describe every holding without a candidate_direction: {second_spec}")
         if str(second_spec.get("artifact_paths", {}).get("review_format", "")).rsplit("/", 1)[-1] != "judge-review-format.md":
             failures.append(f"judge spec should reference judge-review-format.md: {second_spec}")
         for debate_key, debate_file in (("debate_bull_persona", "debate-bull.md"), ("debate_bear_persona", "debate-bear.md")):
@@ -799,45 +800,47 @@ def step_second_spec_checks(tmp: Path, run_dir: Path) -> list[str]:
             failures.append(f"judge spec missing readable debate_format: {second_spec}")
         if str(second_spec.get("artifact_paths", {}).get("debate_artifact", "")) != str(run_dir / "judge-debate.json"):
             failures.append(f"judge spec missing deterministic debate_artifact path: {second_spec}")
-        threshold_analyst_review = load_json(run_dir / "analyst-review.json")
-        for item in threshold_analyst_review.get("symbols", []):
-            if item.get("symbol_id") == "000660":
-                item["final_first_score"] = 6.0
-        write_json(run_dir / "analyst-review-threshold-6.0.json", threshold_analyst_review)
-        threshold_60_spec = build_second_spec(second_spec_args(str(run_dir / "analyst-review-threshold-6.0.json"), "judge-review-spec-threshold-6.0.json"))
-        if threshold_60_spec["symbol_ids"] != ["005930", "000660"] or threshold_60_spec.get("candidate_directions", {}).get("000660") != "buy":
-            failures.append(f"exactly 6.0 must become a buy candidate: {threshold_60_spec}")
-        for item in threshold_analyst_review.get("symbols", []):
-            if item.get("symbol_id") == "000660":
-                item["final_first_score"] = 6.1
-        write_json(run_dir / "analyst-review-threshold-6.1.json", threshold_analyst_review)
-        threshold_61_spec = build_second_spec(second_spec_args(str(run_dir / "analyst-review-threshold-6.1.json"), "judge-review-spec-threshold-6.1.json"))
-        if threshold_61_spec["symbol_ids"] != ["005930", "000660"] or threshold_61_spec.get("candidate_directions", {}).get("000660") != "buy":
-            failures.append(f"score at or above 6.0 should become a buy candidate: {threshold_61_spec}")
-        sell_band_review = load_json(run_dir / "analyst-review.json")
-        for item in sell_band_review.get("symbols", []):
+
+        # A held symbol must stay in scope even with a low/mid/missing score: no score band gates it out.
+        held_low_score_review = load_json(run_dir / "analyst-review.json")
+        for item in held_low_score_review.get("symbols", []):
             if item.get("symbol_id") == "005930":
-                item["final_first_score"] = 3.9
-            if item.get("symbol_id") == "000660":
-                item["final_first_score"] = 3.0
-        write_json(run_dir / "analyst-review-sell-band.json", sell_band_review)
-        sell_band_spec = build_second_spec(second_spec_args(str(run_dir / "analyst-review-sell-band.json"), "judge-review-spec-sell-band.json"))
-        if sell_band_spec["symbol_ids"] != ["005930"] or sell_band_spec.get("candidate_directions") != {"005930": "sell"}:
-            failures.append(f"only held symbols at or below 4.0 may become sell candidates: {sell_band_spec}")
-        mid_band_review = load_json(run_dir / "analyst-review.json")
-        for item in mid_band_review.get("symbols", []):
-            item["final_first_score"] = 5.0
-        write_json(run_dir / "analyst-review-mid-band.json", mid_band_review)
-        mid_band_spec = build_second_spec(second_spec_args(str(run_dir / "analyst-review-mid-band.json"), "judge-review-spec-mid-band.json"))
-        if mid_band_spec["symbol_ids"] != [] or mid_band_spec.get("candidate_directions") != {}:
-            failures.append(f"mid-band symbols must not reach the judge: {mid_band_spec}")
-        for item in mid_band_review.get("symbols", []):
+                item["final_first_score"] = 2.0
+        write_json(run_dir / "analyst-review-held-low-score.json", held_low_score_review)
+        held_low_score_spec = build_second_spec(second_spec_args(str(run_dir / "analyst-review-held-low-score.json"), "judge-review-spec-held-low-score.json"))
+        if held_low_score_spec.get("review_scope_reasons", {}).get("005930") != "held_position":
+            failures.append(f"held symbol must remain in scope regardless of score: {held_low_score_spec}")
+        held_missing_score_review = load_json(run_dir / "analyst-review.json")
+        for item in held_missing_score_review.get("symbols", []):
             if item.get("symbol_id") == "005930":
-                item["final_first_score"] = 4.0
-        write_json(run_dir / "analyst-review-sell-edge.json", mid_band_review)
-        sell_edge_spec = build_second_spec(second_spec_args(str(run_dir / "analyst-review-sell-edge.json"), "judge-review-spec-sell-edge.json"))
-        if sell_edge_spec["symbol_ids"] != ["005930"] or sell_edge_spec.get("candidate_directions") != {"005930": "sell"}:
-            failures.append(f"exactly 4.0 must become a sell candidate: {sell_edge_spec}")
+                item["final_first_score"] = None
+        write_json(
+            run_dir / "analyst-review-held-missing-score.json",
+            held_missing_score_review,
+        )
+        held_missing_score_spec = build_second_spec(
+            second_spec_args(
+                str(run_dir / "analyst-review-held-missing-score.json"),
+                "judge-review-spec-held-missing-score.json",
+            )
+        )
+        if (
+            held_missing_score_spec.get("review_scope_reasons", {}).get("005930")
+            != "held_position"
+        ):
+            failures.append(
+                f"held symbol with no usable score must still reach judge-review: {held_missing_score_spec}"
+            )
+
+        # unheld_review_top_k=0 must exclude the unheld symbol entirely; the held symbol always stays.
+        zero_top_k_policy = tmp / "strategy-policy-zero-top-k.yaml"
+        base_policy_text = Path(default_strategy_policy_config_path()).read_text(encoding="utf-8")
+        zero_top_k_policy.write_text(base_policy_text.replace("unheld_review_top_k: 5", "unheld_review_top_k: 0"), encoding="utf-8")
+        zero_top_k_spec = build_second_spec(
+            second_spec_args(str(run_dir / "analyst-review.json"), "judge-review-spec-zero-top-k.json", strategy_policy_config=str(zero_top_k_policy))
+        )
+        if zero_top_k_spec["symbol_ids"] != ["005930"] or zero_top_k_spec.get("review_scope_reasons") != {"005930": "held_position"}:
+            failures.append(f"unheld_review_top_k=0 must exclude unheld symbols: {zero_top_k_spec}")
         write_json(
             run_dir / "judge-review.json",
             {

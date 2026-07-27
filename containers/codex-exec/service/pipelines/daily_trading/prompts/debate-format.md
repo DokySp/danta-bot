@@ -46,5 +46,5 @@ Bull/Bear는 Python pipeline이 관리하는 동일 Codex session에서 `opening
 
 - `opening`: `kind=claim`, `targets=[]`. 독립적인 핵심 주장과 스스로 인정하는 약점을 명시한다.
 - `rebuttal-1`: `kind=rebuttal`. 각 `targets`는 상대 opening의 `argument_id`를 하나 이상 참조한다. 상대와 무관한 새 주장을 만들지 않고 `final_position`, `recommended_action`, `target_holding_quantity`를 반드시 완성한다.
-- `recommended_action`은 `portfolio_snapshot.current_live_holding_quantity`와 `target_holding_quantity`의 차이에 따라 `buy`, `hold`, `sell` 중 하나로 일치시킨다. snapshot이 없으면 기준 수량은 0이다.
-- `target_holding_quantity`는 0 이상의 정수다. 매수 후보는 기준 수량보다 줄일 수 없고 매도 후보는 기준 수량보다 늘릴 수 없다. 근거가 부족하면 기준 수량을 유지하고 `hold`를 반환한다.
+- `recommended_action`은 `portfolio_snapshot.current_live_holding_quantity`와 `target_holding_quantity`의 차이에 따라 `buy`, `hold`, `sell` 중 하나로 일치시킨다. snapshot이 없으면 기준 수량은 0이다. 사전에 정해진 매수/매도 후보 구분은 없으며, 어느 방향으로든 자유롭게 `target_holding_quantity`를 제안할 수 있다.
+- `target_holding_quantity`는 0 이상의 정수다. 근거가 부족하면 기준 수량을 유지하고 `hold`를 반환한다.
