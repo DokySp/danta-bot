@@ -3265,6 +3265,58 @@ class FreshBalanceRecheckTest(unittest.TestCase):
         order = execution["orders"][0]
         self.assertEqual(order.get("result"), "blocked")
         self.assertEqual(order.get("reason"), "profit_protection_pnl_recheck_failed")
+        # A failed recheck must still persist a compact sanitized audit entry, not only successes.
+        audit = order.get("fresh_recheck_audit")
+        self.assertEqual(len(audit), 1)
+        self.assertIn("checked_at", audit[0])
+        self.assertFalse(audit[0]["pnl_verification_outcome"])
+
+    def test_reconcile_persists_fresh_recheck_audit_on_a_successful_profit_protection_sell(self) -> None:
+        class CurrentPriceKis:
+            def current_price(self, symbol: str) -> int:
+                return 80_000
+
+        execution = {
+            "orders": [
+                {
+                    "symbol_id": "005930",
+                    "symbol_name": "삼성전자",
+                    "final_holding_quantity": 8,
+                    "order_price": 70000,
+                    "order_path": "immediate",
+                    "decision_basis": "profit_protection",
+                    "decision_guard": {
+                        "status": "allowed",
+                        "canonical_action": "reduce",
+                        "basis": "profit_protection",
+                        "max_reduction_pct": 25.0,
+                    },
+                }
+            ]
+        }
+        reconcile(
+            {"account_summary": {"cash_amount": 1_000_000}, "symbols": [{"symbol_id": "005930", "symbol_name": "삼성전자", "current_live_holding_quantity": 10}]},
+            execution,
+            [],
+            {},
+            {"005930": {"max_sell_qty": 5}},
+            submit=False,
+            kis=CurrentPriceKis(),
+            fresh_balance={
+                "symbols": {"005930": {"quantity": 10, "average_purchase_price": 65000, "valuation_amount": 700000}},
+                "total_evaluation_amount": 10_000_000,
+            },
+        )
+        order = execution["orders"][0]
+        # A successful recheck must ALSO be audited -- the pre-existing code only persisted failures.
+        self.assertNotEqual(order.get("reason"), "profit_protection_pnl_recheck_failed")
+        self.assertNotEqual(order.get("reason"), "profit_protection_reduction_bound_recheck_failed")
+        audit = order.get("fresh_recheck_audit")
+        self.assertEqual(len(audit), 1)
+        self.assertEqual(audit[0]["fresh_holding_quantity"], 10)
+        self.assertTrue(audit[0]["pnl_verification_outcome"])
+        self.assertTrue(audit[0]["reduction_bound_outcome"])
+        self.assertEqual(audit[0]["approved_max_reduction_pct"], 25.0)
 
     def test_reconcile_blocks_every_duplicate_execution_symbol(self) -> None:
         duplicate_order = {

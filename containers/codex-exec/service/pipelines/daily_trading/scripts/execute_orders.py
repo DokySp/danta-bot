@@ -466,6 +466,42 @@ def verify_fresh_reduction_bounds(
     return 0 < combined_reduction <= max_allowed_reduction
 
 
+def record_fresh_recheck_audit(
+    order: dict[str, Any],
+    fresh_balance: dict[str, Any] | None,
+    symbol: str,
+    *,
+    pnl_verification_outcome: bool | None = None,
+    reduction_bound_outcome: bool | None = None,
+    concentration_outcome: bool | None = None,
+) -> None:
+    """Persist a compact, sanitized per-order audit of a fresh pre-submit profit_protection/
+    concentration_rebalance recheck -- for BOTH the pass and fail path, not only failures.
+
+    Only already-computed booleans and the guard's own previously-approved bound values are
+    recorded (reusing fresh_balance already fetched for the verify_* calls above); no raw/sensitive
+    broker balance rows and no extra broker calls are involved.
+    """
+    guard = order.get("decision_guard") if isinstance(order.get("decision_guard"), dict) else {}
+    entry: dict[str, Any] = {
+        "checked_at": now_iso(),
+        "fresh_holding_quantity": fresh_balance_quantity(fresh_balance, symbol),
+    }
+    if pnl_verification_outcome is not None:
+        entry["pnl_verification_outcome"] = pnl_verification_outcome
+    if reduction_bound_outcome is not None:
+        entry["reduction_bound_outcome"] = reduction_bound_outcome
+        entry["approved_max_reduction_pct"] = guard.get("max_reduction_pct")
+    if concentration_outcome is not None:
+        entry["concentration_outcome"] = concentration_outcome
+        entry["approved_concentration_cap_pct"] = guard.get("cap_pct")
+    audit_list = order.get("fresh_recheck_audit")
+    if not isinstance(audit_list, list):
+        audit_list = []
+        order["fresh_recheck_audit"] = audit_list
+    audit_list.append(entry)
+
+
 def as_number(value: Any) -> float | None:
     if isinstance(value, bool) or value is None:
         return None
@@ -2278,7 +2314,12 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
                     blocked += 1
                     continue
                 if side == "sell" and decision_basis == "profit_protection":
-                    if not verify_profit_protection_pnl(kis, fresh_balance, symbol):
+                    pnl_ok = verify_profit_protection_pnl(kis, fresh_balance, symbol)
+                    reduction_ok = verify_fresh_reduction_bounds(fresh_balance, symbol, order)
+                    record_fresh_recheck_audit(
+                        order, fresh_balance, symbol, pnl_verification_outcome=pnl_ok, reduction_bound_outcome=reduction_ok
+                    )
+                    if not pnl_ok:
                         order["result"] = "blocked"
                         order["reason"] = "profit_protection_pnl_recheck_failed"
                         order["attempts"].append(attempt("profit-protection-recheck", "blocked", "positive PnL could not be reverified immediately before submission", "profit_protection_pnl_recheck_failed"))
@@ -2286,7 +2327,7 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
                             order_adjustments.append(adjustment_row(conflict, action="keep", reason="same_direction_active_order_kept", result="skipped"))
                         blocked += 1
                         continue
-                    if not verify_fresh_reduction_bounds(fresh_balance, symbol, order):
+                    if not reduction_ok:
                         order["result"] = "blocked"
                         order["reason"] = "profit_protection_reduction_bound_recheck_failed"
                         order["attempts"].append(attempt("profit-protection-recheck", "blocked", "fresh holdings no longer support the approved partial-reduction bound", "profit_protection_reduction_bound_recheck_failed"))
@@ -2295,10 +2336,16 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
                         blocked += 1
                         continue
                 if side == "sell" and decision_basis == "concentration_rebalance":
-                    if (
-                        not verify_fresh_reduction_bounds(fresh_balance, symbol, order)
-                        or not verify_concentration_rebalance(fresh_balance, symbol, order)
-                    ):
+                    reduction_ok = verify_fresh_reduction_bounds(fresh_balance, symbol, order)
+                    concentration_ok = verify_concentration_rebalance(fresh_balance, symbol, order)
+                    record_fresh_recheck_audit(
+                        order,
+                        fresh_balance,
+                        symbol,
+                        reduction_bound_outcome=reduction_ok,
+                        concentration_outcome=concentration_ok,
+                    )
+                    if not reduction_ok or not concentration_ok:
                         order["result"] = "blocked"
                         order["reason"] = "concentration_rebalance_recheck_failed"
                         order["attempts"].append(attempt("concentration-rebalance-recheck", "blocked", "latest quantities/valuation or approved reduction bound could not be reverified immediately before submission", "concentration_rebalance_recheck_failed"))
@@ -2536,13 +2583,18 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
             continue
 
         if side == "sell" and decision_basis == "profit_protection":
-            if not verify_profit_protection_pnl(kis, fresh_balance, symbol):
+            pnl_ok = verify_profit_protection_pnl(kis, fresh_balance, symbol)
+            reduction_ok = verify_fresh_reduction_bounds(fresh_balance, symbol, order)
+            record_fresh_recheck_audit(
+                order, fresh_balance, symbol, pnl_verification_outcome=pnl_ok, reduction_bound_outcome=reduction_ok
+            )
+            if not pnl_ok:
                 order["result"] = "blocked"
                 order["reason"] = "profit_protection_pnl_recheck_failed"
                 order["attempts"].append(attempt("profit-protection-recheck", "blocked", "positive PnL could not be reverified immediately before submission", "profit_protection_pnl_recheck_failed"))
                 blocked += 1
                 continue
-            if not verify_fresh_reduction_bounds(fresh_balance, symbol, order):
+            if not reduction_ok:
                 order["result"] = "blocked"
                 order["reason"] = "profit_protection_reduction_bound_recheck_failed"
                 order["attempts"].append(attempt("profit-protection-recheck", "blocked", "fresh holdings no longer support the approved partial-reduction bound", "profit_protection_reduction_bound_recheck_failed"))
@@ -2550,10 +2602,12 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
                 continue
 
         if side == "sell" and decision_basis == "concentration_rebalance":
-            if (
-                not verify_fresh_reduction_bounds(fresh_balance, symbol, order)
-                or not verify_concentration_rebalance(fresh_balance, symbol, order)
-            ):
+            reduction_ok = verify_fresh_reduction_bounds(fresh_balance, symbol, order)
+            concentration_ok = verify_concentration_rebalance(fresh_balance, symbol, order)
+            record_fresh_recheck_audit(
+                order, fresh_balance, symbol, reduction_bound_outcome=reduction_ok, concentration_outcome=concentration_ok
+            )
+            if not reduction_ok or not concentration_ok:
                 order["result"] = "blocked"
                 order["reason"] = "concentration_rebalance_recheck_failed"
                 order["attempts"].append(attempt("concentration-rebalance-recheck", "blocked", "latest quantities/valuation or approved reduction bound could not be reverified immediately before submission", "concentration_rebalance_recheck_failed"))

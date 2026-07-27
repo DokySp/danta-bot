@@ -24,6 +24,73 @@ PHASE_LABELS = {
     "rebuttal-1": "Rebuttal 1",
 }
 SIDE_LABELS = {"bull": "Bull", "bear": "Bear"}
+# canonical_action/requested_action (derive_action) are increase|hold|reduce|exit, never buy/sell.
+CANONICAL_ACTION_LABELS = {"increase": "확대", "reduce": "축소", "exit": "청산", "hold": "유지"}
+DECISION_BASIS_LABELS = {
+    "none": "기준유지",
+    "thesis": "논지",
+    "profit_protection": "이익보호",
+    "concentration_rebalance": "집중도조정",
+}
+GUARD_STATUS_LABELS = {"allowed": "허용", "blocked": "차단", "no_change": "변경없음 처리"}
+REVIEW_TRIGGER_DECISION_LABELS = {"full": "전체 리뷰 실행", "skipped": "생략(변경 없음)", "safety_block": "안전 차단"}
+REVIEW_TRIGGER_REASON_LABELS = {
+    "manual_invocation": "수동/전체 실행 요청",
+    "first_safe_run_of_day": "당일 최초 안전 실행",
+    "broker_fingerprint_changed": "브로커 상태 변경 감지",
+    "fixed_review_time_due": "예정 리뷰 시각 도래",
+    "account_lookup_failed": "계좌 조회 실패",
+    "order_lifecycle_lookup_incomplete": "미체결 주문 조회 미완료",
+    "orderable_cash_unavailable": "주문가능금액 조회 불가",
+    "holding_state_issue_detected": "보유수량 상태 불일치 감지",
+    "today_fills_lookup_incomplete": "당일 체결 조회 미완료",
+    "unexpected_non_universe_holding": "유니버스 외 예상외 보유 종목",
+}
+
+
+def review_trigger_reason_label(value: Any) -> str:
+    raw = str(value or "")
+    return REVIEW_TRIGGER_REASON_LABELS.get(raw, raw or "-")
+NOT_RECORDED = "미기록"
+
+
+def judge_field_display(final_item: dict[str, Any], field: str, labels: dict[str, str]) -> str:
+    """v1 judge-review.json artifacts never had decision_basis/requested_action/canonical_action.
+    A missing field must show "미기록"(not recorded), never a fabricated none/hold default that
+    reads as an actual mechanical decision."""
+    if field not in final_item:
+        return NOT_RECORDED
+    raw = str(final_item.get(field) or "")
+    return labels.get(raw, raw or NOT_RECORDED)
+
+
+JUDGE_SCOPE_STATUS_LABELS = {
+    "resolved": "Judge 진행",
+    "unresolved_in_scope": "Judge 대상 미해결",
+    "not_selected": "Judge 미선정",
+    "legacy_unknown": "Judge 상태 확인불가(구버전)",
+}
+
+
+def judge_symbol_scope_status(
+    symbol_id: str,
+    final_item: dict[str, Any] | None,
+    judge_scope_reasons: dict[str, Any],
+    has_judge_scope_metadata: bool,
+) -> str:
+    """A symbol present in judge-review-spec.review_scope_reasons but absent from judge-review.json
+    was an in-scope Judge target Judge never returned a valid result for -- it is not "Analyst
+    only"/"not selected" (both of those imply Judge never intended to look at it). A v1 run with no
+    scope metadata at all cannot honestly claim "not selected" for every unresolved symbol either."""
+    if final_item is not None:
+        return "resolved"
+    if not has_judge_scope_metadata:
+        return "legacy_unknown"
+    if symbol_id in judge_scope_reasons:
+        return "unresolved_in_scope"
+    return "not_selected"
+
+
 REGIME_LABELS = {
     "insufficient_market_data": "시장 데이터 부족",
     "neutral": "중립",
@@ -58,6 +125,31 @@ ORDER_REASON_LABELS = {
     "holding_state_not_verified": "보유수량 상태 불일치",
     "stale_active_order_requires_cancellation": "이전 미체결 주문 정리 필요",
     "unverified_holding_requires_active_order_cancellation": "수량 불일치로 기존 미체결 주문 취소 필요",
+    "active_order_correction_submitted": "기존주문 정정 제출",
+    "decision_guard_action_mismatch": "가드-액션 불일치",
+    "decision_guard_basis_mismatch": "가드-근거 불일치",
+    "duplicate_execution_symbol": "중복 실행 종목",
+    "sell_quantity_capacity_missing": "매도가능수량 조회 불가",
+    # Legacy score-band gate reason codes (removed in favor of guarded target-position decisions);
+    # kept here so same-day artifacts written before that change still render truthfully instead
+    # of falling back to the raw code.
+    "sell_blocked_score_band": "점수 밴드 매도 차단(legacy)",
+    "buy_blocked_score_band": "점수 밴드 매수 차단(legacy)",
+    "score_band_value_missing": "점수 확인 불가 차단(legacy)",
+    "debate_incomplete_baseline_forced": "토론 미완료로 기준 유지 강제",
+    "decision_basis_required_for_increase": "확대에는 decision_basis 필요",
+    "decision_basis_required_for_reduction": "축소에는 decision_basis 필요",
+    "thesis_increase_allowed": "논지 기반 확대 허용",
+    "thesis_reduction_allowed": "논지 기반 축소 허용",
+    "thesis_reduction_gate_blocked": "논지 축소 게이트 차단",
+    "profit_protection_blocked": "이익보호 조건 미충족 차단",
+    "profit_protection_reduction_allowed": "이익보호 축소 허용",
+    "concentration_rebalance_blocked": "집중도 조정 조건 미충족 차단",
+    "concentration_rebalance_reduction_allowed": "집중도 조정 축소 허용",
+    "capped_reduction_below_one_share": "축소분 1주 미만으로 변경없음 처리",
+    "daily_turnover_context_unavailable": "일일 회전한도 컨텍스트 조회 불가",
+    "daily_turnover_cap_exceeded": "일일 회전한도 초과",
+    "within_daily_turnover_budget": "일일 회전한도 이내",
 }
 
 
@@ -88,6 +180,16 @@ def decimal(value: Any, digits: int = 2) -> str:
         return "-"
 
 
+def valid_analyst_score(value: Any) -> bool:
+    if isinstance(value, bool) or value is None:
+        return False
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return False
+    return 0 <= score <= 10
+
+
 def signed_decimal(value: Any, digits: int = 2) -> str:
     try:
         return f"{float(value):+.{digits}f}"
@@ -95,24 +197,50 @@ def signed_decimal(value: Any, digits: int = 2) -> str:
         return "-"
 
 
-def analyst_score_sort_key(item: dict[str, Any]) -> tuple[float, str, str]:
-    try:
-        score = float(item.get("final_first_score"))
-    except (TypeError, ValueError):
-        score = math.inf
-    return score, str(item.get("symbol_name") or ""), str(item.get("symbol_id") or "")
+def judge_guard_intervened(final_item: dict[str, Any] | None) -> bool:
+    """decision_guard.status is only ever "blocked" or "no_change" (there is no "capped"
+    status); a capped/adjusted decision is instead detected from the reason_code text or from
+    the judge's requested target being clamped away from the canonical target."""
+    if not isinstance(final_item, dict):
+        return False
+    guard = final_item.get("decision_guard") if isinstance(final_item.get("decision_guard"), dict) else {}
+    status = str(guard.get("status") or "")
+    if status in {"blocked", "no_change"}:
+        return True
+    reason_code = str(guard.get("reason_code") or "")
+    if "capped" in reason_code:
+        return True
+    requested_target = final_item.get("requested_target_position_value_krw")
+    canonical_target = final_item.get("target_position_value_krw")
+    return requested_target is not None and canonical_target is not None and requested_target != canonical_target
 
 
-def analyst_score_class(value: Any) -> str:
-    try:
-        score = float(value)
-    except (TypeError, ValueError):
-        return ""
-    if score <= 4:
-        return " score-low"
-    if score >= 6:
-        return " score-high"
-    return ""
+def analyst_symbol_group_priority(
+    symbol_id: str,
+    final_by_symbol: dict[str, Any],
+    trade_symbol_ids: set[str],
+    attempt_symbol_ids: set[str],
+) -> int:
+    """Operational grouping order: 거래 확정 > 가드 개입 > 미해결/Judge 미처리 > 나머지."""
+    final_item = final_by_symbol.get(symbol_id)
+    if symbol_id in trade_symbol_ids:
+        return 0
+    if judge_guard_intervened(final_item) or symbol_id in attempt_symbol_ids:
+        return 1
+    if final_item is None:
+        return 2
+    return 3
+
+
+def analyst_symbol_sort_key(
+    item: dict[str, Any],
+    final_by_symbol: dict[str, Any],
+    trade_symbol_ids: set[str],
+    attempt_symbol_ids: set[str],
+) -> tuple[int, str, str]:
+    symbol_id = str(item.get("symbol_id") or "")
+    priority = analyst_symbol_group_priority(symbol_id, final_by_symbol, trade_symbol_ids, attempt_symbol_ids)
+    return priority, str(item.get("symbol_name") or ""), symbol_id
 
 
 def time_text(value: Any) -> str:
@@ -152,6 +280,11 @@ def find_runs(runs_root: Path, target_started_at: str) -> list[dict[str, Any]]:
                 "lifecycle": load_json(path / "order-lifecycle.json"),
                 "decision": load_json(path / "decision-brief.json"),
                 "market": load_json(path / "market-index-snapshot.json"),
+                # Only build_summary's full-review path ever adds "review_summary"; a
+                # short-circuit (safety_block/skipped preflight) summary never does, so this is a
+                # reliable signal that the run never reached decision-brief/analyst/judge at all --
+                # it must not be rendered as an empty full-review run.
+                "is_preflight_only": "review_summary" not in summary,
             }
         )
     ordered_runs = sorted(runs, key=lambda item: str(item["summary"].get("started_at") or ""))
@@ -285,12 +418,104 @@ def order_reason_label(order: dict[str, Any]) -> str:
     return ORDER_REASON_LABELS.get(raw, raw or "-")
 
 
+LIFECYCLE_ONLY_REASONS = {
+    "active_order_cancel_submitted",
+    "active_order_correction_submitted",
+    # Legacy same-day artifact shape: a cancel followed by an immediate resubmission, reported as
+    # a single row. It replaces an existing order rather than opening a fresh position, so it is
+    # classified alongside "correction" (not counted as an ordinary new buy/sell submission).
+    "active_order_cancel_and_replacement_submitted",
+}
+
+
+def order_lifecycle_kind(order: dict[str, Any]) -> str:
+    """Classify an execution order row so lifecycle-only cancel/correction submissions are never
+    confused with ordinary new buy/sell orders (direction=none is not the same as a sell)."""
+    reason = str(order.get("reason") or "")
+    result = str(order.get("result") or "")
+    direction = str(order.get("direction") or "")
+    if result == "submitted":
+        if reason == "active_order_cancel_submitted":
+            return "cancellation"
+        if reason in {"active_order_correction_submitted", "active_order_cancel_and_replacement_submitted"}:
+            return "correction"
+        if direction in {"buy", "sell"}:
+            return direction
+        return "none"
+    if result in {"blocked", "failed"}:
+        return "blocked"
+    return "none"
+
+
+def order_direction_label(order: dict[str, Any]) -> str:
+    """Lifecycle reason takes precedence over direction: a real correction row still carries a
+    genuine buy/sell direction (the corrected order's side), so checking direction first would
+    still mislabel it as an ordinary 매수/매도 instead of 정정. direction=none must also never be
+    shown as a sell just because it isn't "buy"."""
+    reason = str(order.get("reason") or "")
+    if reason in {"active_order_correction_submitted", "active_order_cancel_and_replacement_submitted"}:
+        return "정정"
+    if reason == "active_order_cancel_submitted":
+        return "취소"
+    direction = str(order.get("direction") or "")
+    if direction == "buy":
+        return "매수"
+    if direction == "sell":
+        return "매도"
+    return "-"
+
+
+def lifecycle_split_counts(orders: list[dict[str, Any]]) -> tuple[int, int, int]:
+    """(new_order_count, correction_count, cancellation_count) among submitted orders, via
+    order_lifecycle_kind, so counts distinguish new submissions from correction/cancellation."""
+    new_count = 0
+    correction_count = 0
+    cancellation_count = 0
+    for order in orders:
+        kind = order_lifecycle_kind(order)
+        if kind in {"buy", "sell"}:
+            new_count += 1
+        elif kind == "correction":
+            correction_count += 1
+        elif kind == "cancellation":
+            cancellation_count += 1
+    return new_count, correction_count, cancellation_count
+
+
 def blocked_attempt_detail(order: dict[str, Any]) -> str:
     attempts = order.get("attempts") if isinstance(order.get("attempts"), list) else []
     for attempt in reversed(attempts):
         if isinstance(attempt, dict) and attempt.get("message"):
             return str(attempt.get("message"))
     return ""
+
+
+def fresh_recheck_audit_summary(order: dict[str, Any]) -> str:
+    """Compact display of the sanitized fresh pre-submit profit_protection/concentration_rebalance
+    recheck audit (checked_at, fresh holding qty, pass/fail outcomes, approved bound values) --
+    persisted for both pass and fail paths, not just failures."""
+    audit_list = order.get("fresh_recheck_audit") if isinstance(order.get("fresh_recheck_audit"), list) else []
+    if not audit_list:
+        return ""
+    parts = []
+    for entry in audit_list:
+        if not isinstance(entry, dict):
+            continue
+        piece = f"재확인 {time_text(entry.get('checked_at'))} · 보유 {number(entry.get('fresh_holding_quantity'))}주"
+        if "pnl_verification_outcome" in entry:
+            piece += f" · 손익검증 {'통과' if entry.get('pnl_verification_outcome') else '실패'}"
+        if "reduction_bound_outcome" in entry:
+            piece += (
+                f" · 축소한도 {'통과' if entry.get('reduction_bound_outcome') else '실패'}"
+                f"(승인 {decimal(entry.get('approved_max_reduction_pct'), 1)}%)"
+            )
+        if "concentration_outcome" in entry:
+            piece += (
+                f" · 집중도 {'통과' if entry.get('concentration_outcome') else '실패'}"
+                f"(승인상한 {decimal(entry.get('approved_concentration_cap_pct'), 1)}%)"
+            )
+        parts.append(piece)
+    return " / ".join(parts)
 
 
 def fill_is_complete(order: dict[str, Any], fill: dict[str, Any] | None) -> bool:
@@ -391,6 +616,12 @@ def render_header(summary: dict[str, Any], run_count: int, fills: list[dict[str,
             f"<article><span>KIS 총자산</span><strong>{number(full_account_amount)}원</strong>"
             "<small>account asset 조회값 · 원금 수익률 아님</small></article>"
         )
+    new_order_count, correction_count, cancellation_count = lifecycle_split_counts(submitted_orders)
+    lifecycle_chip = (
+        f"<span class=\"chip\">정정·취소 {correction_count + cancellation_count}건</span>"
+        if (correction_count + cancellation_count) > 0
+        else ""
+    )
     return f"""
     <header class="hero">
       <div class="eyebrow">CUMULATIVE DAILY TRADING REPORT</div>
@@ -401,7 +632,8 @@ def render_header(summary: dict[str, Any], run_count: int, fills: list[dict[str,
         <span class="chip">{esc(started_at)}</span>
         <span class="chip">run {run_count}회</span>
         <span class="chip">체결 {len(fills)}건</span>
-        <span class="chip">봇 주문 제출 {len(submitted_orders)}건</span>
+        {lifecycle_chip}
+        <span class="chip">봇 신규주문 {new_order_count}건</span>
       </div>
       <div class="run-id"><span>실행 ID</span><code>{esc(run_id)}</code>{run_id_hint}</div>
     </header>
@@ -445,7 +677,7 @@ def render_trade_ledger(
     for item in submitted_orders:
         fill = item.get("fill") if isinstance(item.get("fill"), dict) else None
         result = order_status_badge(item, fill)
-        direction = "매수" if item.get("direction") == "buy" else "매도"
+        direction = order_direction_label(item)
         order_id = str(item.get("order_or_reservation_id") or "")
         resulting_order_id = str(item.get("resulting_order_id") or "")
         order_id_cell = (
@@ -461,6 +693,10 @@ def render_trade_ledger(
                 f"{number(fill.get('filled_quantity'))}주<br>"
                 f"<small>{number(fill.get('filled_price'))}원 · {number(fill.get('filled_amount'))}원</small>"
             )
+        submitted_audit_summary = fresh_recheck_audit_summary(item)
+        submitted_result_cell = (
+            f"{result}<br><small>재확인 감사: {esc(submitted_audit_summary)}</small>" if submitted_audit_summary else result
+        )
         ledger_rows.append(
             (
                 str(item.get("run_started_at") or ""),
@@ -468,7 +704,7 @@ def render_trade_ledger(
                 f"<td><strong>{esc(item.get('symbol_name'))}</strong><br><code>{esc(item.get('symbol_id'))}</code></td>"
                 f"<td>{direction}</td>"
                 f"<td>{number(item.get('validated_order_quantity') or item.get('quantity'))}주<br><small>{number(item.get('order_price'))}원</small></td>"
-                f"<td>{fill_cell}</td><td><code>{order_id_cell}</code></td><td>{result}</td></tr>",
+                f"<td>{fill_cell}</td><td><code>{order_id_cell}</code></td><td>{submitted_result_cell}</td></tr>",
             )
         )
 
@@ -490,12 +726,14 @@ def render_trade_ledger(
         )
 
     for item in blocked_orders:
-        direction = "매수" if item.get("direction") == "buy" else "매도"
+        direction = order_direction_label(item)
         is_failed = item.get("result") == "failed"
         result_text = "실패" if is_failed else "차단"
         reason_text = order_reason_label(item)
         detail = blocked_attempt_detail(item)
         detail_html = f"<br><small>{esc(detail)}</small>" if detail else ""
+        audit_summary = fresh_recheck_audit_summary(item)
+        audit_html = f"<br><small>재확인 감사: {esc(audit_summary)}</small>" if audit_summary else ""
         ledger_rows.append(
             (
                 str(item.get("run_started_at") or ""),
@@ -504,10 +742,11 @@ def render_trade_ledger(
                 f"<td>{direction}</td>"
                 f"<td>{number(attempted_order_quantity(item))}주 요청<br><small>{number(item.get('order_price'))}원</small></td>"
                 f"<td>-</td><td>-</td>"
-                f"<td><span class=\"badge bad\">{esc(result_text)}</span><br><small>{esc(reason_text)}</small>{detail_html}</td></tr>",
+                f"<td><span class=\"badge bad\">{esc(result_text)}</span><br><small>{esc(reason_text)}</small>{detail_html}{audit_html}</td></tr>",
             )
         )
     ledger_html = "".join(row for _, row in sorted(ledger_rows, key=lambda item: item[0]))
+    ledger_new_count, ledger_correction_count, ledger_cancellation_count = lifecycle_split_counts(submitted_orders)
 
     cut_off = time_text(runs[-1]["summary"].get("started_at")) if runs else "-"
     if fill_status == "success" and fill_scope == "account":
@@ -519,7 +758,7 @@ def render_trade_ledger(
         )
     content = f"""
     <section class="panel" id="trades">
-      <div class="section-head"><div><p class="kicker">DAY LEDGER</p><h2>{esc(cut_off)}까지의 당일 전체 거래</h2></div><span class="badge info">체결 {len(fills)} · 봇 제출 {len(submitted_orders)} · 시도 차단/실패 {len(blocked_orders)}</span></div>
+      <div class="section-head"><div><p class="kicker">DAY LEDGER</p><h2>{esc(cut_off)}까지의 당일 전체 거래</h2></div><span class="badge info">체결 {len(fills)} · 봇 신규주문 {ledger_new_count} · 정정·취소 {ledger_correction_count + ledger_cancellation_count} · 시도 차단/실패 {len(blocked_orders)}</span></div>
       <div class="notice">{esc(fill_notice)}</div>
       <h3>주문·체결 통합 원장</h3>
       <div class="table-wrap"><table><thead><tr><th>시각</th><th>주체</th><th>종목</th><th>방향</th><th>주문</th><th>체결</th><th>주문번호</th><th>{esc(cut_off)} 기준 상태</th></tr></thead><tbody>{ledger_html or '<tr><td colspan="8">확인된 주문·체결 없음</td></tr>'}</tbody></table></div>
@@ -615,6 +854,9 @@ def render_thesis_section(final_item: dict[str, Any]) -> str:
 
 
 def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[str, Any]]) -> str:
+    # A preflight-only run never reached Analyst/Judge -- it must not appear in the time wheel as
+    # an empty Analyst/Judge run.
+    runs = [run for run in runs if not run.get("is_preflight_only")]
     fill_by_order = {
         str(item.get("order_id")): item
         for item in fills
@@ -659,6 +901,15 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
         is_active_time = run_index == len(runs) - 1
 
         execution_orders = run["execution"].get("orders") if isinstance(run["execution"].get("orders"), list) else []
+        execution_by_symbol = {
+            str(item.get("symbol_id")): item for item in execution_orders if isinstance(item, dict)
+        }
+        run_review_summary = run["summary"].get("review_summary") if isinstance(run["summary"].get("review_summary"), dict) else {}
+        review_summary_by_symbol = {
+            str(item.get("symbol_id")): item
+            for item in run_review_summary.get("symbols", [])
+            if isinstance(item, dict)
+        }
         submitted_orders = [
             item for item in execution_orders if isinstance(item, dict) and item.get("result") == "submitted"
         ]
@@ -673,25 +924,62 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
             item for item in linked_fills if str(item.get("order_id") or "") not in submitted_order_ids
         ]
         analyst = load_json(run_dir / "analyst-review.json")
-        analyst_symbols = sorted(
-            (item for item in analyst.get("symbols", []) if isinstance(item, dict)),
-            key=analyst_score_sort_key,
-        )
         debate = load_json(run_dir / "judge-debate.json")
         debate_argument_index = build_debate_argument_index(debate)
         final = load_json(run_dir / "judge-review.json")
         final_by_symbol = {
             str(item.get("symbol_id")): item for item in final.get("symbols", []) if isinstance(item, dict)
         }
+        judge_spec = load_json(run_dir / "judge-review-spec.json")
+        judge_scope_reasons = judge_spec.get("review_scope_reasons") if isinstance(judge_spec.get("review_scope_reasons"), dict) else {}
+        # Some v1 judge-review-spec.json artifacts exist and contain other keys but do not carry
+        # review_scope_reasons. Presence of the file/dict alone therefore does not prove that
+        # "not selected" can be reconstructed.
+        has_judge_scope_metadata = isinstance(judge_spec.get("review_scope_reasons"), dict)
+        judge_scope_resolved = set(final_by_symbol)
+        # held_position/unheld_score_rank distinguish WHY a symbol entered Judge scope;
+        # not_selected (scored but never in scope) and in-scope-unresolved (in scope but Judge
+        # never returned a valid result) are separate categories from either of those.
+        judge_held_count = sum(1 for reason in judge_scope_reasons.values() if reason == "held_position")
+        judge_unheld_count = sum(1 for reason in judge_scope_reasons.values() if reason == "unheld_score_rank")
+        judge_scope_unresolved_count = sum(
+            1
+            for symbol_id in judge_scope_reasons
+            if str(symbol_id).strip() and str(symbol_id).strip() not in judge_scope_resolved
+        )
+        judge_scored_symbol_ids = {
+            str(item.get("symbol_id") or "")
+            for item in analyst.get("symbols", [])
+            if isinstance(item, dict)
+            and item.get("symbol_id")
+            and valid_analyst_score(item.get("final_first_score"))
+        }
+        judge_not_selected_count = len(judge_scored_symbol_ids - set(judge_scope_reasons)) if has_judge_scope_metadata else 0
+        new_submitted_orders = [
+            item for item in submitted_orders if order_lifecycle_kind(item) in {"buy", "sell"}
+        ]
+        lifecycle_submitted_orders = [
+            item for item in submitted_orders if order_lifecycle_kind(item) in {"correction", "cancellation"}
+        ]
+        trade_symbol_ids = {str(item.get("symbol_id") or "") for item in new_submitted_orders}
+        trade_symbol_ids.update(str(item.get("symbol_id") or "") for item in linked_fills)
+        attempt_symbol_ids = {str(item.get("symbol_id") or "") for item in blocked_orders}
+        attempt_symbol_ids.update(str(item.get("symbol_id") or "") for item in lifecycle_submitted_orders)
+        analyst_symbols = sorted(
+            (item for item in analyst.get("symbols", []) if isinstance(item, dict)),
+            key=lambda item: analyst_symbol_sort_key(item, final_by_symbol, trade_symbol_ids, attempt_symbol_ids),
+        )
         decision_by_symbol = {
             str(item.get("symbol_id")): item for item in run["decision"].get("symbols", []) if isinstance(item, dict)
         }
 
         preferred_symbol = ""
-        if submitted_orders:
-            preferred_symbol = str(submitted_orders[0].get("symbol_id") or "")
+        if new_submitted_orders:
+            preferred_symbol = str(new_submitted_orders[0].get("symbol_id") or "")
         elif linked_fills:
             preferred_symbol = str(linked_fills[0].get("symbol_id") or "")
+        elif lifecycle_submitted_orders:
+            preferred_symbol = str(lifecycle_submitted_orders[0].get("symbol_id") or "")
         elif blocked_orders:
             preferred_symbol = str(blocked_orders[0].get("symbol_id") or "")
         elif final_by_symbol:
@@ -701,18 +989,35 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
 
         activity_cards = []
         for order in submitted_orders:
-            direction = "매수" if order.get("direction") == "buy" else "매도"
+            lifecycle_kind = order_lifecycle_kind(order)
+            direction = order_direction_label(order)
             order_id = str(order.get("order_or_reservation_id") or "")
             resulting_order_id = str(order.get("resulting_order_id") or "")
             order_id_text = f"{order_id} → {resulting_order_id}" if resulting_order_id else order_id
             fill = resolve_fill(order, fill_by_order)
-            if fill_is_complete(order, fill) and str(broker_reconciliation(order).get("status") or "") not in ADVERSE_TERMINAL_BROKER_STATUSES:
+            status_text = order_status_text(order, fill)
+            if lifecycle_kind == "cancellation":
+                activity_cards.append(
+                    f"<article class=\"activity-card order\"><span>{esc(status_text)}</span>"
+                    f"<strong>{esc(order.get('symbol_name'))} 기존주문 취소</strong>"
+                    f"<small>처리 {run_time} · <code>{esc(order_id_text)}</code></small></article>"
+                )
+            elif lifecycle_kind == "correction":
+                corrected_quantity = number(order.get("validated_order_quantity") or order.get("quantity"))
+                corrected_side = (
+                    "매수" if order.get("direction") == "buy" else "매도" if order.get("direction") == "sell" else "-"
+                )
+                activity_cards.append(
+                    f"<article class=\"activity-card order\"><span>{esc(status_text)}</span>"
+                    f"<strong>{esc(order.get('symbol_name'))} 기존주문 정정({esc(corrected_side)} {corrected_quantity}주)</strong>"
+                    f"<small>처리 {run_time} · <code>{esc(order_id_text)}</code></small></article>"
+                )
+            elif fill_is_complete(order, fill) and str(broker_reconciliation(order).get("status") or "") not in ADVERSE_TERMINAL_BROKER_STATUSES:
                 activity_cards.append(
                     f"<article class=\"activity-card filled\"><span>주문 후 체결</span><strong>{esc(order.get('symbol_name'))} {esc(direction)} {number(fill.get('filled_quantity'))}주</strong>"
                     f"<small>주문 {run_time} · {number(order.get('order_price'))}원 → 체결 {time_text(fill.get('filled_at'))} · {number(fill.get('filled_price'))}원 · <code>{esc(order_id_text)}</code></small></article>"
                 )
             else:
-                status_text = order_status_text(order, fill)
                 activity_cards.append(
                     f"<article class=\"activity-card order\"><span>{esc(status_text)}</span><strong>{esc(order.get('symbol_name'))} {esc(direction)} {number(order.get('validated_order_quantity') or order.get('quantity'))}주</strong>"
                     f"<small>주문 {run_time} · {number(order.get('order_price'))}원 · <code>{esc(order_id_text)}</code></small></article>"
@@ -725,7 +1030,7 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
                 f"<small>체결 {time_text(fill.get('filled_at'))} · {number(fill.get('filled_price'))}원 · <code>{esc(fill.get('order_id'))}</code></small></article>"
             )
         for order in blocked_orders:
-            direction = "매수" if order.get("direction") == "buy" else "매도"
+            direction = order_direction_label(order)
             result_text = "실패" if order.get("result") == "failed" else "차단"
             reason_text = order_reason_label(order)
             detail = blocked_attempt_detail(order)
@@ -738,10 +1043,13 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
         if not activity_cards:
             activity_cards.append('<div class="empty-state">이 run에 연결된 주문 또는 체결이 없습니다.</div>')
 
+        time_button_new_count, time_button_correction_count, time_button_cancellation_count = lifecycle_split_counts(
+            submitted_orders
+        )
         time_buttons.append(
             f'<button type="button" role="option" aria-selected="{str(is_active_time).lower()}" class="time-button{" active" if is_active_time else ""}" data-time-target="{esc(time_key)}">'
             f'<strong>{esc(run_time)}</strong><span>Analyst {len(analyst_symbols)} · Judge {len(final_by_symbol)}</span>'
-            f'<small>주문 {len(submitted_orders)} · 체결 {len(linked_fills)} · 차단 {len(blocked_orders)}</small></button>'
+            f'<small>신규주문 {time_button_new_count} · 정정·취소 {time_button_correction_count + time_button_cancellation_count} · 체결 {len(linked_fills)} · 차단 {len(blocked_orders)}</small></button>'
         )
 
         symbol_buttons = []
@@ -755,17 +1063,37 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
             related_orders = [item for item in submitted_orders if str(item.get("symbol_id") or "") == symbol_id]
             related_fills = [item for item in linked_fills if str(item.get("symbol_id") or "") == symbol_id]
             related_blocked = [item for item in blocked_orders if str(item.get("symbol_id") or "") == symbol_id]
-            has_trade = bool(related_orders or related_fills)
+            related_lifecycle_orders = [
+                item
+                for item in related_orders
+                if order_lifecycle_kind(item) in {"correction", "cancellation"}
+            ]
+            related_new_orders = [
+                item for item in related_orders if order_lifecycle_kind(item) in {"buy", "sell"}
+            ]
+            has_trade = bool(related_new_orders or related_fills)
+            has_lifecycle = bool(related_lifecycle_orders)
             has_attempt = bool(related_blocked)
-            judge_label = "Judge 진행" if final_item else "Analyst only"
+            has_guard_intervention = judge_guard_intervened(final_item)
+            judge_scope_status = judge_symbol_scope_status(symbol_id, final_item, judge_scope_reasons, has_judge_scope_metadata)
+            judge_label = JUDGE_SCOPE_STATUS_LABELS[judge_scope_status]
+            judge_badge_class = {
+                "resolved": "judge",
+                "unresolved_in_scope": "attempt",
+                "not_selected": "analyst",
+                "legacy_unknown": "analyst",
+            }[judge_scope_status]
             attempt_badge = ""
             if has_trade:
                 attempt_badge = "<b class=\"mini-badge trade\">거래</b>"
+            elif has_lifecycle:
+                attempt_badge = "<b class=\"mini-badge analyst\">주문 정정·취소</b>"
             elif has_attempt:
                 attempt_badge = "<b class=\"mini-badge attempt\">시도 차단</b>"
+            group_class = " group-trade" if has_trade else " group-guard" if has_guard_intervention else ""
             symbol_buttons.append(
-                f'<button type="button" class="trade-symbol-button{analyst_score_class(analyst_item.get("final_first_score"))}{" active" if is_active_symbol else ""}" data-symbol-target="{esc(composite_key)}">'
-                f'<span class="symbol-button-left"><span class="symbol-button-status"><b class="mini-badge {"judge" if final_item else "analyst"}">{judge_label}</b>'
+                f'<button type="button" class="trade-symbol-button{group_class}{" active" if is_active_symbol else ""}" data-symbol-target="{esc(composite_key)}">'
+                f'<span class="symbol-button-left"><span class="symbol-button-status"><b class="mini-badge {judge_badge_class}">{judge_label}</b>'
                 f'{attempt_badge}</span>'
                 f'<strong class="symbol-button-name" title="{esc(symbol_name)}">{esc(symbol_name)}</strong></span>'
                 f'<span class="symbol-button-right"><b class="symbol-score">{decimal(analyst_item.get("final_first_score"))}</b><code>{esc(symbol_id)}</code></span></button>'
@@ -816,32 +1144,70 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
                 decision_guard = final_item.get("decision_guard") if isinstance(final_item.get("decision_guard"), dict) else {}
                 guard_status = str(decision_guard.get("status") or "")
                 guard_reason = str(decision_guard.get("reason_code") or "")
+                guard_status_display = GUARD_STATUS_LABELS.get(guard_status, guard_status)
+                guard_reason_display = ORDER_REASON_LABELS.get(guard_reason, guard_reason)
                 guard_html = (
-                    f"<span class=\"badge {'warn' if guard_status == 'blocked' else 'info'}\">guard {esc(guard_status)}{(': ' + esc(guard_reason)) if guard_reason else ''}</span>"
+                    f"<span class=\"badge {'warn' if guard_status == 'blocked' else 'info'}\">가드(guard) {esc(guard_status_display)}({esc(guard_status)}){(': ' + esc(guard_reason_display) + '(' + esc(guard_reason) + ')') if guard_reason else ''}</span>"
                     if guard_status
                     else ""
                 )
+                symbol_execution_item = execution_by_symbol.get(symbol_id) or {}
+                # Prefer the execution row's own value; when no execution row exists for this
+                # symbol at all (common: many Judge-scoped symbols never reach execute_orders in
+                # the same run), fall back to review_summary.symbols' expected_holding_quantity,
+                # which already has the same current+pending buy-pending sell fallback baked in.
+                expected_holding_quantity = symbol_execution_item.get("expected_holding_quantity")
+                if expected_holding_quantity is None:
+                    review_summary_item = review_summary_by_symbol.get(symbol_id) or {}
+                    expected_holding_quantity = review_summary_item.get("expected_holding_quantity")
+                # expected_holding_quantity (current + pending buy - pending sell) is the baseline
+                # canonical_action was actually decided against, distinct from current->final position change.
+                expected_text = (
+                    f" → 대기반영 {number(expected_holding_quantity)}주"
+                    if expected_holding_quantity is not None
+                    else ""
+                )
+                basis_display = judge_field_display(final_item, "decision_basis", DECISION_BASIS_LABELS)
+                requested_action_display = judge_field_display(final_item, "requested_action", CANONICAL_ACTION_LABELS)
+                canonical_action_display = judge_field_display(final_item, "canonical_action", CANONICAL_ACTION_LABELS)
                 judge_html = (
                     f"<article class=\"final-card full\"><div><h3>Final Judge</h3><span class=\"badge info\">rank {number(final_item.get('relative_attractiveness_rank'))}</span>"
-                    f"<span class=\"badge info\">basis {esc(final_item.get('decision_basis') or 'none')}</span>{guard_html}</div>"
-                    f"<div class=\"final-numbers\"><span>현재 {number(account_exposure.get('current_live_holding_quantity'))}주</span>"
-                    f"<span>최종 {number(final_item.get('final_holding_quantity'))}주</span>"
+                    f"<span class=\"badge info\">근거(basis) {esc(basis_display)}</span>{guard_html}</div>"
+                    f"<div class=\"final-numbers\"><span>현재 {number(account_exposure.get('current_live_holding_quantity'))}주{expected_text}</span>"
+                    f"<span>최종 보유수량 {number(final_item.get('final_holding_quantity'))}주</span>"
                     f"<span>요청목표 {number(final_item.get('requested_target_position_value_krw'))}원 → 확정목표 {number(final_item.get('target_position_value_krw'))}원</span>"
-                    f"<span>{esc(final_item.get('requested_action') or 'hold')} → {esc(final_item.get('canonical_action') or 'hold')}</span></div>"
+                    f"<span>{esc(requested_action_display)} → {esc(canonical_action_display)}(대기반영 기준)</span></div>"
                     f"<p><code>{esc(final_item.get('reason_code'))}</code></p><p>{esc(final_item.get('one_line_reason'))}</p>"
                     f"{decision_evidence_html}{render_thesis_section(final_item)}</article>{''.join(phase_blocks)}"
                 )
+            elif judge_scope_status == "unresolved_in_scope":
+                judge_html = '<div class="empty-state">이 종목은 Judge 심사대상(review_scope)이었지만 이 run의 judge-review.json에 유효한 결과가 없습니다(미해결).</div>'
+            elif judge_scope_status == "legacy_unknown":
+                judge_html = '<div class="empty-state">구버전(v1) run으로 Judge 심사대상 여부를 판단할 스코프 정보가 없습니다. Judge 결과 없음만 확인됩니다.</div>'
             else:
-                judge_html = '<div class="empty-state">Analyst 평가는 완료됐지만 이 run의 Judge shortlist에는 선정되지 않았습니다.</div>'
+                judge_html = '<div class="empty-state">Analyst 평가는 완료됐지만 이 run의 Judge 심사대상으로 선정되지 않았습니다.</div>'
 
             trade_notes = []
             related_order_ids: set[str] = set()
             for order in related_orders:
                 related_order_ids.update(order_link_ids(order))
             for order in related_orders:
-                direction = "매수" if order.get("direction") == "buy" else "매도"
+                lifecycle_kind = order_lifecycle_kind(order)
+                direction = order_direction_label(order)
                 fill = resolve_fill(order, fill_by_order)
-                if fill_is_complete(order, fill) and str(broker_reconciliation(order).get("status") or "") not in ADVERSE_TERMINAL_BROKER_STATUSES:
+                if lifecycle_kind == "cancellation":
+                    trade_notes.append(
+                        f"{run_time} 봇 기존주문 취소 제출 · {order_status_text(order, fill)}"
+                    )
+                elif lifecycle_kind == "correction":
+                    corrected_side = (
+                        "매수" if order.get("direction") == "buy" else "매도" if order.get("direction") == "sell" else "-"
+                    )
+                    corrected_quantity = number(order.get("validated_order_quantity") or order.get("quantity"))
+                    trade_notes.append(
+                        f"{run_time} 봇 기존주문 정정({corrected_side} {corrected_quantity}주) · {order_status_text(order, fill)}"
+                    )
+                elif fill_is_complete(order, fill) and str(broker_reconciliation(order).get("status") or "") not in ADVERSE_TERMINAL_BROKER_STATUSES:
                     trade_notes.append(
                         f"{run_time} 봇 {direction} 주문 · {time_text(fill.get('filled_at'))} {number(fill.get('filled_quantity'))}주 체결"
                     )
@@ -858,7 +1224,7 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
                     f"{time_text(fill.get('filled_at'))} {actor} {direction} {number(fill.get('filled_quantity'))}주 체결"
                 )
             for order in related_blocked:
-                direction = "매수" if order.get("direction") == "buy" else "매도"
+                direction = order_direction_label(order)
                 result_text = "실패" if order.get("result") == "failed" else "차단"
                 reason_text = order_reason_label(order)
                 detail = blocked_attempt_detail(order)
@@ -870,7 +1236,7 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
             symbol_panels.append(
                 f"<section class=\"symbol-analysis-panel{' active' if is_active_symbol else ''}\" data-symbol-panel=\"{esc(composite_key)}\">"
                 f"<div class=\"symbol-focus-head\"><div><p class=\"kicker\">RUN {esc(run_time)} · SYMBOL ANALYSIS</p><h2>{esc(symbol_name)} <code>{esc(symbol_id)}</code></h2>"
-                f"<p>{esc(trade_note)}</p></div><div class=\"focus-badges\"><span class=\"badge info\">Analyst 평균 {decimal(analyst_item.get('final_first_score'))}</span>"
+                f"<p>{esc(trade_note)}</p></div><div class=\"focus-badges\"><span class=\"badge info\" title=\"참고용 advisory 점수이며 매수/매도 판단이 아닙니다\">Analyst 참고점수(advisory) {decimal(analyst_item.get('final_first_score'))}</span>"
                 f"<span class=\"badge {'ok' if final_item else 'muted'}\">{esc(judge_label)}</span></div></div>"
                 f"<section class=\"inline-analysis\"><h3>Analyst 상세 점수</h3><div class=\"table-wrap\"><table><thead><tr><th>역할</th><th>점수</th><th>집계</th><th>코드</th><th>상세 근거</th><th>누락 데이터</th></tr></thead><tbody>{''.join(score_rows)}</tbody></table></div></section>"
                 f"<section class=\"inline-judge\"><h3>Judge 단계별 판단</h3>{judge_html}</section></section>"
@@ -880,7 +1246,9 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
             f'<section class="time-analysis-panel{" active" if is_active_time else ""}" data-time-panel="{esc(time_key)}">'
             f'<div class="time-panel-head"><div><p class="kicker">TIME WINDOW</p><h2>{esc(run_time)} 거래·종목 판단</h2>'
             f'<p>{esc(run_time)} run의 주문과 연결 체결, 직접 체결, Analyst/Judge 결과입니다.</p></div>'
-            f'<span class="badge info">Analyst {len(analyst_symbols)} · Judge {len(final_by_symbol)}</span></div>'
+            f'<span class="badge info">Analyst {len(analyst_symbols)} · Judge {len(final_by_symbol)}</span>'
+            f'<span class="badge info" title="judge-review-spec.json 기준">Judge 심사범위: 보유 {judge_held_count} · 비보유 상위선정 {judge_unheld_count}'
+            f' · 미선정 {judge_not_selected_count} · 미해결 {judge_scope_unresolved_count}</span></div>'
             f'<div class="run-activity">{"".join(activity_cards)}</div>'
             f'<h3>전체 Analyst 대상 종목</h3><div class="trade-symbol-selector">{"".join(symbol_buttons)}</div>'
             f'<div class="symbol-analysis-content">{"".join(symbol_panels)}</div></section>'
@@ -901,9 +1269,37 @@ def render_run_timeline(runs: list[dict[str, Any]]) -> str:
     total_tokens = 0
     for run in runs:
         summary = run["summary"]
-        account = summary.get("account_display_summary") if isinstance(summary.get("account_display_summary"), dict) else {}
         tokens = (((summary.get("token_usage") or {}).get("total") or {}).get("total_tokens") or 0)
         total_tokens += int(tokens)
+        if run.get("is_preflight_only"):
+            # A preflight-only run (safety_block or a skipped/unchanged scheduled check) never
+            # reached decision-brief/Analyst/Judge; showing 0/0/0 and regime "-" reads as an empty
+            # full review that ran and found nothing, which is not what happened.
+            trigger = summary.get("review_trigger") if isinstance(summary.get("review_trigger"), dict) else {}
+            decision_raw = str(trigger.get("decision") or "-")
+            decision_label = REVIEW_TRIGGER_DECISION_LABELS.get(decision_raw, decision_raw)
+            reasons = trigger.get("reasons") if isinstance(trigger.get("reasons"), list) else []
+            reason_text = ", ".join(review_trigger_reason_label(r) for r in reasons) or "-"
+            detail_parts = [reason_text]
+            due_slot = trigger.get("due_slot")
+            if due_slot:
+                detail_parts.append(f"적용 정기 슬롯 {due_slot}")
+            if decision_raw == "skipped":
+                persisted = trigger.get("trigger_state_persisted")
+                if persisted is True:
+                    detail_parts.append("상태 저장 성공")
+                elif persisted is False:
+                    detail_parts.append("상태 저장 실패(다음 실행에서 재평가)")
+                else:
+                    detail_parts.append("상태 저장 결과 미기록")
+            rows.append(
+                f'<tr class="preflight-row"><td>{time_text(summary.get("started_at"))}</td>'
+                f'<td><span class="badge info">사전점검</span></td>'
+                f'<td colspan="5">{esc(decision_label)}({esc(decision_raw)}) · {esc(" · ".join(detail_parts))}</td>'
+                f"<td>{number(tokens)}</td></tr>"
+            )
+            continue
+        account = summary.get("account_display_summary") if isinstance(summary.get("account_display_summary"), dict) else {}
         submitted, blocked, skipped = execution_counts(run["execution"])
         strategy = run["decision"].get("strategy_context") if isinstance(run["decision"].get("strategy_context"), dict) else {}
         indexes = index_map(run["market"])
@@ -1216,6 +1612,66 @@ def render_holdings(target_dir: Path, summary: dict[str, Any]) -> str:
       </div>
       <p class="source-note">업종은 {esc(cut_off)} decision-brief의 종목별 financial_summary를 사용했습니다. 파이는 현금 제외 주식 평가액 {number(pie_total)}원을 기준으로 합니다.</p>
       <div class="table-wrap holdings-table"><table><thead><tr><th>종목</th><th>업종</th><th>수량</th><th>현재가</th><th>평가액</th><th>주식 내 비중</th><th>평가손익</th><th>수익률</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div>
+    </section>
+    """
+
+
+def render_policy_panel(summary: dict[str, Any]) -> str:
+    """Effective execution-guard values in force for this run (unheld top-K, profit-protection
+    and concentration reduction bounds, daily turnover cap) -- projected from
+    pipeline-summary.json's execution_guards_policy so they are auditable, not just implicit in
+    code/config."""
+    policy = summary.get("execution_guards_policy") if isinstance(summary.get("execution_guards_policy"), dict) else {}
+    if not policy:
+        return ""
+    return f"""
+    <section class="panel" id="policy">
+      <div class="section-head"><div><p class="kicker">EXECUTION GUARDS</p><h2>적용 중인 실행 정책</h2></div></div>
+      <div class="table-wrap"><table><thead><tr><th>정책</th><th>값</th></tr></thead><tbody>
+        <tr><td>비보유 상위선정 top-K</td><td>{number(policy.get('unheld_review_top_k'))}</td></tr>
+        <tr><td>이익보호 최대 축소율</td><td>{decimal(policy.get('profit_protection_max_reduction_pct'), 1)}%</td></tr>
+        <tr><td>집중도 상한</td><td>{decimal(policy.get('concentration_rebalance_cap_pct'), 1)}%</td></tr>
+        <tr><td>집중도 조정 최대 축소율</td><td>{decimal(policy.get('concentration_rebalance_max_reduction_pct'), 1)}%</td></tr>
+        <tr><td>일일 회전한도</td><td>{decimal(policy.get('max_daily_turnover_pct'), 1)}%</td></tr>
+      </tbody></table></div>
+    </section>
+    """
+
+
+def render_review_trigger_panel(summary: dict[str, Any]) -> str:
+    """Final review-trigger decision/persistence state for the target run, rendered after
+    finalize_review_gate_state so full_review_completed and trigger_state_persisted reflect what
+    actually happened, not the pre-finalize snapshot."""
+    trigger = summary.get("review_trigger") if isinstance(summary.get("review_trigger"), dict) else {}
+    if not trigger:
+        return ""
+    decision_raw = str(trigger.get("decision") or "-")
+    decision_label = REVIEW_TRIGGER_DECISION_LABELS.get(decision_raw, decision_raw)
+    reasons = trigger.get("reasons") if isinstance(trigger.get("reasons"), list) else []
+    reason_text = ", ".join(review_trigger_reason_label(r) for r in reasons) or "-"
+    changed = trigger.get("changed_components") if isinstance(trigger.get("changed_components"), list) else []
+    safety_reasons = trigger.get("safety_reasons") if isinstance(trigger.get("safety_reasons"), list) else []
+    persisted = trigger.get("trigger_state_persisted")
+    if decision_raw == "safety_block":
+        persist_badge = '<span class="badge info">저장 대상 아님</span>'
+    elif persisted is True:
+        persist_badge = '<span class="badge ok">저장 성공</span>'
+    elif persisted is False:
+        persist_badge = '<span class="badge warn">저장 실패</span>'
+    else:
+        persist_badge = '<span class="badge warn">저장 결과 미기록</span>'
+    return f"""
+    <section class="panel" id="review-trigger">
+      <div class="section-head"><div><p class="kicker">REVIEW TRIGGER</p><h2>리뷰 트리거 최종 상태</h2></div></div>
+      <div class="table-wrap"><table><thead><tr><th>항목</th><th>값</th></tr></thead><tbody>
+        <tr><td>결정</td><td>{esc(decision_label)}({esc(decision_raw)})</td></tr>
+        <tr><td>사유</td><td>{esc(reason_text)}</td></tr>
+        <tr><td>적용 정기 슬롯</td><td>{esc(str(trigger.get('due_slot') or '-'))}</td></tr>
+        <tr><td>변경 감지 항목</td><td>{esc(', '.join(str(c) for c in changed) or '-')}</td></tr>
+        <tr><td>안전 문제</td><td>{esc(', '.join(review_trigger_reason_label(r) for r in safety_reasons) or '-')}</td></tr>
+        <tr><td>전체 리뷰 완료</td><td>{'예' if trigger.get('full_review_completed') else '아니오'}</td></tr>
+        <tr><td>트리거 상태 저장</td><td>{persist_badge}</td></tr>
+      </tbody></table></div>
     </section>
     """
 
@@ -1613,7 +2069,13 @@ def build_html(runs_root: Path, target_run: str) -> str:
     overview = render_header(summary, len(runs), fills, submitted_orders) + render_combined_chart(runs)
     trades = trade_html + render_time_symbol_inspector(runs, fills)
     evidence = render_news_timeline(runs) + render_market_news_timeline(runs) + render_financial_details(target_dir)
-    operations = render_run_timeline(runs) + render_holdings(target_dir, summary) + render_market_and_quality(target_dir, summary)
+    operations = (
+        render_run_timeline(runs)
+        + render_holdings(target_dir, summary)
+        + render_market_and_quality(target_dir, summary)
+        + render_policy_panel(summary)
+        + render_review_trigger_panel(summary)
+    )
 
     tab_buttons = [
         '<button type="button" class="tab-button active" data-tab="overview" role="tab" aria-selected="true">개요</button>',
@@ -1674,7 +2136,7 @@ def build_html(runs_root: Path, target_run: str) -> str:
     .financial-list {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }} .financial-card {{ padding:17px; border:1px solid var(--line); border-radius:15px; background:var(--subtle); }} .financial-body {{ padding:13px; border-radius:11px; background:#fff; }} .financial-body ul {{ margin:0; padding-left:20px; }} .evidence-title {{ display:flex; gap:10px; align-items:flex-start; margin-bottom:12px; }} .evidence-title h3 {{ margin:0; }} .evidence-title p {{ margin:4px 0 0; color:var(--muted); font-size:12px; }} .source-note {{ margin:12px 0 0; color:var(--muted); font-size:11px; }}
     .news-timeline {{ position:relative; display:grid; gap:12px; padding-left:22px; }} .news-timeline::before {{ content:""; position:absolute; left:7px; top:9px; bottom:9px; width:2px; background:linear-gradient(var(--accent),var(--accent-2)); }} .news-run {{ position:relative; padding:16px; border:1px solid var(--line); border-radius:15px; background:var(--subtle); }} .news-run::before {{ content:""; position:absolute; left:-22px; top:22px; width:11px; height:11px; border:3px solid var(--bg); border-radius:50%; background:var(--accent); }} .news-run-head {{ display:flex; justify-content:space-between; gap:10px; margin-bottom:9px; }} .news-run-head>div {{ display:flex; align-items:center; flex-wrap:wrap; gap:8px; }} .news-time {{ display:grid; width:50px; height:28px; place-items:center; border-radius:8px; background:var(--accent); color:#fff; font-size:12px; font-weight:900; }} .news-run-head span:not(.news-time):not(.badge) {{ color:var(--muted); font-size:11px; }} .news-run-body {{ padding:4px 12px; border-radius:11px; background:#fff; }} .news-item {{ padding:10px 0; border-bottom:1px solid var(--line); }} .news-item:last-child {{ border-bottom:0; }} .news-item time {{ margin-left:8px; color:var(--muted); font-size:11px; }} .news-item p {{ margin:5px 0 0; }} .empty-state {{ padding:12px; border-radius:9px; background:var(--subtle); color:var(--muted); font-size:12px; }}
     .time-wheel {{ position:relative; width:min(100%,360px); margin:14px auto 20px; }} .time-wheel-caption {{ display:block; margin-bottom:6px; color:var(--muted); font-size:11px; font-weight:800; text-align:center; }} .time-wheel::after {{ position:absolute; right:0; bottom:68px; left:0; height:68px; border:1px solid rgba(78,92,232,.28); border-radius:14px; background:rgba(78,92,232,.06); content:""; pointer-events:none; }} .time-selector {{ position:relative; display:flex; height:204px; padding-block:68px; overflow-x:hidden; overflow-y:auto; flex-direction:column; scroll-snap-type:y mandatory; scrollbar-width:none; overscroll-behavior-y:contain; -webkit-mask-image:linear-gradient(transparent,#000 29%,#000 71%,transparent); mask-image:linear-gradient(transparent,#000 29%,#000 71%,transparent); }} .time-selector::-webkit-scrollbar {{ display:none; }} .time-button {{ display:grid; min-height:68px; flex:0 0 68px; padding:10px 16px; border:0; border-radius:13px; background:transparent; color:var(--text); cursor:pointer; grid-template-columns:74px minmax(0,1fr); grid-template-rows:1fr 1fr; align-items:center; text-align:left; scroll-snap-align:center; scroll-snap-stop:always; opacity:.48; transform:scale(.92); transition:opacity .16s ease,transform .16s ease,color .16s ease; }} .time-button:hover {{ color:var(--accent); opacity:.75; }} .time-button.active {{ color:var(--accent); opacity:1; transform:scale(1); }} .time-button strong {{ grid-row:1/-1; font-size:22px; }} .time-button span,.time-button small {{ color:inherit; font-size:10px; }} .time-analysis-panel {{ display:none; }} .time-analysis-panel.active {{ display:block; animation:page-in .18s ease; }} .time-panel-head {{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; padding-top:4px; }} .time-panel-head p {{ color:var(--muted); }} .run-activity {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:9px; margin:12px 0 19px; }} .activity-card {{ padding:13px; border:1px solid var(--line); border-radius:12px; background:#fff; }} .activity-card.order {{ border-left:4px solid var(--accent); }} .activity-card.filled {{ border-left:4px solid var(--ok); background:linear-gradient(145deg,#fff,var(--ok-bg)); }} .activity-card.fill {{ border-left:4px solid var(--accent-2); }} .activity-card.blocked {{ border-left:4px solid var(--bad); background:linear-gradient(145deg,#fff,var(--bad-bg)); }} .activity-card span,.activity-card strong,.activity-card small {{ display:block; }} .activity-card span,.activity-card small {{ color:var(--muted); font-size:11px; }}
-    .trade-symbol-selector {{ display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:9px; margin-bottom:16px; }} .trade-symbol-button {{ display:grid; min-width:0; padding:12px; border:1px solid var(--line); border-radius:13px; background:var(--subtle); color:var(--text); text-align:left; cursor:pointer; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:10px; transition:.16s ease; }} .trade-symbol-button.score-low {{ border-color:#f3bbc2; background:var(--bad-bg); }} .trade-symbol-button.score-high {{ border-color:#a9ddcc; background:var(--ok-bg); }} .trade-symbol-button:hover {{ border-color:#aab4ff; transform:translateY(-1px); }} .trade-symbol-button.active {{ border-color:var(--accent); box-shadow:0 8px 22px rgba(78,92,232,.12); }} .trade-symbol-button.score-low.active {{ background:linear-gradient(145deg,var(--bad-bg),#fff4f5); }} .trade-symbol-button.score-high.active {{ background:linear-gradient(145deg,var(--ok-bg),#eefaf7); }} .symbol-button-left {{ display:flex; min-width:0; flex-direction:column; }} .symbol-button-status {{ display:flex; min-height:19px; flex-wrap:wrap; gap:4px; }} .symbol-button-name {{ display:-webkit-box; min-width:0; min-height:2.6em; margin-top:4px; overflow:hidden; color:var(--text); font-size:13px; line-height:1.3; text-overflow:ellipsis; white-space:normal; -webkit-box-orient:vertical; -webkit-line-clamp:2; }} .symbol-button-right {{ display:flex; flex:0 0 auto; align-items:flex-end; flex-direction:column; gap:3px; text-align:right; }} .symbol-button-right code {{ color:var(--muted); font-size:10px; }} .symbol-score {{ display:block; padding:0; background:transparent; color:var(--text); font-size:13px; font-weight:800; line-height:1.2; }} .trade-symbol-button.active .symbol-score {{ background:transparent; color:var(--accent); }} .mini-badge {{ padding:2px 5px; border-radius:999px; font-size:9px; }} .mini-badge.judge {{ color:var(--ok); background:var(--ok-bg); }} .mini-badge.analyst {{ color:var(--muted); background:#e9eef5; }} .mini-badge.trade {{ color:var(--accent); background:var(--accent-bg); }} .mini-badge.attempt {{ color:var(--bad); background:var(--bad-bg); }} .symbol-analysis-panel {{ display:none; padding:20px; border:1px solid var(--line); border-radius:16px; background:linear-gradient(145deg,#fff,var(--subtle)); }} .symbol-analysis-panel.active {{ display:block; animation:page-in .18s ease; }} .symbol-focus-head {{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }} .symbol-focus-head h2 {{ margin-bottom:5px; }} .symbol-focus-head p {{ color:var(--muted); }} .focus-badges {{ display:flex; flex-wrap:wrap; justify-content:flex-end; gap:6px; }} .inline-analysis,.inline-judge {{ margin-top:20px; }} .compact-phase {{ margin-top:18px; padding-top:15px; }} .final-card.full {{ margin-top:12px; }}
+    .trade-symbol-selector {{ display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:9px; margin-bottom:16px; }} .trade-symbol-button {{ display:grid; min-width:0; padding:12px; border:1px solid var(--line); border-radius:13px; background:var(--subtle); color:var(--text); text-align:left; cursor:pointer; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:10px; transition:.16s ease; }} .trade-symbol-button.group-trade {{ border-color:#a9ddcc; background:var(--ok-bg); }} .trade-symbol-button.group-guard {{ border-color:#f3bbc2; background:var(--bad-bg); }} .trade-symbol-button:hover {{ border-color:#aab4ff; transform:translateY(-1px); }} .trade-symbol-button.active {{ border-color:var(--accent); box-shadow:0 8px 22px rgba(78,92,232,.12); }} .trade-symbol-button.group-trade.active {{ background:linear-gradient(145deg,var(--ok-bg),#eefaf7); }} .trade-symbol-button.group-guard.active {{ background:linear-gradient(145deg,var(--bad-bg),#fff4f5); }} .symbol-button-left {{ display:flex; min-width:0; flex-direction:column; }} .symbol-button-status {{ display:flex; min-height:19px; flex-wrap:wrap; gap:4px; }} .symbol-button-name {{ display:-webkit-box; min-width:0; min-height:2.6em; margin-top:4px; overflow:hidden; color:var(--text); font-size:13px; line-height:1.3; text-overflow:ellipsis; white-space:normal; -webkit-box-orient:vertical; -webkit-line-clamp:2; }} .symbol-button-right {{ display:flex; flex:0 0 auto; align-items:flex-end; flex-direction:column; gap:3px; text-align:right; }} .symbol-button-right code {{ color:var(--muted); font-size:10px; }} .symbol-score {{ display:block; padding:0; background:transparent; color:var(--text); font-size:13px; font-weight:800; line-height:1.2; }} .trade-symbol-button.active .symbol-score {{ background:transparent; color:var(--accent); }} .mini-badge {{ padding:2px 5px; border-radius:999px; font-size:9px; }} .mini-badge.judge {{ color:var(--ok); background:var(--ok-bg); }} .mini-badge.analyst {{ color:var(--muted); background:#e9eef5; }} .mini-badge.trade {{ color:var(--accent); background:var(--accent-bg); }} .mini-badge.attempt {{ color:var(--bad); background:var(--bad-bg); }} .symbol-analysis-panel {{ display:none; padding:20px; border:1px solid var(--line); border-radius:16px; background:linear-gradient(145deg,#fff,var(--subtle)); }} .symbol-analysis-panel.active {{ display:block; animation:page-in .18s ease; }} .symbol-focus-head {{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }} .symbol-focus-head h2 {{ margin-bottom:5px; }} .symbol-focus-head p {{ color:var(--muted); }} .focus-badges {{ display:flex; flex-wrap:wrap; justify-content:flex-end; gap:6px; }} .inline-analysis,.inline-judge {{ margin-top:20px; }} .compact-phase {{ margin-top:18px; padding-top:15px; }} .final-card.full {{ margin-top:12px; }}
     .decision-hero {{ background:linear-gradient(145deg,#fff,#f4f6ff); }} .decision-hero>div:first-child p:last-child {{ color:var(--muted); }} .decision-meta {{ display:flex; flex-wrap:wrap; gap:8px; }} .decision-meta>span {{ padding:7px 9px; border:1px solid var(--line); border-radius:9px; background:#fff; font-size:12px; }} .decision-orders {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin-top:14px; }} .decision-orders article {{ padding:13px; border-radius:12px; background:linear-gradient(135deg,var(--accent-bg),#eefaf7); }} .decision-orders span,.decision-orders strong,.decision-orders small {{ display:block; }} .decision-orders span,.decision-orders small {{ color:var(--muted); font-size:11px; }}
     .analyst-list {{ display:grid; gap:14px; }} .analyst-card {{ padding:17px; border:1px solid var(--line); border-radius:14px; background:var(--subtle); }} .card-title {{ display:flex; align-items:flex-start; gap:10px; margin-bottom:12px; }} .card-title h3,.card-title h4 {{ margin:0; }} .card-title p {{ margin:3px 0 0; color:var(--muted); font-size:13px; }} .index {{ display:grid; flex:0 0 30px; height:30px; place-items:center; border-radius:9px; background:var(--accent-bg); color:var(--accent); font-weight:900; }}
     .phase,.final-section {{ margin-top:26px; padding-top:22px; border-top:3px solid var(--line); }} .phase-title {{ display:flex; align-items:baseline; gap:12px; margin-bottom:12px; }} .phase-title span {{ font-size:22px; font-weight:900; }} .phase-title small {{ color:var(--muted); }}

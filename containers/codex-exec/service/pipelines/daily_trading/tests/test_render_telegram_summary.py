@@ -20,7 +20,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from ..scripts.render_telegram_summary import render
+from ..scripts.render_telegram_summary import order_line, render
 
 PAYLOAD_SUBMITTED = {
     "run_id": "self-test",
@@ -358,9 +358,9 @@ CASES = {
             "- 주문가능 1,043,015원 · 주식평가 2,000원",
             "- 전체 계좌 총자산(KIS 잔고) 17,039,121원",
             "<b>당일 누계</b>(이번 run 주문 전 기준) 매수 100원 · 매도 0원 · 체결 7건",
-            "<b>이번 run</b> real-submit · 제출 1 · 차단·실패 0 · 스킵 0",
+            "<b>이번 run</b> real-submit · 신규주문 1 · 정정 0 · 취소 0 · 차단·실패 0 · 스킵 0",
             "- <code>005930</code> 삼성전자: 매수 3주→1주 · 제출(접수, 조정=매수가능수량으로 축소) / <code>r1</code>",
-            "- 최종 결정: 매도 0 · 매수 1 · 유지 0 · 미결 2",
+            "- 포지션 변화(보유수량 기준): 매도 0 · 매수 1 · 유지 0 · 미결 2",
             "- 수집 데이터 일부 확인 필요(실행과 무관): 수급",
             "상세 리포트: <code>daily-trading-report.html</code> 첨부",
             "토큰: 123",
@@ -373,10 +373,10 @@ CASES = {
             "<b>daily-trading ⚠️ 부분 완료</b>",
             "<b>계좌</b> 국내매매 총평가 조회 실패 · 평가손익 조회 실패",
             "<b>당일 누계</b>(이번 run 주문 전 기준) 매수 조회 실패 · 매도 조회 실패 · 체결 조회 실패",
-            "<b>이번 run</b> real-submit · 제출 0 · 차단·실패 2 · 스킵 6",
+            "<b>이번 run</b> real-submit · 신규주문 0 · 정정 0 · 취소 0 · 차단·실패 2 · 스킵 6",
             "- <code>402340</code> SK스퀘어: 매도 1주 · 차단(매도가능수량 초과) / <code>0028360200</code>",
             "- <code>000660</code> SK하이닉스: - 0주 · 차단(제외 종목 차단)",
-            "- 최종 결정: 매도 1 · 매수 0 · 유지 0",
+            "- 포지션 변화(보유수량 기준): 매도 1 · 매수 0 · 유지 0",
             "상세 리포트: 생성 실패 또는 미첨부",
         ],
         ["스킵종목1", "청산 목표", "final_equals_expected_holding_quantity", "sell_quantity_exceeds_order_available_quantity", "미결", "평결:", "Judge 후보", "Judge 검토", "미선정"],
@@ -509,6 +509,290 @@ class RenderCaseTest(unittest.TestCase):
 
     def test_broker_rejected(self) -> None:
         check_case_renders_without_failures("broker-rejected")
+
+
+class OrderLineLifecycleTest(unittest.TestCase):
+    def test_correction_with_real_buy_direction_is_not_shown_as_an_ordinary_buy(self) -> None:
+        item = {
+            "symbol_id": "005930",
+            "symbol_name": "삼성전자",
+            "direction": "buy",
+            "quantity": 3,
+            "result": "submitted",
+            "reason": "active_order_correction_submitted",
+            "order_or_reservation_id": "r1",
+        }
+        line = order_line(item)
+        self.assertIn("기존주문 정정", line)
+        self.assertIn("매수 3주", line)  # the corrected order's real direction/qty, in context
+        self.assertNotIn("- <code>005930</code> 삼성전자: 매수 3주 ·", line)  # not the ordinary-order shape
+
+    def test_cancellation_is_not_shown_as_a_sell_of_zero_shares(self) -> None:
+        item = {
+            "symbol_id": "005930",
+            "symbol_name": "삼성전자",
+            "direction": "none",
+            "quantity": 0,
+            "result": "submitted",
+            "reason": "active_order_cancel_submitted",
+            "order_or_reservation_id": "r1",
+        }
+        line = order_line(item)
+        self.assertIn("기존주문 취소", line)
+        self.assertNotIn("- 0주", line)
+
+
+class ReviewTriggerRenderTest(unittest.TestCase):
+    BASE_PAYLOAD = {
+        "run_id": "trigger-test",
+        "status": "success",
+        "account_display_summary": {},
+        "evidence_summary": {},
+        "today_fills_summary": {"status": "success", "skipped": False, "fill_count": 0},
+        "execution": {"request_type": "real-submit", "status": "success", "orders": []},
+        "review_summary": {},
+        "token_usage": {"total": {"total_tokens": 0}},
+    }
+
+    def test_due_slot_uses_applied_slot_wording_not_next_slot_wording(self) -> None:
+        payload = dict(self.BASE_PAYLOAD)
+        payload["review_trigger"] = {
+            "decision": "full",
+            "reasons": ["fixed_review_time_due"],
+            "due_slot": "09:05",
+            "full_review_completed": True,
+            "trigger_state_persisted": True,
+        }
+        rendered = render(payload)
+        self.assertIn("적용 정기 슬롯 09:05", rendered)
+        self.assertNotIn("다음 예정 슬롯", rendered)
+
+    def test_persistence_failure_is_visible_not_reported_as_success(self) -> None:
+        payload = dict(self.BASE_PAYLOAD)
+        payload["review_trigger"] = {
+            "decision": "full",
+            "reasons": ["broker_fingerprint_changed"],
+            "due_slot": None,
+            "full_review_completed": True,
+            "trigger_state_persisted": False,
+        }
+        rendered = render(payload)
+        self.assertIn("저장 실패", rendered)
+
+    def test_persistence_success_does_not_show_a_failure_warning(self) -> None:
+        payload = dict(self.BASE_PAYLOAD)
+        payload["review_trigger"] = {
+            "decision": "full",
+            "reasons": ["broker_fingerprint_changed"],
+            "due_slot": None,
+            "full_review_completed": True,
+            "trigger_state_persisted": True,
+        }
+        rendered = render(payload)
+        self.assertNotIn("저장 실패", rendered)
+
+    def test_safety_trigger_reasons_are_localized(self) -> None:
+        payload = dict(self.BASE_PAYLOAD)
+        payload["review_trigger"] = {
+            "decision": "safety_block",
+            "reasons": ["account_lookup_failed"],
+            "safety_reasons": ["account_lookup_failed"],
+        }
+        rendered = render(payload)
+        self.assertIn("계좌 조회 실패", rendered)
+        self.assertNotIn("account_lookup_failed", rendered)
+
+
+class PolicyMentionTest(unittest.TestCase):
+    BASE_PAYLOAD = {
+        "run_id": "policy-test",
+        "status": "success",
+        "account_display_summary": {},
+        "evidence_summary": {},
+        "today_fills_summary": {"status": "success", "skipped": False, "fill_count": 0},
+        "execution": {"request_type": "real-submit", "status": "success", "orders": []},
+        "token_usage": {"total": {"total_tokens": 0}},
+        "execution_guards_policy": {
+            "unheld_review_top_k": 5,
+            "profit_protection_max_reduction_pct": 25.0,
+            "concentration_rebalance_cap_pct": 15.0,
+            "concentration_rebalance_max_reduction_pct": 30.0,
+            "max_daily_turnover_pct": 20.0,
+        },
+    }
+
+    def test_policy_line_appears_when_guard_materially_intervened(self) -> None:
+        payload = dict(self.BASE_PAYLOAD)
+        payload["review_summary"] = {
+            "final_sell_count": 0,
+            "final_buy_count": 0,
+            "final_hold_count": 1,
+            "blocked_guard_count": 1,
+            "symbols": [
+                {
+                    "symbol_id": "005930",
+                    "current_live_holding_quantity": 5,
+                    "final_holding_quantity": 5,
+                    "decision_guard": {"status": "blocked", "reason_code": "profit_protection_blocked"},
+                }
+            ],
+        }
+        rendered = render(payload)
+        self.assertIn("적용 정책: 이익보호 최대축소 25.0%", rendered)
+
+    def test_policy_line_only_mentions_the_affected_guard_not_every_policy_value(self) -> None:
+        payload = dict(self.BASE_PAYLOAD)
+        payload["review_summary"] = {
+            "final_sell_count": 0,
+            "final_buy_count": 0,
+            "final_hold_count": 1,
+            "blocked_guard_count": 1,
+            "symbols": [
+                {
+                    "symbol_id": "005930",
+                    "current_live_holding_quantity": 5,
+                    "final_holding_quantity": 5,
+                    "decision_guard": {"status": "blocked", "reason_code": "profit_protection_blocked"},
+                }
+            ],
+        }
+        rendered = render(payload)
+        self.assertIn("이익보호 최대축소", rendered)
+        # Only profit_protection intervened -- concentration/turnover values must not appear.
+        self.assertNotIn("집중도 상한", rendered)
+        self.assertNotIn("일일 회전한도", rendered)
+
+    def test_guard_reason_code_is_localized_not_raw_enum(self) -> None:
+        payload = dict(self.BASE_PAYLOAD)
+        payload["review_summary"] = {
+            "final_sell_count": 0,
+            "final_buy_count": 0,
+            "final_hold_count": 1,
+            "blocked_guard_count": 1,
+            "symbols": [
+                {
+                    "symbol_id": "005930",
+                    "symbol_name": "삼성전자",
+                    "current_live_holding_quantity": 5,
+                    "final_holding_quantity": 5,
+                    "requested_action": "reduce",
+                    "canonical_action": "hold",
+                    "decision_guard": {"status": "blocked", "reason_code": "profit_protection_blocked"},
+                }
+            ],
+        }
+        rendered = render(payload)
+        self.assertIn("이익보호 조건 미충족 차단", rendered)
+        self.assertNotIn("profit_protection_blocked", rendered)
+
+    def test_allowed_capped_guard_status_is_localized(self) -> None:
+        payload = dict(self.BASE_PAYLOAD)
+        payload["review_summary"] = {
+            "final_sell_count": 1,
+            "final_buy_count": 0,
+            "final_hold_count": 0,
+            "symbols": [
+                {
+                    "symbol_id": "005930",
+                    "symbol_name": "삼성전자",
+                    "current_live_holding_quantity": 10,
+                    "expected_holding_quantity": 10,
+                    "final_holding_quantity": 8,
+                    "requested_target_position_value_krw": 500_000,
+                    "target_position_value_krw": 800_000,
+                    "requested_action": "reduce",
+                    "canonical_action": "reduce",
+                    "decision_basis": "profit_protection",
+                    "decision_guard": {
+                        "status": "allowed",
+                        "reason_code": "profit_protection_reduction_allowed",
+                        "basis": "profit_protection",
+                    },
+                }
+            ],
+        }
+        rendered = render(payload)
+        self.assertIn("가드 허용(이익보호 축소 허용)", rendered)
+        self.assertNotIn("가드 allowed", rendered)
+
+    def test_pending_order_baseline_hold_is_not_described_as_a_new_increase(self) -> None:
+        payload = dict(self.BASE_PAYLOAD)
+        payload["review_summary"] = {
+            "final_sell_count": 0,
+            "final_buy_count": 1,
+            "final_hold_count": 0,
+            "symbols": [
+                {
+                    "symbol_id": "005930",
+                    "symbol_name": "삼성전자",
+                    "current_live_holding_quantity": 10,
+                    "expected_holding_quantity": 15,
+                    "final_holding_quantity": 15,
+                    "delta_quantity": 5,
+                    "requested_action": "hold",
+                    "canonical_action": "hold",
+                    "decision_basis": "none",
+                    "decision_guard": {},
+                }
+            ],
+        }
+        rendered = render(payload)
+        self.assertNotIn("<b>주요 종목 결정</b>", rendered)
+        self.assertNotIn("유지(기준유지) 최종 15주 · 증가 5주", rendered)
+
+    def test_material_decision_line_shows_expected_to_final_baseline(self) -> None:
+        payload = dict(self.BASE_PAYLOAD)
+        payload["review_summary"] = {
+            "final_sell_count": 1,
+            "final_buy_count": 0,
+            "final_hold_count": 0,
+            "symbols": [
+                {
+                    "symbol_id": "005930",
+                    "symbol_name": "삼성전자",
+                    "current_live_holding_quantity": 10,
+                    "expected_holding_quantity": 12,
+                    "final_holding_quantity": 8,
+                    "requested_action": "reduce",
+                    "canonical_action": "reduce",
+                    "decision_basis": "thesis",
+                    "decision_guard": {"status": "allowed", "reason_code": "thesis_reduction_allowed"},
+                }
+            ],
+        }
+        rendered = render(payload)
+        self.assertIn("대기반영 12주→최종 8주", rendered)
+        self.assertIn("대기반영 기준 감소 4주", rendered)
+
+    def test_unresolved_judge_error_reuses_localized_reason_label(self) -> None:
+        payload = dict(self.BASE_PAYLOAD)
+        payload["review_summary"] = {
+            "unresolved_review_scope_count": 1,
+            "unresolved_review_scope": [
+                {
+                    "symbol_id": "005930",
+                    "symbol_name": "삼성전자",
+                    "scope_reason": "held_position",
+                    "judge_error_code": "invalid_final_holding_quantity",
+                }
+            ],
+        }
+        rendered = render(payload)
+        self.assertIn("최종수량 값 오류", rendered)
+        self.assertNotIn("invalid_final_holding_quantity", rendered)
+
+    def test_policy_line_absent_without_material_guard_intervention(self) -> None:
+        payload = dict(self.BASE_PAYLOAD)
+        payload["review_summary"] = {
+            "final_sell_count": 0,
+            "final_buy_count": 1,
+            "final_hold_count": 0,
+            "symbols": [
+                {"symbol_id": "005930", "current_live_holding_quantity": 0, "final_holding_quantity": 1}
+            ],
+        }
+        rendered = render(payload)
+        self.assertNotIn("적용 정책", rendered)
 
 
 if __name__ == "__main__":

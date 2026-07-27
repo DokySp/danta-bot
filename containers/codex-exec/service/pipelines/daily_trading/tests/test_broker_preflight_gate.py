@@ -180,6 +180,14 @@ class SafetyBlockEndsBeforeFullReviewTest(unittest.TestCase):
             self.assertIn("holding_state_issue_detected", trigger["safety"]["reasons"])
             telegram_summary = (run_dir / "telegram-summary.txt").read_text(encoding="utf-8")
             self.assertTrue(telegram_summary.strip())
+            # decision_info["reasons"] IS safety.reasons for a safety_block (same list); the raw
+            # reason text must appear exactly once, not duplicated across a "사유" and a separate
+            # "안전 문제" line.
+            self.assertEqual(telegram_summary.count("holding_state_issue_detected"), 0)
+            self.assertEqual(telegram_summary.count("보유수량 상태 불일치 감지"), 1)
+            self.assertNotIn("사유:", telegram_summary)
+            self.assertIn("안전 문제: 보유수량 상태 불일치 감지", telegram_summary)
+            self.assertIn("적용 정기 슬롯:", telegram_summary)
 
     def test_incomplete_today_fills_lookup_blocks_full_review(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -217,6 +225,34 @@ class SafetyBlockEndsBeforeFullReviewTest(unittest.TestCase):
             trigger = load_json(run_dir / "review-trigger.json")
             self.assertEqual(trigger["decision"], "safety_block")
             self.assertIn("today_fills_lookup_incomplete", trigger["safety"]["reasons"])
+
+    def test_incomplete_order_lifecycle_lookup_shows_active_order_count_as_unverified(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            run_dir = workspace / "reports" / "runs" / "gate-lifecycle-lookup-incomplete"
+            portfolio_path = write_self_test_fixtures(workspace, run_dir)
+            fake_execute_orders = workspace / "fake-execute-orders-lookup-incomplete.py"
+            write_fake_lifecycle_execute_orders(fake_execute_orders, holding_state_issue_count=0, lookup_complete=False)
+
+            pipeline = make_pipeline(
+                fake_execute_orders,
+                args=gate_args(
+                    workspace=workspace,
+                    run_dir=run_dir,
+                    portfolio_path=portfolio_path,
+                    invocation_type="scheduled",
+                    started_at="2026-07-27T09:20:00+09:00",
+                ),
+            )
+            pipeline.run()
+
+            trigger = load_json(run_dir / "review-trigger.json")
+            self.assertEqual(trigger["decision"], "safety_block")
+            self.assertIn("order_lifecycle_lookup_incomplete", trigger["safety"]["reasons"])
+            telegram_summary = (run_dir / "telegram-summary.txt").read_text(encoding="utf-8")
+            # An incomplete lookup must never be presented as a verified "0건" active-order count.
+            self.assertIn("활성 주문: 미확인", telegram_summary)
+            self.assertNotIn("활성 주문: 0건", telegram_summary)
 
     def test_unexpected_non_universe_holding_blocks_full_review(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -320,6 +356,7 @@ class DueSlotAndFingerprintGateStateTest(unittest.TestCase):
             self.assertEqual(state_after_full["last_satisfied_time"], "09:05")
             completed_trigger = load_json(run_dir_1 / "review-trigger.json")
             self.assertTrue(completed_trigger["full_review_completed"])
+            self.assertTrue(completed_trigger["trigger_state_persisted"])
 
             # A later non-fixed-time invocation (09:20) with an unchanged broker
             # snapshot must end after preflight rather than repeat the full review.
@@ -342,6 +379,7 @@ class DueSlotAndFingerprintGateStateTest(unittest.TestCase):
             trigger_2 = load_json(run_dir_2 / "review-trigger.json")
             self.assertEqual(trigger_2["decision"], "skipped")
             self.assertEqual(trigger_2["changed_components"], [])
+            self.assertTrue(trigger_2["trigger_state_persisted"])
 
     def test_manual_invocation_is_full_even_at_a_non_fixed_time(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -695,6 +733,13 @@ class ReviewTriggerStatePersistenceFailureTest(unittest.TestCase):
 
             trigger = load_json(run_dir / "review-trigger.json")
             self.assertTrue(trigger["full_review_completed"])
+            # completed_fingerprint is written for audit purposes even on a failed persist, so its
+            # mere presence must never be read as persistence success -- trigger_state_persisted is
+            # the only truthful signal, and it must be explicitly False here.
+            self.assertIn("completed_fingerprint", trigger)
+            self.assertFalse(trigger["trigger_state_persisted"])
+            review_trigger_view = pipeline.build_review_trigger_view()
+            self.assertFalse(review_trigger_view["trigger_state_persisted"])
 
 
 if __name__ == "__main__":

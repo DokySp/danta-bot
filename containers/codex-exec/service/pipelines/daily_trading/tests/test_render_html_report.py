@@ -23,11 +23,17 @@ from pathlib import Path
 from unittest.mock import patch
 
 from ..scripts.render_html_report import (
-    analyst_score_class,
+    CANONICAL_ACTION_LABELS,
+    DECISION_BASIS_LABELS,
+    NOT_RECORDED,
+    analyst_symbol_group_priority,
     argument_anchor_id,
     build_html,
     cumulative_today_fills,
     find_runs,
+    fresh_recheck_audit_summary,
+    judge_field_display,
+    order_direction_label,
     order_status_badge,
     parse_cited_argument_ids,
     render_combined_chart,
@@ -37,6 +43,7 @@ from ..scripts.render_html_report import (
     render_time_symbol_inspector,
     render_trade_ledger,
     resolve_fill,
+    valid_analyst_score,
 )
 
 
@@ -81,6 +88,10 @@ def make_run(runs_root: Path, run_id: str, started_at: str, *, target: bool) -> 
         },
         "token_usage": {"total": {"total_tokens": 123}},
         "stages": [{"stage": "execution-plan", "status": "success", "detail": "status=success"}],
+        # Presence of "review_summary" is exactly the signal is_preflight_only relies on to tell
+        # a full-review run apart from a short-circuit (safety_block/skipped preflight) one; every
+        # run built by this fixture reached full review, so it must have this key.
+        "review_summary": {"symbol_count": 2},
     }
     if target:
         summary["order_lifecycle"] = {
@@ -319,7 +330,7 @@ REQUIRED_CUMULATIVE_REPORT_STRINGS = [
     "data-time-target=\"run-2-1000\"",
     "알파전자",
     "베타소재",
-    "Analyst only",
+    "Judge 상태 확인불가(구버전)",
     "Final Judge",
     "추세가 유지됩니다.",
     "수주 모멘텀",
@@ -355,8 +366,7 @@ REQUIRED_CUMULATIVE_REPORT_STRINGS = [
     'class="series-line asset-line"',
     "asset&quot;:10500000",
     "'KIS 총자산 ' + Number(point.asset)",
-    'class="trade-symbol-button score-low"',
-    'class="trade-symbol-button score-high active"',
+    'class="trade-symbol-button group-trade active"',
     'class="chart-range-slider"',
     'max="2"',
     "slider.addEventListener('input'",
@@ -387,6 +397,8 @@ FORBIDDEN_CUMULATIVE_REPORT_STRINGS = [
     'class="sentiment',
     "sentiment positive",
     "sentiment negative",
+    "score-low",
+    "score-high",
 ]
 
 
@@ -414,9 +426,12 @@ def check_cumulative_report_excludes_forbidden_strings(rendered: str, runs_root:
     return [value for value in forbidden if value in rendered]
 
 
-def check_cumulative_report_orders_analyst_symbols_by_score(rendered: str) -> bool:
+def check_cumulative_report_orders_analyst_symbols_by_group(rendered: str) -> bool:
+    # 알파전자 has a submitted trade this run (operational priority 0); 베타소재 has neither a
+    # trade nor a Judge decision (priority 2, unresolved) — trade must sort ahead of unresolved,
+    # replacing the removed low-score-first ordering.
     selector_start = rendered.rfind("전체 Analyst 대상 종목")
-    return rendered.find("베타소재", selector_start) < rendered.find("알파전자", selector_start)
+    return rendered.find("알파전자", selector_start) < rendered.find("베타소재", selector_start)
 
 
 def scenario_render_combined_chart_without_kospi() -> str:
@@ -451,7 +466,7 @@ def self_test() -> int:
     try:
         missing = check_cumulative_report_contains_required_strings(rendered)
         present = check_cumulative_report_excludes_forbidden_strings(rendered, runs_root)
-        score_order_ok = check_cumulative_report_orders_analyst_symbols_by_score(rendered)
+        score_order_ok = check_cumulative_report_orders_analyst_symbols_by_group(rendered)
     finally:
         temp_dir.cleanup()
 
@@ -476,7 +491,7 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
         ) as check_missing, patch(
             f"{__name__}.check_cumulative_report_excludes_forbidden_strings", return_value=[]
         ) as check_forbidden, patch(
-            f"{__name__}.check_cumulative_report_orders_analyst_symbols_by_score", return_value=True
+            f"{__name__}.check_cumulative_report_orders_analyst_symbols_by_group", return_value=True
         ) as check_order, patch(
             f"{__name__}.scenario_render_combined_chart_without_kospi", return_value=""
         ) as chart_scenario, patch(
@@ -511,7 +526,7 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
     def test_cumulative_report_orders_analyst_symbols_by_score(self) -> None:
         rendered, _runs_root, temp_dir = scenario_build_cumulative_report()
         self.addCleanup(temp_dir.cleanup)
-        self.assertTrue(check_cumulative_report_orders_analyst_symbols_by_score(rendered))
+        self.assertTrue(check_cumulative_report_orders_analyst_symbols_by_group(rendered))
 
     def test_combined_chart_falls_back_when_kospi_and_asset_missing(self) -> None:
         no_kospi_chart = scenario_render_combined_chart_without_kospi()
@@ -698,11 +713,439 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
         self.assertIn("마지막 8자리는 해시가 아니라", rendered)
         self.assertIn("같은 초에 시작한 실행을 구분하는 임의 식별자", rendered)
 
-    def test_analyst_score_classes_include_requested_boundaries(self) -> None:
-        self.assertEqual(analyst_score_class(4), " score-low")
-        self.assertEqual(analyst_score_class(6), " score-high")
-        self.assertEqual(analyst_score_class(5), "")
-        self.assertEqual(analyst_score_class(None), "")
+    def test_analyst_symbol_group_priority_ranks_trade_over_guard_over_unresolved(self) -> None:
+        final_by_symbol = {
+            "000010": {"decision_guard": {"status": "blocked"}},
+        }
+        # A symbol with an actual trade outranks a symbol whose Judge decision was guard-blocked,
+        # which in turn outranks a symbol Judge never resolved (no final_by_symbol entry) — this
+        # replaces the removed low-score-first ordering with operationally meaningful grouping.
+        self.assertEqual(
+            analyst_symbol_group_priority("000020", final_by_symbol, {"000020"}, set()),
+            0,
+        )
+        self.assertEqual(
+            analyst_symbol_group_priority("000010", final_by_symbol, set(), set()),
+            1,
+        )
+        self.assertEqual(
+            analyst_symbol_group_priority("000030", final_by_symbol, set(), set()),
+            2,
+        )
+
+    def test_order_direction_label_never_shows_lifecycle_only_submission_as_sell(self) -> None:
+        # direction=none + reason=active_order_cancel_submitted is a cancellation of an existing
+        # order, not a new sell order; it must never be mislabeled as 매도 just because
+        # direction != "buy".
+        cancel_only = {"direction": "none", "reason": "active_order_cancel_submitted", "result": "submitted"}
+        self.assertEqual(order_direction_label(cancel_only), "취소")
+
+        correction_only = {"direction": "none", "reason": "active_order_correction_submitted", "result": "submitted"}
+        self.assertEqual(order_direction_label(correction_only), "정정")
+
+        real_sell = {"direction": "sell", "reason": "accepted", "result": "submitted"}
+        self.assertEqual(order_direction_label(real_sell), "매도")
+
+        blocked_none_direction = {"direction": "none", "reason": "invalid_final_holding_quantity", "result": "blocked"}
+        self.assertEqual(order_direction_label(blocked_none_direction), "-")
+
+        # A REAL correction row carries the corrected order's actual buy/sell direction (not
+        # direction=none), so checking direction before the lifecycle reason would still mislabel
+        # it as an ordinary 매수/매도 instead of 정정.
+        real_correction_with_buy_direction = {
+            "direction": "buy",
+            "reason": "active_order_correction_submitted",
+            "result": "submitted",
+        }
+        self.assertEqual(order_direction_label(real_correction_with_buy_direction), "정정")
+
+        legacy_cancel_and_replacement = {
+            "direction": "sell",
+            "reason": "active_order_cancel_and_replacement_submitted",
+            "result": "submitted",
+        }
+        self.assertEqual(order_direction_label(legacy_cancel_and_replacement), "정정")
+
+    def test_judge_field_display_never_fabricates_none_or_hold_for_missing_v1_fields(self) -> None:
+        # v1 judge-review.json artifacts never had decision_basis/requested_action/canonical_action
+        # at all; defaulting a missing key to "none"/"hold" would fabricate a mechanical decision
+        # that was never actually made.
+        v1_final_item = {"symbol_id": "005930", "final_holding_quantity": 3}
+        self.assertEqual(judge_field_display(v1_final_item, "decision_basis", DECISION_BASIS_LABELS), NOT_RECORDED)
+        self.assertEqual(judge_field_display(v1_final_item, "canonical_action", CANONICAL_ACTION_LABELS), NOT_RECORDED)
+
+        v2_final_item = {"decision_basis": "profit_protection", "canonical_action": "reduce"}
+        self.assertEqual(judge_field_display(v2_final_item, "decision_basis", DECISION_BASIS_LABELS), "이익보호")
+        self.assertEqual(judge_field_display(v2_final_item, "canonical_action", CANONICAL_ACTION_LABELS), "축소")
+
+        # An explicit canonical_action="hold" IS a real recorded decision and must render as such,
+        # not as NOT_RECORDED -- only an absent key is unavailable.
+        explicit_hold_item = {"canonical_action": "hold"}
+        self.assertEqual(judge_field_display(explicit_hold_item, "canonical_action", CANONICAL_ACTION_LABELS), "유지")
+
+    def test_render_policy_panel_shows_effective_guard_values(self) -> None:
+        from ..scripts.render_html_report import render_policy_panel
+
+        rendered = render_policy_panel(
+            {
+                "execution_guards_policy": {
+                    "unheld_review_top_k": 5,
+                    "profit_protection_max_reduction_pct": 25.0,
+                    "concentration_rebalance_cap_pct": 15.0,
+                    "concentration_rebalance_max_reduction_pct": 30.0,
+                    "max_daily_turnover_pct": 20.0,
+                }
+            }
+        )
+        self.assertIn("적용 중인 실행 정책", rendered)
+        self.assertIn("25.0%", rendered)
+        self.assertIn("15.0%", rendered)
+        self.assertEqual(render_policy_panel({}), "")
+
+    def test_render_review_trigger_panel_shows_final_decision_and_persistence(self) -> None:
+        from ..scripts.render_html_report import render_review_trigger_panel
+
+        rendered = render_review_trigger_panel(
+            {
+                "review_trigger": {
+                    "decision": "full",
+                    "reasons": ["broker_fingerprint_changed"],
+                    "due_slot": "09:05",
+                    "changed_components": ["account"],
+                    "safety_reasons": [],
+                    "full_review_completed": True,
+                    "trigger_state_persisted": False,
+                }
+            }
+        )
+        self.assertIn("리뷰 트리거 최종 상태", rendered)
+        self.assertIn("브로커 상태 변경 감지", rendered)
+        self.assertIn("09:05", rendered)
+        self.assertIn("account", rendered)
+        self.assertIn("저장 실패", rendered)
+        self.assertEqual(render_review_trigger_panel({}), "")
+
+    def test_render_review_trigger_panel_does_not_call_safety_block_a_persistence_failure(self) -> None:
+        from ..scripts.render_html_report import render_review_trigger_panel
+
+        rendered = render_review_trigger_panel(
+            {
+                "review_trigger": {
+                    "decision": "safety_block",
+                    "reasons": ["account_lookup_failed"],
+                    "safety_reasons": ["account_lookup_failed"],
+                    "full_review_completed": False,
+                }
+            }
+        )
+        self.assertIn("저장 대상 아님", rendered)
+        self.assertNotIn("저장 실패", rendered)
+
+    def test_valid_analyst_score_matches_pipeline_not_selected_count_contract(self) -> None:
+        self.assertTrue(valid_analyst_score(0))
+        self.assertTrue(valid_analyst_score("10"))
+        self.assertFalse(valid_analyst_score(None))
+        self.assertFalse(valid_analyst_score(True))
+        self.assertFalse(valid_analyst_score("not-a-score"))
+        self.assertFalse(valid_analyst_score(10.1))
+
+    def test_judge_symbol_scope_status_distinguishes_resolved_unresolved_not_selected_and_legacy(self) -> None:
+        from ..scripts.render_html_report import judge_symbol_scope_status
+
+        final_by_symbol = {"000001": {"final_holding_quantity": 5}}
+        scope_reasons = {"000002": "unheld_score_rank"}
+        # Resolved: judge-review.json has a row for this symbol.
+        self.assertEqual(
+            judge_symbol_scope_status("000001", final_by_symbol.get("000001"), scope_reasons, True),
+            "resolved",
+        )
+        # In review_scope_reasons but no judge-review.json row -- unresolved-in-scope, not "not
+        # selected" and not "Analyst only".
+        self.assertEqual(
+            judge_symbol_scope_status("000002", final_by_symbol.get("000002"), scope_reasons, True),
+            "unresolved_in_scope",
+        )
+        # Never in review_scope_reasons at all, with valid v2 scope metadata present -- genuinely
+        # not selected.
+        self.assertEqual(
+            judge_symbol_scope_status("000003", final_by_symbol.get("000003"), scope_reasons, True),
+            "not_selected",
+        )
+        # v1 run: no scope metadata exists at all, so "not selected" would be fabricated precision.
+        self.assertEqual(
+            judge_symbol_scope_status("000003", final_by_symbol.get("000003"), scope_reasons, False),
+            "legacy_unknown",
+        )
+
+    def test_render_run_timeline_shows_preflight_only_run_distinctly_not_as_empty_full_run(self) -> None:
+        from ..scripts.render_html_report import render_run_timeline
+
+        preflight_run = {
+            "summary": {
+                "started_at": "2026-07-27T09:05:00+09:00",
+                "token_usage": {"total": {"total_tokens": 10}},
+                "review_trigger": {
+                    "decision": "skipped",
+                    "reasons": ["fixed_review_time_due"],
+                    "due_slot": "09:05",
+                    "trigger_state_persisted": False,
+                },
+                # No "review_summary" key at all -- this is the short-circuit signal.
+            },
+            "execution": {},
+            "decision": {},
+            "market": {},
+            "is_preflight_only": True,
+        }
+        full_run = {
+            "summary": {
+                "started_at": "2026-07-27T09:10:00+09:00",
+                "token_usage": {"total": {"total_tokens": 20}},
+                "account_display_summary": {},
+                "review_summary": {"symbol_count": 1},
+            },
+            "execution": {"orders": [{"result": "submitted"}]},
+            "decision": {"strategy_context": {"regime": "risk_on"}},
+            "market": {"indexes": []},
+            "is_preflight_only": False,
+        }
+        rendered = render_run_timeline([preflight_run, full_run])
+        self.assertIn("사전점검", rendered)
+        self.assertIn("생략(변경 없음)", rendered)
+        self.assertIn("예정 리뷰 시각 도래", rendered)
+        self.assertIn("적용 정기 슬롯 09:05", rendered)
+        self.assertIn("상태 저장 실패", rendered)
+        # A preflight-only row must not render the generic 0/0/0 full-run shape; the (non-preflight)
+        # full run has one submitted order, so any "0 / 0 / 0" left over would have to be a
+        # mistakenly-rendered preflight row.
+        self.assertNotIn("0 / 0 / 0", rendered)
+
+    def test_render_time_symbol_inspector_excludes_preflight_only_runs_from_analyst_judge_wheel(self) -> None:
+        preflight_run = {
+            "path": Path("/nonexistent/preflight-run"),
+            "summary": {"started_at": "2026-07-27T09:05:00+09:00"},
+            "execution": {},
+            "decision": {},
+            "is_preflight_only": True,
+        }
+        full_run = {
+            "path": Path("/nonexistent/full-run"),
+            "summary": {"started_at": "2026-07-27T09:10:00+09:00"},
+            "execution": {"orders": []},
+            "decision": {},
+            "is_preflight_only": False,
+        }
+        rendered = render_time_symbol_inspector([preflight_run, full_run], [])
+        # Only the full run's time button should appear; the preflight-only run is excluded
+        # entirely rather than shown as an empty Analyst/Judge run.
+        self.assertEqual(rendered.count("data-time-target="), 1)
+        self.assertNotIn("09:05", rendered)
+        self.assertIn("09:10", rendered)
+
+    def test_inspector_treats_existing_v1_spec_without_scope_key_as_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            write_json(
+                run_dir / "analyst-review.json",
+                {"symbols": [{"symbol_id": "005930", "symbol_name": "삼성전자", "final_first_score": 5, "agent_scores": []}]},
+            )
+            write_json(run_dir / "judge-review.json", {"symbols": []})
+            write_json(run_dir / "judge-review-spec.json", {"schema_version": "1", "symbol_ids": ["005930"]})
+            write_json(run_dir / "judge-debate.json", {})
+            rendered = render_time_symbol_inspector(
+                [
+                    {
+                        "path": run_dir,
+                        "summary": {"started_at": "2026-07-27T10:00:00+09:00", "review_summary": {"symbols": []}},
+                        "execution": {"orders": []},
+                        "decision": {},
+                        "is_preflight_only": False,
+                    }
+                ],
+                [],
+            )
+
+        self.assertIn("Judge 상태 확인불가(구버전)", rendered)
+        self.assertNotIn(">Judge 미선정<", rendered)
+
+    def test_inspector_not_selected_count_uses_only_valid_analyst_scores(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            write_json(
+                run_dir / "analyst-review.json",
+                {
+                    "symbols": [
+                        {"symbol_id": "000001", "symbol_name": "유효", "final_first_score": 5, "agent_scores": []},
+                        {"symbol_id": "000002", "symbol_name": "누락", "final_first_score": None, "agent_scores": []},
+                        {"symbol_id": "000003", "symbol_name": "범위밖", "final_first_score": 11, "agent_scores": []},
+                    ]
+                },
+            )
+            write_json(run_dir / "judge-review.json", {"symbols": []})
+            write_json(run_dir / "judge-review-spec.json", {"schema_version": "2", "review_scope_reasons": {}})
+            write_json(run_dir / "judge-debate.json", {})
+            rendered = render_time_symbol_inspector(
+                [
+                    {
+                        "path": run_dir,
+                        "summary": {"started_at": "2026-07-27T10:00:00+09:00", "review_summary": {"symbols": []}},
+                        "execution": {"orders": []},
+                        "decision": {},
+                        "is_preflight_only": False,
+                    }
+                ],
+                [],
+            )
+
+        self.assertIn("Judge 심사범위: 보유 0 · 비보유 상위선정 0 · 미선정 1 · 미해결 0", rendered)
+
+    def test_inspector_uses_review_summary_expected_holding_and_labels_final_as_quantity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            write_json(
+                run_dir / "analyst-review.json",
+                {"symbols": [{"symbol_id": "005930", "symbol_name": "삼성전자", "final_first_score": 5, "agent_scores": []}]},
+            )
+            write_json(
+                run_dir / "judge-review.json",
+                {
+                    "symbols": [
+                        {
+                            "symbol_id": "005930",
+                            "symbol_name": "삼성전자",
+                            "final_holding_quantity": 5,
+                            "requested_target_position_value_krw": 500_000,
+                            "target_position_value_krw": 500_000,
+                            "requested_action": "hold",
+                            "canonical_action": "hold",
+                            "decision_basis": "none",
+                            "decision_guard": {"status": "allowed", "reason_code": "within_daily_turnover_budget"},
+                        }
+                    ]
+                },
+            )
+            write_json(
+                run_dir / "judge-review-spec.json",
+                {"schema_version": "2", "review_scope_reasons": {"005930": "held_position"}},
+            )
+            write_json(run_dir / "judge-debate.json", {})
+            rendered = render_time_symbol_inspector(
+                [
+                    {
+                        "path": run_dir,
+                        "summary": {
+                            "started_at": "2026-07-27T10:00:00+09:00",
+                            "review_summary": {"symbols": [{"symbol_id": "005930", "expected_holding_quantity": 5}]},
+                        },
+                        "execution": {"orders": []},
+                        "decision": {
+                            "symbols": [
+                                {"symbol_id": "005930", "account_exposure": {"current_live_holding_quantity": 3}}
+                            ]
+                        },
+                        "is_preflight_only": False,
+                    }
+                ],
+                [],
+            )
+
+        self.assertIn("현재 3주 → 대기반영 5주", rendered)
+        self.assertIn("최종 보유수량 5주", rendered)
+        self.assertNotIn("최종(포지션 변화) 5주", rendered)
+
+    def test_inspector_does_not_badge_lifecycle_only_cancellation_as_trade(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            write_json(
+                run_dir / "analyst-review.json",
+                {"symbols": [{"symbol_id": "005930", "symbol_name": "삼성전자", "final_first_score": 5, "agent_scores": []}]},
+            )
+            write_json(run_dir / "judge-review.json", {"symbols": []})
+            write_json(run_dir / "judge-review-spec.json", {"schema_version": "2", "review_scope_reasons": {}})
+            write_json(run_dir / "judge-debate.json", {})
+            rendered = render_time_symbol_inspector(
+                [
+                    {
+                        "path": run_dir,
+                        "summary": {"started_at": "2026-07-27T10:00:00+09:00", "review_summary": {"symbols": []}},
+                        "execution": {
+                            "orders": [
+                                {
+                                    "symbol_id": "005930",
+                                    "symbol_name": "삼성전자",
+                                    "direction": "none",
+                                    "validated_order_quantity": 0,
+                                    "result": "submitted",
+                                    "reason": "active_order_cancel_submitted",
+                                }
+                            ]
+                        },
+                        "decision": {},
+                        "is_preflight_only": False,
+                    }
+                ],
+                [],
+            )
+
+        self.assertIn("주문 정정·취소", rendered)
+        self.assertIn("기존주문 취소", rendered)
+        self.assertNotIn('mini-badge trade">거래', rendered)
+        self.assertNotIn("취소 0주", rendered)
+
+    def test_fresh_recheck_audit_summary_renders_for_a_successful_entry_too(self) -> None:
+        order = {
+            "fresh_recheck_audit": [
+                {
+                    "checked_at": "2026-07-27T09:10:00+09:00",
+                    "fresh_holding_quantity": 10,
+                    "pnl_verification_outcome": True,
+                    "reduction_bound_outcome": True,
+                    "approved_max_reduction_pct": 25.0,
+                }
+            ]
+        }
+        rendered = fresh_recheck_audit_summary(order)
+        self.assertIn("보유 10주", rendered)
+        self.assertIn("손익검증 통과", rendered)
+        self.assertIn("축소한도 통과", rendered)
+        self.assertIn("25.0%", rendered)
+
+    def test_trade_ledger_shows_fresh_recheck_audit_on_submitted_order(self) -> None:
+        rendered, submitted_orders = render_trade_ledger(
+            [
+                {
+                    "summary": {"started_at": "2026-07-27T10:00:00+09:00"},
+                    "execution": {
+                        "orders": [
+                            {
+                                "symbol_id": "005930",
+                                "symbol_name": "삼성전자",
+                                "direction": "sell",
+                                "validated_order_quantity": 1,
+                                "order_price": 70_000,
+                                "result": "submitted",
+                                "fresh_recheck_audit": [
+                                    {
+                                        "checked_at": "2026-07-27T10:00:01+09:00",
+                                        "fresh_holding_quantity": 10,
+                                        "pnl_verification_outcome": True,
+                                        "reduction_bound_outcome": True,
+                                        "approved_max_reduction_pct": 25.0,
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                }
+            ],
+            [],
+            "success",
+            "account",
+        )
+
+        self.assertEqual(len(submitted_orders), 1)
+        self.assertIn("재확인 감사:", rendered)
+        self.assertIn("손익검증 통과", rendered)
 
     def test_render_thesis_section_shows_prior_source_matched_conditions_gate_and_successor(self) -> None:
         final_item = {

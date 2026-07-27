@@ -53,6 +53,60 @@ REASON_LABELS = {
     "holding_state_not_verified": "보유수량 상태 불일치",
     "stale_active_order_requires_cancellation": "이전 미체결 주문 정리 필요",
     "unverified_holding_requires_active_order_cancellation": "수량 불일치로 기존 미체결 주문 취소 필요",
+    "active_order_correction_submitted": "기존주문 정정 제출",
+    "decision_guard_action_mismatch": "가드-액션 불일치",
+    "decision_guard_basis_mismatch": "가드-근거 불일치",
+    "duplicate_execution_symbol": "중복 실행 종목",
+    "sell_quantity_capacity_missing": "매도가능수량 조회 불가",
+    # Legacy score-band gate reason codes (removed in favor of guarded target-position decisions);
+    # kept so same-day artifacts written before that change still render truthfully.
+    "sell_blocked_score_band": "점수 밴드 매도 차단(legacy)",
+    "buy_blocked_score_band": "점수 밴드 매수 차단(legacy)",
+    "score_band_value_missing": "점수 확인 불가 차단(legacy)",
+    "debate_incomplete_baseline_forced": "토론 미완료로 기준 유지 강제",
+    "decision_basis_required_for_increase": "확대에는 decision_basis 필요",
+    "decision_basis_required_for_reduction": "축소에는 decision_basis 필요",
+    "thesis_increase_allowed": "논지 기반 확대 허용",
+    "thesis_reduction_allowed": "논지 기반 축소 허용",
+    "thesis_reduction_gate_blocked": "논지 축소 게이트 차단",
+    "profit_protection_blocked": "이익보호 조건 미충족 차단",
+    "profit_protection_reduction_allowed": "이익보호 축소 허용",
+    "concentration_rebalance_blocked": "집중도 조정 조건 미충족 차단",
+    "concentration_rebalance_reduction_allowed": "집중도 조정 축소 허용",
+    "capped_reduction_below_one_share": "축소분 1주 미만으로 변경없음 처리",
+    "daily_turnover_context_unavailable": "일일 회전한도 컨텍스트 조회 불가",
+    "daily_turnover_cap_exceeded": "일일 회전한도 초과",
+    "within_daily_turnover_budget": "일일 회전한도 이내",
+}
+LIFECYCLE_CANCEL_REASONS = {"active_order_cancel_submitted"}
+LIFECYCLE_CORRECTION_REASONS = {"active_order_correction_submitted", "active_order_cancel_and_replacement_submitted"}
+# canonical_action/requested_action (derive_action) are increase|hold|reduce|exit, never buy/sell.
+CANONICAL_ACTION_LABELS = {"increase": "확대", "reduce": "축소", "exit": "청산", "hold": "유지"}
+BASIS_LABELS = {
+    "none": "기준유지",
+    "thesis": "논지",
+    "profit_protection": "이익보호",
+    "concentration_rebalance": "집중도조정",
+}
+GUARD_STATUS_LABELS = {"allowed": "허용", "blocked": "차단", "no_change": "변경없음 처리"}
+REVIEW_TRIGGER_DECISION_LABELS = {"full": "전체 리뷰 실행", "skipped": "생략(변경 없음)", "safety_block": "안전 차단"}
+REVIEW_TRIGGER_REASON_LABELS = {
+    "manual_invocation": "수동/전체 실행 요청",
+    "first_safe_run_of_day": "당일 최초 안전 실행",
+    "broker_fingerprint_changed": "브로커 상태 변경 감지",
+    "fixed_review_time_due": "예정 리뷰 시각 도래",
+    "account_lookup_failed": "계좌 조회 실패",
+    "order_lifecycle_lookup_incomplete": "미체결 주문 조회 미완료",
+    "orderable_cash_unavailable": "주문가능금액 조회 불가",
+    "holding_state_issue_detected": "보유수량 상태 불일치 감지",
+    "today_fills_lookup_incomplete": "당일 체결 조회 미완료",
+    "unexpected_non_universe_holding": "유니버스 외 예상외 보유 종목",
+}
+SCOPE_REASON_LABELS = {"held_position": "보유 심사대상", "unheld_score_rank": "비보유 상위선정"}
+JUDGE_ERROR_LABELS = {
+    "missing_judge_symbol": "Judge 결과 누락",
+    "duplicate_judge_symbol": "Judge 결과 중복",
+    "judge_symbol_outside_candidate_set": "후보 외 종목 응답",
 }
 BROKER_STATUS_LABELS = {
     "filled": "KIS 체결",
@@ -86,6 +140,13 @@ def as_int(value: Any, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def decimal(value: Any, digits: int = 2) -> str:
+    try:
+        return f"{float(value):.{digits}f}"
+    except (TypeError, ValueError):
+        return "-"
 
 
 def money(value: Any) -> str:
@@ -156,21 +217,113 @@ def symbol_html(item: dict[str, Any]) -> str:
 
 
 def order_line(item: dict[str, Any]) -> str:
+    reason_raw = str(item.get("reason") or "")
+    result = result_label(item.get("result") or "-")
+    reason = esc(reason_label(reason_raw or "-"))
+    order_id = esc(item.get("order_or_reservation_id") or "")
+    suffix = f" / <code>{order_id}</code>" if order_id else ""
+    broker = item.get("broker_reconciliation") if isinstance(item.get("broker_reconciliation"), dict) else {}
+    broker_text = esc(broker_status_label(broker.get("status")))
+    broker_suffix = f" · {broker_text}" if broker_text else ""
+    if reason_raw in LIFECYCLE_CANCEL_REASONS:
+        # direction=none + quantity=0 here is an existing-order CANCELLATION event, not a "- 0주"
+        # sell/buy of nothing -- the lifecycle reason must take precedence over direction/quantity.
+        return f"- {symbol_html(item)}: 기존주문 취소 · {result}({reason}){broker_suffix}{suffix}"
+    if reason_raw in LIFECYCLE_CORRECTION_REASONS:
+        # A correction row carries the CORRECTED order's real buy/sell direction (not none), so
+        # showing it as an ordinary "매수 3주" line hides that this is a correction, not a new order.
+        quantity = as_int(item.get("quantity"))
+        return f"- {symbol_html(item)}: 기존주문 정정({direction_label(item.get('direction') or 'none')} {quantity}주) · {result}({reason}){broker_suffix}{suffix}"
     direction = direction_label(item.get("direction") or "none")
     quantity = as_int(item.get("quantity"))
     requested_quantity = as_int(item.get("requested_quantity"))
-    result = result_label(item.get("result") or "-")
-    reason = esc(reason_label(item.get("reason") or "-"))
-    order_id = esc(item.get("order_or_reservation_id") or "")
-    suffix = f" / <code>{order_id}</code>" if order_id else ""
     adjustment = item.get("quantity_adjustment") if isinstance(item.get("quantity_adjustment"), dict) else {}
     quantity_text = f"{requested_quantity}주→{quantity}주" if requested_quantity and requested_quantity != quantity else f"{quantity}주"
     adjustment_reason = esc(reason_label(adjustment.get("reason"))) if adjustment.get("reason") else ""
     adjustment_suffix = f", 조정={adjustment_reason}" if adjustment_reason else ""
-    broker = item.get("broker_reconciliation") if isinstance(item.get("broker_reconciliation"), dict) else {}
-    broker_text = esc(broker_status_label(broker.get("status")))
-    broker_suffix = f" · {broker_text}" if broker_text else ""
     return f"- {symbol_html(item)}: {direction} {quantity_text} · {result}({reason}{adjustment_suffix}){broker_suffix}{suffix}"
+
+
+def guard_intervened(row: dict[str, Any]) -> bool:
+    """decision_guard.status is only ever "blocked" or "no_change" — there is no "capped"
+    status — so a capped/adjusted decision must be detected from the reason_code text or from
+    the judge's requested target being clamped away from the canonical target."""
+    guard = row.get("decision_guard") if isinstance(row.get("decision_guard"), dict) else {}
+    status = text(guard.get("status"))
+    reason = text(guard.get("reason_code"))
+    if status in {"blocked", "no_change"} or "capped" in reason:
+        return True
+    requested_target = row.get("requested_target_position_value_krw")
+    canonical_target = row.get("target_position_value_krw")
+    return requested_target is not None and canonical_target is not None and requested_target != canonical_target
+
+
+def is_material_symbol_decision(row: dict[str, Any]) -> bool:
+    if guard_intervened(row):
+        return True
+    if text(row.get("requested_action") or "hold") != text(row.get("canonical_action") or "hold"):
+        return True
+    canonical_action = text(row.get("canonical_action") or "hold")
+    if canonical_action in {"increase", "reduce", "exit"}:
+        return True
+    expected_quantity = row.get("expected_holding_quantity")
+    if expected_quantity is not None and as_int(row.get("final_holding_quantity")) != as_int(expected_quantity):
+        return True
+    return False
+
+
+def material_symbol_priority(row: dict[str, Any]) -> int:
+    if guard_intervened(row):
+        return 0
+    if text(row.get("requested_action") or "hold") != text(row.get("canonical_action") or "hold"):
+        return 1
+    return 2
+
+
+def material_symbol_reason(row: dict[str, Any]) -> str:
+    guard = row.get("decision_guard") if isinstance(row.get("decision_guard"), dict) else {}
+    if guard_intervened(row):
+        status = text(guard.get("status"))
+        reason = text(guard.get("reason_code"))
+        label = GUARD_STATUS_LABELS.get(status, status or "-")
+        reason_label_text = reason_label(reason) if reason else ""
+        return f"가드 {label}" + (f"({reason_label_text})" if reason_label_text else "")
+    requested = text(row.get("requested_action") or "hold")
+    canonical = text(row.get("canonical_action") or "hold")
+    if requested != canonical:
+        requested_label = CANONICAL_ACTION_LABELS.get(requested, requested)
+        canonical_label = CANONICAL_ACTION_LABELS.get(canonical, canonical)
+        return f"{requested_label}→{canonical_label} 조정"
+    expected_quantity = row.get("expected_holding_quantity")
+    delta = (
+        as_int(row.get("final_holding_quantity")) - as_int(expected_quantity)
+        if expected_quantity is not None
+        else as_int(row.get("delta_quantity"))
+    )
+    if delta != 0:
+        baseline = "대기반영 기준 " if expected_quantity is not None else "현재보유 기준 "
+        return f"{baseline}{'증가' if delta > 0 else '감소'} {abs(delta)}주"
+    return ""
+
+
+def symbol_decision_line(row: dict[str, Any]) -> str:
+    basis_raw = text(row.get("decision_basis")) or "none"
+    basis = BASIS_LABELS.get(basis_raw, basis_raw)
+    action_raw = text(row.get("canonical_action")) or "hold"
+    action = CANONICAL_ACTION_LABELS.get(action_raw, action_raw)
+    final_qty = as_int(row.get("final_holding_quantity"))
+    expected_quantity = row.get("expected_holding_quantity")
+    quantity_text = (
+        f"대기반영 {as_int(expected_quantity)}주→최종 {final_qty}주"
+        if expected_quantity is not None
+        else f"최종 {final_qty}주"
+    )
+    material_reason = material_symbol_reason(row)
+    one_line_reason = text(row.get("one_line_reason"))
+    if len(one_line_reason) > 40:
+        one_line_reason = one_line_reason[:40] + "…"
+    reason_suffix = f" · {esc(one_line_reason)}" if one_line_reason else ""
+    return f"- {symbol_html(row)}: {action}({basis}) {quantity_text}{(' · ' + material_reason) if material_reason else ''}{reason_suffix}"
 
 
 def render(summary: dict[str, Any]) -> str:
@@ -227,7 +380,11 @@ def render(summary: dict[str, Any]) -> str:
     total_tokens = ((tokens.get("total") or {}).get("total_tokens")) if isinstance(tokens.get("total"), dict) else 0
     orders = [item for item in execution.get("orders", []) if isinstance(item, dict)]
     submitted_or_blocked = [item for item in orders if item.get("result") in {"submitted", "blocked", "failed"}]
-    submitted_count = len([item for item in orders if item.get("result") == "submitted"])
+    submitted_orders = [item for item in orders if item.get("result") == "submitted"]
+    submitted_count = len(submitted_orders)
+    cancellation_count = len([item for item in submitted_orders if item.get("reason") in LIFECYCLE_CANCEL_REASONS])
+    correction_count = len([item for item in submitted_orders if item.get("reason") in LIFECYCLE_CORRECTION_REASONS])
+    new_order_count = submitted_count - cancellation_count - correction_count
     blocked_failed_count = len([item for item in orders if item.get("result") in {"blocked", "failed"}])
     skipped_count = len([item for item in orders if item.get("result") == "skipped"])
     started_at = text(summary.get("started_at"))
@@ -256,9 +413,29 @@ def render(summary: dict[str, Any]) -> str:
             "",
             f"<b>당일 누계</b>(이번 run 주문 전 기준) 매수 {money(today_buy)} · 매도 {money(today_sell)} · 체결 {fill_count_text}",
             "",
-            f"<b>이번 run</b> {esc(execution.get('request_type') or '-')} · 제출 {submitted_count} · 차단·실패 {blocked_failed_count} · 스킵 {skipped_count}",
+            f"<b>이번 run</b> {esc(execution.get('request_type') or '-')} · 신규주문 {new_order_count} · 정정 {correction_count} · 취소 {cancellation_count} · 차단·실패 {blocked_failed_count} · 스킵 {skipped_count}",
         ]
     )
+    review_trigger = summary.get("review_trigger") if isinstance(summary.get("review_trigger"), dict) else {}
+    if review_trigger:
+        trigger_decision_raw = text(review_trigger.get("decision"))
+        trigger_line = f"- 리뷰 트리거: {REVIEW_TRIGGER_DECISION_LABELS.get(trigger_decision_raw, trigger_decision_raw or '-')}"
+        reasons = review_trigger.get("reasons") if isinstance(review_trigger.get("reasons"), list) else []
+        if reasons:
+            trigger_line += " (" + ", ".join(REVIEW_TRIGGER_REASON_LABELS.get(text(r), text(r)) for r in reasons) + ")"
+        due_slot = review_trigger.get("due_slot")
+        if due_slot:
+            # due_slot is the fixed-time slot being applied/evaluated THIS run, not a future slot.
+            trigger_line += f" · 적용 정기 슬롯 {esc(due_slot)}"
+        changed_components = review_trigger.get("changed_components") if isinstance(review_trigger.get("changed_components"), list) else []
+        if changed_components:
+            trigger_line += " · 변경 감지: " + ", ".join(esc(str(c)) for c in changed_components)
+        safety_reasons = review_trigger.get("safety_reasons") if isinstance(review_trigger.get("safety_reasons"), list) else []
+        if safety_reasons:
+            trigger_line += " · 안전 문제: " + ", ".join(REVIEW_TRIGGER_REASON_LABELS.get(text(r), text(r)) for r in safety_reasons)
+        lines.append(trigger_line)
+        if trigger_decision_raw in {"full", "skipped"} and not review_trigger.get("trigger_state_persisted"):
+            lines.append("- ⚠️ 리뷰 트리거 상태 저장 실패(다음 실행에서 재평가됨)")
     if as_int(broker_summary.get("submitted_cash_order_count")) > 0:
         unresolved_count = (
             as_int(broker_summary.get("partially_filled_order_count"))
@@ -294,7 +471,7 @@ def render(summary: dict[str, Any]) -> str:
         lines.append(f"- 외 {len(submitted_or_blocked) - 3}건")
     if any(key in review for key in ("final_sell_count", "final_buy_count", "final_hold_count")):
         final_line = (
-            f"- 최종 결정: 매도 {as_int(review.get('final_sell_count'))}"
+            f"- 포지션 변화(보유수량 기준): 매도 {as_int(review.get('final_sell_count'))}"
             f" · 매수 {as_int(review.get('final_buy_count'))}"
             f" · 유지 {as_int(review.get('final_hold_count'))}"
         )
@@ -305,12 +482,78 @@ def render(summary: dict[str, Any]) -> str:
         if blocked_guard > 0:
             final_line += f" · 가드 차단 {blocked_guard}"
         lines.append(final_line)
+        # A guard policy value is only worth a Telegram line when it materially intervened
+        # (something was actually blocked/capped this run) -- otherwise it's noise. AND only the
+        # value relevant to the affected guard/reason is shown, not every policy value merely
+        # because some intervention happened somewhere.
+        intervened_rows = [row for row in review.get("symbols", []) if isinstance(row, dict) and guard_intervened(row)]
+        if intervened_rows:
+            policy = summary.get("execution_guards_policy") if isinstance(summary.get("execution_guards_policy"), dict) else {}
+            policy_lines = []
+            # Identify which guard actually intervened from decision_basis and/or the guard's own
+            # reason_code/basis text (both profit_protection_blocked-style reason codes and an
+            # explicit basis="profit_protection" on the guard are used in practice).
+            signals = set()
+            for row in intervened_rows:
+                guard = row.get("decision_guard") if isinstance(row.get("decision_guard"), dict) else {}
+                signals.add(text(row.get("decision_basis")))
+                signals.add(text(guard.get("basis")))
+                signals.add(text(guard.get("reason_code")))
+            if policy and any("profit_protection" in signal for signal in signals):
+                policy_lines.append(f"이익보호 최대축소 {decimal(policy.get('profit_protection_max_reduction_pct'), 1)}%")
+            if policy and any("concentration_rebalance" in signal for signal in signals):
+                policy_lines.append(
+                    f"집중도 상한 {decimal(policy.get('concentration_rebalance_cap_pct'), 1)}%"
+                    f"/최대축소 {decimal(policy.get('concentration_rebalance_max_reduction_pct'), 1)}%"
+                )
+            if policy and signals & {"daily_turnover_cap_exceeded", "daily_turnover_context_unavailable"}:
+                policy_lines.append(f"일일 회전한도 {decimal(policy.get('max_daily_turnover_pct'), 1)}%")
+            if policy_lines:
+                lines.append("- 적용 정책: " + " · ".join(policy_lines))
+        if any(
+            key in review
+            for key in ("canonical_increase_count", "canonical_reduce_count", "canonical_exit_count", "canonical_hold_count")
+        ):
+            lines.append(
+                f"- Judge 결정(대기주문 반영 기준): 확대 {as_int(review.get('canonical_increase_count'))}"
+                f" · 축소 {as_int(review.get('canonical_reduce_count'))}"
+                f" · 청산 {as_int(review.get('canonical_exit_count'))}"
+                f" · 유지 {as_int(review.get('canonical_hold_count'))}"
+            )
     elif any(key in review for key in ("held_review_scope_count", "unheld_review_scope_count", "hold_symbol_count")):
         lines.append(
             f"- Judge 검토: 보유 심사대상 {as_int(review.get('held_review_scope_count'))}"
             f" · 비보유 상위선정 {as_int(review.get('unheld_review_scope_count'))}"
             f" · 미선정 {as_int(review.get('hold_symbol_count'))}"
         )
+    # In-scope-but-unresolved (missing/duplicate/invalid Judge result) is never the same as
+    # "not shortlisted" — show up to 3 concrete names/reasons instead of collapsing into a count.
+    unresolved_rows = [item for item in review.get("unresolved_review_scope", []) if isinstance(item, dict)]
+    if unresolved_rows:
+        lines.append("")
+        lines.append("<b>Judge 미해결 종목</b>(심사대상이었으나 결과 없음/오류)")
+        for row in unresolved_rows[:3]:
+            scope_reason_raw = text(row.get("scope_reason"))
+            scope_reason_label = SCOPE_REASON_LABELS.get(scope_reason_raw, scope_reason_raw or "-")
+            error_code_raw = text(row.get("judge_error_code"))
+            error_suffix = (
+                f" · {JUDGE_ERROR_LABELS.get(error_code_raw, reason_label(error_code_raw))}" if error_code_raw else ""
+            )
+            lines.append(f"- {symbol_html(row)}: {scope_reason_label}{error_suffix}")
+        if len(unresolved_rows) > 3:
+            lines.append(f"- 외 {len(unresolved_rows) - 3}건")
+    review_symbols = [item for item in review.get("symbols", []) if isinstance(item, dict)]
+    material_rows = sorted(
+        (row for row in review_symbols if is_material_symbol_decision(row)),
+        key=material_symbol_priority,
+    )
+    if material_rows:
+        lines.append("")
+        lines.append("<b>주요 종목 결정</b>")
+        for row in material_rows[:3]:
+            lines.append(symbol_decision_line(row))
+        if len(material_rows) > 3:
+            lines.append(f"- 외 {len(material_rows) - 3}건")
     def domain_issue_text(label: str, payload: dict[str, Any]) -> str:
         usable_items = payload.get("usable_item_count")
         if usable_items is not None:

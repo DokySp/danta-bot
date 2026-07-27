@@ -1731,6 +1731,19 @@ print(json.dumps(execution, ensure_ascii=False))
             )
         )
         submit_summary = submit_pipeline.run()
+        review_trigger = (
+            submit_summary.get("review_trigger")
+            if isinstance(submit_summary.get("review_trigger"), dict)
+            else {}
+        )
+        if not review_trigger.get("full_review_completed") or not review_trigger.get("trigger_state_persisted"):
+            failures.append(f"full review did not persist its finalized trigger view: {review_trigger}")
+        final_html = (submit_run_dir / "daily-trading-report.html").read_text(encoding="utf-8")
+        if "리뷰 트리거 최종 상태" not in final_html or "저장 성공" not in final_html:
+            failures.append("final HTML was not rerendered from the finalized trigger state")
+        final_telegram = (submit_run_dir / "telegram-summary.txt").read_text(encoding="utf-8")
+        if "리뷰 트리거: 전체 리뷰 실행" not in final_telegram or "리뷰 트리거 상태 저장 실패" in final_telegram:
+            failures.append("final Telegram summary did not use the finalized trigger state")
         submit_stages = [item.get("stage") for item in load_json(submit_run_dir / "run.json").get("stages", []) if isinstance(item, dict)]
         if "order-lifecycle-preflight" not in submit_stages:
             failures.append(f"submit-orders pipeline did not run lifecycle preflight: {submit_stages}")
@@ -2144,6 +2157,15 @@ class RunDailyTradingPipelineSelfTest(unittest.TestCase):
                 run_dir / "judge-review.json",
                 {
                     "status": "success",
+                    "errors": [
+                        {
+                            "stage": "judge-review",
+                            "source": "pipeline",
+                            "code": "invalid_final_holding_quantity",
+                            "message": "402340: final_holding_quantity must be a non-negative integer",
+                            "required": True,
+                        }
+                    ],
                     "symbols": [
                         {"symbol_id": "005930", "final_holding_quantity": 2},   # 0 -> 2 매수
                         {"symbol_id": "000660", "final_holding_quantity": 0},   # 3 -> 0 매도
@@ -2157,7 +2179,7 @@ class RunDailyTradingPipelineSelfTest(unittest.TestCase):
                     {"symbol_id": "005930", "current_live_holding_quantity": 0},
                     {"symbol_id": "000660", "current_live_holding_quantity": 3},
                     {"symbol_id": "035720", "current_live_holding_quantity": 5},
-                    {"symbol_id": "402340", "current_live_holding_quantity": 0},
+                    {"symbol_id": "402340", "current_live_holding_quantity": 0, "symbol_name": "SK스퀘어"},
                 ]
             }
             review = pipeline.build_review_summary(account, {"orders": []})
@@ -2175,6 +2197,76 @@ class RunDailyTradingPipelineSelfTest(unittest.TestCase):
             # Only a valid-scored, out-of-scope symbol counts as "미선정";
             # missing-score rows are retained for audit but are not scored rows.
             self.assertEqual(review["hold_symbol_count"], 1)
+            # 402340 is in-scope-but-unresolved (invalid Judge result), never "not shortlisted":
+            # it must carry its scope reason and the Judge error code, with a resolved symbol_name.
+            unresolved = review["unresolved_review_scope"]
+            self.assertEqual(len(unresolved), 1)
+            self.assertEqual(unresolved[0]["symbol_id"], "402340")
+            self.assertEqual(unresolved[0]["symbol_name"], "SK스퀘어")
+            self.assertEqual(unresolved[0]["scope_reason"], "unheld_score_rank")
+            self.assertEqual(unresolved[0]["judge_error_code"], "invalid_final_holding_quantity")
+
+    def test_build_review_summary_canonical_action_enum_counts_and_expected_baseline_fallback(self) -> None:
+        # canonical_action (derive_action) is increase|hold|reduce|exit, never buy/sell/hold.
+        # Counting against buy/sell silently zeroes every bucket, which is exactly the bug Codex
+        # reproduced with a canonical_action="reduce" fixture.
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            run_dir = workspace / "reports" / "runs" / "canonical-enum-probe"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            pipeline = Pipeline(
+                argparse.Namespace(
+                    command="summarize",
+                    workspace_dir=str(workspace),
+                    output_dir=str(run_dir),
+                    run_id="canonical-enum-probe",
+                    started_at="2026-06-18T09:00:00+09:00",
+                )
+            )
+            write_json(
+                run_dir / "judge-review.json",
+                {
+                    "status": "success",
+                    "symbols": [
+                        {"symbol_id": "005930", "final_holding_quantity": 5, "canonical_action": "increase"},
+                        {"symbol_id": "000660", "final_holding_quantity": 0, "canonical_action": "exit"},
+                        {"symbol_id": "035720", "final_holding_quantity": 2, "canonical_action": "reduce"},
+                        {"symbol_id": "402340", "final_holding_quantity": 3, "canonical_action": "hold"},
+                    ],
+                },
+            )
+            account = {
+                "symbols": [
+                    {"symbol_id": "005930", "current_live_holding_quantity": 0},
+                    {"symbol_id": "000660", "current_live_holding_quantity": 3},
+                    # No execution row below for 035720: expected_holding_quantity must fall back to
+                    # account current + pending buy - pending sell instead of staying unresolved.
+                    {
+                        "symbol_id": "035720",
+                        "current_live_holding_quantity": 5,
+                        "pending_and_reserved_buy_quantity": 1,
+                        "pending_and_reserved_sell_quantity": 2,
+                    },
+                    {"symbol_id": "402340", "current_live_holding_quantity": 3},
+                ]
+            }
+            execution = {
+                "orders": [
+                    {"symbol_id": "005930", "expected_holding_quantity": 0, "result": "submitted", "direction": "buy"},
+                    {"symbol_id": "000660", "expected_holding_quantity": 3, "result": "submitted", "direction": "sell"},
+                ]
+            }
+            review = pipeline.build_review_summary(account, execution)
+            self.assertEqual(review["canonical_increase_count"], 1)
+            self.assertEqual(review["canonical_reduce_count"], 1)
+            self.assertEqual(review["canonical_exit_count"], 1)
+            self.assertEqual(review["canonical_hold_count"], 1)
+            self.assertEqual(review["canonical_reduce_or_exit_count"], 2)
+            rows_by_symbol = {row["symbol_id"]: row for row in review["symbols"]}
+            self.assertEqual(rows_by_symbol["005930"]["expected_holding_quantity"], 0)
+            self.assertEqual(rows_by_symbol["000660"]["expected_holding_quantity"], 3)
+            # 035720 has no execution row: fallback = current(5) + pending_buy(1) - pending_sell(2) = 4.
+            self.assertEqual(rows_by_symbol["035720"]["expected_holding_quantity"], 4)
 
     def test_empty_judge_scope_writes_review_contract_v2(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3561,3 +3653,50 @@ class RunDailyTradingPipelineSelfTest(unittest.TestCase):
             )
             self.assertEqual(pipeline.turnover_used_value, 0.0)
             self.assertNotIn("thesis_definition", normalized)
+
+
+class FinalReviewReportRefreshTest(unittest.TestCase):
+    def test_telegram_reads_the_second_html_render_availability(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output_dir = Path(temporary)
+            summary_path = output_dir / "pipeline-summary.json"
+            html_path = output_dir / "daily-trading-report.html"
+            html_path.write_text("first render", encoding="utf-8")
+
+            pipeline = object.__new__(Pipeline)
+            pipeline.output_dir = output_dir
+            pipeline.summary_path = summary_path
+            pipeline.load_summary_stages = mock.Mock(
+                side_effect=[
+                    [{"stage": "html-report", "status": "partial"}],
+                    [
+                        {"stage": "html-report", "status": "partial"},
+                        {"stage": "telegram-summary", "status": "success"},
+                    ],
+                ]
+            )
+
+            def fail_second_html_render() -> None:
+                html_path.unlink()
+
+            telegram_observed_availability: list[bool] = []
+            telegram_observed_stages: list[list[dict]] = []
+
+            def capture_telegram_input() -> None:
+                persisted = load_json(summary_path)
+                telegram_observed_availability.append(bool(persisted.get("html_report_available")))
+                telegram_observed_stages.append(persisted.get("stages") or [])
+
+            pipeline.write_html_report = mock.Mock(side_effect=fail_second_html_render)
+            pipeline.write_telegram_summary = mock.Mock(side_effect=capture_telegram_input)
+            summary = {"html_report_available": True, "stages": []}
+
+            pipeline.refresh_final_review_reports(summary)
+
+            self.assertEqual(telegram_observed_availability, [False])
+            self.assertEqual(
+                telegram_observed_stages,
+                [[{"stage": "html-report", "status": "partial"}]],
+            )
+            self.assertFalse(summary["html_report_available"])
+            self.assertEqual(summary["stages"][-1]["stage"], "telegram-summary")

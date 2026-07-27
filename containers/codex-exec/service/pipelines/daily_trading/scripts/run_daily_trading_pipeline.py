@@ -51,6 +51,36 @@ RESERVATION_ORDER_START_MINUTE = 15 * 60 + 40
 RESERVATION_ORDER_END_MINUTE = 7 * 60 + 30
 STRATEGY_POLICY_CONFIG_ENV = "DAILY_TRADING_STRATEGY_POLICY_CONFIG"
 STRATEGY_POLICY_CONFIG_FILENAME = "daily-trading-strategy-policy.yaml"
+LIFECYCLE_ONLY_ORDER_REASONS = {
+    "active_order_cancel_submitted",
+    "active_order_correction_submitted",
+    "active_order_cancel_and_replacement_submitted",
+}
+REVIEW_TRIGGER_DECISION_LABELS = {"full": "전체 리뷰 실행", "skipped": "생략(변경 없음)", "safety_block": "안전 차단"}
+REVIEW_TRIGGER_REASON_LABELS = {
+    "manual_invocation": "수동/전체 실행 요청",
+    "first_safe_run_of_day": "당일 최초 안전 실행",
+    "broker_fingerprint_changed": "브로커 상태 변경 감지",
+    "fixed_review_time_due": "예정 리뷰 시각 도래",
+}
+SAFETY_REASON_LABELS = {
+    "account_lookup_failed": "계좌 조회 실패",
+    "order_lifecycle_lookup_incomplete": "미체결 주문 조회 미완료",
+    "orderable_cash_unavailable": "주문가능금액 조회 불가",
+    "holding_state_issue_detected": "보유수량 상태 불일치 감지",
+    "today_fills_lookup_incomplete": "당일 체결 조회 미완료",
+    "unexpected_non_universe_holding": "유니버스 외 예상외 보유 종목",
+}
+
+
+def review_trigger_decision_label(value: Any) -> str:
+    raw = str(value or "")
+    return REVIEW_TRIGGER_DECISION_LABELS.get(raw, raw or "-")
+
+
+def review_trigger_reason_label(value: Any) -> str:
+    raw = str(value or "")
+    return REVIEW_TRIGGER_REASON_LABELS.get(raw, SAFETY_REASON_LABELS.get(raw, raw or "-"))
 
 
 def now_kst() -> datetime:
@@ -1393,7 +1423,7 @@ class Pipeline:
         # crash/failure after selecting `full` leaves the prior fingerprint in
         # place and the same broker change is still detected next invocation.
         if safety.safe and decision_info["decision"] == "skipped":
-            self.save_review_trigger_state_safely(
+            persisted = self.save_review_trigger_state_safely(
                 state_path,
                 review_policy.ReviewTriggerState(
                     date=today,
@@ -1403,6 +1433,11 @@ class Pipeline:
                 ),
                 stage_detail="persisted skipped-preflight fingerprint",
             )
+            # Reflect the actual save outcome back into review-trigger.json so reporting never
+            # infers success from an unrelated key's presence.
+            trigger = load_json_if_exists(review_trigger_path) or {}
+            trigger["trigger_state_persisted"] = persisted
+            write_json(review_trigger_path, trigger)
 
         if decision_info["decision"] == "full":
             return None
@@ -1410,7 +1445,7 @@ class Pipeline:
 
     def save_review_trigger_state_safely(
         self, state_path: Path, state: "review_policy.ReviewTriggerState", *, stage_detail: str
-    ) -> None:
+    ) -> bool:
         """Persist review-trigger state without letting a write failure fail the run.
 
         A persistence error must not turn an otherwise-completed trading run
@@ -1418,6 +1453,9 @@ class Pipeline:
         the next invocation conservatively eligible for a full review (a stale
         date/fingerprint reads as first-run-of-day or a broker-fingerprint
         change) rather than silently trusting an unwritten decision.
+
+        Returns whether the write actually succeeded, so callers (and reporting) never claim
+        persistence succeeded when it did not.
         """
         try:
             review_policy.save_review_trigger_state(state_path, state)
@@ -1429,10 +1467,11 @@ class Pipeline:
                 detail=f"{stage_detail} failed: {exc}",
                 path=state_path,
             )
-            return
+            return False
         self.add_stage(
             "review-trigger-state-persist", "success", required=False, detail=stage_detail, path=state_path
         )
+        return True
 
     def finalize_short_circuit_summary(
         self,
@@ -1468,11 +1507,7 @@ class Pipeline:
             "html_report_path": str(self.output_dir / "daily-trading-report.html"),
             "html_report_available": False,
             "stages": stages,
-            "review_trigger": {
-                "decision": decision_info["decision"],
-                "reasons": decision_info["reasons"],
-                "due_slot": decision_info["due_slot"],
-            },
+            "review_trigger": self.build_review_trigger_view(),
             "account_summary": account_summary,
             "order_lifecycle": {
                 "status": lifecycle.get("status") if isinstance(lifecycle, dict) else "not_run",
@@ -1508,22 +1543,68 @@ class Pipeline:
         lines = [
             header,
             f"run_id: {self.run_id}",
-            f"결정: {decision}",
-            f"사유: {', '.join(decision_info['reasons']) or '-'}",
+            f"결정: {review_trigger_decision_label(decision)}({decision})",
         ]
-        if decision == "safety_block":
-            lines.append(f"안전 문제: {', '.join(safety.reasons) or '-'}")
+        # For a safety_block, decision_info["reasons"] IS safety.reasons (same list) -- printing
+        # both a "사유" line and a separate "안전 문제" line duplicated the identical raw reasons.
+        # Only skipped/full-adjacent decisions get a distinct non-safety reason line.
+        reason_labels = ", ".join(review_trigger_reason_label(r) for r in decision_info["reasons"]) or "-"
+        if decision != "safety_block":
+            lines.append(f"사유: {reason_labels}")
+        else:
+            safety_labels = ", ".join(review_trigger_reason_label(r) for r in safety.reasons) or "-"
+            lines.append(f"안전 문제: {safety_labels}")
+        due_slot = decision_info.get("due_slot")
+        if due_slot:
+            # due_slot is the fixed-time slot being applied/evaluated THIS run, not some future
+            # slot -- "다음 예정 슬롯"(next upcoming slot) was misleading.
+            lines.append(f"적용 정기 슬롯: {due_slot}")
+        if decision == "skipped":
+            trigger_view = self.build_review_trigger_view()
+            changed = trigger_view.get("changed_components") or []
+            if changed:
+                lines.append(f"변경 감지 항목: {', '.join(str(c) for c in changed)}")
+            lines.append("상태 저장: 성공" if trigger_view.get("trigger_state_persisted") else "상태 저장: 실패(다음 실행에서 재평가됨)")
         cash = (account_summary or {}).get("orderable_cash_amount")
         if cash is not None:
             lines.append(f"주문가능금액: {format_number(cash)}")
+        lookup_complete = bool(lifecycle.get("lookup_complete")) if isinstance(lifecycle, dict) else False
         active_count = lifecycle.get("active_order_count") if isinstance(lifecycle, dict) else None
-        if active_count is not None:
+        if lookup_complete and active_count is not None:
             lines.append(f"활성 주문: {active_count}건")
+        else:
+            # An incomplete lookup must never be presented as "0 active orders" -- that reads as a
+            # verified fact when it is actually unknown.
+            lines.append("활성 주문: 미확인(사전조회 미완료)")
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         self.stages = [item for item in self.stages if item.get("stage") != "telegram-summary"]
         self.add_stage(
             "telegram-summary", "success", required=False, detail="rendered short-circuit telegram-summary.txt", path=path
         )
+
+    def build_review_trigger_view(self) -> dict[str, Any]:
+        """Normal full-review runs previously never projected review-trigger.json into the
+        summary at all (only the short-circuit path did), so HTML/Telegram had no way to show
+        why a full review ran, its due slot, or whether trigger-state persistence finalized.
+
+        trigger_state_persisted is read from the explicit key finalize_review_gate_state/the
+        skipped-preflight branch write -- never inferred from completed_fingerprint's mere
+        presence, since that key is written for audit purposes even when the actual state-file
+        write failed.
+        """
+        trigger = load_json_if_exists(self.output_dir / "review-trigger.json") or {}
+        if not trigger:
+            return {}
+        safety = trigger.get("safety") if isinstance(trigger.get("safety"), dict) else {}
+        return {
+            "decision": trigger.get("decision"),
+            "reasons": trigger.get("reasons") if isinstance(trigger.get("reasons"), list) else [],
+            "due_slot": trigger.get("due_slot"),
+            "full_review_completed": bool(trigger.get("full_review_completed")),
+            "trigger_state_persisted": bool(trigger.get("trigger_state_persisted")),
+            "changed_components": trigger.get("changed_components") if isinstance(trigger.get("changed_components"), list) else [],
+            "safety_reasons": safety.get("reasons") if isinstance(safety.get("reasons"), list) else [],
+        }
 
     def finalize_review_gate_state(self, summary: dict[str, Any]) -> None:
         gate = self._review_gate
@@ -1552,7 +1633,7 @@ class Pipeline:
             not last_satisfied or review_policy.parse_time_minutes(last_satisfied) < review_policy.parse_time_minutes(due)
         ):
             last_satisfied = due
-        self.save_review_trigger_state_safely(
+        persisted = self.save_review_trigger_state_safely(
             gate["state_path"],
             review_policy.ReviewTriggerState(
                 date=gate["today"],
@@ -1565,6 +1646,11 @@ class Pipeline:
         trigger_path = self.output_dir / "review-trigger.json"
         trigger = load_json_if_exists(trigger_path) or {}
         trigger["full_review_completed"] = True
+        trigger["trigger_state_persisted"] = persisted
+        # completed_fingerprint/_payload record what full review just computed for audit purposes
+        # even when the on-disk trigger-state write failed -- but "persisted" (below, and read by
+        # build_review_trigger_view) is the only truthful signal of whether that write succeeded,
+        # since this key's mere presence does not imply the save succeeded.
         trigger["completed_fingerprint"] = fingerprint
         trigger["completed_fingerprint_payload"] = fingerprint_payload
         write_json(trigger_path, trigger)
@@ -3545,15 +3631,33 @@ class Pipeline:
             if final_qty is None:
                 continue
             delta = final_qty - current_qty
+            # expected_holding_quantity = current + pending buy - pending sell (the baseline canonical_action
+            # was actually decided against); it can differ from current_live_holding_quantity when active
+            # orders are already in flight, so delta_quantity (current->final) is a position-change summary,
+            # not the same axis canonical_action was computed on.
+            # Prefer the execution row's own expected_holding_quantity (computed against the same
+            # active-order snapshot execute_orders actually decided against). When execution has no
+            # row for this symbol yet (or an incomplete one), fall back to account current + pending
+            # buy - pending sell so every resolved Judge row still gets a baseline value.
+            expected_holding_quantity = execution_item.get("expected_holding_quantity")
+            if expected_holding_quantity is None:
+                expected_holding_quantity = (
+                    current_qty
+                    + as_int(account_item.get("pending_and_reserved_buy_quantity"))
+                    - as_int(account_item.get("pending_and_reserved_sell_quantity"))
+                )
+            order_reason = execution_item.get("reason") or ""
             rows.append(
                 {
                     "symbol_id": symbol_id,
                     "symbol_name": item.get("symbol_name") or account_item.get("symbol_name") or symbol_id,
                     "current_live_holding_quantity": current_qty,
+                    "expected_holding_quantity": as_int(expected_holding_quantity) if expected_holding_quantity is not None else None,
                     "requested_target_position_value_krw": item.get("requested_target_position_value_krw"),
                     "target_position_value_krw": item.get("target_position_value_krw"),
                     "final_holding_quantity": final_qty,
                     "delta_quantity": delta,
+                    "position_change_quantity": delta,
                     "relative_attractiveness_rank": as_int(item.get("relative_attractiveness_rank")),
                     "requested_action": item.get("requested_action") or "hold",
                     "canonical_action": item.get("canonical_action") or "hold",
@@ -3563,6 +3667,8 @@ class Pipeline:
                     "one_line_reason": item.get("one_line_reason") or "",
                     "order_result": execution_item.get("result") or "",
                     "order_direction": execution_item.get("direction") or "none",
+                    "order_reason": order_reason,
+                    "is_lifecycle_only_order": order_reason in LIFECYCLE_ONLY_ORDER_REASONS,
                     "order_quantity": as_int(execution_item.get("validated_order_quantity")),
                     "requested_order_quantity": as_int(execution_item.get("requested_order_quantity")),
                     "quantity_adjustment": execution_item.get("quantity_adjustment") if isinstance(execution_item.get("quantity_adjustment"), dict) else {},
@@ -3573,24 +3679,68 @@ class Pipeline:
                 }
             )
         submitted = [item for item in rows if item.get("order_result") == "submitted"]
+        new_order_submitted = [item for item in submitted if not item.get("is_lifecycle_only_order")]
+        lifecycle_only_submitted = [item for item in submitted if item.get("is_lifecycle_only_order")]
         spec = load_json_if_exists(self.output_dir / "judge-review-spec.json") or {}
         review_scope_reasons = spec.get("review_scope_reasons") if isinstance(spec.get("review_scope_reasons"), dict) else {}
-        # Final decisions are derived from the actual current->final holding quantity direction of the
-        # rows that resolved to a valid final_holding_quantity, so unresolved/invalid Judge decisions are
-        # never silently folded into 유지(hold).
+        # final_*_count below is a current->final POSITION CHANGE summary (existing/back-compat field
+        # names), never fold unresolved/invalid Judge decisions into 유지(hold).
         final_sell_count = sum(1 for row in rows if row["delta_quantity"] < 0)
         final_buy_count = sum(1 for row in rows if row["delta_quantity"] > 0)
         final_hold_count = sum(1 for row in rows if row["delta_quantity"] == 0)
+        # canonical_*_count is the separate axis: the new-order DECISION Judge made against
+        # expected_holding_quantity (current + pending buy - pending sell), which can differ from the
+        # current->final position-change counts above when active orders are already in flight.
+        # canonical_action (derive_action) is increase|hold|reduce|exit, NOT buy/sell/hold — counting
+        # against buy/sell silently zeroes every row (reduce/exit never equal "sell").
+        canonical_increase_count = sum(1 for row in rows if row.get("canonical_action") == "increase")
+        canonical_reduce_count = sum(1 for row in rows if row.get("canonical_action") == "reduce")
+        canonical_exit_count = sum(1 for row in rows if row.get("canonical_action") == "exit")
+        canonical_hold_count = sum(1 for row in rows if row.get("canonical_action") == "hold")
+        # Deliberate combined view for callers that only care about "any reduction direction".
+        canonical_reduce_or_exit_count = canonical_reduce_count + canonical_exit_count
         resolved_symbol_ids = {str(row.get("symbol_id") or "") for row in rows}
-        unresolved_review_scope_count = sum(
-            1
-            for symbol_id in review_scope_reasons
-            if str(symbol_id).strip() and str(symbol_id).strip() not in resolved_symbol_ids
-        )
+        # judge-review.json errors carry "{symbol_id}: message" text with a machine code (e.g.
+        # missing_judge_symbol, duplicate_judge_symbol); surface that code per unresolved symbol so
+        # an in-scope missing/duplicate/invalid Judge result is never described as "not shortlisted".
+        judge_review_errors = judge_review.get("errors") if isinstance(judge_review.get("errors"), list) else []
+        error_code_by_symbol: dict[str, str] = {}
+        for error_item in judge_review_errors:
+            if not isinstance(error_item, dict):
+                continue
+            message = str(error_item.get("message") or "")
+            candidate_symbol_id = message.split(":", 1)[0].strip()
+            if candidate_symbol_id and candidate_symbol_id not in error_code_by_symbol:
+                error_code_by_symbol[candidate_symbol_id] = str(error_item.get("code") or "")
+        analyst_review = load_json_if_exists(self.output_dir / "analyst-review.json") or {}
+        analyst_name_by_symbol = {
+            symbol_key(item): item.get("symbol_name")
+            for item in (analyst_review.get("symbols") if isinstance(analyst_review.get("symbols"), list) else [])
+            if isinstance(item, dict) and symbol_key(item) and item.get("symbol_name")
+        }
+        unresolved_review_scope: list[dict[str, Any]] = []
+        for symbol_id, scope_reason in review_scope_reasons.items():
+            stripped_symbol_id = str(symbol_id).strip()
+            if not stripped_symbol_id or stripped_symbol_id in resolved_symbol_ids:
+                continue
+            # An unheld (unheld_score_rank) unresolved symbol commonly has no account holding
+            # row at all, so account_by_symbol has nothing to name it with; fall back to the
+            # Analyst review's symbol_name so it isn't rendered blank.
+            symbol_name = str((account_by_symbol.get(stripped_symbol_id) or {}).get("symbol_name") or "")
+            if not symbol_name:
+                symbol_name = str(analyst_name_by_symbol.get(stripped_symbol_id) or "")
+            unresolved_review_scope.append(
+                {
+                    "symbol_id": stripped_symbol_id,
+                    "symbol_name": symbol_name,
+                    "scope_reason": str(scope_reason or ""),
+                    "judge_error_code": error_code_by_symbol.get(stripped_symbol_id, ""),
+                }
+            )
+        unresolved_review_scope_count = len(unresolved_review_scope)
         blocked_guard_count = sum(
             1 for row in rows if str((row.get("decision_guard") or {}).get("status") or "") == "blocked"
         )
-        analyst_review = load_json_if_exists(self.output_dir / "analyst-review.json") or {}
         judge_debate = load_json_if_exists(self.output_dir / "judge-debate.json") or {}
         scored_symbol_ids = {
             symbol_key(item)
@@ -3611,10 +3761,18 @@ class Pipeline:
             "debate_final_phase": judge_debate.get("final_phase") or "",
             "symbol_count": len(rows),
             "submitted_order_count": len(submitted),
+            "new_order_submitted_count": len(new_order_submitted),
+            "lifecycle_only_submitted_count": len(lifecycle_only_submitted),
             "final_sell_count": final_sell_count,
             "final_buy_count": final_buy_count,
             "final_hold_count": final_hold_count,
+            "canonical_increase_count": canonical_increase_count,
+            "canonical_reduce_count": canonical_reduce_count,
+            "canonical_exit_count": canonical_exit_count,
+            "canonical_reduce_or_exit_count": canonical_reduce_or_exit_count,
+            "canonical_hold_count": canonical_hold_count,
             "unresolved_review_scope_count": unresolved_review_scope_count,
+            "unresolved_review_scope": unresolved_review_scope,
             "blocked_guard_count": blocked_guard_count,
             "held_review_scope_count": sum(1 for reason in review_scope_reasons.values() if reason == "held_position"),
             "unheld_review_scope_count": sum(1 for reason in review_scope_reasons.values() if reason == "unheld_score_rank"),
@@ -4005,6 +4163,19 @@ class Pipeline:
             self.add_stage("html-report", "success", required=False, detail="rendered daily-trading-report.html", path=path)
         return path
 
+    def refresh_final_review_reports(self, summary: dict[str, Any]) -> None:
+        """Rerender reports after full-review trigger persistence is finalized.
+
+        Telegram reads pipeline-summary.json, so the second HTML render's
+        availability and stage snapshot must be stored before Telegram runs.
+        """
+        self.write_html_report()
+        summary["stages"] = self.load_summary_stages()
+        summary["html_report_available"] = (self.output_dir / "daily-trading-report.html").is_file()
+        write_json(self.summary_path, summary)
+        self.write_telegram_summary()
+        summary["stages"] = self.load_summary_stages()
+
     def build_summary(self, portfolio: dict[str, Any]) -> dict[str, Any]:
         token_summary = load_json_if_exists(self.output_dir / "token-summary.json") or {}
         execution = load_json_if_exists(self.output_dir / "execution.json") or {}
@@ -4013,6 +4184,7 @@ class Pipeline:
         today_fills = load_json_if_exists(self.output_dir / "today-fills.json") or {}
         order_lifecycle = load_json_if_exists(self.output_dir / "order-lifecycle.json") or {}
         decision_brief = load_json_if_exists(self.output_dir / "decision-brief.json") or {}
+        review_trigger_view = self.build_review_trigger_view()
         orders = []
         for item in execution.get("orders", []) if isinstance(execution, dict) else []:
             if not isinstance(item, dict):
@@ -4106,6 +4278,8 @@ class Pipeline:
                 "error_count": len(decision_brief.get("errors", [])) if isinstance(decision_brief.get("errors"), list) else 0,
             },
             "review_summary": review_summary,
+            "review_trigger": review_trigger_view,
+            "execution_guards_policy": dict(self.execution_guards),
             "account_collection_status": account_collection_status,
             "order_gate_status": order_gate_status,
             "account_summary": account_summary,
@@ -4363,12 +4537,24 @@ class Pipeline:
             detail = "main/sub-agent token summary built" if self.args.main_events else "sub-agent token summary built"
             self.add_stage("token-summary", "success", detail=detail, required=False, path=self.output_dir / "token-summary.json")
         summary = self.build_summary(portfolio)
+        gate_was_full = self._review_gate is not None and self._review_gate["decision_info"]["decision"] == "full"
         self.finalize_review_gate_state(summary)
         # finalize_review_gate_state may have added a non-required
         # trigger-state-persist stage after build_summary's final write; take
         # a fresh snapshot and re-assert the already-decided status so
         # run.json/pipeline-summary.json never drift from what was returned.
         summary["stages"] = self.load_summary_stages()
+        if gate_was_full:
+            # build_summary rendered HTML/Telegram before finalize_review_gate_state ran, so
+            # review-trigger.json's full_review_completed/trigger_state_persisted were still
+            # stale (False / not yet written) at render time. Refresh the projected view and
+            # rerender both reports so the final state and any persistence warning are actually
+            # visible; this does not touch trade behavior, only reporting. Skip the rerender
+            # entirely when the gate never selected "full" (nothing in review-trigger.json
+            # changed after build_summary, so re-rendering would just duplicate work).
+            summary["review_trigger"] = self.build_review_trigger_view()
+            write_json(self.summary_path, summary)
+            self.refresh_final_review_reports(summary)
         write_json(self.summary_path, summary)
         self.write_run_json(status=summary["status"])
         return summary
