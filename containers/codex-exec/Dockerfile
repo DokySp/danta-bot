@@ -58,7 +58,12 @@ RUN groupadd --gid 1000 app \
   && chown -R app:app /app /codex-home /state /workspace /tmp/codex-exec /tmp/npm-cache
 
 ARG APP_VERSION
-RUN test -n "$APP_VERSION" || (echo "APP_VERSION build arg is required" >&2; exit 1)
+RUN set -eu; \
+  if [ -z "$APP_VERSION" ]; then \
+    echo "APP_VERSION build arg is required" >&2; \
+    exit 1; \
+  fi; \
+  printf '%s\n' "$APP_VERSION" > /app/VERSION
 LABEL org.opencontainers.image.version="${APP_VERSION}"
 ENV APP_VERSION=${APP_VERSION}
 ENV npm_config_cache=/tmp/npm-cache
