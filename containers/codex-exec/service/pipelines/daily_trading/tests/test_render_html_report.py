@@ -28,6 +28,7 @@ from ..scripts.render_html_report import (
     NOT_RECORDED,
     analyst_symbol_group_priority,
     argument_anchor_id,
+    blocked_attempt_badge_text,
     build_html,
     cumulative_today_fills,
     find_daily_history,
@@ -772,6 +773,25 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
             "result": "submitted",
         }
         self.assertEqual(order_direction_label(legacy_cancel_and_replacement), "정정")
+
+    def test_blocked_attempt_badge_text_keeps_direction_and_outcome(self) -> None:
+        self.assertEqual(
+            blocked_attempt_badge_text([{"direction": "buy", "result": "blocked"}]),
+            "매수 시도 차단",
+        )
+        self.assertEqual(
+            blocked_attempt_badge_text([{"direction": "sell", "result": "failed"}]),
+            "매도 시도 실패",
+        )
+        self.assertEqual(
+            blocked_attempt_badge_text(
+                [
+                    {"direction": "buy", "result": "blocked"},
+                    {"direction": "sell", "result": "failed"},
+                ]
+            ),
+            "매수·매도 시도 차단/실패",
+        )
 
     def test_judge_field_display_never_fabricates_none_or_hold_for_missing_v1_fields(self) -> None:
         # v1 judge-review.json artifacts never had decision_basis/requested_action/canonical_action
@@ -1815,7 +1835,7 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
         self.assertIn("3주 요청", rendered)
         self.assertIn("매도가능수량 초과", rendered)
         self.assertIn("max_sell_qty=0", rendered)
-        self.assertIn('class="mini-badge attempt"', rendered)
+        self.assertIn('class="mini-badge attempt">매도 시도 차단</b>', rendered)
         self.assertIn('active" data-symbol-target="run-0-1400-005930"', rendered)
 
     def _write_debate_and_judge_run(

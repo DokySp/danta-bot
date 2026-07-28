@@ -531,6 +531,21 @@ def order_direction_label(order: dict[str, Any]) -> str:
     return "-"
 
 
+def blocked_attempt_badge_text(orders: list[dict[str, Any]]) -> str:
+    raw_directions = {str(order.get("direction") or "") for order in orders}
+    direction_labels = []
+    if "buy" in raw_directions:
+        direction_labels.append("매수")
+    if "sell" in raw_directions:
+        direction_labels.append("매도")
+    if raw_directions - {"buy", "sell"}:
+        direction_labels.append("방향 미기록")
+    direction_text = "·".join(direction_labels) or "방향 미기록"
+    results = {str(order.get("result") or "") for order in orders}
+    outcome = "실패" if results == {"failed"} else "차단/실패" if "failed" in results else "차단"
+    return f"{direction_text} 시도 {outcome}"
+
+
 def lifecycle_split_counts(orders: list[dict[str, Any]]) -> tuple[int, int, int]:
     """(new_order_count, correction_count, cancellation_count) among submitted orders, via
     order_lifecycle_kind, so counts distinguish new submissions from correction/cancellation."""
@@ -1156,7 +1171,9 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
             elif has_lifecycle:
                 attempt_badge = "<b class=\"mini-badge analyst\">주문 정정·취소</b>"
             elif has_attempt:
-                attempt_badge = "<b class=\"mini-badge attempt\">시도 차단</b>"
+                attempt_badge = (
+                    f'<b class="mini-badge attempt">{esc(blocked_attempt_badge_text(related_blocked))}</b>'
+                )
             group_class = " group-trade" if has_trade else " group-guard" if has_guard_intervention else ""
             symbol_buttons.append(
                 f'<button type="button" class="trade-symbol-button{group_class}{" active" if is_active_symbol else ""}" data-symbol-target="{esc(composite_key)}">'
