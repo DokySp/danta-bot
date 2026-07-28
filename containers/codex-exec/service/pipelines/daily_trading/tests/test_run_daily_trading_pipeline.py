@@ -14,7 +14,6 @@ from pathlib import Path
 from unittest import mock
 
 from ..scripts.run_daily_trading_pipeline import (
-    DEBATE_SIDES,
     ORDER_PATH_AUTO,
     STRATEGY_POLICY_CONFIG_ENV,
     STRATEGY_POLICY_CONFIG_FILENAME,
@@ -22,7 +21,6 @@ from ..scripts.run_daily_trading_pipeline import (
     as_int,
     cache_coverage,
     cache_evidence_counts,
-    compact_opening_context,
     file_sha256,
     load_json,
     load_json_if_exists,
@@ -38,44 +36,6 @@ from ..scripts.run_daily_trading_pipeline import (
     thesis_definition_is_valid,
     write_json,
 )
-
-
-def turnover_context_fixtures(run_id: str, *, total_evaluation_amount: int = 100_000_000) -> tuple[dict, dict]:
-    account = {
-        "run_id": run_id,
-        "status": "success",
-        "skipped": False,
-        "symbols": [],
-        "account_summary": {"total_evaluation_amount": total_evaluation_amount},
-    }
-    today_fills = {
-        "run_id": run_id,
-        "status": "success",
-        "skipped": False,
-        "fill_scope": "account",
-        "fills": [],
-    }
-    return account, today_fills
-
-
-def seed_turnover_context(pipeline: Pipeline, *, total_evaluation_amount: int = 100_000_000) -> None:
-    """Seed a complete, same-run account/today-fills context so apply_turnover_budget's
-    fail-closed cap check can actually compute a budget for direct unit-test calls that
-    don't go through the real collect_main_evidence/write_judge_review flow. Only useful
-    for direct derive_judge_final_quantity() calls -- write_judge_review() always reloads
-    both caches from disk, so tests that call it must use write_turnover_context_files()
-    instead."""
-    account, today_fills = turnover_context_fixtures(pipeline.run_id, total_evaluation_amount=total_evaluation_amount)
-    pipeline.account_before_order_cache = account
-    pipeline.today_fills_cache = today_fills
-
-
-def write_turnover_context_files(output_dir: Path, run_id: str, *, total_evaluation_amount: int = 100_000_000) -> None:
-    """Write account-before-order.json/today-fills.json fixtures that
-    write_judge_review's disk reload will pick up as a complete, same-run context."""
-    account, today_fills = turnover_context_fixtures(run_id, total_evaluation_amount=total_evaluation_amount)
-    write_json(output_dir / "account-before-order.json", account)
-    write_json(output_dir / "today-fills.json", today_fills)
 
 
 def fake_codex_script(path: Path) -> None:
@@ -97,11 +57,6 @@ if output_path is None:
     sys.exit(2)
 task_name = output_path.name.removesuffix(".raw.txt")
 fail_once_tasks = {value.strip() for value in os.environ.get("FAKE_CODEX_FAIL_ONCE_TASKS", "").split(",") if value.strip()}
-invalid_rebuttal_1_tasks = {
-    value.strip()
-    for value in os.environ.get("FAKE_CODEX_INVALID_REBUTTAL_1_TASKS", "").split(",")
-    if value.strip()
-}
 fail_state_dir = Path(os.environ.get("FAKE_CODEX_FAIL_STATE_DIR", output_path.parent))
 fail_marker = fail_state_dir / f"{task_name}.failed-once"
 fail_output = task_name in fail_once_tasks and not fail_marker.exists()
@@ -110,9 +65,7 @@ if fail_output:
     fail_marker.write_text("failed", encoding="utf-8")
 
 prompt = sys.argv[-1] if sys.argv else ""
-if "stage: judge-debate" in prompt:
-    stage = "judge-debate"
-elif "stage: judge-review" in prompt:
+if "stage: judge-review" in prompt:
     stage = "judge-review"
 else:
     stage = "analyst-review"
@@ -124,37 +77,7 @@ match = re.search(r"symbol_ids:\\s*([^\\n]+)", prompt)
 symbols = [item.strip() for item in (match.group(1).split(",") if match else ["005930"]) if item.strip()]
 rows = []
 for index, symbol in enumerate(symbols, start=1):
-    if stage == "judge-debate":
-        phase = next((value for value in ("opening", "rebuttal-1") if f"debate_phase: {value}" in prompt), "opening")
-        side = "bull" if agent_role == "debate-bull" else "bear"
-        opponent = "bear" if side == "bull" else "bull"
-        kind = {"opening": "claim", "rebuttal-1": "rebuttal"}[phase]
-        decision = {}
-        if phase != "opening":
-            action = "hold"
-            target_quantity = 0
-            decision = {
-                "recommended_action": action,
-                "target_holding_quantity": target_quantity
-            }
-            if phase == "rebuttal-1" and task_name in invalid_rebuttal_1_tasks:
-                decision.pop("recommended_action", None)
-        rows.append({
-            "symbol_id": symbol,
-            "symbol_name": symbol,
-            "arguments": [{
-                "argument_id": f"{symbol}-{side}-{phase}-1",
-                "kind": kind,
-                "targets": [] if phase == "opening" else [f"{symbol}-{opponent}-opening-1"],
-                "statement": f"{side} {phase} self-test",
-                "evidence_refs": [f"decision-brief:{symbol}:price"]
-            }],
-            "concessions": [],
-            "unresolved_conflicts": [],
-            "final_position": "" if phase == "opening" else f"{side} final position",
-            **decision
-        })
-    elif stage == "judge-review":
+    if stage == "judge-review":
         rows.append({
             "symbol_id": symbol,
             "symbol_name": symbol,
@@ -164,6 +87,16 @@ for index, symbol in enumerate(symbols, start=1):
             "evidence_refs": [f"analyst-review:{symbol}:analyst-quality-value"],
             "reason_code": "hold_neutral",
             "one_line_reason": "self-test",
+            "opposing_view": {
+                "increase_case": {
+                    "summary": "self-test increase case",
+                    "evidence_refs": [f"analyst-review:{symbol}:analyst-quality-value"]
+                },
+                "reduce_case": {
+                    "summary": "self-test reduce case",
+                    "evidence_refs": [f"analyst-review:{symbol}:analyst-news-flow"]
+                }
+            },
             "thesis_definition": {
                 "core_rationale": "self-test entry rationale",
                 "invalidation_conditions": [
@@ -216,25 +149,11 @@ for index, symbol in enumerate(symbols, start=1):
                 "missing_data": []
             })
         rows.append(row)
-if stage == "judge-debate":
-    payload = {
-        "stage": stage,
-        "phase": phase,
-        "side": side,
-        "symbols": rows,
-        "errors": []
-    }
-else:
-    payload = {"stage": stage, "agent_id": "fake", "persona": "fake", "human_markdown_path": "", "symbols": rows, "errors": []}
+payload = {"stage": stage, "agent_id": "fake", "persona": "fake", "human_markdown_path": "", "symbols": rows, "errors": []}
 output_path.parent.mkdir(parents=True, exist_ok=True)
 output_path.write_text("" if fail_output else json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 if "--json" in sys.argv:
-    if agent_role == "debate-bull":
-        thread_id = "00000000-0000-4000-8000-000000000001"
-    elif agent_role == "debate-bear":
-        thread_id = "00000000-0000-4000-8000-000000000002"
-    else:
-        thread_id = "00000000-0000-4000-8000-000000000099"
+    thread_id = "00000000-0000-4000-8000-000000000099"
     thread_id_overrides = json.loads(os.environ.get("FAKE_CODEX_THREAD_ID_OVERRIDES", "{}"))
     if isinstance(thread_id_overrides, dict) and task_name in thread_id_overrides:
         thread_id = str(thread_id_overrides[task_name])
@@ -855,11 +774,6 @@ def step_retry_review_and_rounding_probe_checks(workspace: Path, portfolio_path:
             max_workers=3,
         )
     )
-    write_turnover_context_files(half_up_dir, "half-up-probe")
-    write_json(
-        half_up_dir / "judge-debate.json",
-        {"schema_version": "1", "stage": "judge-debate", "status": "success", "phases": []},
-    )
     half_up_pipeline.write_judge_review(
         {
             "stage": "judge-review",
@@ -899,35 +813,11 @@ def step_retry_review_and_rounding_probe_checks(workspace: Path, portfolio_path:
     half_up_symbol = (half_up_review.get("symbols") or [{}])[0]
     if half_up_symbol.get("final_holding_quantity") != 2:
         failures.append(f"Decimal ROUND_HALF_UP did not derive 1.5 shares as 2 and ignore judge final quantity: {half_up_symbol}")
-    forced_baseline, forced_errors = half_up_pipeline.derive_judge_final_quantity(
-        {
-            "symbol_id": "005930",
-            "symbol_name": "삼성전자",
-            "target_position_value_krw": 210000,
-            "relative_attractiveness_rank": 1,
-            "reason_code": "increase_target",
-            "one_line_reason": "must be overridden",
-            "decision_basis": "thesis",
-        },
-        {
-            "price": {"current_or_last": 70000},
-            "holding_quantity_context": {"expected_holding_quantity": 1},
-            "today_trade_timeline_context": {"collection_status": "complete", "has_same_day_buy": False},
-        },
-        force_baseline=True,
-    )
-    if (
-        forced_errors
-        or forced_baseline is None
-        or forced_baseline.get("target_position_value_krw") != 70000
-        or forced_baseline.get("reason_code") != "hold_debate_incomplete"
-    ):
-        failures.append(f"incomplete debate did not force deterministic baseline exposure: {forced_baseline} {forced_errors}")
     return failures
 
 
 def step_same_day_buy_and_invalid_final_probe_checks(workspace: Path, portfolio_path: Path) -> list[str]:
-    """Same-day buy exposure baseline (with incomplete debate) and invalid final-position validation."""
+    """Same-day buy exposure baseline and invalid final-position validation."""
     failures: list[str] = []
     same_day_dir = workspace / "reports" / "runs" / "same-day-buy-probe"
     same_day_dir.mkdir(parents=True, exist_ok=True)
@@ -949,11 +839,6 @@ def step_same_day_buy_and_invalid_final_probe_checks(workspace: Path, portfolio_
             skip_account=False,
             max_workers=3,
         )
-    )
-    seed_turnover_context(same_day_pipeline)
-    write_json(
-        same_day_dir / "judge-debate.json",
-        {"schema_version": "1", "stage": "judge-debate", "status": "success", "phases": []},
     )
     same_day_pipeline.write_judge_review(
         {
@@ -978,10 +863,9 @@ def step_same_day_buy_and_invalid_final_probe_checks(workspace: Path, portfolio_
         }
     )
     same_day_review = load_json_if_exists(same_day_dir / "judge-review.json") or {}
-    if same_day_review.get("symbols"):
-        failures.append(f"same-day increased target without additional_buy_reason was accepted: {same_day_review}")
-    if not any(item.get("code") == "missing_additional_buy_reason" for item in same_day_review.get("errors", [])):
-        failures.append(f"same-day increased target did not require additional_buy_reason: {same_day_review}")
+    same_day_symbols = same_day_review.get("symbols") if isinstance(same_day_review.get("symbols"), list) else []
+    if len(same_day_symbols) != 1 or same_day_symbols[0].get("target_position_value_krw") != 140000:
+        failures.append(f"same-day target without optional additional_buy_reason was not accepted: {same_day_review}")
     unknown_item = {
         "symbol_id": "005930",
         "symbol_name": "삼성전자",
@@ -1006,14 +890,12 @@ def step_same_day_buy_and_invalid_final_probe_checks(workspace: Path, portfolio_
         },
     }
     unknown_normalized, unknown_errors = same_day_pipeline.derive_judge_final_quantity(unknown_item, {})
-    if unknown_normalized is not None or not any(
-        item.get("code") == "missing_additional_buy_reason_unknown_same_day_history" for item in unknown_errors
-    ):
-        failures.append(f"unknown same-day history did not require additional_buy_reason: {unknown_normalized} {unknown_errors}")
+    if unknown_normalized is None or unknown_errors:
+        failures.append(f"unknown same-day history unexpectedly blocked the Judge target: {unknown_normalized} {unknown_errors}")
     unknown_item["additional_buy_reason"] = "새 가격 돌파와 포트폴리오 여유가 확인됨"
     reasoned_normalized, reasoned_errors = same_day_pipeline.derive_judge_final_quantity(unknown_item, {})
     if reasoned_normalized is None or reasoned_errors:
-        failures.append(f"unknown same-day history with additional_buy_reason should allow an increase: {reasoned_normalized} {reasoned_errors}")
+        failures.append(f"optional additional_buy_reason was not preserved: {reasoned_normalized} {reasoned_errors}")
     confirmed_absent_item = dict(
         unknown_item,
         today_trade_timeline_context={
@@ -1047,10 +929,6 @@ def step_same_day_buy_and_invalid_final_probe_checks(workspace: Path, portfolio_
             skip_account=False,
             max_workers=3,
         )
-    )
-    write_json(
-        invalid_dir / "judge-debate.json",
-        {"schema_version": "1", "stage": "judge-debate", "status": "success", "phases": []},
     )
     invalid_pipeline.write_judge_review(
         {
@@ -1191,6 +1069,10 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
                 f"collection={summary.get('account_collection_status')}, gate={summary.get('order_gate_status')}"
             )
         run_stage_names = [item.get("stage") for item in load_json(run_dir / "run.json").get("stages", []) if isinstance(item, dict)]
+        if any(str(stage).startswith("judge-debate") for stage in run_stage_names):
+            failures.append(f"pipeline still executed a standalone debate stage: {run_stage_names}")
+        if (run_dir / "judge-debate.json").exists() or (run_dir / "debate").exists():
+            failures.append("pipeline still produced standalone debate artifacts")
         if "market-index-snapshot" not in run_stage_names or not (run_dir / "market-index-snapshot.json").exists():
             failures.append(f"pipeline did not record optional market-index-snapshot stage: {run_stage_names}")
         decision_payload = load_json(run_dir / "decision-brief.json")
@@ -1208,57 +1090,6 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
         if order_path_selection.get("resolved") != "immediate" or order_path_selection.get("reason") != "auto_regular_session":
             failures.append(f"pipeline did not resolve auto order path to immediate: {order_path_selection}")
         command_log = load_json(run_dir / "pipeline-command-log.json")
-        debate_artifact = load_json(run_dir / "judge-debate.json")
-        debate_phases = debate_artifact.get("phases") if isinstance(debate_artifact.get("phases"), list) else []
-        if debate_artifact.get("status") != "success" or [item.get("phase") for item in debate_phases] != [
-            "opening",
-            "rebuttal-1",
-        ]:
-            failures.append(f"pipeline did not record the two debate phases: {debate_artifact}")
-        if (
-            debate_artifact.get("executed_flow") != ["opening", "rebuttal-1"]
-            or debate_artifact.get("final_phase") != "rebuttal-1"
-        ):
-            failures.append(f"pipeline did not finish at rebuttal-1: {debate_artifact}")
-        for side in DEBATE_SIDES:
-            compact_path = run_dir / "debate" / f"opening-{side}-compact.json"
-            compact_payload = load_json_if_exists(compact_path) or {}
-            compact_symbols = compact_payload.get("symbols") if isinstance(compact_payload.get("symbols"), list) else []
-            if (
-                compact_payload.get("phase") != "opening"
-                or compact_payload.get("side") != side
-                or not compact_symbols
-                or "symbol_name" in compact_symbols[0]
-                or "unresolved_conflicts" in compact_symbols[0]
-            ):
-                failures.append(f"pipeline did not write compact {side} opening context: {compact_payload}")
-        expected_debate_sessions = {
-            "bull": "00000000-0000-4000-8000-000000000001",
-            "bear": "00000000-0000-4000-8000-000000000002",
-        }
-        if debate_artifact.get("session_ids") != expected_debate_sessions:
-            failures.append(f"pipeline did not preserve opening debate sessions: {debate_artifact.get('session_ids')}")
-        for phase_item in [item for item in debate_phases if item.get("status") == "success"]:
-            for side in DEBATE_SIDES:
-                side_item = ((phase_item.get("sides") or {}).get(side) or {})
-                if (
-                    side_item.get("session_id") != expected_debate_sessions[side]
-                    or not side_item.get("event_log_retained")
-                    or not Path(str(side_item.get("event_log_path") or "")).is_file()
-                ):
-                    failures.append(f"{phase_item.get('phase')} {side} lost session/audit log continuity: {side_item}")
-                if phase_item.get("phase") != "opening" and side_item.get("resume_session_id") != expected_debate_sessions[side]:
-                    failures.append(f"{phase_item.get('phase')} {side} did not resume opening session: {side_item}")
-        debate_stage_order = [
-            item.get("stage")
-            for item in command_log.get("commands", [])
-            if isinstance(item, dict) and str(item.get("stage") or "").startswith("judge-debate-")
-        ]
-        if debate_stage_order != [
-            "judge-debate-opening-attempt-01",
-            "judge-debate-rebuttal-1-attempt-01",
-        ]:
-            failures.append(f"debate wait barriers ran out of order or retried unexpectedly: {debate_stage_order}")
         decision_commands = [
             item.get("command")
             for item in command_log.get("commands", [])
@@ -1306,9 +1137,9 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
             failures.append(
                 "execution-plan did not fall back to decision-brief price for a new holding with missing account current_price"
             )
-        if summary["token_usage"]["subagents"]["total_tokens"] != 840:
+        if summary["token_usage"]["subagents"]["total_tokens"] != 360:
             failures.append(f"unexpected subagent token total: {summary['token_usage']}")
-        if summary["token_usage"]["main"]["total_tokens"] != 17 or summary["token_usage"]["total"]["total_tokens"] != 857:
+        if summary["token_usage"]["main"]["total_tokens"] != 17 or summary["token_usage"]["total"]["total_tokens"] != 377:
             failures.append(f"unexpected pipeline token summary with main events: {summary['token_usage']}")
         review_summary = summary.get("review_summary") if isinstance(summary.get("review_summary"), dict) else {}
         # Both symbols are now in scope (one held, one unheld top-ranked) with no score band.
@@ -1316,13 +1147,6 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
             failures.append(f"pipeline summary omitted compact review summary: {review_summary}")
         elif review_summary["symbols"][1].get("target_position_value_krw") != 70000:
             failures.append(f"pipeline summary omitted judge target position value: {review_summary}")
-        if (
-            review_summary.get("debate_status") != "success"
-            or review_summary.get("debate_phase_count") != 2
-            or review_summary.get("debate_executed_phase_count") != 2
-            or review_summary.get("debate_final_phase") != "rebuttal-1"
-        ):
-            failures.append(f"pipeline summary omitted two-phase debate status: {review_summary}")
         today_trade_summary = summary.get("today_trade_summary") if isinstance(summary.get("today_trade_summary"), dict) else {}
         if (
             today_trade_summary.get("collection_status") != "complete"
@@ -1349,8 +1173,6 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
             failures.append(f"pipeline summary omitted account asset artifact path: {artifacts}")
         if not str(artifacts.get("model_usage", "")).endswith("model-usage.jsonl"):
             failures.append(f"pipeline summary omitted model usage artifact path: {artifacts}")
-        if not str(artifacts.get("judge_debate", "")).endswith("judge-debate.json"):
-            failures.append(f"pipeline summary omitted judge debate artifact path: {artifacts}")
         if not str(artifacts.get("news_context", "")).endswith("news-context.json"):
             failures.append(f"pipeline summary omitted news context artifact path: {artifacts}")
         if not str(artifacts.get("html_report", "")).endswith("daily-trading-report.html"):
@@ -1502,132 +1324,6 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
             os.environ[STRATEGY_POLICY_CONFIG_ENV] = old_strategy_policy
     return failures
 
-
-def step_debate_retry_probe_checks(workspace: Path, run_dir: Path, portfolio_path: Path) -> list[str]:
-    """Retrying rebuttal-1 after resetting its wrapper resumes the prior compact debate context."""
-    failures: list[str] = []
-    # Written to disk by step_main_pipeline_run_checks, which always runs first.
-    fake_codex = workspace / "fake-codex"
-    fake_market_index_snapshot = workspace / "fake-market-index-snapshot.py"
-    override_policy = workspace / "override-strategy-policy.yaml"
-    old_codex_bin = os.environ.get("CODEX_BIN")
-    old_reuse = os.environ.get("CODEX_SUBAGENT_REUSE_SUCCESS")
-    old_market_index_snapshot = os.environ.get("DAILY_TRADING_MARKET_INDEX_SNAPSHOT_SCRIPT")
-    old_strategy_policy = os.environ.get(STRATEGY_POLICY_CONFIG_ENV)
-    os.environ["CODEX_BIN"] = str(fake_codex)
-    os.environ["CODEX_SUBAGENT_REUSE_SUCCESS"] = "0"
-    os.environ["DAILY_TRADING_MARKET_INDEX_SNAPSHOT_SCRIPT"] = str(fake_market_index_snapshot)
-    os.environ[STRATEGY_POLICY_CONFIG_ENV] = str(override_policy)
-    try:
-        retry_debate_dir = workspace / "reports" / "runs" / "debate-retry-probe"
-        retry_debate_dir.mkdir(parents=True, exist_ok=True)
-        retry_debate_spec = load_json(run_dir / "judge-review-spec.json")
-        retry_debate_spec["run_id"] = "debate-retry-probe"
-        retry_debate_spec["output_dir"] = str(retry_debate_dir)
-        retry_debate_spec["artifact_paths"]["debate_artifact"] = str(retry_debate_dir / "judge-debate.json")
-        write_json(retry_debate_dir / "judge-review-spec.json", retry_debate_spec)
-        retry_debate_pipeline = Pipeline(
-            argparse.Namespace(
-                command="run",
-                workspace_dir=str(workspace),
-                output_dir=str(retry_debate_dir),
-                run_id="debate-retry-probe",
-                started_at="2026-06-18T09:00:00+09:00",
-                env="acct",
-                request_type="analysis",
-                portfolio_json=str(portfolio_path),
-                financial_cache_path="",
-                symbol_news_cache_path="",
-                main_events="",
-                date="2026-06-18",
-                reuse_existing_artifacts=True,
-                skip_account=False,
-                max_workers=2,
-                strategy_policy_config=str(override_policy),
-            )
-        )
-        os.environ["FAKE_CODEX_FAIL_ONCE_TASKS"] = "judge-debate-bear-opening-attempt-01"
-        os.environ["FAKE_CODEX_FAIL_STATE_DIR"] = str(retry_debate_dir / "fake-state")
-        os.environ["FAKE_CODEX_INVALID_REBUTTAL_1_TASKS"] = (
-            "judge-debate-bear-rebuttal-1-attempt-01"
-        )
-        os.environ["FAKE_CODEX_THREAD_ID_OVERRIDES"] = json.dumps(
-            {
-                "judge-debate-bear-rebuttal-1-attempt-01": "00000000-0000-4000-8000-000000000009",
-            }
-        )
-        try:
-            retry_debate = retry_debate_pipeline.run_judge_debate()
-        finally:
-            os.environ.pop("FAKE_CODEX_FAIL_ONCE_TASKS", None)
-            os.environ.pop("FAKE_CODEX_FAIL_STATE_DIR", None)
-            os.environ.pop("FAKE_CODEX_INVALID_REBUTTAL_1_TASKS", None)
-            os.environ.pop("FAKE_CODEX_THREAD_ID_OVERRIDES", None)
-        retry_opening = (retry_debate.get("phases") or [{}])[0]
-        retry_opening_sides = retry_opening.get("sides") if isinstance(retry_opening.get("sides"), dict) else {}
-        if (
-            retry_debate.get("status") != "success"
-            or len((retry_opening_sides.get("bull") or {}).get("attempts") or []) != 1
-            or len((retry_opening_sides.get("bear") or {}).get("attempts") or []) != 2
-        ):
-            failures.append(f"debate retry did not preserve successful bull and retry only bear: {retry_debate}")
-        retry_specs = load_json(retry_debate_dir / "debate" / "opening.attempt-02.specs.json")
-        retry_specs_list = retry_specs.get("specs") if isinstance(retry_specs.get("specs"), list) else []
-        if (
-            len(retry_specs_list) != 1
-            or retry_specs_list[0].get("agent_role") != "debate-bear"
-            or retry_specs_list[0].get("resume_session_id") != "00000000-0000-4000-8000-000000000002"
-        ):
-            failures.append(f"debate retry did not resume only the failed bear session: {retry_specs}")
-        retry_phases = retry_debate.get("phases") if isinstance(retry_debate.get("phases"), list) else []
-        if (
-            retry_debate.get("final_phase") != "rebuttal-1"
-            or len(retry_phases) != 2
-            or retry_phases[-1].get("status") != "success"
-        ):
-            failures.append(f"debate retry did not finish at rebuttal-1: {retry_debate}")
-        retry_rebuttal = retry_phases[1] if len(retry_phases) > 1 else {}
-        retry_rebuttal_sides = retry_rebuttal.get("sides") if isinstance(retry_rebuttal.get("sides"), dict) else {}
-        retry_bear_rebuttal = retry_rebuttal_sides.get("bear") or {}
-        retry_bear_attempts = retry_bear_rebuttal.get("attempts") or []
-        if (
-            len(retry_bear_attempts) != 2
-            or retry_bear_attempts[0].get("session_id") != "00000000-0000-4000-8000-000000000002"
-            or retry_bear_attempts[0].get("reported_session_id") != "00000000-0000-4000-8000-000000000009"
-            or "invalid_debate_recommended_action"
-            not in {item.get("code") for item in retry_bear_attempts[0].get("errors") or []}
-        ):
-            failures.append(f"invalid rebuttal-1 did not retry in the persistent session: {retry_bear_rebuttal}")
-        retry_rebuttal_specs = load_json(retry_debate_dir / "debate" / "rebuttal-1.attempt-02.specs.json")
-        retry_rebuttal_specs_list = (
-            retry_rebuttal_specs.get("specs") if isinstance(retry_rebuttal_specs.get("specs"), list) else []
-        )
-        if (
-            len(retry_rebuttal_specs_list) != 1
-            or retry_rebuttal_specs_list[0].get("agent_role") != "debate-bear"
-            or retry_rebuttal_specs_list[0].get("resume_session_id") != "00000000-0000-4000-8000-000000000002"
-            or "own_previous_turn" in retry_rebuttal_specs_list[0].get("artifact_paths", {})
-            or not str((retry_rebuttal_specs_list[0].get("artifact_paths") or {}).get("opponent_opening") or "").endswith("opening-bull-compact.json")
-        ):
-            failures.append(f"rebuttal-1 retry lost compact-resume inputs: {retry_rebuttal_specs}")
-    finally:
-        if old_codex_bin is None:
-            os.environ.pop("CODEX_BIN", None)
-        else:
-            os.environ["CODEX_BIN"] = old_codex_bin
-        if old_reuse is None:
-            os.environ.pop("CODEX_SUBAGENT_REUSE_SUCCESS", None)
-        else:
-            os.environ["CODEX_SUBAGENT_REUSE_SUCCESS"] = old_reuse
-        if old_market_index_snapshot is None:
-            os.environ.pop("DAILY_TRADING_MARKET_INDEX_SNAPSHOT_SCRIPT", None)
-        else:
-            os.environ["DAILY_TRADING_MARKET_INDEX_SNAPSHOT_SCRIPT"] = old_market_index_snapshot
-        if old_strategy_policy is None:
-            os.environ.pop(STRATEGY_POLICY_CONFIG_ENV, None)
-        else:
-            os.environ[STRATEGY_POLICY_CONFIG_ENV] = old_strategy_policy
-    return failures
 
 
 def step_submit_orders_probe_checks(workspace: Path, run_dir: Path, portfolio_path: Path) -> list[str]:
@@ -1937,7 +1633,6 @@ def run_self_test() -> int:
         failures.extend(step_retry_review_and_rounding_probe_checks(workspace, portfolio_path))
         failures.extend(step_same_day_buy_and_invalid_final_probe_checks(workspace, portfolio_path))
         failures.extend(step_main_pipeline_run_checks(workspace, run_dir, portfolio_path))
-        failures.extend(step_debate_retry_probe_checks(workspace, run_dir, portfolio_path))
         failures.extend(step_submit_orders_probe_checks(workspace, run_dir, portfolio_path))
 
     payload = {"status": "passed" if not failures else "failed", "failures": failures}
@@ -1966,7 +1661,6 @@ class RunSelfTestStepsAreIndividuallyDiscoverableTest(unittest.TestCase):
         cls.retry_and_rounding_failures = step_retry_review_and_rounding_probe_checks(cls.workspace, cls.portfolio_path)
         cls.same_day_and_invalid_final_failures = step_same_day_buy_and_invalid_final_probe_checks(cls.workspace, cls.portfolio_path)
         cls.main_pipeline_run_failures = step_main_pipeline_run_checks(cls.workspace, cls.run_dir, cls.portfolio_path)
-        cls.debate_retry_probe_failures = step_debate_retry_probe_checks(cls.workspace, cls.run_dir, cls.portfolio_path)
         cls.submit_orders_probe_failures = step_submit_orders_probe_checks(cls.workspace, cls.run_dir, cls.portfolio_path)
 
     def test_step_cache_coverage_and_evidence_checks(self) -> None:
@@ -1987,9 +1681,6 @@ class RunSelfTestStepsAreIndividuallyDiscoverableTest(unittest.TestCase):
     def test_step_main_pipeline_run_checks(self) -> None:
         self.assertEqual(self.main_pipeline_run_failures, [])
 
-    def test_step_debate_retry_probe_checks(self) -> None:
-        self.assertEqual(self.debate_retry_probe_failures, [])
-
     def test_step_submit_orders_probe_checks(self) -> None:
         self.assertEqual(self.submit_orders_probe_failures, [])
 
@@ -2007,7 +1698,6 @@ class RunDailyTradingPipelineSelfTest(unittest.TestCase):
             "step_retry_review_and_rounding_probe_checks",
             "step_same_day_buy_and_invalid_final_probe_checks",
             "step_main_pipeline_run_checks",
-            "step_debate_retry_probe_checks",
             "step_submit_orders_probe_checks",
         ]
         patchers = [mock.patch(f"{__name__}.{name}", return_value=[]) for name in step_names]
@@ -2027,7 +1717,7 @@ class RunDailyTradingPipelineSelfTest(unittest.TestCase):
             f"{__name__}.step_retry_review_and_rounding_probe_checks", return_value=[]
         ), mock.patch(f"{__name__}.step_same_day_buy_and_invalid_final_probe_checks", return_value=[]), mock.patch(
             f"{__name__}.step_main_pipeline_run_checks", return_value=[]
-        ), mock.patch(f"{__name__}.step_debate_retry_probe_checks", return_value=[]), mock.patch(
+        ), mock.patch(
             f"{__name__}.step_submit_orders_probe_checks", return_value=[]
         ):
             result = run_self_test()
@@ -2080,44 +1770,6 @@ class RunDailyTradingPipelineSelfTest(unittest.TestCase):
             self.assertEqual(active_view["lookup_status"], "not_looked_up")
             self.assertEqual(history_view["raw_row_count"], 5)
 
-    def test_compact_opening_context_keeps_only_rebuttal_inputs(self) -> None:
-        compact = compact_opening_context(
-            {
-                "stage": "judge-debate",
-                "phase": "opening",
-                "side": "bear",
-                "symbols": [
-                    {
-                        "symbol_id": "005930",
-                        "symbol_name": "삼성전자",
-                        "arguments": [
-                            {
-                                "argument_id": "005930-bear-opening-1",
-                                "kind": "claim",
-                                "targets": [],
-                                "statement": "valuation risk",
-                                "evidence_refs": ["analyst-review:005930:quality"],
-                            }
-                        ],
-                        "concessions": ["momentum remains positive"],
-                        "unresolved_conflicts": ["position size"],
-                        "final_position": "hold",
-                    }
-                ],
-                "errors": [],
-            }
-        )
-        self.assertEqual(compact["phase"], "opening")
-        self.assertEqual(compact["side"], "bear")
-        self.assertEqual(
-            set(compact["symbols"][0]),
-            {"symbol_id", "arguments", "concessions", "final_position"},
-        )
-        self.assertEqual(
-            set(compact["symbols"][0]["arguments"][0]),
-            {"argument_id", "statement", "evidence_refs"},
-        )
-
     def test_build_review_summary_reports_final_decisions_not_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
@@ -2131,10 +1783,6 @@ class RunDailyTradingPipelineSelfTest(unittest.TestCase):
                     run_id="review-summary-probe",
                     started_at="2026-06-18T09:00:00+09:00",
                 )
-            )
-            write_json(
-                run_dir / "judge-debate.json",
-                {"schema_version": "1", "stage": "judge-debate", "status": "success", "phases": []},
             )
             write_json(
                 run_dir / "analyst-review.json",
@@ -2268,7 +1916,7 @@ class RunDailyTradingPipelineSelfTest(unittest.TestCase):
             # 035720 has no execution row: fallback = current(5) + pending_buy(1) - pending_sell(2) = 4.
             self.assertEqual(rows_by_symbol["035720"]["expected_holding_quantity"], 4)
 
-    def test_empty_judge_scope_writes_review_contract_v2(self) -> None:
+    def test_empty_judge_scope_writes_review_contract_v4(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             run_dir = workspace / "reports" / "runs" / "empty-review-scope"
@@ -2287,7 +1935,7 @@ class RunDailyTradingPipelineSelfTest(unittest.TestCase):
             pipeline.run_judge_review()
 
             review = load_json(run_dir / "judge-review.json")
-            self.assertEqual(review.get("schema_version"), "2")
+            self.assertEqual(review.get("schema_version"), "4")
             self.assertTrue(review.get("skipped"))
             self.assertEqual(review.get("skip_reason"), "no selected symbols")
 
@@ -2319,16 +1967,12 @@ class RunDailyTradingPipelineSelfTest(unittest.TestCase):
             self.assertEqual(stage.get("stage"), "analyst-review")
             self.assertEqual(stage.get("status"), "partial")
 
-    def test_run_judge_review_propagates_partial_artifact_status(self) -> None:
+    def test_run_judge_review_accepts_target_without_thesis_definition(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             pipeline = self._make_pipeline(workspace, "partial-judge-artifact")
             run_dir = pipeline.output_dir
             write_json(run_dir / "judge-review-spec.json", {"symbol_ids": ["005930"]})
-            write_json(
-                run_dir / "judge-debate.json",
-                {"schema_version": "1", "stage": "judge-debate", "status": "success", "phases": []},
-            )
             wrapper = {
                 "status": "success",
                 "agent_role": "judge",
@@ -2345,9 +1989,11 @@ class RunDailyTradingPipelineSelfTest(unittest.TestCase):
                             "holding_quantity_context": {"expected_holding_quantity": 1},
                             "relative_attractiveness_rank": 1,
                             "decision_basis": "thesis",
-                            "evidence_refs": ["analyst-review:005930:analyst-quality-value"],
                             "reason_code": "increase_target",
                             "one_line_reason": "increase without a required thesis definition",
+                            "opposing_view": self._opposing_view_with_reduce_evidence(
+                                "analyst-review:005930:analyst-quality-value"
+                            ),
                         }
                     ],
                 },
@@ -2363,10 +2009,11 @@ class RunDailyTradingPipelineSelfTest(unittest.TestCase):
                 pipeline.run_judge_review()
 
             review = load_json(run_dir / "judge-review.json")
-            self.assertEqual(review.get("status"), "partial")
-            self.assertEqual(review.get("symbols"), [])
+            self.assertEqual(review.get("status"), "success")
+            self.assertEqual(review["symbols"][0]["target_position_value_krw"], 140000)
+            self.assertNotIn("decision_guard", review["symbols"][0])
             self.assertEqual(pipeline.stages[-1].get("stage"), "judge-review")
-            self.assertEqual(pipeline.stages[-1].get("status"), "partial")
+            self.assertEqual(pipeline.stages[-1].get("status"), "success")
 
     def test_write_judge_review_drops_every_duplicate_symbol_row(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2383,10 +2030,6 @@ class RunDailyTradingPipelineSelfTest(unittest.TestCase):
                 )
             )
             write_json(run_dir / "judge-review-spec.json", {"symbol_ids": ["005930"]})
-            write_json(
-                run_dir / "judge-debate.json",
-                {"schema_version": "1", "stage": "judge-debate", "status": "success"},
-            )
             duplicate = {
                 "symbol_id": "005930",
                 "symbol_name": "삼성전자",
@@ -2422,7 +2065,6 @@ class RunDailyTradingPipelineSelfTest(unittest.TestCase):
         workspace: Path,
         run_id: str,
         started_at: str = "2026-06-02T09:00:00+09:00",
-        total_evaluation_amount: int = 100_000_000,
     ) -> Pipeline:
         run_dir = workspace / "reports" / "runs" / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -2435,31 +2077,20 @@ class RunDailyTradingPipelineSelfTest(unittest.TestCase):
                 started_at=started_at,
             )
         )
-        seed_turnover_context(pipeline, total_evaluation_amount=total_evaluation_amount)
         return pipeline
 
     def _loss_context(self) -> dict:
         return {
             "price": {"current_or_last": 70000},
+            "financial_summary": {"status": "success", "operating_margin_trend": "compressed"},
             "holding_quantity_context": {"expected_holding_quantity": 10},
             "symbol_strategy_context": {"loss_position": True},
         }
 
-    def _debate_with_argument(self, symbol_id: str, argument_id: str) -> dict:
+    def _opposing_view_with_reduce_evidence(self, evidence_ref: str) -> dict:
         return {
-            "phases": [
-                {
-                    "sides": {
-                        "bear": {
-                            "output": {
-                                "symbols": [
-                                    {"symbol_id": symbol_id, "arguments": [{"argument_id": argument_id}]}
-                                ]
-                            }
-                        }
-                    }
-                }
-            ]
+            "increase_case": {"summary": "increase case self-test", "evidence_refs": []},
+            "reduce_case": {"summary": "reduce case self-test", "evidence_refs": [evidence_ref]},
         }
 
     def test_load_prior_thesis_ignores_future_equal_and_invalid_runs(self) -> None:
@@ -2505,635 +2136,113 @@ class RunDailyTradingPipelineSelfTest(unittest.TestCase):
             self.assertIsNotNone(prior)
             self.assertEqual(prior.get("core_rationale"), "latest-valid")
 
-    def test_protected_loss_thesis_gate_requires_prior_definition_and_verified_evidence(self) -> None:
+    def test_judge_target_is_not_clamped_by_strategy_labels_or_thesis_assessment(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
-            prior_dir = workspace / "reports" / "runs" / "prior-run"
-            prior_dir.mkdir(parents=True, exist_ok=True)
-            write_json(
-                prior_dir / "judge-review.json",
-                {
-                    "run_id": "prior-run",
-                    "started_at": "2026-06-01T09:00:00+09:00",
-                    "status": "success",
-                    "symbols": [
-                        {
-                            "symbol_id": "005930",
-                            "thesis_definition": {
-                                "defined_at_run_id": "prior-run",
-                                "core_rationale": "quality moat and pricing power",
-                                "invalidation_conditions": [
-                                    {"condition_id": "margin-compression", "description": "gross margin drops below prior guidance"}
-                                ],
-                            },
-                        }
-                    ],
-                },
-            )
-            pipeline = self._make_pipeline(workspace, "current-run")
-
-            # Prior thesis loads back without crashing and is the exact prior artifact.
-            prior_thesis = pipeline.load_prior_thesis("005930")
-            self.assertIsNotNone(prior_thesis)
-            self.assertEqual(
-                [c["condition_id"] for c in prior_thesis["invalidation_conditions"]],
-                ["margin-compression"],
-            )
-
-            debate = self._debate_with_argument("005930", "005930-bear-opening-1")
-
-            # Valid: damaged status, matched prior condition id, verifiable cited evidence -> allowed.
-            allowed_item = {
-                "symbol_id": "005930",
-                "target_position_value_krw": 350000,
-                "reason_code": "reduce_on_thesis_damage",
-                "one_line_reason": "margin compression confirmed",
-                "decision_basis": "thesis",
-                "thesis_assessment": {
-                    "status": "damaged",
-                    "matched_invalidation_condition_ids": ["margin-compression"],
-                    "cited_argument_ids": ["005930-bear-opening-1"],
-                },
-            }
-            normalized, errors = pipeline.derive_judge_final_quantity(
-                dict(allowed_item), self._loss_context(), judge_debate=debate
-            )
-            self.assertEqual(errors, [])
-            self.assertIsNotNone(normalized)
-            self.assertEqual(normalized["target_position_value_krw"], 350000)
-            self.assertEqual(normalized["protected_loss_gate"], {"allowed": True, "reason": "damaged_evidence_confirmed"})
-            # The persisted prior_thesis_context must be exactly the mechanical gate's
-            # own selected source: no path leaked, only the stable artifact label.
-            self.assertEqual(
-                normalized["prior_thesis_context"],
-                {
-                    "available": True,
-                    "source_run_id": "prior-run",
-                    "source_started_at": "2026-06-01T09:00:00+09:00",
-                    "source_artifact": "judge-review.json",
-                    "core_rationale": "quality moat and pricing power",
-                    "invalidation_conditions": [
-                        {"condition_id": "margin-compression", "description": "gross margin drops below prior guidance"}
-                    ],
-                },
-            )
-
-            # Arbitrary/unverifiable evidence ref -> blocked, baseline preserved.
-            bad_evidence_item = dict(allowed_item)
-            bad_evidence_item["thesis_assessment"] = {
-                "status": "damaged",
-                "matched_invalidation_condition_ids": ["margin-compression"],
-                "cited_argument_ids": ["made-up-argument-id"],
-            }
-            normalized, errors = pipeline.derive_judge_final_quantity(
-                bad_evidence_item, self._loss_context(), judge_debate=debate
-            )
-            self.assertIsNotNone(normalized)
-            self.assertEqual(normalized["target_position_value_krw"], 700000)
-            self.assertEqual(normalized["reason_code"], "hold_protected_loss_thesis")
-            self.assertEqual(normalized["protected_loss_gate"], {"allowed": False, "reason": "evidence_not_verified"})
-
-            # Invalidation condition not present in the immutable prior thesis -> blocked.
-            unmatched_condition_item = dict(allowed_item)
-            unmatched_condition_item["thesis_assessment"] = {
-                "status": "damaged",
-                "matched_invalidation_condition_ids": ["a-condition-invented-this-run"],
-                "cited_argument_ids": ["005930-bear-opening-1"],
-            }
-            normalized, errors = pipeline.derive_judge_final_quantity(
-                unmatched_condition_item, self._loss_context(), judge_debate=debate
-            )
-            self.assertIsNotNone(normalized)
-            self.assertEqual(normalized["target_position_value_krw"], 700000)
-            self.assertEqual(normalized["protected_loss_gate"]["reason"], "invalidation_condition_not_matched")
-
-            # intact/uncertain status can never authorize a reduction, even with valid ids/evidence.
-            for status in ("intact", "uncertain"):
-                status_item = dict(allowed_item)
-                status_item["thesis_assessment"] = {
-                    "status": status,
-                    "matched_invalidation_condition_ids": ["margin-compression"],
-                    "cited_argument_ids": ["005930-bear-opening-1"],
-                }
-                normalized, errors = pipeline.derive_judge_final_quantity(
-                    status_item, self._loss_context(), judge_debate=debate
-                )
-                self.assertEqual(normalized["target_position_value_krw"], 700000, msg=f"status={status}")
-                self.assertEqual(normalized["protected_loss_gate"]["reason"], "thesis_not_damaged", msg=f"status={status}")
-
-            # Price loss / low score / missing optional evidence alone (no thesis_assessment at all) cannot
-            # qualify as damage; the pipeline defaults to blocked and preserves baseline.
-            no_assessment_item = {
-                "symbol_id": "005930",
-                "target_position_value_krw": 350000,
-                "reason_code": "low_score_reduce",
-                "one_line_reason": "score dropped, index fell",
-                "decision_basis": "thesis",
-            }
-            normalized, errors = pipeline.derive_judge_final_quantity(
-                no_assessment_item, self._loss_context(), judge_debate=debate
-            )
-            self.assertEqual(normalized["target_position_value_krw"], 700000)
-            self.assertEqual(normalized["protected_loss_gate"], {"allowed": False, "reason": "thesis_not_damaged"})
-
-    def test_derive_judge_final_quantity_reuses_single_selector_read_for_gate_and_persisted_context(self) -> None:
-        # A concurrently completed run must not be able to make the mechanical gate
-        # evaluate one prior source while judge-review.json persists/displays a
-        # different one. Simulate that race: select_prior_thesis_source is mocked to
-        # return DIFFERENT sources on successive calls. If the code path still reads
-        # it twice for one symbol, the gate and the persisted prior_thesis_context
-        # would disagree; with a single shared selection they must always agree.
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            pipeline = self._make_pipeline(workspace, "race-run")
-            debate = self._debate_with_argument("005930", "005930-bear-opening-1")
-
-            first_selection = {
-                "source_run_id": "prior-run-first",
-                "source_started_at": "2026-06-01T09:00:00+09:00",
-                "thesis_definition": {
-                    "core_rationale": "first selection rationale",
-                    "invalidation_conditions": [
-                        {"condition_id": "margin-compression", "description": "gross margin drops below prior guidance"}
-                    ],
-                },
-            }
-            second_selection = {
-                "source_run_id": "prior-run-second-concurrent",
-                "source_started_at": "2026-06-01T10:00:00+09:00",
-                "thesis_definition": {
-                    "core_rationale": "second concurrent selection rationale",
-                    "invalidation_conditions": [
-                        {"condition_id": "margin-compression", "description": "different description"}
-                    ],
-                },
-            }
-            call_count = {"n": 0}
-
-            def fake_select(symbol_id: str) -> dict:
-                call_count["n"] += 1
-                return first_selection if call_count["n"] == 1 else second_selection
-
-            item = {
-                "symbol_id": "005930",
-                "target_position_value_krw": 350000,
-                "reason_code": "reduce_on_thesis_damage",
-                "one_line_reason": "margin compression confirmed",
-                "decision_basis": "thesis",
-                "thesis_assessment": {
-                    "status": "damaged",
-                    "matched_invalidation_condition_ids": ["margin-compression"],
-                    "cited_argument_ids": ["005930-bear-opening-1"],
-                },
-            }
-            with mock.patch.object(pipeline, "select_prior_thesis_source", side_effect=fake_select) as mocked:
-                normalized, errors = pipeline.derive_judge_final_quantity(
-                    item, self._loss_context(), judge_debate=debate
-                )
-            self.assertEqual(errors, [])
-            self.assertIsNotNone(normalized)
-            # Exactly one selection for this symbol: the gate and the persisted
-            # provenance must come from the identical read, never a second scan.
-            self.assertEqual(mocked.call_count, 1)
-            self.assertEqual(normalized["protected_loss_gate"], {"allowed": True, "reason": "damaged_evidence_confirmed"})
-            self.assertEqual(
-                normalized["prior_thesis_context"],
-                {
-                    "available": True,
-                    "source_run_id": "prior-run-first",
-                    "source_started_at": "2026-06-01T09:00:00+09:00",
-                    "source_artifact": "judge-review.json",
-                    "core_rationale": "first selection rationale",
-                    "invalidation_conditions": [
-                        {"condition_id": "margin-compression", "description": "gross margin drops below prior guidance"}
-                    ],
-                },
-            )
-            self.assertNotIn("second concurrent", json.dumps(normalized, ensure_ascii=False))
-
-    def test_protected_loss_thesis_gate_bootstraps_without_defining_and_invalidating_in_one_pass(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            pipeline = self._make_pipeline(workspace, "bootstrap-run")
-            self.assertIsNone(pipeline.load_prior_thesis("005930"))
-            debate = self._debate_with_argument("005930", "005930-bear-opening-1")
-            assessment = {
-                "status": "damaged",
-                "matched_invalidation_condition_ids": ["margin-compression"],
-                "cited_argument_ids": ["005930-bear-opening-1"],
-            }
-
-            # The judge omits/malforms a bootstrap thesis_definition: nothing is
-            # synthesized, the reduction stays blocked, and no thesis_definition claim
-            # is written into the artifact.
-            no_def_item = {
-                "symbol_id": "005930",
-                "target_position_value_krw": 350000,
-                "reason_code": "reduce_on_thesis_damage",
-                "one_line_reason": "margin compression confirmed",
-                "decision_basis": "thesis",
-                "thesis_assessment": assessment,
-            }
-            normalized, errors = pipeline.derive_judge_final_quantity(
-                no_def_item, self._loss_context(), judge_debate=debate
-            )
-            self.assertEqual(errors, [])
-            self.assertIsNotNone(normalized)
-            # No prior thesis: this run's own assessment cannot both define and invalidate it, so
-            # baseline exposure is preserved even though status/evidence look otherwise valid.
-            self.assertEqual(normalized["target_position_value_krw"], 700000)
-            self.assertEqual(normalized["protected_loss_gate"], {"allowed": False, "reason": "no_prior_thesis"})
-            self.assertNotIn("thesis_definition", normalized)
-            # No fabricated provenance: prior_thesis_context reports unavailable rather
-            # than inventing a source, distinguishing this from an actual prior thesis.
-            self.assertEqual(normalized["prior_thesis_context"], {"available": False})
-
-            malformed_def_item = dict(no_def_item, thesis_definition={"core_rationale": "", "invalidation_conditions": []})
-            normalized, errors = pipeline.derive_judge_final_quantity(
-                malformed_def_item, self._loss_context(), judge_debate=debate
-            )
-            self.assertEqual(normalized["target_position_value_krw"], 700000)
-            self.assertNotIn("thesis_definition", normalized)
-
-            # A genuinely valid judge-supplied thesis_definition IS persisted, still
-            # without authorizing this run's own reduction.
-            valid_def_item = dict(
-                no_def_item,
-                thesis_definition={
-                    "core_rationale": "quality moat and pricing power",
-                    "invalidation_conditions": [
-                        {"condition_id": "margin-compression", "description": "gross margin drops below prior guidance"}
-                    ],
-                },
-            )
-            normalized, errors = pipeline.derive_judge_final_quantity(
-                valid_def_item, self._loss_context(), judge_debate=debate
-            )
-            self.assertEqual(errors, [])
-            self.assertEqual(normalized["target_position_value_krw"], 700000)
-            self.assertEqual(normalized["protected_loss_gate"], {"allowed": False, "reason": "no_prior_thesis"})
-            self.assertEqual(
-                normalized["thesis_definition"],
-                {
-                    "defined_at_run_id": "bootstrap-run",
-                    "core_rationale": "quality moat and pricing power",
-                    "invalidation_conditions": [
-                        {"condition_id": "margin-compression", "description": "gross margin drops below prior guidance"}
-                    ],
-                },
-            )
-            # This run's newly bootstrapped thesis_definition is a successor for future
-            # runs, not a prior; prior_thesis_context still correctly reports unavailable.
-            self.assertEqual(normalized["prior_thesis_context"], {"available": False})
-
-    def test_protected_loss_thesis_gate_does_not_apply_outside_loss_positions(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            pipeline = self._make_pipeline(workspace, "profit-taking-run")
-            item = {
-                "symbol_id": "005930",
-                "target_position_value_krw": 200000,
-                "reason_code": "profit_taking",
-                "one_line_reason": "밸류에이션 부담으로 이익 실현",
-            }
-            profit_context = {
+            pipeline = self._make_pipeline(workspace, "direct-target-run")
+            context = {
                 "price": {"current_or_last": 70000},
                 "holding_quantity_context": {"expected_holding_quantity": 10},
-                "symbol_strategy_context": {"loss_position": False},
             }
-            # No decision_basis: protected_loss_gate does not apply (not a loss
-            # position), but a reduction still requires profit_protection or
-            # concentration_rebalance to actually authorize it, so it is
-            # mechanically clamped back to baseline instead of executed unrestricted.
-            normalized, errors = pipeline.derive_judge_final_quantity(item, profit_context)
-            self.assertEqual(errors, [])
-            self.assertIsNotNone(normalized)
-            self.assertEqual(normalized["target_position_value_krw"], 700000)
-            self.assertNotIn("protected_loss_gate", normalized)
-            self.assertEqual(normalized["decision_guard"]["status"], "blocked")
-            self.assertEqual(normalized["decision_guard"]["reason_code"], "decision_basis_required_for_reduction")
-
-            # With decision_basis=profit_protection and a verifiable positive pnl_rate,
-            # the reduction is allowed (capped by profit_protection_max_reduction_pct).
-            profit_protection_item = dict(item, decision_basis="profit_protection")
-            profit_protection_context = dict(
-                profit_context,
-                account_exposure={"pnl_rate": 5.0},
-                today_trade_timeline_context={"collection_status": "complete", "has_same_day_buy": False, "has_same_day_sell": False},
-            )
-            normalized, errors = pipeline.derive_judge_final_quantity(profit_protection_item, profit_protection_context)
-            self.assertEqual(errors, [])
-            self.assertIsNotNone(normalized)
-            self.assertEqual(normalized["decision_guard"]["status"], "allowed")
-            self.assertEqual(normalized["decision_guard"]["basis"], "profit_protection")
-            # 25% default cap of 10 shares -> reduce by at most 2 shares (8 remaining),
-            # not the full requested reduction down to 200000/70000 ~= 2.86 shares.
-            self.assertEqual(normalized["final_holding_quantity"], 8)
-
-    def test_protected_loss_thesis_gate_applies_on_negative_pnl_rate_even_if_loss_flag_is_false(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            pipeline = self._make_pipeline(workspace, "false-flag-run")
-            item = {
-                "symbol_id": "005930",
-                "target_position_value_krw": 200000,
-                "reason_code": "reduce",
-                "one_line_reason": "score dropped",
-                "decision_basis": "thesis",
-            }
-            # symbol_strategy_context.loss_position is explicitly false, but
-            # symbol_strategy_context.pnl_rate (and account_exposure.pnl_rate) is
-            # negative; the OR contract means is_loss_position() must still apply
-            # (loss/PnL detection itself is unchanged; only its use as a reduction
-            # precondition moved to decision_basis=thesis).
-            strategy_pnl_context = {
-                "price": {"current_or_last": 70000},
-                "holding_quantity_context": {"expected_holding_quantity": 10},
-                "symbol_strategy_context": {"loss_position": False, "pnl_rate": -4.2},
-            }
-            normalized, errors = pipeline.derive_judge_final_quantity(item, strategy_pnl_context)
-            self.assertEqual(errors, [])
-            self.assertIsNotNone(normalized)
-            self.assertEqual(normalized["target_position_value_krw"], 700000)
-            self.assertIn("protected_loss_gate", normalized)
-            self.assertEqual(normalized["protected_loss_gate"]["allowed"], False)
-
-            account_pnl_context = {
-                "price": {"current_or_last": 70000},
-                "holding_quantity_context": {"expected_holding_quantity": 10},
-                "symbol_strategy_context": {"loss_position": False},
-                "account_exposure": {"pnl_rate": -1.5},
-            }
-            normalized, errors = pipeline.derive_judge_final_quantity(item, account_pnl_context)
-            self.assertEqual(normalized["target_position_value_krw"], 700000)
-            self.assertIn("protected_loss_gate", normalized)
-            self.assertEqual(normalized["protected_loss_gate"]["allowed"], False)
-
-    def test_write_judge_review_persists_bootstrap_thesis_and_blocks_reduction(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            pipeline = self._make_pipeline(workspace, "bootstrap-write-run", started_at="2026-06-02T09:00:00+09:00")
-            write_json(
-                pipeline.output_dir / "judge-debate.json",
-                {"schema_version": "1", "stage": "judge-debate", "status": "success", "phases": []},
-            )
-            write_json(
-                pipeline.output_dir / "judge-review-spec.json",
-                {"review_scope_reasons": {"005930": "held_position"}, "symbol_ids": ["005930"]},
-            )
-            pipeline.write_judge_review(
-                {
-                    "stage": "judge-review",
-                    "parsed_json": {
-                        "stage": "judge-review",
-                        "symbols": [
-                            {
-                                "symbol_id": "005930",
-                                "symbol_name": "삼성전자",
-                                "target_position_value_krw": 350000,
-                                "price": {"current_or_last": 70000},
-                                "holding_quantity_context": {"expected_holding_quantity": 10},
-                                "symbol_strategy_context": {"loss_position": True},
-                                "relative_attractiveness_rank": 1,
-                                "reason_code": "reduce_on_thesis_damage",
-                                "one_line_reason": "margin compression confirmed",
-                                "decision_basis": "thesis",
-                                "thesis_assessment": {
-                                    "status": "damaged",
-                                    "matched_invalidation_condition_ids": ["margin-compression"],
-                                    "cited_argument_ids": ["005930-bear-opening-1"],
-                                },
-                            }
-                        ],
+            cases = [
+                (
+                    {
+                        "symbol_id": "005930",
+                        "target_position_value_krw": 210000,
+                        "decision_basis": "none",
+                        "reason_code": "reduce_target",
+                        "one_line_reason": "direct reduction",
+                        "thesis_assessment": {
+                            "status": "intact",
+                            "matched_invalidation_condition_ids": [],
+                        },
                     },
-                    "errors": [],
-                }
-            )
-            review = load_json_if_exists(pipeline.output_dir / "judge-review.json") or {}
-            symbol = (review.get("symbols") or [{}])[0]
-            self.assertEqual(symbol.get("target_position_value_krw"), 700000)
-            self.assertEqual(symbol.get("protected_loss_gate", {}).get("allowed"), False)
-            # The judge never supplied a thesis_definition, so nothing is synthesized
-            # or persisted, and the artifact must not claim bootstrap succeeded.
-            self.assertNotIn("thesis_definition", symbol)
-
-            # A later run still finds no valid prior thesis for this symbol.
-            later_pipeline = self._make_pipeline(workspace, "bootstrap-write-run-2", started_at="2026-06-03T09:00:00+09:00")
-            prior = later_pipeline.load_prior_thesis("005930")
-            self.assertIsNone(prior)
-
-    def test_write_judge_review_persists_valid_bootstrap_thesis_and_next_run_loads_it_as_prior(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            pipeline = self._make_pipeline(workspace, "valid-bootstrap-write-run", started_at="2026-06-02T09:00:00+09:00")
-            write_json(
-                pipeline.output_dir / "judge-debate.json",
-                {"schema_version": "1", "stage": "judge-debate", "status": "success", "phases": []},
-            )
-            write_json(
-                pipeline.output_dir / "judge-review-spec.json",
-                {"review_scope_reasons": {"000660": "held_position"}, "symbol_ids": ["000660"]},
-            )
-            pipeline.write_judge_review(
-                {
-                    "stage": "judge-review",
-                    "parsed_json": {
-                        "stage": "judge-review",
-                        "symbols": [
-                            {
-                                "symbol_id": "000660",
-                                "symbol_name": "SK하이닉스",
-                                "target_position_value_krw": 350000,
-                                "price": {"current_or_last": 70000},
-                                "holding_quantity_context": {"expected_holding_quantity": 10},
-                                "symbol_strategy_context": {"loss_position": True},
-                                "relative_attractiveness_rank": 1,
-                                "reason_code": "reduce_on_thesis_damage",
-                                "one_line_reason": "margin compression confirmed",
-                                "decision_basis": "thesis",
-                                "thesis_assessment": {
-                                    "status": "damaged",
-                                    "matched_invalidation_condition_ids": ["margin-compression"],
-                                    "cited_argument_ids": ["000660-bear-opening-1"],
-                                },
-                                "thesis_definition": {
-                                    "core_rationale": "memory cycle upside and cost leadership",
-                                    "invalidation_conditions": [
-                                        {"condition_id": "margin-compression", "description": "gross margin drops below prior guidance"}
-                                    ],
-                                },
-                            }
-                        ],
+                    210000,
+                    "reduce",
+                ),
+                (
+                    {
+                        "symbol_id": "005930",
+                        "target_position_value_krw": 840000,
+                        "decision_basis": "profit_protection",
+                        "reason_code": "increase_target",
+                        "one_line_reason": "direct increase",
                     },
-                    "errors": [],
-                }
-            )
-            review = load_json_if_exists(pipeline.output_dir / "judge-review.json") or {}
-            symbol = (review.get("symbols") or [{}])[0]
-            # No prior thesis existed yet this run, so the reduction is still held at
-            # baseline even though the judge supplied a genuinely valid definition.
-            self.assertEqual(symbol.get("target_position_value_krw"), 700000)
-            self.assertEqual(symbol.get("protected_loss_gate", {}).get("allowed"), False)
-            self.assertEqual(symbol.get("protected_loss_gate", {}).get("reason"), "no_prior_thesis")
-            self.assertEqual(
-                symbol.get("thesis_definition"),
-                {
-                    "defined_at_run_id": "valid-bootstrap-write-run",
-                    "core_rationale": "memory cycle upside and cost leadership",
-                    "invalidation_conditions": [
-                        {"condition_id": "margin-compression", "description": "gross margin drops below prior guidance"}
-                    ],
-                },
-            )
+                    840000,
+                    "increase",
+                ),
+            ]
+            for item, expected_target, expected_action in cases:
+                normalized, errors = pipeline.derive_judge_final_quantity(item, context)
+                self.assertEqual(errors, [])
+                self.assertEqual(normalized["target_position_value_krw"], expected_target)
+                self.assertEqual(normalized["canonical_action"], expected_action)
+                self.assertNotIn("decision_guard", normalized)
+                self.assertNotIn("protected_loss_gate", normalized)
 
-            # A later run now loads this bootstrap record as its immutable prior thesis.
-            later_pipeline = self._make_pipeline(workspace, "valid-bootstrap-write-run-2", started_at="2026-06-03T09:00:00+09:00")
-            prior = later_pipeline.load_prior_thesis("000660")
-            self.assertEqual(prior, symbol.get("thesis_definition"))
-
-    def test_protected_loss_thesis_gate_bootstraps_loss_position_buy_candidate_holding_baseline(self) -> None:
+    def test_increase_accepts_missing_or_malformed_thesis_definition(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
-            pipeline = self._make_pipeline(workspace, "buy-candidate-loss-bootstrap-run")
-            self.assertIsNone(pipeline.load_prior_thesis("005930"))
-
-            # A loss-position symbol that is a buy candidate (score-band precondition),
-            # holding exactly baseline. This is not a "sell" and not a reduction, but
-            # the bootstrap rule must still apply and a valid definition must persist.
-            item = {
-                "symbol_id": "005930",
-                "target_position_value_krw": 700000,
-                "reason_code": "hold_at_baseline",
-                "one_line_reason": "add conditions not yet satisfied",
-                "thesis_definition": {
-                    "core_rationale": "quality moat and pricing power",
-                    "invalidation_conditions": [
-                        {"condition_id": "margin-compression", "description": "gross margin drops below prior guidance"}
-                    ],
-                },
-            }
-            normalized, errors = pipeline.derive_judge_final_quantity(
-                item, self._loss_context()
-            )
-            self.assertEqual(errors, [])
-            self.assertIsNotNone(normalized)
-            self.assertEqual(normalized["target_position_value_krw"], 700000)
-            self.assertEqual(normalized["protected_loss_gate"], {"allowed": False, "reason": "no_prior_thesis"})
-            self.assertEqual(
-                normalized["thesis_definition"],
-                {
-                    "defined_at_run_id": "buy-candidate-loss-bootstrap-run",
-                    "core_rationale": "quality moat and pricing power",
-                    "invalidation_conditions": [
-                        {"condition_id": "margin-compression", "description": "gross margin drops below prior guidance"}
-                    ],
-                },
-            )
-
-            # Write it through the real artifact path and confirm a later run loads it as prior.
-            write_json(
-                pipeline.output_dir / "judge-review.json",
-                {
-                    "run_id": pipeline.run_id,
-                    "started_at": pipeline.started_at,
-                    "status": "success" if normalized else "partial",
-                    "symbols": [normalized],
-                },
-            )
-            later_pipeline = self._make_pipeline(workspace, "buy-candidate-loss-bootstrap-run-2", started_at="2026-06-03T09:00:00+09:00")
-            prior = later_pipeline.load_prior_thesis("005930")
-            self.assertEqual(prior, normalized["thesis_definition"])
-
-    def test_derive_judge_final_quantity_rejects_increase_with_missing_or_malformed_thesis_definition(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            pipeline = self._make_pipeline(workspace, "increase-missing-thesis-run")
+            pipeline = self._make_pipeline(workspace, "optional-thesis-run")
             context = {
                 "price": {"current_or_last": 70000},
                 "holding_quantity_context": {"expected_holding_quantity": 1},
-                "today_trade_timeline_context": {"collection_status": "complete", "has_same_day_buy": False},
             }
+            for thesis_definition in (
+                None,
+                {},
+                {"core_rationale": 123, "invalidation_conditions": []},
+            ):
+                item = {
+                    "symbol_id": "005930",
+                    "target_position_value_krw": 210000,
+                    "reason_code": "increase_target",
+                    "one_line_reason": "increase without a required thesis gate",
+                }
+                if thesis_definition is not None:
+                    item["thesis_definition"] = thesis_definition
+                normalized, errors = pipeline.derive_judge_final_quantity(item, context)
+                self.assertEqual(errors, [])
+                self.assertEqual(normalized["target_position_value_krw"], 210000)
+                self.assertEqual(normalized["canonical_action"], "increase")
+                self.assertNotIn("thesis_definition", normalized)
 
-            missing_item = {
-                "symbol_id": "005930",
-                "target_position_value_krw": 210000,
-                "decision_basis": "thesis",
-                "reason_code": "increase_target",
-                "one_line_reason": "increase without any thesis_definition",
-            }
-            normalized, errors = pipeline.derive_judge_final_quantity(missing_item, context)
-            self.assertIsNone(normalized)
-            self.assertTrue(any(error.get("code") == "missing_thesis_definition_for_increase" for error in errors))
-
-            empty_core_rationale_item = dict(
-                missing_item,
-                thesis_definition={
-                    "core_rationale": "   ",
-                    "invalidation_conditions": [{"condition_id": "cond-a", "description": "description a"}],
-                },
-            )
-            normalized, errors = pipeline.derive_judge_final_quantity(empty_core_rationale_item, context)
-            self.assertIsNone(normalized)
-            self.assertTrue(any(error.get("code") == "missing_thesis_definition_for_increase" for error in errors))
-
-            no_conditions_item = dict(
-                missing_item,
-                thesis_definition={"core_rationale": "valid rationale", "invalidation_conditions": []},
-            )
-            normalized, errors = pipeline.derive_judge_final_quantity(no_conditions_item, context)
-            self.assertIsNone(normalized)
-            self.assertTrue(any(error.get("code") == "missing_thesis_definition_for_increase" for error in errors))
-
-            malformed_condition_item = dict(
-                missing_item,
-                thesis_definition={
-                    "core_rationale": "valid rationale",
-                    "invalidation_conditions": [{"condition_id": "", "description": ""}],
-                },
-            )
-            normalized, errors = pipeline.derive_judge_final_quantity(malformed_condition_item, context)
-            self.assertIsNone(normalized)
-            self.assertTrue(any(error.get("code") == "missing_thesis_definition_for_increase" for error in errors))
-
-    def test_derive_judge_final_quantity_accepts_increase_with_valid_thesis_definition(self) -> None:
+    def test_valid_thesis_definition_is_sanitized_as_audit_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
-            pipeline = self._make_pipeline(workspace, "increase-valid-thesis-run")
+            pipeline = self._make_pipeline(workspace, "valid-thesis-audit-run")
             context = {
                 "price": {"current_or_last": 70000},
                 "holding_quantity_context": {"expected_holding_quantity": 1},
-                "today_trade_timeline_context": {"collection_status": "complete", "has_same_day_buy": False},
             }
             item = {
                 "symbol_id": "005930",
                 "target_position_value_krw": 210000,
                 "decision_basis": "thesis",
                 "reason_code": "increase_target",
-                "one_line_reason": "increase with a valid thesis_definition",
+                "one_line_reason": "increase with thesis context",
                 "thesis_definition": {
                     "core_rationale": "  quality moat and pricing power  ",
                     "invalidation_conditions": [
                         {"condition_id": "Margin Compression!", "description": "  gross margin drops below prior guidance  "},
                         {"condition_id": "Margin Compression!", "description": "duplicate condition_id is deduped"},
-                        {"condition_id": "", "description": "dropped: empty condition_id"},
                     ],
                 },
             }
             normalized, errors = pipeline.derive_judge_final_quantity(item, context)
             self.assertEqual(errors, [])
-            self.assertIsNotNone(normalized)
             self.assertEqual(normalized["target_position_value_krw"], 210000)
             self.assertEqual(
                 normalized["thesis_definition"],
                 {
-                    "defined_at_run_id": "increase-valid-thesis-run",
+                    "defined_at_run_id": "valid-thesis-audit-run",
                     "core_rationale": "quality moat and pricing power",
                     "invalidation_conditions": [
                         {"condition_id": "margin-compression", "description": "gross margin drops below prior guidance"}
                     ],
                 },
             )
-            self.assertNotIn("protected_loss_gate", normalized)
+            self.assertEqual(normalized["prior_thesis_context"], {"available": False})
 
     def test_load_prior_thesis_treats_naive_started_at_as_kst(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3242,64 +2351,6 @@ class RunDailyTradingPipelineSelfTest(unittest.TestCase):
             pipeline = self._make_pipeline(workspace, "numeric-fields-current-run")
             self.assertIsNone(pipeline.load_prior_thesis("005930"))
 
-    def test_derive_judge_final_quantity_rejects_increase_with_non_string_thesis_fields(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            pipeline = self._make_pipeline(workspace, "increase-non-string-thesis-run")
-            context = {
-                "price": {"current_or_last": 70000},
-                "holding_quantity_context": {"expected_holding_quantity": 1},
-                "today_trade_timeline_context": {"collection_status": "complete", "has_same_day_buy": False},
-            }
-            base_item = {
-                "symbol_id": "005930",
-                "target_position_value_krw": 210000,
-                "reason_code": "increase_target",
-                "one_line_reason": "increase with numeric/bool/object/list thesis fields",
-            }
-            numeric_item = dict(
-                base_item,
-                thesis_definition={
-                    "core_rationale": 1,
-                    "invalidation_conditions": [{"condition_id": 1, "description": 1}],
-                },
-            )
-            normalized, errors = pipeline.derive_judge_final_quantity(numeric_item, context)
-            self.assertIsNone(normalized)
-            self.assertTrue(any(error.get("code") == "missing_thesis_definition_for_increase" for error in errors))
-
-            bool_item = dict(
-                base_item,
-                thesis_definition={
-                    "core_rationale": True,
-                    "invalidation_conditions": [{"condition_id": True, "description": True}],
-                },
-            )
-            normalized, errors = pipeline.derive_judge_final_quantity(bool_item, context)
-            self.assertIsNone(normalized)
-            self.assertTrue(any(error.get("code") == "missing_thesis_definition_for_increase" for error in errors))
-
-            object_item = dict(
-                base_item,
-                thesis_definition={
-                    "core_rationale": {"text": "quality moat"},
-                    "invalidation_conditions": [{"condition_id": {"a": 1}, "description": {"b": 2}}],
-                },
-            )
-            normalized, errors = pipeline.derive_judge_final_quantity(object_item, context)
-            self.assertIsNone(normalized)
-            self.assertTrue(any(error.get("code") == "missing_thesis_definition_for_increase" for error in errors))
-
-            list_item = dict(
-                base_item,
-                thesis_definition={
-                    "core_rationale": ["quality", "moat"],
-                    "invalidation_conditions": [{"condition_id": ["a"], "description": ["b"]}],
-                },
-            )
-            normalized, errors = pipeline.derive_judge_final_quantity(list_item, context)
-            self.assertIsNone(normalized)
-            self.assertTrue(any(error.get("code") == "missing_thesis_definition_for_increase" for error in errors))
 
     def test_derive_judge_final_quantity_preserves_korean_condition_id_and_dedupes_after_normalization(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3399,214 +2450,6 @@ class RunDailyTradingPipelineSelfTest(unittest.TestCase):
             },
         )
 
-    def test_score_never_participates_high_score_can_reduce_low_score_can_increase(self) -> None:
-        """A high advisory final_first_score must not block a profit_protection reduction,
-        and a low advisory final_first_score must not block a thesis increase: the score is
-        advisory/reporting context only and never an order precondition."""
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            pipeline = self._make_pipeline(workspace, "score-independence-run")
-            reduce_item = {
-                "symbol_id": "005930",
-                "symbol_name": "삼성전자",
-                "final_first_score": 9.5,  # strongly positive advisory score
-                "target_position_value_krw": 490000,
-                "reason_code": "profit_taking",
-                "one_line_reason": "valuation stretched despite strong score",
-                "decision_basis": "profit_protection",
-            }
-            reduce_context = {
-                "final_first_score": 9.5,
-                "price": {"current_or_last": 70000},
-                "holding_quantity_context": {"expected_holding_quantity": 10},
-                "account_exposure": {"pnl_rate": 8.0},
-                "today_trade_timeline_context": {"collection_status": "complete", "has_same_day_buy": False, "has_same_day_sell": False},
-            }
-            normalized, errors = pipeline.derive_judge_final_quantity(reduce_item, reduce_context)
-            self.assertEqual(errors, [])
-            self.assertEqual(normalized["decision_guard"]["status"], "allowed")
-            self.assertEqual(normalized["canonical_action"], "reduce")
-
-            increase_item = {
-                "symbol_id": "000660",
-                "symbol_name": "SK하이닉스",
-                "final_first_score": 0.5,  # strongly negative advisory score
-                "target_position_value_krw": 140000,
-                "reason_code": "increase_target",
-                "one_line_reason": "add despite weak score",
-                "decision_basis": "thesis",
-                "thesis_definition": {
-                    "core_rationale": "cycle upside",
-                    "invalidation_conditions": [{"condition_id": "cycle-reversal", "description": "memory cycle reverses"}],
-                },
-            }
-            increase_context = {
-                "final_first_score": 0.5,
-                "price": {"current_or_last": 70000},
-                "holding_quantity_context": {"expected_holding_quantity": 1},
-                "today_trade_timeline_context": {"collection_status": "complete", "has_same_day_buy": False},
-            }
-            normalized2, errors2 = pipeline.derive_judge_final_quantity(increase_item, increase_context)
-            self.assertEqual(errors2, [])
-            self.assertEqual(normalized2["decision_guard"]["status"], "allowed")
-            self.assertEqual(normalized2["canonical_action"], "increase")
-
-    def test_concentration_rebalance_independent_of_thesis_allows_loss_position_partial_reduction(self) -> None:
-        """concentration_rebalance must not route through the thesis reduction gate: a loss
-        position with no prior thesis and no thesis_assessment must still be allowed a partial
-        reduction once its own complete-account/cap/turnover/same-day/lot guards pass, and it
-        must never fully exit."""
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            pipeline = self._make_pipeline(workspace, "concentration-loss-position-run", total_evaluation_amount=2_000_000)
-            item = {
-                "symbol_id": "005930",
-                "symbol_name": "삼성전자",
-                "target_position_value_krw": 0,  # judge requests full exit; must be capped, never granted
-                "reason_code": "trim_concentration",
-                "one_line_reason": "concentration above cap",
-                "decision_basis": "concentration_rebalance",
-            }
-            context = {
-                "price": {"current_or_last": 70000},
-                "holding_quantity_context": {"expected_holding_quantity": 10},
-                "symbol_strategy_context": {"loss_position": True, "pnl_rate": -6.0},
-                "account_exposure": {"valuation_amount": 400_000},  # 20% > 15% default cap
-                "today_trade_timeline_context": {"collection_status": "complete", "has_same_day_buy": False, "has_same_day_sell": False},
-            }
-            normalized, errors = pipeline.derive_judge_final_quantity(item, context)
-            self.assertEqual(errors, [])
-            self.assertNotIn("protected_loss_gate", normalized)
-            self.assertEqual(normalized["decision_guard"]["status"], "allowed")
-            self.assertEqual(normalized["decision_guard"]["basis"], "concentration_rebalance")
-            self.assertEqual(normalized["decision_guard"]["max_reduction_pct"], 25.0)
-            # Never a full exit: at least 1 share remains even though target requested 0.
-            self.assertGreaterEqual(normalized["final_holding_quantity"], 1)
-            self.assertLess(normalized["final_holding_quantity"], 10)
-
-    def test_one_share_holding_capped_reduction_becomes_no_change_not_allowed(self) -> None:
-        """S-Oil-style case: a 1-share holding's 25% profit_protection cap rounds down to 0
-        whole shares. This must canonicalize to no_change (or blocked), never an allowed order
-        at a fabricated non-zero reduction."""
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            pipeline = self._make_pipeline(workspace, "one-share-cap-run")
-            item = {
-                "symbol_id": "010950",
-                "symbol_name": "S-Oil",
-                "target_position_value_krw": 0,
-                "reason_code": "profit_taking",
-                "one_line_reason": "small profitable position",
-                "decision_basis": "profit_protection",
-            }
-            context = {
-                "price": {"current_or_last": 70000},
-                "holding_quantity_context": {"expected_holding_quantity": 1},
-                "account_exposure": {"pnl_rate": 3.0},
-                "today_trade_timeline_context": {"collection_status": "complete", "has_same_day_buy": False, "has_same_day_sell": False},
-            }
-            normalized, errors = pipeline.derive_judge_final_quantity(item, context)
-            self.assertEqual(errors, [])
-            self.assertIn(normalized["decision_guard"]["status"], {"no_change", "blocked"})
-            self.assertNotEqual(normalized["decision_guard"]["status"], "allowed")
-            self.assertEqual(normalized["final_holding_quantity"], 1)
-            self.assertEqual(normalized["canonical_action"], "hold")
-
-    def test_missing_today_fills_context_blocks_a_thesis_increase(self) -> None:
-        """An unseeded (missing/partial) today-fills/account turnover context must block a
-        changed target rather than silently allow it -- fail closed, not fail open."""
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            pipeline = self._make_pipeline(workspace, "missing-turnover-context-run")
-            # Deliberately clear the seeded turnover context to simulate a missing/partial artifact.
-            pipeline.account_before_order_cache = {}
-            pipeline.today_fills_cache = {}
-            item = {
-                "symbol_id": "005930",
-                "symbol_name": "삼성전자",
-                "target_position_value_krw": 140000,
-                "reason_code": "increase_target",
-                "one_line_reason": "add on strength",
-                "decision_basis": "thesis",
-                "thesis_definition": {
-                    "core_rationale": "quality moat",
-                    "invalidation_conditions": [{"condition_id": "margin-compression", "description": "gross margin drops"}],
-                },
-            }
-            context = {
-                "price": {"current_or_last": 70000},
-                "holding_quantity_context": {"expected_holding_quantity": 1},
-                "today_trade_timeline_context": {"collection_status": "complete", "has_same_day_buy": False},
-            }
-            normalized, errors = pipeline.derive_judge_final_quantity(item, context)
-            self.assertEqual(errors, [])
-            self.assertEqual(normalized["decision_guard"]["status"], "blocked")
-            self.assertEqual(normalized["decision_guard"]["reason_code"], "daily_turnover_context_unavailable")
-            self.assertEqual(normalized["target_position_value_krw"], 70000)
-
-            # Partial today-fills (wrong run_id) must block identically to fully missing.
-            pipeline.account_before_order_cache = {
-                "run_id": pipeline.run_id,
-                "status": "success",
-                "skipped": False,
-                "symbols": [],
-                "account_summary": {"total_evaluation_amount": 100_000_000},
-            }
-            pipeline.today_fills_cache = {
-                "run_id": "some-other-run",
-                "status": "success",
-                "skipped": False,
-                "fill_scope": "account",
-                "fills": [],
-            }
-            normalized2, errors2 = pipeline.derive_judge_final_quantity(item, context)
-            self.assertEqual(errors2, [])
-            self.assertEqual(normalized2["decision_guard"]["status"], "blocked")
-            self.assertEqual(normalized2["decision_guard"]["reason_code"], "daily_turnover_context_unavailable")
-
-    def test_turnover_cap_uses_orderable_whole_share_value(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            pipeline = self._make_pipeline(
-                workspace,
-                "whole-share-turnover-run",
-                total_evaluation_amount=500_000,
-            )
-            normalized, errors = pipeline.derive_judge_final_quantity(
-                {
-                    "symbol_id": "005930",
-                    "target_position_value_krw": 35_001,
-                    "decision_basis": "thesis",
-                    "reason_code": "increase_target",
-                    "one_line_reason": "one-share entry",
-                    "thesis_definition": {
-                        "core_rationale": "quality moat",
-                        "invalidation_conditions": [
-                            {
-                                "condition_id": "margin-compression",
-                                "description": "gross margin drops below guidance",
-                            }
-                        ],
-                    },
-                },
-                {
-                    "price": {"current_or_last": 70_000},
-                    "holding_quantity_context": {"expected_holding_quantity": 0},
-                    "today_trade_timeline_context": {
-                        "collection_status": "complete",
-                        "has_same_day_buy": False,
-                    },
-                },
-            )
-            self.assertEqual(errors, [])
-            self.assertIsNotNone(normalized)
-            self.assertEqual(normalized["requested_target_position_value_krw"], 35_001)
-            self.assertEqual(normalized["target_position_value_krw"], 0)
-            self.assertEqual(
-                normalized["decision_guard"].get("reason_code"),
-                "daily_turnover_cap_exceeded",
-            )
-            self.assertNotIn("thesis_definition", normalized)
 
     def test_sub_share_target_change_is_canonical_no_change(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3642,17 +2485,10 @@ class RunDailyTradingPipelineSelfTest(unittest.TestCase):
             self.assertEqual(errors, [])
             self.assertIsNotNone(normalized)
             self.assertEqual(normalized["target_position_value_krw"], 700_000)
-            self.assertEqual(normalized["decision_basis"], "none")
+            self.assertEqual(normalized["decision_basis"], "thesis")
             self.assertEqual(normalized["canonical_action"], "hold")
-            self.assertEqual(
-                normalized["decision_guard"],
-                {
-                    "status": "no_change",
-                    "reason_code": "target_rounds_to_baseline_quantity",
-                },
-            )
-            self.assertEqual(pipeline.turnover_used_value, 0.0)
-            self.assertNotIn("thesis_definition", normalized)
+            self.assertNotIn("decision_guard", normalized)
+            self.assertIn("thesis_definition", normalized)
 
 
 class FinalReviewReportRefreshTest(unittest.TestCase):

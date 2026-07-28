@@ -780,6 +780,8 @@ def step_second_spec_checks(tmp: Path, run_dir: Path) -> list[str]:
             )
 
         second_spec = build_second_spec(second_spec_args(str(run_dir / "analyst-review.json"), "judge-review-spec.json"))
+        if second_spec.get("review_contract_version") != 3:
+            failures.append(f"judge spec must use review contract version 3: {second_spec}")
         if second_spec["symbol_ids"] != ["000660", "005930"]:
             failures.append(f"unexpected second spec symbols: {second_spec}")
         if second_spec.get("review_scope_reasons") != {"005930": "held_position", "000660": "unheld_score_rank"}:
@@ -791,15 +793,8 @@ def step_second_spec_checks(tmp: Path, run_dir: Path) -> list[str]:
             failures.append(f"portfolio snapshot should describe every holding without a candidate_direction: {second_spec}")
         if str(second_spec.get("artifact_paths", {}).get("review_format", "")).rsplit("/", 1)[-1] != "judge-review-format.md":
             failures.append(f"judge spec should reference judge-review-format.md: {second_spec}")
-        for debate_key, debate_file in (("debate_bull_persona", "debate-bull.md"), ("debate_bear_persona", "debate-bear.md")):
-            debate_path = str(second_spec.get("artifact_paths", {}).get(debate_key, ""))
-            if debate_path.rsplit("/", 1)[-1] != debate_file or not Path(debate_path).is_file():
-                failures.append(f"judge spec missing readable {debate_key}: {second_spec}")
-        debate_format_path = str(second_spec.get("artifact_paths", {}).get("debate_format", ""))
-        if debate_format_path.rsplit("/", 1)[-1] != "debate-format.md" or not Path(debate_format_path).is_file():
-            failures.append(f"judge spec missing readable debate_format: {second_spec}")
-        if str(second_spec.get("artifact_paths", {}).get("debate_artifact", "")) != str(run_dir / "judge-debate.json"):
-            failures.append(f"judge spec missing deterministic debate_artifact path: {second_spec}")
+        if any(key.startswith("debate") for key in second_spec.get("artifact_paths", {})):
+            failures.append(f"judge spec must not reference removed standalone debate artifacts: {second_spec}")
 
         # A held symbol must stay in scope even with a low/mid/missing score: no score band gates it out.
         held_low_score_review = load_json(run_dir / "analyst-review.json")

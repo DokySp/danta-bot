@@ -2,7 +2,7 @@
 """Deterministic broker-preflight review policy for scheduled daily-trading runs.
 
 Decides whether a scheduled daily-trading invocation must run the expensive
-full review (universe evidence, Analyst, Debate, Judge, execution) or may end
+full review (universe evidence, Analyst, Judge, execution) or may end
 after a cheap broker preflight. See containers/codex-exec/profiles/base/config/
 daily-trading-full-review-times.yaml for the fixed KST review-time schedule.
 """

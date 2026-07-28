@@ -2,7 +2,7 @@
 """Integration tests for the scheduled daily-trading broker-preflight gate.
 
 Proves the deterministic contract wired into Pipeline: a safety_block ends
-the run before any full-review stage (decision-brief/Analyst/Debate/Judge/
+the run before any full-review stage (decision-brief/Analyst/Judge/
 execution-plan) and is reported as a completed-but-partial (non-failed) run;
 a due fixed-review-time slot forces a full review while an already-satisfied
 non-fixed-time invocation with an unchanged broker fingerprint ends after

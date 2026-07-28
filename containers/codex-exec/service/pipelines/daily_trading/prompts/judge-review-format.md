@@ -4,7 +4,7 @@
 
 Review agents use only supplied immutable artifacts, persona text, and this format. They may use read-only local shell commands such as `cat` and `jq` only for explicitly listed artifact/persona/rule files. They must not call KIS, MCP, web, network, account/order APIs, or external data sources; read unrelated files; recollect; write files; or write canonical artifacts.
 
-Debate boundary: the Python pipeline runs persistent bull/bear sessions before judge-review and supplies one normalized `debate_artifact`. The judge must not spawn or resume debate agents, request another round, or include debate transcripts in the returned JSON.
+Opposing-view boundary: judge-review does its own bounded internal comparison of the strongest exposure-increase/maintain case and the strongest exposure-reduce/avoid case per symbol (see `opposing_view` below). The judge must not spawn or resume a separate debate agent, request another round, or include long transcripts in the returned JSON.
 
 Review agents return compact JSON only. They must not emit Markdown, diffs, code fences, long prose, raw artifact excerpts, or raw source payloads. `human_markdown_path` is informational only; the Main agent creates one human-review Markdown sidecar from parsed JSON:
 
@@ -61,9 +61,18 @@ Return JSON:
       "target_position_value_krw": 560000,
       "relative_attractiveness_rank": 1,
       "decision_basis": "none",
-      "evidence_refs": ["analyst-review:005930:analyst-quality-value"],
       "reason_code": "hold_final_quantity",
       "one_line_reason": "기준금액 수준의 목표금액을 유지한다.",
+      "opposing_view": {
+        "increase_case": {
+          "summary": "quality moat and pricing power support maintaining exposure",
+          "evidence_refs": ["analyst-review:005930:analyst-quality-value"]
+        },
+        "reduce_case": {
+          "summary": "margin compression risk flagged by momentum/news view",
+          "evidence_refs": ["analyst-review:005930:analyst-news-flow"]
+        }
+      },
       "thesis_definition": {
         "core_rationale": "quality moat and pricing power",
         "invalidation_conditions": [
@@ -72,8 +81,7 @@ Return JSON:
       },
       "thesis_assessment": {
         "status": "damaged",
-        "matched_invalidation_condition_ids": ["margin-compression"],
-        "cited_argument_ids": ["005930-bear-opening-1"]
+        "matched_invalidation_condition_ids": ["margin-compression"]
       }
     }
   ],
@@ -81,7 +89,7 @@ Return JSON:
 }
 ```
 
-`thesis_definition` and `thesis_assessment` are optional per symbol and used only as described below.
+`decision_basis`, `thesis_definition`, and `thesis_assessment` are optional audit fields per symbol. `opposing_view` is required for every symbol.
 
 Rules:
 
@@ -89,10 +97,10 @@ Rules:
 - `target_position_value_krw` must be numeric and non-negative. `0` is valid when the rationale explicitly says reduce-to-zero or exit.
 - `final_holding_quantity` is optional in judge output and is not the judge's sizing decision. Main/pipeline derives it from `target_position_value_krw / price.current_or_last` using Decimal `ROUND_HALF_UP`.
 - Use each symbol's `holding_quantity_context.expected_holding_quantity * price.current_or_last` as the explicit baseline position value.
-- `decision_basis` is required: `none` (target equals baseline), `thesis` (thesis-supported increase or reduction), `profit_protection` (positive-PnL protective reduction), or `concentration_rebalance` (reduction of excess concentration only). There is no direction precondition on which symbols may propose an increase or a decrease; Main/pipeline mechanically re-verifies every non-`none` `decision_basis` against its own fail-closed rules (see judge.md and pipeline validation) and clamps the request back to baseline with an auditable `decision_guard` when the mechanical conditions are not met. A `decision_basis`/`reason_code`/`one_line_reason` value is never itself authorization.
-- `evidence_refs` is required: a compact string list citing the analyst-review view ids, debate argument ids, or other supplied artifact fields that support this target. Do not cite optional-evidence absence as a ref.
+- `decision_basis` is an optional audit label: `none` (target equals baseline), `thesis`, `profit_protection`, or `concentration_rebalance`. It explains the target but does not authorize or block it.
+- `opposing_view` is required: `increase_case` and `reduce_case`, each with a short `summary` and its own `evidence_refs` drawn only from supplied usable evidence. This is the bounded, auditable record of the internal comparison that replaced the standalone bull/bear debate; the resolved decision is already represented by `target_position_value_krw`, so do not add a second action, resolution, confidence, transcript, or hidden reasoning field.
 - "No additional buy", "no extra exposure", or "추가 확대 없음" is a hold rationale: keep `target_position_value_krw` at the baseline level, use `decision_basis="none"`, and do not set it to `0`.
-- If `today_trade_timeline_context` confirms a same-day buy, or its `collection_status` is `partial`/`unavailable` so same-day buy history is unknown, `target_position_value_krw` may exceed the baseline only when `additional_buy_reason` supplies new evidence or materially changed price/portfolio context supporting the increase. Missing history alone is never the reason.
+- When increasing after a same-day buy, `additional_buy_reason` may record the new evidence or changed price/portfolio context. It is optional audit text, not an authorization field.
 - Treat an empty `recent_trade_context.recent_submitted_trades` list as confirmed absence only when `coverage_status=complete`; with `partial`/`unavailable` coverage, recent trade history is unknown and its absence is non-directional.
 - `reason_code` and `one_line_reason` must describe the same reduce/hold/increase direction implied by `target_position_value_krw` versus the baseline.
 - Consider relative attractiveness, duplicate exposure, current weight, price/chart conditions, `portfolio_snapshot`, and the supplied selected-symbol analyst-review results that contain usable evidence.
@@ -100,30 +108,27 @@ Rules:
 - Optional evidence marked `missing`, `failed`, `empty`, `unavailable`, or `excluded_from_aggregation` is non-directional. Do not use its absence to justify hold, reduce, or increase decisions, and do not cite it as decisive evidence in `reason_code` or `one_line_reason`.
 - Do not use optional-domain coverage counts or completeness to decide whether the supplied usable evidence is sufficient. Judge sufficiency from the directional strength and conflict of the usable evidence that is actually supplied.
 - If a held symbol's analyst-review score is missing, unavailable, or unusable, keep it in scope and treat the score absence as non-directional. Judge from the other supplied usable evidence; the missing score alone must neither force baseline nor support an increase or reduction.
-- For a held symbol with a low score, distinguish `long_term_thesis_intact` from thesis damage using supplied usable evidence: supported intact thesis favors holding despite the low score; reduce or exit when thesis damage, material adverse news/disclosure, or structural deterioration is supported by supplied evidence. Lack of damage evidence alone does not establish an intact thesis.
+- For a held symbol with a low score, assess thesis integrity from supplied usable evidence. An intact thesis is one positive input and thesis damage is one negative input, but thesis damage is not required for reduction: relative attractiveness, concentration, profit/loss risk, opportunity cost, or a stronger alternative may independently support reducing or exiting. Lack of damage evidence alone neither establishes an intact thesis nor forces a hold.
 - Judge long-term thesis from supplied evidence only: core investment rationale, material news/disclosure risk, quality/value deterioration, whether a price shock indicates structural damage or short-term volatility, and portfolio weight/concentration.
 - Propose an increase for any supplied symbol only when add conditions are satisfied: quality/value advantage, acceptable risk/allocation, and weight/concentration room. Apply material adverse news/disclosure only when usable news/disclosure evidence is supplied; unavailable news is neutral rather than favorable or adverse. Otherwise hold at the baseline.
-- When the supplied usable evidence itself is insufficient or conflicting, the default decision is hold at the baseline without citing optional evidence absence as the decision reason.
+- Conflict alone is not a hold rule. Compare materiality, freshness, source quality, and portfolio impact, then set the target change magnitude in proportion to the supported net advantage. Hold only when neither case has enough supported net advantage to justify a change, without citing optional evidence absence as the reason.
 - No fixed cash ratio or fixed investment ratio.
 - The judge cannot add symbols outside the supplied review scope.
 - Do not return long `cash_rationale`, `duplicate_exposure_limits`, `price_chart_view`, `rationale`, `risks`, or prose arrays.
 
-### Position-thesis fields (protected-loss reductions)
+### Position-thesis fields (audit context)
 
-- Each symbol's `review-core` input carries `prior_thesis_context`: `status` (`available`/`no_prior_thesis`) and, when available, a `thesis_definition` (`core_rationale`, `invalidation_conditions[]` with `condition_id`/`description`) recorded by an earlier successful run. Those prior conditions are immutable for evaluating a reduction in the current run: a newly returned definition cannot be applied retroactively to that assessment. A valid definition returned for an actual buy/increase becomes the successor prior for later runs. When `prior_thesis_context.status` is `no_prior_thesis`, a definition or assessment newly produced in the current run can never authorize that same run's reduction. When a valid prior exists, the current run's `thesis_assessment` is exactly the semantic input that may authorize a reduction, once matched against the prior's `invalidation_conditions` and verified against `debate_artifact` (see Validation by Main agent below).
+- Each symbol's `review-core` input carries `prior_thesis_context`: `status` (`available`/`no_prior_thesis`) and, when available, a prior `thesis_definition`. Use it as decision context; it does not mechanically authorize or block a target change.
 - `thesis_definition` is valid only when `core_rationale` is non-empty and at least one `invalidation_conditions[]` entry has both a non-empty `condition_id` and a non-empty `description`. An empty, missing, or otherwise malformed `thesis_definition` is never treated as valid.
-- When you decide to buy or increase `target_position_value_krw` above baseline, return a valid `thesis_definition` so a later run has explicit invalidation criteria to assess against. Main/pipeline mechanically rejects the increase (no order, no updated target) when a valid `thesis_definition` is missing or malformed for that symbol.
-- For any held symbol whose `symbol_strategy_context.loss_position` is `true` (or `pnl_rate < 0`), always return `thesis_assessment`: `status` (`intact`/`damaged`/`uncertain`), `matched_invalidation_condition_ids[]`, and `cited_argument_ids[]` (decisive `debate_artifact` argument ids). Price loss, index/regime panic, a low score, or missing optional evidence alone never justify `status: damaged`. This applies regardless of whether the proposed target is above, below, or equal to baseline.
-- When `prior_thesis_context.status` is `no_prior_thesis` for such a held loss position, also return a valid `thesis_definition` even though the decision is to hold at baseline (or a reduction gets blocked): this bootstraps a real prior for a future run. Main/pipeline never invents this definition; an invalid/missing one is simply not persisted, and the next run still sees `no_prior_thesis`.
+- Return `thesis_definition` when an explicit core rationale and invalidation criteria improve future review context. Main/pipeline persists only a valid structure and otherwise ignores it without changing the target.
+- Return `thesis_assessment` when the prior thesis materially affects the decision. Price loss, index/regime panic, a low score, or missing optional evidence alone never justify `status: damaged`.
 
 Validation by Main agent:
 
-- Main/pipeline preserves the judge's raw `requested_target_position_value_krw` and derives a canonical `target_position_value_krw` after mechanically validating `decision_basis` against its fail-closed rules; a disallowed request is clamped to baseline with an auditable `decision_guard` (status `blocked`) instead of being rejected outright or silently dropped.
+- Main/pipeline preserves the judge's raw `requested_target_position_value_krw` and normalizes `target_position_value_krw` only to a whole-share quantity at the supplied price.
 - Main/pipeline derives canonical `final_holding_quantity` values from the canonical `target_position_value_krw / price.current_or_last` using Decimal `ROUND_HALF_UP`.
 - Symbols outside the supplied review scope are dropped with an error and produce no order.
 - If the valid judge result is missing a target position value for a symbol, set no final holding quantity and exclude it from orders.
 - Do not reduce buy-side quantities solely because rounded target shares exceed `target_position_value_krw`; affordability and order availability are handled by existing account/order gates.
-- For any held symbol, at any pnl_rate, a `decision_basis=thesis` reduction below baseline is only accepted when `thesis_assessment.status` is `damaged`, `matched_invalidation_condition_ids` reference condition ids that already exist in the immutable prior `thesis_definition`, and `cited_argument_ids` reference argument ids that already exist in `judge-debate.json` for that symbol; otherwise Main/pipeline forces `target_position_value_krw` back to baseline and records `protected_loss_gate`. A symbol with no prior `thesis_definition` is bootstrapped the same way, at or below baseline: this run's own assessment cannot both define and invalidate the thesis, and only a valid judge-supplied `thesis_definition` is persisted (never a synthesized placeholder).
-- A buy/increase (`target_position_value_krw` above baseline) with a missing or malformed `thesis_definition` is rejected: Main/pipeline records an error and produces no order for that symbol instead of executing the increase.
 - If derived final holdings are below assets, leave the remainder as residual cash. Do not create, report, or optimize toward a cash target value.
-- Preserve existing account/order execution checks such as orderable cash, active orders, same-day context, order validity, and market open checks.
+- Preserve existing broker/order execution checks such as explicit submit authorization, orderable cash, holdings and sell capacity, active orders, order validity, and market open checks.

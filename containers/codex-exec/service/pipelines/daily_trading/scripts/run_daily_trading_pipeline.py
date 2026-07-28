@@ -40,9 +40,6 @@ ANALYST_REVIEW_ROLES = (
     "analyst-quality-risk",
     "analyst-momentum-news",
 )
-DEBATE_SIDES = ("bull", "bear")
-DEBATE_PHASES = ("opening", "rebuttal-1")
-DEBATE_MAX_ATTEMPTS = 2
 COMMAND_OUTPUT_LIMIT = 2000
 ORDER_PATH_AUTO = "auto"
 REGULAR_ORDER_START_MINUTE = 9 * 60
@@ -173,46 +170,6 @@ def load_yaml_if_exists(path: Path) -> Any | None:
             return yaml.safe_load(handle)
     except Exception:
         return None
-
-
-def load_execution_guards_config(path: Path) -> dict[str, Any]:
-    """Strict, fail-closed load of the execution_guards section from the strategy policy config.
-
-    The config file is required (build_run_artifacts.py's validate_strategy_policy_config
-    already enforces this for the same file). A missing/malformed execution_guards
-    section here must raise rather than silently substitute a default, since that
-    default would silently alter production policy instead of surfacing the error.
-    """
-    if not path.exists():
-        raise FileNotFoundError(f"strategy policy config not found: {path}")
-    try:
-        import yaml  # type: ignore[import-not-found]
-    except Exception as exc:  # pragma: no cover - depends on runtime image
-        raise RuntimeError(f"PyYAML is required to read {path}") from exc
-    try:
-        payload = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        raise ValueError(f"failed to parse YAML: {path}") from exc
-    if not isinstance(payload, dict):
-        raise ValueError(f"strategy policy config must be an object: {path}")
-    guards = payload.get("execution_guards")
-    if not isinstance(guards, dict):
-        raise ValueError(f"strategy policy execution_guards must be an object: {path}")
-    top_k = guards.get("unheld_review_top_k")
-    if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 0:
-        raise ValueError(f"strategy policy execution_guards.unheld_review_top_k must be a non-negative integer: {path}")
-    result: dict[str, Any] = {"unheld_review_top_k": top_k}
-    for key in (
-        "profit_protection_max_reduction_pct",
-        "concentration_rebalance_cap_pct",
-        "concentration_rebalance_max_reduction_pct",
-        "max_daily_turnover_pct",
-    ):
-        value = guards.get(key)
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not (0 < float(value) <= 100):
-            raise ValueError(f"strategy policy execution_guards.{key} must be a number in (0, 100]: {path}")
-        result[key] = float(value)
-    return result
 
 
 def resolve_workspace_path(workspace_dir: Path, path_text: str | Path) -> Path:
@@ -507,64 +464,6 @@ def thesis_definition_is_valid(thesis: Any) -> bool:
     return False
 
 
-def debate_argument_ids_for_symbol(judge_debate: dict[str, Any], symbol_id: str) -> set[str]:
-    """Collect argument_id values actually present in judge-debate.json for symbol_id.
-
-    This is the verifiable evidence set: a thesis_assessment cannot cite an
-    argument_id that was never returned by the persisted bull/bear debate.
-    """
-    ids: set[str] = set()
-    if not isinstance(judge_debate, dict) or not symbol_id:
-        return ids
-    phases = judge_debate.get("phases") if isinstance(judge_debate.get("phases"), list) else []
-    for phase in phases:
-        sides = phase.get("sides") if isinstance(phase, dict) and isinstance(phase.get("sides"), dict) else {}
-        for side in sides.values():
-            output = side.get("output") if isinstance(side, dict) else None
-            symbols = output.get("symbols") if isinstance(output, dict) else None
-            if not isinstance(symbols, list):
-                continue
-            for entry in symbols:
-                if not isinstance(entry, dict) or symbol_key(entry) != symbol_id:
-                    continue
-                for argument in entry.get("arguments") or []:
-                    if isinstance(argument, dict):
-                        argument_id = str(argument.get("argument_id") or "").strip()
-                        if argument_id:
-                            ids.add(argument_id)
-    return ids
-
-
-def compact_opening_context(payload: Any) -> dict[str, Any]:
-    source = payload if isinstance(payload, dict) else {}
-    symbols: list[dict[str, Any]] = []
-    for item in source.get("symbols") if isinstance(source.get("symbols"), list) else []:
-        if not isinstance(item, dict) or not symbol_key(item):
-            continue
-        arguments = item.get("arguments") if isinstance(item.get("arguments"), list) else []
-        symbols.append(
-            {
-                "symbol_id": symbol_key(item),
-                "arguments": [
-                    {
-                        "argument_id": str(argument.get("argument_id") or ""),
-                        "statement": str(argument.get("statement") or ""),
-                        "evidence_refs": list(argument.get("evidence_refs") or []),
-                    }
-                    for argument in arguments
-                    if isinstance(argument, dict)
-                ],
-                "concessions": list(item.get("concessions") or []),
-                "final_position": str(item.get("final_position") or ""),
-            }
-        )
-    return {
-        "phase": "opening",
-        "side": str(source.get("side") or ""),
-        "symbols": symbols,
-    }
-
-
 def cache_symbol_has_content(value: Any) -> bool:
     if isinstance(value, dict):
         if not value:
@@ -775,10 +674,6 @@ class Pipeline:
             self.repo_root,
             str(getattr(args, "strategy_policy_config", "") or ""),
         )
-        self.execution_guards = load_execution_guards_config(self.strategy_policy_config_path)
-        self.account_before_order_cache: dict[str, Any] = {}
-        self.today_fills_cache: dict[str, Any] = {}
-        self.turnover_used_value: float = 0.0
         self.order_path_requested = str(getattr(args, "order_path", ORDER_PATH_AUTO) or ORDER_PATH_AUTO)
         try:
             self.order_path, self.order_path_reason = resolve_order_path(self.order_path_requested, self.started_at)
@@ -1881,308 +1776,6 @@ class Pipeline:
             path=self.command_log_path,
         )
 
-    def build_debate_turn_spec(
-        self,
-        judge_spec: dict[str, Any],
-        *,
-        side: str,
-        phase: str,
-        attempt: int,
-        session_id: str = "",
-        opponent_opening: dict[str, Any] | None = None,
-        retry_of_task_name: str = "",
-    ) -> dict[str, Any]:
-        judge_artifacts = judge_spec.get("artifact_paths") if isinstance(judge_spec.get("artifact_paths"), dict) else {}
-        persona_key = f"debate_{side}_persona"
-        artifacts = {
-            "persona": str(judge_artifacts.get(persona_key) or ""),
-            "debate_format": str(judge_artifacts.get("debate_format") or ""),
-        }
-        if phase == "opening":
-            artifacts.update(
-                {
-                    "decision_brief": str(judge_artifacts.get("decision_brief") or ""),
-                    "analyst_review": str(judge_artifacts.get("analyst_review") or ""),
-                }
-            )
-        else:
-            artifacts.update(
-                {
-                    "opponent_opening": str((opponent_opening or {}).get("compact_output_path") or ""),
-                }
-            )
-        task_name = f"judge-debate-{side}-{phase}-attempt-{attempt:02d}"
-        spec: dict[str, Any] = {
-            "run_id": self.run_id,
-            "started_at": self.started_at,
-            "stage": "judge-debate",
-            "agent_role": f"debate-{side}",
-            "task_name": task_name,
-            "debate_phase": phase,
-            "workspace_dir": str(self.workspace_dir),
-            "output_dir": str(self.output_dir),
-            "artifact_paths": artifacts,
-            "symbol_ids": normalize_symbol_ids(judge_spec.get("symbol_ids")),
-            "review_contract_version": judge_spec.get("review_contract_version"),
-            "review_scope_reasons": dict(judge_spec.get("review_scope_reasons") or {}),
-            "portfolio_snapshot": list(judge_spec.get("portfolio_snapshot") or []),
-        }
-        if session_id:
-            spec["resume_session_id"] = session_id
-        if retry_of_task_name:
-            spec["retry_of_task_name"] = retry_of_task_name
-        if isinstance(judge_spec.get("extra_instructions"), list) and judge_spec["extra_instructions"]:
-            spec["extra_instructions"] = list(judge_spec["extra_instructions"])
-        return spec
-
-    def debate_wrapper_summary(self, wrapper: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "status": str(wrapper.get("status") or "failed"),
-            "task_name": str(wrapper.get("task_name") or ""),
-            "agent_role": str(wrapper.get("agent_role") or ""),
-            "debate_phase": str(wrapper.get("debate_phase") or ""),
-            "session_id": str(wrapper.get("session_id") or ""),
-            "resume_session_id": str(wrapper.get("resume_session_id") or ""),
-            "reported_session_id": str(wrapper.get("reported_session_id") or ""),
-            "wrapper_path": str(wrapper.get("wrapper_path") or ""),
-            "raw_output_path": str(wrapper.get("raw_output_path") or ""),
-            "compact_output_path": str(wrapper.get("compact_output_path") or ""),
-            "event_log_path": str(wrapper.get("event_log_path") or ""),
-            "event_log_retained": bool(wrapper.get("event_log_retained")),
-            "spec_fingerprint": str(wrapper.get("spec_fingerprint") or ""),
-            "debate_decision_issues": (
-                wrapper.get("debate_decision_issues")
-                if isinstance(wrapper.get("debate_decision_issues"), list)
-                else []
-            ),
-            "debate_final_decision_ready": bool(wrapper.get("debate_final_decision_ready")),
-            "errors": wrapper.get("errors") if isinstance(wrapper.get("errors"), list) else [],
-        }
-
-    def run_debate_phase(
-        self,
-        judge_spec: dict[str, Any],
-        *,
-        phase: str,
-        session_ids: dict[str, str],
-        previous_wrappers: dict[str, dict[str, Any]],
-    ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
-        successful: dict[str, dict[str, Any]] = {}
-        latest: dict[str, dict[str, Any]] = {}
-        attempt_history: dict[str, list[dict[str, Any]]] = {side: [] for side in DEBATE_SIDES}
-        retry_of: dict[str, str] = {}
-
-        for attempt in range(1, DEBATE_MAX_ATTEMPTS + 1):
-            pending = [side for side in DEBATE_SIDES if side not in successful]
-            if not pending:
-                break
-            specs: list[dict[str, Any]] = []
-            for side in pending:
-                opponent = "bear" if side == "bull" else "bull"
-                specs.append(
-                    self.build_debate_turn_spec(
-                        judge_spec,
-                        side=side,
-                        phase=phase,
-                        attempt=attempt,
-                        session_id=session_ids.get(side, ""),
-                        opponent_opening=previous_wrappers.get(opponent),
-                        retry_of_task_name=retry_of.get(side, ""),
-                    )
-                )
-            specs_path = self.output_dir / "debate" / f"{phase}.attempt-{attempt:02d}.specs.json"
-            write_json(
-                specs_path,
-                {
-                    "schema_version": "1",
-                    "run_id": self.run_id,
-                    "phase": phase,
-                    "attempt": attempt,
-                    "specs": specs,
-                },
-            )
-            result = self.run_cmd(
-                f"judge-debate-{phase}-attempt-{attempt:02d}",
-                [
-                    sys.executable,
-                    self.subagent_script(),
-                    "run-group",
-                    "--spec",
-                    str(specs_path),
-                    "--max-workers",
-                    str(min(2, max(1, self.args.max_workers))),
-                ],
-                required=False,
-            )
-            try:
-                group = json.loads(result.stdout)
-            except json.JSONDecodeError:
-                group = {}
-            wrappers = group.get("wrappers") if isinstance(group.get("wrappers"), list) else []
-            wrappers_by_side = {
-                str(wrapper.get("agent_role") or "").removeprefix("debate-"): wrapper
-                for wrapper in wrappers
-                if isinstance(wrapper, dict)
-            }
-            for side in pending:
-                wrapper = wrappers_by_side.get(side) or {
-                    "status": "failed",
-                    "stage": "judge-debate",
-                    "agent_role": f"debate-{side}",
-                    "task_name": f"judge-debate-{side}-{phase}-attempt-{attempt:02d}",
-                    "debate_phase": phase,
-                    "errors": [
-                        {
-                            "code": "missing_debate_wrapper",
-                            "message": f"{side} {phase} did not return a wrapper",
-                        }
-                    ],
-                }
-                latest[side] = wrapper
-                attempt_history[side].append(self.debate_wrapper_summary(wrapper))
-                returned_session_id = str(wrapper.get("session_id") or "").strip()
-                current_session_id = session_ids.get(side, "")
-                if returned_session_id and (not current_session_id or returned_session_id == current_session_id):
-                    session_ids[side] = returned_session_id
-                if wrapper.get("status") == "success" and returned_session_id:
-                    successful[side] = wrapper
-                else:
-                    retry_of[side] = str(wrapper.get("task_name") or "")
-
-        missing = [side for side in DEBATE_SIDES if side not in successful]
-        errors: list[dict[str, Any]] = []
-        for side in missing:
-            errors.append(
-                {
-                    "stage": "judge-debate",
-                    "phase": phase,
-                    "side": side,
-                    "code": "debate_side_failed",
-                    "message": f"{side} failed {phase} after {DEBATE_MAX_ATTEMPTS} attempts",
-                    "required": False,
-                }
-            )
-        if phase == "opening":
-            for side, wrapper in successful.items():
-                compact_path = self.output_dir / "debate" / f"opening-{side}-compact.json"
-                write_compact_json(compact_path, compact_opening_context(wrapper.get("parsed_json")))
-                wrapper["compact_output_path"] = str(compact_path)
-
-        phase_artifact = {
-            "schema_version": "1",
-            "run_id": self.run_id,
-            "started_at": self.started_at,
-            "generated_at": now_iso(),
-            "stage": "judge-debate",
-            "phase": phase,
-            "status": "success" if not missing else "incomplete",
-            "session_ids": dict(session_ids),
-            "sides": {
-                side: {
-                    **self.debate_wrapper_summary(successful.get(side) or latest.get(side) or {}),
-                    "attempts": attempt_history[side],
-                    "output": (successful.get(side) or {}).get("parsed_json"),
-                }
-                for side in DEBATE_SIDES
-            },
-            "errors": errors,
-        }
-        phase_path = self.output_dir / "debate" / f"{phase}.json"
-        write_json(phase_path, phase_artifact)
-        return phase_artifact, successful
-
-    def run_judge_debate(self) -> dict[str, Any]:
-        spec = load_json(self.output_dir / "judge-review-spec.json")
-        symbols = normalize_symbol_ids(spec.get("symbol_ids"))
-        artifact_path = self.output_dir / "judge-debate.json"
-        if not symbols:
-            artifact = {
-                "schema_version": "1",
-                "run_id": self.run_id,
-                "started_at": self.started_at,
-                "generated_at": now_iso(),
-                "stage": "judge-debate",
-                "status": "success",
-                "skipped": True,
-                "skip_reason": "no selected symbols",
-                "flow": list(DEBATE_PHASES),
-                "executed_flow": [],
-                "final_phase": "",
-                "session_ids": {},
-                "phases": [],
-                "errors": [],
-            }
-            write_json(artifact_path, artifact)
-            self.add_stage("judge-debate", "skipped", detail="no selected symbols", required=False, path=artifact_path)
-            return artifact
-
-        aggregate: dict[str, Any] = {
-            "schema_version": "1",
-            "run_id": self.run_id,
-            "started_at": self.started_at,
-            "generated_at": now_iso(),
-            "stage": "judge-debate",
-            "status": "running",
-            "skipped": False,
-            "skip_reason": "",
-            "flow": list(DEBATE_PHASES),
-            "executed_flow": [],
-            "final_phase": "",
-            "symbol_ids": symbols,
-            "session_ids": {},
-            "phases": [],
-            "errors": [],
-        }
-        write_json(artifact_path, aggregate)
-        session_ids: dict[str, str] = {}
-        previous_wrappers: dict[str, dict[str, Any]] = {}
-        for phase in DEBATE_PHASES:
-            phase_artifact, successful = self.run_debate_phase(
-                spec,
-                phase=phase,
-                session_ids=session_ids,
-                previous_wrappers=previous_wrappers,
-            )
-            aggregate["generated_at"] = now_iso()
-            aggregate["session_ids"] = dict(session_ids)
-            aggregate["phases"].append(phase_artifact)
-            aggregate["executed_flow"] = [
-                item.get("phase")
-                for item in aggregate["phases"]
-                if isinstance(item, dict) and item.get("status") == "success"
-            ]
-            aggregate["final_phase"] = aggregate["executed_flow"][-1] if aggregate["executed_flow"] else ""
-            aggregate["errors"].extend(phase_artifact.get("errors") or [])
-            if phase_artifact.get("status") != "success":
-                aggregate["status"] = "incomplete"
-                write_json(artifact_path, aggregate)
-                self.add_stage(
-                    f"judge-debate-{phase}",
-                    "partial",
-                    detail="one or both persistent debate sessions failed after retry",
-                    path=self.output_dir / "debate" / f"{phase}.json",
-                )
-                self.add_stage("judge-debate", "partial", detail=f"stopped after incomplete {phase}", path=artifact_path)
-                return aggregate
-            self.add_stage(
-                f"judge-debate-{phase}",
-                "success",
-                detail="bull and bear sessions completed wait_all barrier",
-                path=self.output_dir / "debate" / f"{phase}.json",
-            )
-            previous_wrappers = successful
-            write_json(artifact_path, aggregate)
-        aggregate["status"] = "success"
-        aggregate["generated_at"] = now_iso()
-        write_json(artifact_path, aggregate)
-        self.add_stage(
-            "judge-debate",
-            "success",
-            detail=f"debate completed at {aggregate['final_phase']}",
-            path=artifact_path,
-        )
-        return aggregate
-
     def run_judge_review(self) -> None:
         spec_path = self.output_dir / "judge-review-spec.json"
         spec = load_json(spec_path)
@@ -2190,7 +1783,7 @@ class Pipeline:
             write_json(
                 self.output_dir / "judge-review.json",
                 {
-                    "schema_version": "2",
+                    "schema_version": "4",
                     "run_id": self.run_id,
                     "started_at": self.started_at,
                     "generated_at": now_iso(),
@@ -2272,14 +1865,13 @@ class Pipeline:
         Eligible runs must have judge-review.json status == "success" and a
         started_at strictly earlier than this run's started_at; the current run,
         future/equal-time runs, and partial/failed/malformed artifacts are
-        ignored. An empty or malformed thesis_definition never counts as a valid
-        prior. This prior definition is immutable input for this run: it must
-        not be rewritten by anything the current run's judge output claims
-        about the same symbol.
+        ignored. An empty or malformed thesis_definition never counts as valid
+        prior context. The current Judge may assess it or return a successor
+        definition, but neither one mechanically authorizes the current target.
 
         Single source of truth for load_prior_thesis() and prior_thesis_context():
-        both derive from this same selection so the mechanical protected-loss
-        gate and the persisted/rendered provenance can never drift apart.
+        both derive from this same selection so Judge context and the
+        persisted/rendered provenance cannot drift apart.
         """
         if not symbol_id:
             return None
@@ -2335,11 +1927,9 @@ class Pipeline:
         """Format an already-selected prior source into bounded, HTML-safe provenance.
 
         Pure formatting, no filesystem access: callers that already hold a
-        select_prior_thesis_source() result (e.g. protected_loss_thesis_gate) must
-        pass that exact object here instead of triggering a second scan, so the
-        persisted/rendered provenance can never drift from what the mechanical
-        gate actually evaluated. Never includes filesystem paths; source_artifact
-        is a stable relative label.
+        select_prior_thesis_source() result pass that exact object here instead
+        of triggering a second scan. Never includes filesystem paths;
+        source_artifact is a stable relative label.
         """
         if selected is None:
             return {"available": False}
@@ -2366,9 +1956,7 @@ class Pipeline:
     def prior_thesis_context(self, symbol_id: str) -> dict[str, Any]:
         """Bounded, HTML-safe prior-thesis provenance from a fresh selection.
 
-        Only for callers that do not already hold a selection (e.g. a symbol
-        whose protected-loss gate never ran). When the gate already ran for this
-        symbol, reuse its returned prior_thesis_context instead of calling this.
+        Use when the caller does not already hold a selected prior source.
         """
         return self.prior_thesis_context_from_selection(self.select_prior_thesis_source(symbol_id))
 
@@ -2417,7 +2005,6 @@ class Pipeline:
         if status not in {"intact", "damaged", "uncertain"}:
             status = "uncertain"
         raw_matched = raw.get("matched_invalidation_condition_ids")
-        raw_cited = raw.get("cited_argument_ids")
         matched_ids: list[str] = []
         if isinstance(raw_matched, list):
             for value in raw_matched:
@@ -2427,113 +2014,27 @@ class Pipeline:
         return {
             "status": status,
             "matched_invalidation_condition_ids": matched_ids[:8],
-            "cited_argument_ids": (
-                [str(value).strip() for value in raw_cited if str(value).strip()][:20]
-                if isinstance(raw_cited, list)
+        }
+
+    def sanitize_opposing_view_case(self, raw: Any) -> dict[str, Any]:
+        source = raw if isinstance(raw, dict) else {}
+        raw_refs = source.get("evidence_refs")
+        return {
+            "summary": str(source.get("summary") or "")[:300],
+            "evidence_refs": (
+                [str(value).strip() for value in raw_refs if str(value).strip()][:10]
+                if isinstance(raw_refs, list)
                 else []
             ),
         }
 
-    def is_loss_position(self, context: dict[str, Any]) -> bool:
-        strategy_context = context.get("symbol_strategy_context") if isinstance(context.get("symbol_strategy_context"), dict) else {}
-        account_exposure = context.get("account_exposure") if isinstance(context.get("account_exposure"), dict) else {}
-        loss_flag = strategy_context.get("loss_position") is True
-        strategy_pnl_rate = as_float(strategy_context.get("pnl_rate"))
-        account_pnl_rate = as_float(account_exposure.get("pnl_rate"))
-        return bool(
-            loss_flag
-            or (strategy_pnl_rate is not None and strategy_pnl_rate < 0)
-            or (account_pnl_rate is not None and account_pnl_rate < 0)
-        )
-
-    def thesis_reduction_gate(
-        self,
-        symbol_id: str,
-        item: dict[str, Any],
-        context: dict[str, Any],
-        judge_debate: dict[str, Any] | None,
-    ) -> dict[str, Any]:
-        """Deterministically decide whether a decision_basis=thesis reduction/exit is allowed.
-
-        Applies at any PnL (not just loss positions): the judge supplies the
-        semantic thesis_assessment (intact/damaged/uncertain); this method
-        independently verifies the thesis-damage predicate, that any matched
-        invalidation condition actually belongs to the immutable prior thesis,
-        and that any cited evidence actually exists in judge-debate.json.
-        Missing prior context, a non-damaged status, or unverifiable evidence all
-        resolve to "not allowed" rather than silently authorizing the reduction.
-        Always returns "applicable": True; callers decide when to invoke this
-        (a decision_basis=thesis reduction, or a loss-position bootstrap-at-hold).
-
-        Selects the prior source exactly once via select_prior_thesis_source() and
-        returns it (formatted) as "prior_thesis_context" in the result, so callers
-        persist/display the identical source this gate actually evaluated instead
-        of re-scanning runs and risking a different run completing in between.
-        """
-        assessment = item.get("thesis_assessment") if isinstance(item.get("thesis_assessment"), dict) else {}
-        status = str(assessment.get("status") or "").strip().lower()
-        raw_matched = assessment.get("matched_invalidation_condition_ids")
-        matched_ids = {
-            normalized
-            for value in raw_matched
-            for normalized in [normalize_thesis_condition_id(value)]
-            if normalized
-        } if isinstance(raw_matched, list) else set()
-        raw_cited = assessment.get("cited_argument_ids")
-        cited_ids = {
-            str(value).strip() for value in raw_cited if str(value).strip()
-        } if isinstance(raw_cited, list) else set()
-
-        selected = self.select_prior_thesis_source(symbol_id)
-        prior_thesis_context = self.prior_thesis_context_from_selection(selected)
-        prior_thesis = selected["thesis_definition"] if selected else None
-        if prior_thesis is None:
-            # No valid earlier definition exists: this run's own thesis_assessment can
-            # never authorize a reduction. If the judge supplied a genuinely valid
-            # thesis_definition here, persist it for a future run to treat as prior;
-            # otherwise nothing is persisted and the next run still sees no_prior_thesis.
-            bootstrap_candidate = self.validate_thesis_definition(item.get("thesis_definition"))
-            return {
-                "applicable": True,
-                "allowed": False,
-                "reason": "no_prior_thesis",
-                "bootstrap_candidate": bootstrap_candidate,
-                "prior_thesis_context": prior_thesis_context,
-            }
-        if status != "damaged":
-            return {
-                "applicable": True,
-                "allowed": False,
-                "reason": "thesis_not_damaged",
-                "prior_thesis_context": prior_thesis_context,
-            }
-        prior_condition_ids = {
-            normalized
-            for condition in prior_thesis.get("invalidation_conditions", [])
-            if isinstance(condition, dict)
-            for normalized in [normalize_thesis_condition_id(condition.get("condition_id"))]
-            if normalized
-        }
-        if not matched_ids or not matched_ids.issubset(prior_condition_ids):
-            return {
-                "applicable": True,
-                "allowed": False,
-                "reason": "invalidation_condition_not_matched",
-                "prior_thesis_context": prior_thesis_context,
-            }
-        available_evidence = debate_argument_ids_for_symbol(judge_debate or {}, symbol_id)
-        if not cited_ids or not cited_ids.issubset(available_evidence):
-            return {
-                "applicable": True,
-                "allowed": False,
-                "reason": "evidence_not_verified",
-                "prior_thesis_context": prior_thesis_context,
-            }
+    def sanitize_opposing_view(self, raw: Any) -> dict[str, Any] | None:
+        """Keep the Judge's compact increase/reduce comparison for audit."""
+        if not isinstance(raw, dict):
+            return None
         return {
-            "applicable": True,
-            "allowed": True,
-            "reason": "damaged_evidence_confirmed",
-            "prior_thesis_context": prior_thesis_context,
+            "increase_case": self.sanitize_opposing_view_case(raw.get("increase_case")),
+            "reduce_case": self.sanitize_opposing_view_case(raw.get("reduce_case")),
         }
 
     def judge_review_context_by_symbol(self, wrapper: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -2553,199 +2054,10 @@ class Pipeline:
                     result[key] = item
         return result
 
-    def same_day_buy_state(self, context: dict[str, Any]) -> str:
-        timeline = context.get("today_trade_timeline_context") if isinstance(context.get("today_trade_timeline_context"), dict) else {}
-        if timeline.get("has_same_day_buy") is True:
-            return "present"
-        if as_int(timeline.get("buy_fill_count")) > 0 or as_int(timeline.get("buy_quantity")) > 0:
-            return "present"
-        fills = timeline.get("fills")
-        if isinstance(fills, list):
-            if any(isinstance(fill, dict) and str(fill.get("direction") or "").lower() == "buy" for fill in fills):
-                return "present"
-        collection_status = str(timeline.get("collection_status") or "").lower()
-        if collection_status == "complete":
-            return "absent"
-        if not collection_status and (timeline.get("has_same_day_buy") is False or timeline.get("has_same_day_trade") is False):
-            return "absent"
-        if not collection_status and timeline.get("has_same_day_trade") is True and isinstance(fills, list):
-            return "absent"
-        return "unknown"
-
-    def same_day_sell_state(self, context: dict[str, Any]) -> str:
-        timeline = context.get("today_trade_timeline_context") if isinstance(context.get("today_trade_timeline_context"), dict) else {}
-        if timeline.get("has_same_day_sell") is True:
-            return "present"
-        if as_int(timeline.get("sell_fill_count")) > 0 or as_int(timeline.get("sell_quantity")) > 0:
-            return "present"
-        fills = timeline.get("fills")
-        if isinstance(fills, list):
-            if any(isinstance(fill, dict) and str(fill.get("direction") or "").lower() == "sell" for fill in fills):
-                return "present"
-        collection_status = str(timeline.get("collection_status") or "").lower()
-        if collection_status == "complete":
-            return "absent"
-        if not collection_status and (timeline.get("has_same_day_sell") is False or timeline.get("has_same_day_trade") is False):
-            return "absent"
-        if not collection_status and timeline.get("has_same_day_trade") is True and isinstance(fills, list):
-            return "absent"
-        return "unknown"
-
-    def same_day_reversal_or_incomplete(self, context: dict[str, Any]) -> str:
-        """"" if neither a same-day buy nor sell nor incomplete history; else a block reason.
-
-        Shared by profit_protection and concentration_rebalance: both require a
-        same-day-buy-free, same-day-sell-free, and fully collected timeline.
-        Unknown/incomplete history is fail-closed for these non-thesis reductions;
-        only decision_basis=thesis may reverse a same-day position, and only
-        through the fully verified damaged-thesis path.
-        """
-        buy_state = self.same_day_buy_state(context)
-        sell_state = self.same_day_sell_state(context)
-        if buy_state != "absent":
-            return "same_day_buy_reversal_blocked" if buy_state == "present" else "same_day_history_incomplete"
-        if sell_state != "absent":
-            return "same_day_sell_trim_blocked" if sell_state == "present" else "same_day_history_incomplete"
-        return ""
-
-    def profit_protection_gate(
-        self,
-        symbol_id: str,
-        context: dict[str, Any],
-        expected_qty: int,
-    ) -> dict[str, Any]:
-        """Fail-closed check for a profit_protection reduction: held, decision-time pnl_rate > 0.
-
-        Independent of thesis/loss-position status: never routed through the
-        thesis reduction gate. Same-day buy/sell or incomplete same-day history
-        blocks (see same_day_reversal_or_incomplete).
-        """
-        account_exposure = context.get("account_exposure") if isinstance(context.get("account_exposure"), dict) else {}
-        pnl_rate = as_float(account_exposure.get("pnl_rate"))
-        if expected_qty <= 0:
-            return {"allowed": False, "reason": "no_held_quantity"}
-        if pnl_rate is None or pnl_rate <= 0:
-            return {"allowed": False, "reason": "pnl_not_positive_or_unverified"}
-        same_day_reason = self.same_day_reversal_or_incomplete(context)
-        if same_day_reason:
-            return {"allowed": False, "reason": same_day_reason}
-        return {"allowed": True, "reason": "positive_pnl_confirmed"}
-
-    def concentration_rebalance_gate(
-        self,
-        symbol_id: str,
-        context: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Fail-closed check for a concentration_rebalance reduction.
-
-        Independent of thesis/loss-position status: a loss position may still
-        use concentration_rebalance once its own complete-account, cap,
-        same-day, and lot guards pass. Requires complete, non-partial account
-        context so a symbol's excess-cap reduction is only computed against a
-        real, current total valuation. Same-day buy/sell or incomplete same-day
-        history blocks (see same_day_reversal_or_incomplete).
-        """
-        account = self.account_before_order_cache
-        if not isinstance(account, dict) or not collect_main_evidence.valid_reused_account_artifact(account, run_id=self.run_id):
-            return {"allowed": False, "reason": "account_context_unavailable"}
-        account_summary = account.get("account_summary") if isinstance(account.get("account_summary"), dict) else {}
-        total_evaluation_amount = as_float(account_summary.get("total_evaluation_amount"))
-        account_exposure = context.get("account_exposure") if isinstance(context.get("account_exposure"), dict) else {}
-        valuation_amount = as_float(account_exposure.get("valuation_amount"))
-        if total_evaluation_amount is None or total_evaluation_amount <= 0 or valuation_amount is None:
-            return {"allowed": False, "reason": "total_valuation_unavailable"}
-        same_day_reason = self.same_day_reversal_or_incomplete(context)
-        if same_day_reason:
-            return {"allowed": False, "reason": same_day_reason}
-        cap_pct = float(self.execution_guards["concentration_rebalance_cap_pct"])
-        current_pct = (valuation_amount / total_evaluation_amount) * 100
-        if current_pct <= cap_pct:
-            return {"allowed": False, "reason": "concentration_within_cap"}
-        excess_value = (current_pct - cap_pct) / 100 * total_evaluation_amount
-        return {"allowed": True, "reason": "concentration_above_cap", "excess_value": excess_value}
-
-    def daily_turnover_budget(self) -> tuple[float | None, float]:
-        """(cap_value, already_used_value) for this run's max_daily_turnover_pct budget.
-
-        Requires a complete, same-run account-before-order.json AND a complete,
-        same-run today-fills.json (validated by collect_main_evidence's identity/
-        completeness checks, not just presence of account_summary amounts).
-        already_used_value is the sum of today's actually-collected fill amounts
-        (buy+sell) from today-fills.json's fills[], so a run that already traded
-        today has less remaining headroom. Returns cap_value=None when either
-        artifact is missing/partial/wrong-run (fail closed: callers must block
-        rather than treat an unknown/incomplete cap context as unlimited).
-        """
-        account = self.account_before_order_cache
-        if not isinstance(account, dict) or not collect_main_evidence.valid_reused_account_artifact(account, run_id=self.run_id):
-            return None, 0.0
-        account_summary = account.get("account_summary") if isinstance(account.get("account_summary"), dict) else {}
-        total_evaluation_amount = as_float(account_summary.get("total_evaluation_amount"))
-        if total_evaluation_amount is None or total_evaluation_amount <= 0:
-            return None, 0.0
-        today_fills = self.today_fills_cache
-        if not isinstance(today_fills, dict) or not collect_main_evidence.valid_reused_today_fills_artifact(today_fills, run_id=self.run_id):
-            return None, 0.0
-        fills = today_fills.get("fills") if isinstance(today_fills.get("fills"), list) else []
-        today_buy = sum(
-            as_float(fill.get("filled_amount")) or 0.0
-            for fill in fills
-            if isinstance(fill, dict) and fill.get("direction") == "buy"
-        )
-        today_sell = sum(
-            as_float(fill.get("filled_amount")) or 0.0
-            for fill in fills
-            if isinstance(fill, dict) and fill.get("direction") == "sell"
-        )
-        cap_pct = float(self.execution_guards["max_daily_turnover_pct"])
-        cap_value = total_evaluation_amount * cap_pct / 100
-        return cap_value, today_buy + today_sell
-
-    def decision_guard_reduction_cap(
-        self,
-        *,
-        expected_qty: int,
-        requested_reduction_shares: int,
-        max_reduction_pct: float,
-        floor_value_shares: int | None = None,
-    ) -> int:
-        """Clamp a proposed reduction to max_reduction_pct of expected_qty, rounded down.
-
-        Always preserves at least 1 share so a partial trim can never become a
-        full exit under profit_protection/concentration_rebalance. If the cap
-        itself would leave 0 whole shares (e.g. a 1-share holding at a 25% cap),
-        the reduction collapses to 0; callers must treat that 0 as "no
-        authorized change" (no_change/blocked), never as an allowed order.
-        """
-        cap_shares = int((Decimal(expected_qty) * Decimal(str(max_reduction_pct)) / Decimal(100)).to_integral_value(rounding=ROUND_DOWN))
-        max_allowed_reduction = max(0, expected_qty - 1)
-        cap_shares = min(cap_shares, max_allowed_reduction)
-        if floor_value_shares is not None:
-            cap_shares = min(cap_shares, max(0, expected_qty - floor_value_shares))
-        return max(0, min(requested_reduction_shares, cap_shares))
-
-    def apply_turnover_budget(self, increment_value: Decimal) -> tuple[bool, str]:
-        """Fail closed: an unavailable/incomplete turnover context blocks a changed target.
-
-        Callers with no real account/today-fills context (e.g. a direct
-        unit-test call) must seed self.account_before_order_cache and
-        self.today_fills_cache with complete, same-run fixtures instead of
-        relying on this to silently allow the change.
-        """
-        cap_value, already_used = self.daily_turnover_budget()
-        if cap_value is None:
-            return False, "daily_turnover_context_unavailable"
-        if float(increment_value) + already_used + self.turnover_used_value > cap_value:
-            return False, "daily_turnover_cap_exceeded"
-        self.turnover_used_value += float(increment_value)
-        return True, "within_daily_turnover_budget"
-
     def derive_judge_final_quantity(
         self,
         item: dict[str, Any],
         context: dict[str, Any],
-        force_baseline: bool = False,
-        judge_debate: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
         symbol_id = symbol_key(item)
         errors: list[dict[str, Any]] = []
@@ -2788,7 +2100,6 @@ class Pipeline:
         expected_qty = as_int(holding_context.get("expected_holding_quantity"))
         baseline_value = Decimal(expected_qty) * price
         requested_qty = round_half_up_quantity(requested_target_value, price)
-        target_rounds_to_baseline = requested_qty == expected_qty and requested_target_value != baseline_value
         # Canonical exposure is always the value of the whole-share quantity the
         # executor can actually submit. The raw judge KRW target remains in
         # requested_target_position_value_krw for audit.
@@ -2798,208 +2109,8 @@ class Pipeline:
         if decision_basis not in {"none", "thesis", "profit_protection", "concentration_rebalance"}:
             decision_basis = "none"
 
-        if force_baseline:
-            target_value = baseline_value
-            normalized = self._assemble_judge_symbol(
-                symbol_id=symbol_id,
-                item=item,
-                context=context,
-                requested_target_value=requested_target_value,
-                target_value=target_value,
-                baseline_value=baseline_value,
-                price=price,
-                expected_qty=expected_qty,
-                decision_basis="none",
-                decision_guard={"status": "no_change", "reason_code": "debate_incomplete_baseline_forced"},
-                thesis_definition_out=None,
-                protected_loss_gate=None,
-                force_baseline=True,
-                forced_reason_code="hold_debate_incomplete",
-                forced_one_line_reason="Bull/Bear 토론이 불완전하여 기준 노출을 유지한다.",
-            )
-            return normalized, errors
-
         additional_buy_reason = str(item.get("additional_buy_reason") or "").strip()
-        same_day_buy_state = self.same_day_buy_state(context)
-        if same_day_buy_state == "present" and target_value > baseline_value and not additional_buy_reason:
-            errors.append(
-                {
-                    "stage": "judge-review",
-                    "source": "pipeline",
-                    "code": "missing_additional_buy_reason",
-                    "message": f"{symbol_id}: additional_buy_reason is required when increasing target_position_value_krw after a same-day buy",
-                    "required": True,
-                }
-            )
-            return None, errors
-        if same_day_buy_state == "unknown" and target_value > baseline_value and not additional_buy_reason:
-            errors.append(
-                {
-                    "stage": "judge-review",
-                    "source": "pipeline",
-                    "code": "missing_additional_buy_reason_unknown_same_day_history",
-                    "message": f"{symbol_id}: additional_buy_reason is required when increasing target_position_value_krw while same-day buy history is unavailable or incomplete",
-                    "required": True,
-                }
-            )
-            return None, errors
-
-        thesis_definition_out: dict[str, Any] | None = None
-        protected_loss_gate: dict[str, Any] | None = None
-        decision_guard: dict[str, Any] = {
-            "status": "no_change",
-            "reason_code": (
-                "target_rounds_to_baseline_quantity"
-                if target_rounds_to_baseline
-                else "target_equals_baseline"
-            ),
-        }
-
-        if target_value == baseline_value:
-            decision_basis = "none"
-            # A loss position at a genuine baseline hold, or an attempted
-            # reduction that rounds back to baseline, may still bootstrap a
-            # missing prior thesis. A raw increase that rounds to no order may
-            # not replace prior thesis without executing; this never changes
-            # target_value, only thesis_definition/prior_thesis_context.
-            # Loss-position-only: this is the bootstrap-at-hold provenance path, not
-            # a reduction authorization (a decision_basis=thesis reduction below
-            # baseline calls thesis_reduction_gate directly, at any PnL).
-            if self.is_loss_position(context) and requested_target_value <= baseline_value:
-                protected_loss_gate = self.thesis_reduction_gate(symbol_id, item, context, judge_debate)
-                bootstrap_candidate = protected_loss_gate.get("bootstrap_candidate")
-                if bootstrap_candidate is not None:
-                    thesis_definition_out = bootstrap_candidate
-
-        elif target_value > baseline_value:
-            # Entry/increase must mechanically establish a compact thesis definition;
-            # a missing or invalid one rejects the increase rather than executing it.
-            candidate_thesis = self.validate_thesis_definition(item.get("thesis_definition"))
-            if candidate_thesis is None:
-                errors.append(
-                    {
-                        "stage": "judge-review",
-                        "source": "pipeline",
-                        "code": "missing_thesis_definition_for_increase",
-                        "message": (
-                            f"{symbol_id}: target_position_value_krw {target_value} exceeds baseline {baseline_value} "
-                            "but no valid thesis_definition (non-empty core_rationale and at least one "
-                            "invalidation_condition with condition_id and description) was supplied"
-                        ),
-                        "required": True,
-                    }
-                )
-                return None, errors
-            if decision_basis != "thesis":
-                target_value = baseline_value
-                decision_guard = {"status": "blocked", "reason_code": "decision_basis_required_for_increase"}
-            else:
-                allowed, turnover_reason = self.apply_turnover_budget(target_value - baseline_value)
-                if allowed:
-                    # A new definition becomes future prior only when the
-                    # increase itself is mechanically authorized.
-                    thesis_definition_out = candidate_thesis
-                    decision_guard = {"status": "allowed", "reason_code": "thesis_increase_allowed", "basis": "thesis"}
-                else:
-                    target_value = baseline_value
-                    decision_guard = {"status": "blocked", "reason_code": turnover_reason}
-
-        else:
-            # target_value < baseline_value: a reduction/exit. Branch selection is by
-            # decision_basis alone -- concentration_rebalance and profit_protection are
-            # independent of thesis/loss-position status; only decision_basis=thesis
-            # goes through thesis_reduction_gate, and it applies at any PnL.
-            if decision_basis == "thesis":
-                protected_loss_gate = self.thesis_reduction_gate(symbol_id, item, context, judge_debate)
-                bootstrap_candidate = protected_loss_gate.get("bootstrap_candidate")
-                if bootstrap_candidate is not None:
-                    thesis_definition_out = bootstrap_candidate
-                if not protected_loss_gate.get("allowed"):
-                    target_value = baseline_value
-                    decision_guard = {"status": "blocked", "reason_code": str(protected_loss_gate.get("reason") or "thesis_reduction_gate_blocked")}
-                else:
-                    allowed, turnover_reason = self.apply_turnover_budget(baseline_value - target_value)
-                    if allowed:
-                        decision_guard = {"status": "allowed", "reason_code": "thesis_reduction_allowed", "basis": "thesis"}
-                    else:
-                        target_value = baseline_value
-                        decision_guard = {"status": "blocked", "reason_code": turnover_reason}
-            elif decision_basis == "profit_protection":
-                gate = self.profit_protection_gate(symbol_id, context, expected_qty)
-                if not gate.get("allowed"):
-                    target_value = baseline_value
-                    decision_guard = {"status": "blocked", "reason_code": str(gate.get("reason") or "profit_protection_blocked")}
-                else:
-                    requested_reduction_shares = max(0, expected_qty - round_half_up_quantity(target_value, price))
-                    max_reduction_pct = float(self.execution_guards["profit_protection_max_reduction_pct"])
-                    capped_reduction_shares = self.decision_guard_reduction_cap(
-                        expected_qty=expected_qty,
-                        requested_reduction_shares=requested_reduction_shares,
-                        max_reduction_pct=max_reduction_pct,
-                    )
-                    if capped_reduction_shares <= 0:
-                        # The 25% cap itself rounds down to 0 whole shares (e.g. a
-                        # 1-share holding): never report this as an allowed order.
-                        target_value = baseline_value
-                        decision_guard = {"status": "no_change", "reason_code": "capped_reduction_below_one_share", "basis": "profit_protection"}
-                    else:
-                        capped_qty = expected_qty - capped_reduction_shares
-                        capped_target_value = Decimal(capped_qty) * price
-                        allowed, turnover_reason = self.apply_turnover_budget(baseline_value - capped_target_value)
-                        if allowed:
-                            target_value = capped_target_value
-                            decision_guard = {
-                                "status": "allowed",
-                                "reason_code": "profit_protection_reduction_allowed",
-                                "basis": "profit_protection",
-                                "max_reduction_pct": max_reduction_pct,
-                            }
-                        else:
-                            target_value = baseline_value
-                            decision_guard = {"status": "blocked", "reason_code": turnover_reason}
-            elif decision_basis == "concentration_rebalance":
-                gate = self.concentration_rebalance_gate(symbol_id, context)
-                if not gate.get("allowed"):
-                    target_value = baseline_value
-                    decision_guard = {"status": "blocked", "reason_code": str(gate.get("reason") or "concentration_rebalance_blocked")}
-                else:
-                    excess_value = Decimal(str(gate.get("excess_value") or 0))
-                    requested_reduction_shares = max(0, expected_qty - round_half_up_quantity(target_value, price))
-                    excess_shares = int((excess_value / price).to_integral_value(rounding=ROUND_DOWN)) if price else 0
-                    max_reduction_pct = float(self.execution_guards["concentration_rebalance_max_reduction_pct"])
-                    capped_reduction_shares = self.decision_guard_reduction_cap(
-                        expected_qty=expected_qty,
-                        requested_reduction_shares=requested_reduction_shares,
-                        max_reduction_pct=max_reduction_pct,
-                        floor_value_shares=max(1, expected_qty - excess_shares),
-                    )
-                    if capped_reduction_shares <= 0:
-                        target_value = baseline_value
-                        decision_guard = {"status": "no_change", "reason_code": "capped_reduction_below_one_share", "basis": "concentration_rebalance"}
-                    else:
-                        capped_qty = expected_qty - capped_reduction_shares
-                        capped_target_value = Decimal(capped_qty) * price
-                        allowed, turnover_reason = self.apply_turnover_budget(baseline_value - capped_target_value)
-                        if allowed:
-                            target_value = capped_target_value
-                            decision_guard = {
-                                "status": "allowed",
-                                "reason_code": "concentration_rebalance_reduction_allowed",
-                                "basis": "concentration_rebalance",
-                                "cap_pct": float(self.execution_guards["concentration_rebalance_cap_pct"]),
-                                "max_reduction_pct": max_reduction_pct,
-                            }
-                        else:
-                            target_value = baseline_value
-                            decision_guard = {"status": "blocked", "reason_code": turnover_reason}
-            else:
-                target_value = baseline_value
-                decision_guard = {"status": "blocked", "reason_code": "decision_basis_required_for_reduction"}
-
-        forced_reason_code = "hold_protected_loss_thesis" if (
-            protected_loss_gate is not None and protected_loss_gate.get("applicable") and not protected_loss_gate.get("allowed")
-        ) else ""
-        forced_one_line_reason = "thesis 훼손 근거가 검증되지 않아 기준 노출을 유지한다." if forced_reason_code else ""
+        thesis_definition_out = self.validate_thesis_definition(item.get("thesis_definition"))
 
         normalized = self._assemble_judge_symbol(
             symbol_id=symbol_id,
@@ -3011,12 +2122,7 @@ class Pipeline:
             price=price,
             expected_qty=expected_qty,
             decision_basis=decision_basis,
-            decision_guard=decision_guard,
             thesis_definition_out=thesis_definition_out,
-            protected_loss_gate=protected_loss_gate,
-            force_baseline=False,
-            forced_reason_code=forced_reason_code,
-            forced_one_line_reason=forced_one_line_reason,
             additional_buy_reason=additional_buy_reason,
         )
         return normalized, errors
@@ -3033,20 +2139,13 @@ class Pipeline:
         price: Decimal,
         expected_qty: int,
         decision_basis: str,
-        decision_guard: dict[str, Any],
         thesis_definition_out: dict[str, Any] | None,
-        protected_loss_gate: dict[str, Any] | None,
-        force_baseline: bool,
-        forced_reason_code: str,
-        forced_one_line_reason: str,
         additional_buy_reason: str = "",
     ) -> dict[str, Any]:
         final_qty = round_half_up_quantity(target_value, price)
         requested_qty = round_half_up_quantity(requested_target_value, price)
         requested_action = derive_action(requested_qty, expected_qty)
         canonical_action = derive_action(final_qty, expected_qty)
-        if decision_guard.get("status") == "allowed":
-            decision_guard = dict(decision_guard, canonical_action=canonical_action)
         normalized = {
             "symbol_id": symbol_id,
             "symbol_name": item.get("symbol_name") or context.get("symbol_name") or symbol_id,
@@ -3058,26 +2157,8 @@ class Pipeline:
             "canonical_action": canonical_action,
             "relative_attractiveness_rank": as_int(item.get("relative_attractiveness_rank")),
             "decision_basis": decision_basis,
-            "decision_guard": decision_guard,
-            "evidence_refs": (
-                [str(ref) for ref in item.get("evidence_refs") if isinstance(item.get("evidence_refs"), list) and isinstance(ref, str)][:20]
-                if isinstance(item.get("evidence_refs"), list)
-                else []
-            ),
-            "reason_code": (
-                "hold_debate_incomplete"
-                if force_baseline
-                else forced_reason_code
-                if forced_reason_code
-                else safe_name(str(item.get("reason_code") or "hold_neutral")).lower()
-            ),
-            "one_line_reason": (
-                "Bull/Bear 토론이 불완전하여 기준 노출을 유지한다."
-                if force_baseline
-                else forced_one_line_reason
-                if forced_reason_code
-                else str(item.get("one_line_reason") or "")[:300]
-            ),
+            "reason_code": safe_name(str(item.get("reason_code") or "hold_neutral")).lower(),
+            "one_line_reason": str(item.get("one_line_reason") or "")[:300],
         }
         if additional_buy_reason:
             normalized["additional_buy_reason"] = additional_buy_reason[:300]
@@ -3086,18 +2167,10 @@ class Pipeline:
         assessment_echo = item.get("thesis_assessment") if isinstance(item.get("thesis_assessment"), dict) else None
         if assessment_echo is not None:
             normalized["thesis_assessment"] = self.sanitize_thesis_assessment(assessment_echo)
-        if protected_loss_gate is not None and protected_loss_gate.get("applicable"):
-            normalized["protected_loss_gate"] = {
-                "allowed": bool(protected_loss_gate.get("allowed")),
-                "reason": str(protected_loss_gate.get("reason") or ""),
-            }
-        gate_applicable = protected_loss_gate is not None and protected_loss_gate.get("applicable")
-        if gate_applicable:
-            # Reuse the exact selection the gate already made instead of scanning runs
-            # again, so a concurrently completed run can never make the persisted
-            # provenance disagree with what the gate actually evaluated.
-            normalized["prior_thesis_context"] = protected_loss_gate.get("prior_thesis_context") or {"available": False}
-        elif assessment_echo is not None or thesis_definition_out is not None:
+        opposing_view_echo = self.sanitize_opposing_view(item.get("opposing_view"))
+        if opposing_view_echo is not None:
+            normalized["opposing_view"] = opposing_view_echo
+        if assessment_echo is not None or thesis_definition_out is not None:
             normalized["prior_thesis_context"] = self.prior_thesis_context(symbol_id)
         return normalized
 
@@ -3107,23 +2180,7 @@ class Pipeline:
         errors = wrapper.get("errors") if isinstance(wrapper.get("errors"), list) else []
         context_by_symbol = self.judge_review_context_by_symbol(wrapper)
         spec = load_json_if_exists(self.output_dir / "judge-review-spec.json") or {}
-        debate = load_json_if_exists(self.output_dir / "judge-debate.json") or {}
-        debate_status = str(debate.get("status") or "")
-        force_baseline = debate_status != "success"
-        if force_baseline:
-            errors.append(
-                {
-                    "stage": "judge-review",
-                    "source": "pipeline",
-                    "code": "debate_incomplete_baseline_forced",
-                    "message": "judge-debate did not complete, so selected symbols are forced to baseline exposure",
-                    "required": False,
-                }
-            )
         allowed_symbols = set(normalize_symbol_ids(spec.get("symbol_ids"))) if isinstance(spec.get("symbol_ids"), list) else set()
-        self.account_before_order_cache = load_json_if_exists(self.output_dir / "account-before-order.json") or {}
-        self.today_fills_cache = load_json_if_exists(self.output_dir / "today-fills.json") or {}
-        self.turnover_used_value = 0.0
         ordered_items = sorted(
             (item for item in parsed.get("symbols", []) if isinstance(item, dict) and symbol_key(item)),
             key=symbol_key,
@@ -3163,8 +2220,6 @@ class Pipeline:
             normalized, item_errors = self.derive_judge_final_quantity(
                 item,
                 context_by_symbol.get(symbol_id, {}),
-                force_baseline=force_baseline,
-                judge_debate=debate,
             )
             errors.extend(item_errors)
             if normalized is None:
@@ -3184,10 +2239,9 @@ class Pipeline:
             )
         membership_complete = not duplicate_symbol_ids and not missing_symbol_ids
         artifact = {
-            # Bumped: symbols now carry requested/canonical target, decision_basis,
-            # decision_guard, and requested_action/canonical_action instead of the
-            # old candidate_direction/score-band contract.
-            "schema_version": "2",
+            # Version 4 accepts the Judge target directly after whole-share
+            # normalization; strategy labels and thesis fields are audit only.
+            "schema_version": "4",
             "run_id": self.run_id,
             "started_at": self.started_at,
             "generated_at": now_iso(),
@@ -3662,7 +2716,6 @@ class Pipeline:
                     "requested_action": item.get("requested_action") or "hold",
                     "canonical_action": item.get("canonical_action") or "hold",
                     "decision_basis": item.get("decision_basis") or "none",
-                    "decision_guard": item.get("decision_guard") if isinstance(item.get("decision_guard"), dict) else {},
                     "reason_code": item.get("reason_code") or "",
                     "one_line_reason": item.get("one_line_reason") or "",
                     "order_result": execution_item.get("result") or "",
@@ -3738,10 +2791,6 @@ class Pipeline:
                 }
             )
         unresolved_review_scope_count = len(unresolved_review_scope)
-        blocked_guard_count = sum(
-            1 for row in rows if str((row.get("decision_guard") or {}).get("status") or "") == "blocked"
-        )
-        judge_debate = load_json_if_exists(self.output_dir / "judge-debate.json") or {}
         scored_symbol_ids = {
             symbol_key(item)
             for item in (analyst_review.get("symbols") if isinstance(analyst_review.get("symbols"), list) else [])
@@ -3750,15 +2799,8 @@ class Pipeline:
             and (score := as_float(item.get("final_first_score"))) is not None
             and 0 <= score <= 10
         }
-        debate_phases = judge_debate.get("phases") if isinstance(judge_debate.get("phases"), list) else []
         return {
             "status": judge_review.get("status"),
-            "debate_status": judge_debate.get("status"),
-            "debate_phase_count": len(debate_phases),
-            "debate_executed_phase_count": len(
-                [item for item in debate_phases if isinstance(item, dict) and item.get("status") == "success"]
-            ),
-            "debate_final_phase": judge_debate.get("final_phase") or "",
             "symbol_count": len(rows),
             "submitted_order_count": len(submitted),
             "new_order_submitted_count": len(new_order_submitted),
@@ -3773,7 +2815,6 @@ class Pipeline:
             "canonical_hold_count": canonical_hold_count,
             "unresolved_review_scope_count": unresolved_review_scope_count,
             "unresolved_review_scope": unresolved_review_scope,
-            "blocked_guard_count": blocked_guard_count,
             "held_review_scope_count": sum(1 for reason in review_scope_reasons.values() if reason == "held_position"),
             "unheld_review_scope_count": sum(1 for reason in review_scope_reasons.values() if reason == "unheld_score_rank"),
             "hold_symbol_count": len(scored_symbol_ids - set(review_scope_reasons)),
@@ -4102,7 +3143,6 @@ class Pipeline:
                 f"- 보존된 partial / failed 아티팩트: {sum(1 for item in stages if isinstance(item, dict) and item.get('status') in {'partial', 'failed'})}",
                 f"- pipeline-summary.json: {summary.get('summary_path', '')}",
                 f"- decision-brief.json: {(summary.get('artifacts') or {}).get('decision_brief', '')}",
-                f"- judge-debate.json: {(summary.get('artifacts') or {}).get('judge_debate', '')}",
                 f"- judge-review.json: {(summary.get('artifacts') or {}).get('judge_review', '')}",
                 f"- execution.json: {(summary.get('artifacts') or {}).get('execution', '')}",
                 f"- 총 사용 토큰: {format_number(token_total)}",
@@ -4279,7 +3319,6 @@ class Pipeline:
             },
             "review_summary": review_summary,
             "review_trigger": review_trigger_view,
-            "execution_guards_policy": dict(self.execution_guards),
             "account_collection_status": account_collection_status,
             "order_gate_status": order_gate_status,
             "account_summary": account_summary,
@@ -4342,7 +3381,6 @@ class Pipeline:
                 "news_context": str(self.output_dir / "news-context.json"),
                 "decision_brief": str(self.output_dir / "decision-brief.json"),
                 "analyst_review": str(self.output_dir / "analyst-review.json"),
-                "judge_debate": str(self.output_dir / "judge-debate.json"),
                 "judge_review": str(self.output_dir / "judge-review.json"),
                 "execution": str(self.output_dir / "execution.json"),
                 "token_summary": str(self.output_dir / "token-summary.json"),
@@ -4501,7 +3539,6 @@ class Pipeline:
             ],
         )
         self.add_stage("second-spec", "success", detail="built judge-review spec", path=self.output_dir / "judge-review-spec.json")
-        self.run_judge_debate()
         self.run_judge_review()
 
         execution = self.run_artifact_command(

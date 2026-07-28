@@ -856,6 +856,7 @@ THESIS_GATE_REASON_LABELS = {
     "invalidation_condition_not_matched": "무효화 조건이 이전 thesis와 불일치",
     "evidence_not_verified": "인용 근거 검증 실패",
     "damaged_evidence_confirmed": "훼손 근거 검증 완료",
+    "damaged_condition_matched": "이전 thesis 무효화 조건 일치",
 }
 
 
@@ -928,7 +929,9 @@ def render_thesis_section(final_item: dict[str, Any]) -> str:
         status = str(assessment.get("status") or "uncertain")
         assessment_status_label = THESIS_ASSESSMENT_LABELS.get(status, status)
         assessment_status_css = THESIS_ASSESSMENT_CSS.get(status, "muted")
-        cited = assessment.get("cited_argument_ids") or []
+        opposing_view = final_item.get("opposing_view") if isinstance(final_item.get("opposing_view"), dict) else {}
+        reduce_case = opposing_view.get("reduce_case") if isinstance(opposing_view.get("reduce_case"), dict) else {}
+        cited = reduce_case.get("evidence_refs") or assessment.get("cited_argument_ids") or []
         cited_text = ", ".join(f"<code>{esc(value)}</code>" for value in cited) if cited else "-"
         blocks.append(
             "<div class=\"thesis-assessment\"><h4>이번 run 판단</h4>"

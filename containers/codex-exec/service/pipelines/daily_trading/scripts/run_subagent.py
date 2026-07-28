@@ -46,15 +46,7 @@ FINANCIAL_PATH_OUTPUT_STAGES = {"financial-collection"}
 TEXT_OUTPUT_STAGES = FINANCIAL_PATH_OUTPUT_STAGES
 OPTIONAL_GROUP_FAILURE_STAGES = TEXT_OUTPUT_STAGES
 REVIEW_STAGES = {"analyst-review", "judge-review"}
-DEBATE_STAGE = "judge-debate"
-DEBATE_ROLES = {"debate-bull", "debate-bear"}
-DEBATE_PHASES = {"opening", "rebuttal-1"}
-DEBATE_PHASE_ARGUMENT_KINDS = {
-    "opening": "claim",
-    "rebuttal-1": "rebuttal",
-}
-DEBATE_FINAL_ACTIONS = {"buy", "hold", "sell"}
-AUDIT_LOG_STAGES = {DEBATE_STAGE, "judge-review"}
+AUDIT_LOG_STAGES = {"judge-review"}
 SELECTED_ANALYST_REVIEW_ROLES = {
     "analyst-quality-risk",
     "analyst-momentum-news",
@@ -1128,8 +1120,8 @@ def normalize_thesis_condition_id(value: Any) -> str:
 def thesis_definition_is_valid(thesis: Any) -> bool:
     """True when thesis has a non-empty core_rationale and >=1 usable invalidation condition.
 
-    Mirrors the pipeline's validity rule so the judge's supplied context and the
-    pipeline's mechanical gate select the same prior thesis. core_rationale,
+    Mirrors the pipeline's persistence rule so the judge and pipeline select the
+    same usable prior thesis context. core_rationale,
     condition_id, and description must be actual strings, not other JSON types
     coerced with str().
     """
@@ -1163,7 +1155,7 @@ def prior_thesis_context(
         "thesis_definition": None,
         "source_run_id": "",
         "status": "no_prior_thesis",
-        "policy": "A missing prior thesis is not evidence of thesis damage; it means no earlier run recorded a structured thesis for this symbol. The pipeline bootstraps such positions without allowing this run's own assessment to invalidate them.",
+        "policy": "A missing prior thesis means no earlier run recorded a structured thesis for this symbol. It is non-directional context and does not authorize or block the current target.",
     }
     if not symbol_id:
         return unavailable
@@ -1210,7 +1202,7 @@ def prior_thesis_context(
         "thesis_definition": thesis,
         "source_run_id": source_run_id,
         "status": "available",
-        "policy": "This thesis_definition is immutable for evaluating a reduction in this run: report thesis_assessment.status honestly and only cite matched_invalidation_condition_ids that already exist here and cited_argument_ids that already exist in debate_artifact. A new definition cannot be applied retroactively to that assessment; a valid definition returned for an actual buy/increase becomes the successor prior for later runs.",
+        "policy": "This thesis_definition is historical decision context. Assess it honestly and return a valid successor definition when useful; neither this definition nor thesis_assessment authorizes or blocks the current target.",
     }
 
 
@@ -1416,8 +1408,7 @@ def build_analyst_review_slice_payload(payload: Any, symbol_ids: list[str]) -> A
 
 def write_review_input_slices(spec: dict[str, Any]) -> dict[str, str]:
     stage = str(spec.get("stage", "")).strip()
-    debate_opening = stage == DEBATE_STAGE and str(spec.get("debate_phase", "")).strip() == "opening"
-    if not is_compact_review_spec(spec) and not (debate_opening and is_compact_debate_spec(spec)):
+    if not is_compact_review_spec(spec):
         return {}
     artifacts = normalize_artifact_paths(spec.get("artifact_paths"))
     symbols = normalize_symbol_ids(spec.get("symbol_ids") or spec.get("symbols"))
@@ -1432,7 +1423,7 @@ def write_review_input_slices(spec: dict[str, Any]) -> dict[str, str]:
     slice_paths: dict[str, str] = {}
 
     sources = [("decision_brief", decision_brief)]
-    if stage in {"judge-review", DEBATE_STAGE}:
+    if stage == "judge-review":
         sources.append(("analyst_review", artifacts.get("analyst_review") or artifacts.get("analyst-review") or ""))
 
     for artifact_key, source_path_text in sources:
@@ -1444,9 +1435,8 @@ def write_review_input_slices(spec: dict[str, Any]) -> dict[str, str]:
             continue
         if artifact_key == "decision_brief":
             sliced = build_review_core_payload(payload, symbols, str(spec.get("agent_role") or ""))
-            if stage in {"judge-review", DEBATE_STAGE}:
-                sliced = add_judge_review_holding_context(sliced, output_dir, str(spec.get("started_at") or ""))
             if stage == "judge-review":
+                sliced = add_judge_review_holding_context(sliced, output_dir, str(spec.get("started_at") or ""))
                 sliced = add_judge_review_position_cost_context(sliced, output_dir)
             relative_name = "review-core"
             slice_paths["review_core"] = str(slice_dir / f"{task_name}.{relative_name}.json")
@@ -1488,39 +1478,6 @@ def is_compact_review_candidate(spec: dict[str, Any]) -> bool:
         str(spec.get("stage", "")).strip() in REVIEW_STAGES
         and not str(spec.get("prompt", "")).strip()
         and (spec.get("artifact_paths") is not None or spec.get("symbol_ids") is not None or spec.get("symbols") is not None)
-    )
-
-
-def is_compact_debate_spec(spec: dict[str, Any]) -> bool:
-    if str(spec.get("stage", "")).strip() != DEBATE_STAGE:
-        return False
-    if str(spec.get("prompt", "")).strip():
-        return False
-    phase = str(spec.get("debate_phase", "")).strip()
-    artifacts = normalize_artifact_paths(spec.get("artifact_paths"))
-    symbols = normalize_symbol_ids(spec.get("symbol_ids") or spec.get("symbols"))
-    if phase not in DEBATE_PHASES or not symbols:
-        return False
-    if not (artifacts.get("persona") and artifacts.get("debate_format")):
-        return False
-    if phase == "opening":
-        return bool(artifacts.get("decision_brief") and artifacts.get("analyst_review"))
-    return bool(
-        str(spec.get("resume_session_id") or "").strip()
-        and artifacts.get("opponent_opening")
-    )
-
-
-def is_compact_debate_candidate(spec: dict[str, Any]) -> bool:
-    return (
-        str(spec.get("stage", "")).strip() == DEBATE_STAGE
-        and not str(spec.get("prompt", "")).strip()
-        and (
-            spec.get("artifact_paths") is not None
-            or spec.get("symbol_ids") is not None
-            or spec.get("symbols") is not None
-            or spec.get("debate_phase") is not None
-        )
     )
 
 
@@ -1596,37 +1553,28 @@ def compact_review_prompt(spec: dict[str, Any]) -> str | None:
     if stage == "judge-review":
         review_scope_reasons = spec.get("review_scope_reasons") if isinstance(spec.get("review_scope_reasons"), dict) else {}
         portfolio_snapshot = spec.get("portfolio_snapshot") if isinstance(spec.get("portfolio_snapshot"), list) else []
-        debate_artifact = artifacts.get("debate_artifact")
-        if debate_artifact:
-            lines.append(f"debate_artifact: {debate_artifact}")
         lines.extend(
             [
                 "",
                 "For judge-review, use the selected-symbol analyst-review slice from analyst_review; agent_scores excluded from aggregation are intentionally omitted from this judgment input.",
-                "Optional evidence marked missing, failed, empty, unavailable, or excluded_from_aggregation is non-directional: its absence must not affect debate claims, weaknesses, rebuttals, reason_code, one_line_reason, or target_position_value_krw.",
+                "Optional evidence marked missing, failed, empty, unavailable, or excluded_from_aggregation is non-directional: its absence must not affect opposing_view cases, reason_code, one_line_reason, or target_position_value_krw.",
                 "Do not infer safety, risk, favorable news, thesis integrity, or thesis damage from the absence of optional evidence.",
                 "Do not use optional-domain coverage counts or completeness to decide evidence sufficiency; judge only the directional strength and conflict of supplied usable evidence.",
                 "The supplied symbols are every eligible held symbol (review_scope_reasons=held_position, regardless of score or missing score) plus the top-ranked unheld symbols by score (review_scope_reasons=unheld_score_rank). There is no score band and no assigned buy/sell candidate direction: you may propose an increase or a decrease for any supplied symbol, held or unheld.",
-                "Return no separate action. Return target_position_value_krw plus decision_basis (none|thesis|profit_protection|concentration_rebalance), evidence_refs (compact string list), reason_code, and one_line_reason. The pipeline mechanically derives the actual buy/hold/sell action from target_position_value_krw versus baseline and independently re-verifies decision_basis; a reason string is never itself authorization, and a disallowed request is clamped back to baseline with an auditable decision_guard.",
-                "When the supplied usable evidence itself is insufficient or conflicting, the default decision is hold at the baseline with decision_basis=none.",
+                "For every supplied symbol, first build a compact opposing_view: the single strongest exposure-increase/maintain case (increase_case) and the single strongest exposure-reduce/avoid case (reduce_case), each with a short summary and its own evidence_refs drawn only from supplied usable evidence. Then resolve the comparison yourself into one target_position_value_krw. Return opposing_view: {increase_case: {summary, evidence_refs}, reduce_case: {summary, evidence_refs}}. Keep both cases short and auditable; do not return long prose, a transcript, or hidden chain-of-thought.",
+                "Conflict alone is not a hold rule. Compare the cases by materiality, freshness, source quality, and portfolio impact, then set the target change magnitude in proportion to the supported net advantage. Hold only when neither case has enough supported net advantage to justify a change.",
+                "Return no separate action. Return target_position_value_krw, reason_code, and one_line_reason. decision_basis (none|thesis|profit_protection|concentration_rebalance) is optional audit metadata.",
                 "final_first_score is the simple mean of the included analyst view scores; per-analyst scores in agent_scores carry the evidence behind it. It is advisory/ranking/reporting context only, never an order precondition.",
                 "Return target_position_value_krw for every supplied symbol as the target KRW position value after this decision.",
                 "The pipeline derives final_holding_quantity from target_position_value_krw / price.current_or_last with Decimal ROUND_HALF_UP; judge-supplied final_holding_quantity is optional and ignored for sizing.",
                 "No additional buy, no extra exposure, or 추가 확대 없음 means target_position_value_krw must stay at the baseline (holding_quantity_context.expected_holding_quantity * price.current_or_last), not 0.",
-                "If today_trade_timeline_context confirms a same-day buy, or its collection_status is partial/unavailable so same-day buy history is unknown, target_position_value_krw may exceed the baseline only when additional_buy_reason supplies new evidence or materially changed price/portfolio context.",
+                "When increasing after a same-day buy, additional_buy_reason may record new evidence or materially changed price/portfolio context; it is optional audit text and never an authorization gate.",
                 "Treat an empty recent_trade_context.recent_submitted_trades list as confirmed absence only when coverage_status=complete; otherwise recent trade history is unknown and its absence is non-directional.",
-                "For a held symbol with a low score, an intact long-term thesis favors holding despite the low score; reduce or exit only when thesis damage, material adverse news/disclosure, or structural deterioration is supported by supplied evidence.",
+                "For a held symbol with a low score, treat thesis integrity as one input, not a reduction gate. Thesis damage can support reduction, but relative attractiveness, concentration, profit/loss risk, opportunity cost, or a stronger alternative may independently support reducing or exiting even when the thesis remains intact.",
                 "Use strategy_context and symbol_strategy_context as advisory inputs for target_position_value_krw, not as order allow/block rules.",
                 "Use position_cost_context (average_purchase_price, purchase_amount, current_review_price, pct_distance_from_average_price) as reference information for profit/loss, risk, and position adjustments. Determine final direction and target exposure by considering thesis, market evidence, and portfolio risk together.",
-                "prior_thesis_context reports whether an earlier run already recorded a structured thesis_definition (core_rationale and invalidation_conditions, each with a condition_id and description) for this symbol. Those prior conditions are immutable for evaluating a reduction in this run: a newly returned definition cannot be applied retroactively to that assessment, while a valid definition returned for an actual buy/increase becomes the successor prior for later runs.",
-                "For a held symbol whose symbol_strategy_context.loss_position is true (or pnl_rate < 0), always return thesis_assessment: {status: intact|damaged|uncertain, matched_invalidation_condition_ids: [...], cited_argument_ids: [...]}. Price loss, index/regime panic, a low score, or missing optional evidence alone are never sufficient for status=damaged.",
-                "The pipeline only allows reducing target_position_value_krw below baseline for a loss position when status is damaged, matched_invalidation_condition_ids reference condition_id values that already exist in prior_thesis_context.thesis_definition.invalidation_conditions, and cited_argument_ids reference argument_id values that already exist in debate_artifact for this symbol. Otherwise it preserves baseline exposure regardless of target_position_value_krw.",
-                "If prior_thesis_context.status is no_prior_thesis for a loss position, still return your honest thesis_assessment and also return a real thesis_definition (core_rationale, invalidation_conditions) for this symbol even when you decide to hold at baseline or a reduction gets blocked. This bootstraps a valid prior for a future run; the pipeline never invents this definition on your behalf, and an empty/malformed one is not persisted and leaves the symbol with no prior thesis next run.",
-                "target_position_value_krw above baseline requires thesis_definition: {core_rationale, invalidation_conditions: [{condition_id, description}, ...]} with a non-empty core_rationale and at least one condition with a non-empty condition_id and description. The pipeline mechanically rejects an increase that omits or malforms this definition; it never executes the increase anyway.",
-                "The Python pipeline already completed bull/bear opening and rebuttal-1 final arguments. Do not spawn or resume debate agents and do not request another round.",
-                "Compare each side's explicit claims, rebuttals, concessions, unresolved conflicts, final position, recommended action, and target holding quantity for every symbol.",
-                "If debate_artifact status is incomplete, or if the completed debate remains balanced or directionally insufficient, hold at the baseline.",
-                "Reflect the decisive argument IDs (or why the sides cancelled out) in one_line_reason without returning the debate transcript.",
+                "prior_thesis_context reports an earlier structured thesis_definition when available. Use it as decision context, not as a mechanical authorization condition.",
+                "When prior thesis materially affects the target, you may return thesis_assessment: {status: intact|damaged|uncertain, matched_invalidation_condition_ids: [...]} and/or a new thesis_definition for future context. These are audit fields; missing or malformed values do not block the target.",
             ]
         )
         if review_scope_reasons:
@@ -1649,111 +1597,8 @@ def compact_review_prompt(spec: dict[str, Any]) -> str | None:
     return compact_prompt("\n".join(lines))
 
 
-def compact_debate_prompt(spec: dict[str, Any]) -> str | None:
-    if not is_compact_debate_spec(spec):
-        return None
-    phase = str(spec.get("debate_phase") or "").strip()
-    role = str(spec.get("agent_role") or "").strip()
-    side = "bull" if role == "debate-bull" else "bear"
-    artifacts = normalize_artifact_paths(spec.get("artifact_paths"))
-    symbols = normalize_symbol_ids(spec.get("symbol_ids") or spec.get("symbols"))
-    portfolio_snapshot = spec.get("portfolio_snapshot") if isinstance(spec.get("portfolio_snapshot"), list) else []
-    expected_kind = DEBATE_PHASE_ARGUMENT_KINDS[phase]
-
-    lines = [
-        "Daily-trading persistent debate agent.",
-        f"stage: {DEBATE_STAGE}",
-        f"debate_phase: {phase}",
-        f"agent_role: {role}",
-        f"debate_side: {side}",
-        f"task_name: {spec.get('task_name', '')}",
-        f"run_id: {spec.get('run_id', '')}",
-        f"started_at: {spec.get('started_at', '')}",
-        f"workspace_dir: {spec.get('workspace_dir', '')}",
-        "",
-        "Use only the explicitly listed immutable local artifacts and the conversation history in this same Codex session.",
-        "You may use read-only local shell commands such as cat and jq only for the explicitly listed files.",
-        "Do not call KIS, MCP, web, network, account/order APIs, or external data sources.",
-        "Do not write files, emit Markdown, diffs, code fences, or hidden chain-of-thought. Return only the explicit structured arguments required by debate_format.",
-        "Optional evidence marked missing, failed, empty, unavailable, or excluded_from_aggregation is non-directional and must not support any claim or rebuttal.",
-        f"persona: {artifacts['persona']}",
-        f"debate_format: {artifacts['debate_format']}",
-        "symbol_ids: " + ",".join(symbols),
-    ]
-    if phase == "opening":
-        lines.extend(
-            [
-                f"decision_brief: {artifacts['decision_brief']}",
-                f"analyst_review: {artifacts['analyst_review']}",
-                "Opening: independently present the strongest supported case for your assigned side for every symbol.",
-                "Every argument.kind must be claim and every argument.targets list must be empty.",
-                "Use deterministic argument_id values formed as <symbol_id>-<side>-opening-<number>.",
-            ]
-        )
-    else:
-        lines.extend(
-            [
-                f"resume_session_id: {spec.get('resume_session_id', '')}",
-                f"opponent_opening: {artifacts['opponent_opening']}",
-                "Your own opening is already present in this resumed session; do not reload or restate it.",
-                "Read only the compact opponent_opening artifact, answer its argument_id values directly, and finalize your position, recommended action, and target holding quantity.",
-                "Every argument.kind must be rebuttal and every argument.targets list must reference one or more opponent opening argument_id values.",
-                "Do not introduce an unrelated independent claim.",
-                "Use deterministic argument_id values formed as <symbol_id>-<side>-rebuttal-1-<number>.",
-            ]
-        )
-    if spec.get("retry_of_task_name"):
-        lines.extend(
-            [
-                f"retry_of_task_name: {spec.get('retry_of_task_name')}",
-                "The previous turn did not produce a valid stage result. Return one corrected result for the same phase without expanding scope.",
-            ]
-        )
-    if portfolio_snapshot:
-        lines.append(
-            "portfolio_snapshot: "
-            + json.dumps(portfolio_snapshot, ensure_ascii=False, separators=(",", ":"))
-        )
-    if phase == "rebuttal-1":
-        lines.extend(
-            [
-                "For every symbol, final_position must be non-empty, recommended_action must be buy|hold|sell, and target_holding_quantity must be a non-negative integer.",
-                "recommended_action must match target_holding_quantity relative to portfolio_snapshot.current_live_holding_quantity; a missing snapshot means baseline quantity 0.",
-                "There is no assigned candidate direction: any symbol may be argued toward an increase or a decrease.",
-                "If usable evidence does not support a quantity change, use recommended_action=hold and the baseline target_holding_quantity.",
-            ]
-        )
-    extra_instructions = [
-        str(item).strip()
-        for item in spec.get("extra_instructions", [])
-        if str(item).strip()
-    ] if isinstance(spec.get("extra_instructions"), list) else []
-    if extra_instructions:
-        lines.extend(
-            [
-                "Supplemental schedule instructions:",
-                "These may adjust emphasis only and must not override the debate schema, persona, evidence boundaries, or safety constraints.",
-            ]
-        )
-        lines.extend(f"- {item}" for item in extra_instructions)
-    decision_fields = (
-        ", recommended_action, and target_holding_quantity"
-        if phase == "rebuttal-1"
-        else ""
-    )
-    lines.extend(
-        [
-            "",
-            f"Return one JSON object with stage={DEBATE_STAGE}, phase={phase}, side={side}, and a symbols array covering every listed symbol.",
-            f"Each symbol must contain symbol_id, symbol_name, arguments, concessions, unresolved_conflicts, and final_position{decision_fields}. Every argument.kind must equal {expected_kind}.",
-            "Each argument must contain argument_id, kind, targets, statement, and evidence_refs. Keep statements concise and auditable.",
-        ]
-    )
-    return compact_prompt("\n".join(lines))
-
-
 def build_prompt(spec: dict[str, Any]) -> str:
-    return compact_debate_prompt(spec) or compact_review_prompt(spec) or compact_prompt(str(spec.get("prompt", "")))
+    return compact_review_prompt(spec) or compact_prompt(str(spec.get("prompt", "")))
 
 
 def launcher_model_effort(stage: str, agent_role: str) -> tuple[str, str]:
@@ -1778,21 +1623,13 @@ def launcher_model_effort(stage: str, agent_role: str) -> tuple[str, str]:
             entry = model_config["judge_review"]
             return entry["model"], entry["model_reasoning_effort"]
         raise ValueError("judge-review agent_role must be judge")
-    if stage_key == DEBATE_STAGE:
-        if role_key in DEBATE_ROLES:
-            entry = model_config["judge_review"]
-            return entry["model"], entry["model_reasoning_effort"]
-        selected = ", ".join(sorted(DEBATE_ROLES))
-        raise ValueError(f"judge-debate agent_role must be one of: {selected}")
     raise ValueError(f"unsupported daily-trading sub-agent stage/role: stage={stage!r}, agent_role={agent_role!r}")
-
 
 
 def validate_spec(spec: dict[str, Any]) -> None:
     required = REQUIRED_SPEC_FIELDS
     compact_review_requested = is_compact_review_candidate(spec)
-    compact_debate_requested = is_compact_debate_candidate(spec)
-    if compact_review_requested or compact_debate_requested:
+    if compact_review_requested:
         required = REQUIRED_SPEC_FIELDS - {"prompt"}
     missing = sorted(field for field in required if not str(spec.get(field, "")).strip())
     if missing:
@@ -1800,8 +1637,6 @@ def validate_spec(spec: dict[str, Any]) -> None:
     stage = str(spec.get("stage", "")).strip()
     if stage in REVIEW_STAGES and str(spec.get("prompt", "")).strip():
         raise ValueError("review raw prompt fallback is forbidden; use compact artifact_paths and symbol_ids")
-    if stage == DEBATE_STAGE and str(spec.get("prompt", "")).strip():
-        raise ValueError("judge-debate raw prompt fallback is forbidden; use compact artifact_paths and symbol_ids")
     if compact_review_requested:
         artifacts = normalize_artifact_paths(spec.get("artifact_paths"))
         decision_brief = artifacts.get("decision_brief") or artifacts.get("decision-brief") or artifacts.get("brief")
@@ -1811,32 +1646,8 @@ def validate_spec(spec: dict[str, Any]) -> None:
             raise ValueError("compact review spec requires artifact_paths.decision_brief")
         if stage == "judge-review" and not analyst_review:
             raise ValueError("judge-review compact spec requires artifact_paths.analyst_review")
-        if stage == "judge-review" and not artifacts.get("debate_artifact"):
-            raise ValueError("judge-review compact spec requires artifact_paths.debate_artifact")
         if not symbols:
             raise ValueError("compact review spec requires symbol_ids")
-    if compact_debate_requested:
-        artifacts = normalize_artifact_paths(spec.get("artifact_paths"))
-        symbols = normalize_symbol_ids(spec.get("symbol_ids") or spec.get("symbols"))
-        phase = str(spec.get("debate_phase") or "").strip()
-        if phase not in DEBATE_PHASES:
-            raise ValueError("judge-debate compact spec requires debate_phase opening or rebuttal-1")
-        if not artifacts.get("persona"):
-            raise ValueError("judge-debate compact spec requires artifact_paths.persona")
-        if not artifacts.get("debate_format"):
-            raise ValueError("judge-debate compact spec requires artifact_paths.debate_format")
-        if not symbols:
-            raise ValueError("judge-debate compact spec requires symbol_ids")
-        if phase == "opening":
-            if not artifacts.get("decision_brief"):
-                raise ValueError("judge-debate opening requires artifact_paths.decision_brief")
-            if not artifacts.get("analyst_review"):
-                raise ValueError("judge-debate opening requires artifact_paths.analyst_review")
-        else:
-            if not str(spec.get("resume_session_id") or "").strip():
-                raise ValueError("judge-debate rebuttal requires resume_session_id")
-            if not artifacts.get("opponent_opening"):
-                raise ValueError("judge-debate rebuttal requires artifact_paths.opponent_opening")
     agent_role = safe_name(str(spec.get("agent_role", ""))).lower()
     task_name = safe_name(str(spec.get("task_name", ""))).lower()
     if stage == "analyst-review":
@@ -1852,10 +1663,6 @@ def validate_spec(spec: dict[str, Any]) -> None:
         ]
         if retry_numbers and max(retry_numbers) > 2:
             raise ValueError("judge retry is limited to at most 2 retries")
-    if stage == DEBATE_STAGE:
-        if agent_role not in DEBATE_ROLES:
-            selected = ", ".join(sorted(DEBATE_ROLES))
-            raise ValueError(f"judge-debate agent_role must be one of: {selected}")
 
 
 def parse_json_output(raw: str) -> tuple[Any | None, list[dict[str, Any]]]:
@@ -2057,7 +1864,7 @@ def compact_review_payload_errors(
                         "message": f"symbols[{index}].final_holding_quantity must be a non-negative integer",
                     }
                 )
-            for field in ("relative_attractiveness_rank", "decision_basis", "evidence_refs", "reason_code", "one_line_reason"):
+            for field in ("relative_attractiveness_rank", "reason_code", "one_line_reason", "opposing_view"):
                 if field not in symbol:
                     errors.append(
                         {
@@ -2072,13 +1879,13 @@ def compact_review_payload_errors(
                         "message": f"symbols[{index}].decision_basis must be one of none, thesis, profit_protection, concentration_rebalance",
                     }
                 )
-            if "evidence_refs" in symbol:
-                refs = symbol.get("evidence_refs")
-                if not isinstance(refs, list) or not all(isinstance(ref, str) for ref in refs):
+            if "opposing_view" in symbol:
+                opposing_view = symbol.get("opposing_view")
+                if not isinstance(opposing_view, dict):
                     errors.append(
                         {
                             "code": "invalid_compact_review_schema",
-                            "message": f"symbols[{index}].evidence_refs must be a string array",
+                            "message": f"symbols[{index}].opposing_view must be an object",
                         }
                     )
     if enforce_expected_symbols:
@@ -2092,256 +1899,6 @@ def compact_review_payload_errors(
                     "message": "judge-review output missing symbols: " + ", ".join(missing_symbols),
                 }
             )
-    return errors
-
-
-def debate_argument_ids_by_symbol(payload: Any) -> dict[str, set[str]]:
-    result: dict[str, set[str]] = {}
-    if not isinstance(payload, dict) or not isinstance(payload.get("symbols"), list):
-        return result
-    for symbol in payload["symbols"]:
-        symbol_id = symbol_key(symbol)
-        if not symbol_id or not isinstance(symbol, dict):
-            continue
-        arguments = symbol.get("arguments")
-        if not isinstance(arguments, list):
-            continue
-        result[symbol_id] = {
-            str(argument.get("argument_id") or "").strip()
-            for argument in arguments
-            if isinstance(argument, dict) and str(argument.get("argument_id") or "").strip()
-        }
-    return result
-
-
-def debate_baseline_quantities(spec: dict[str, Any]) -> dict[str, int]:
-    quantities = {
-        symbol_id: 0
-        for symbol_id in normalize_symbol_ids(spec.get("symbol_ids") or spec.get("symbols"))
-    }
-    snapshot = spec.get("portfolio_snapshot")
-    if not isinstance(snapshot, list):
-        return quantities
-    for item in snapshot:
-        symbol_id = symbol_key(item)
-        if symbol_id not in quantities:
-            continue
-        quantity = non_negative_int_value(item.get("current_live_holding_quantity"))
-        if quantity is not None:
-            quantities[symbol_id] = quantity
-    return quantities
-
-
-def debate_final_decision_issues(payload: Any, spec: dict[str, Any]) -> list[dict[str, Any]]:
-    phase = str(spec.get("debate_phase") or "").strip()
-    if phase != "rebuttal-1" or not isinstance(payload, dict):
-        return []
-    symbols = payload.get("symbols")
-    if not isinstance(symbols, list):
-        return []
-
-    issues: list[dict[str, Any]] = []
-    baselines = debate_baseline_quantities(spec)
-    for symbol in symbols:
-        if not isinstance(symbol, dict):
-            continue
-        symbol_id = symbol_key(symbol)
-        if not symbol_id:
-            continue
-        final_position = symbol.get("final_position")
-        if not isinstance(final_position, str) or not final_position.strip():
-            issues.append(
-                {
-                    "code": "incomplete_debate_final_position",
-                    "message": f"{symbol_id}.final_position is required after rebuttal-1",
-                    "symbol_id": symbol_id,
-                }
-            )
-        action = str(symbol.get("recommended_action") or "").strip().lower()
-        if action not in DEBATE_FINAL_ACTIONS:
-            issues.append(
-                {
-                    "code": "invalid_debate_recommended_action",
-                    "message": f"{symbol_id}.recommended_action must be buy, hold, or sell",
-                    "symbol_id": symbol_id,
-                }
-            )
-        raw_target_quantity = symbol.get("target_holding_quantity")
-        target_quantity = (
-            raw_target_quantity
-            if isinstance(raw_target_quantity, int)
-            and not isinstance(raw_target_quantity, bool)
-            and raw_target_quantity >= 0
-            else None
-        )
-        if target_quantity is None:
-            issues.append(
-                {
-                    "code": "invalid_debate_target_holding_quantity",
-                    "message": f"{symbol_id}.target_holding_quantity must be a non-negative integer",
-                    "symbol_id": symbol_id,
-                }
-            )
-        if action in DEBATE_FINAL_ACTIONS and target_quantity is not None:
-            baseline = baselines.get(symbol_id, 0)
-            expected_action = "buy" if target_quantity > baseline else "sell" if target_quantity < baseline else "hold"
-            if action != expected_action:
-                issues.append(
-                    {
-                        "code": "inconsistent_debate_action_quantity",
-                        "message": (
-                            f"{symbol_id}.recommended_action={action} does not match "
-                            f"baseline={baseline} and target_holding_quantity={target_quantity}"
-                        ),
-                        "symbol_id": symbol_id,
-                    }
-                )
-        arguments = symbol.get("arguments")
-        if isinstance(arguments, list):
-            for argument in arguments:
-                if not isinstance(argument, dict):
-                    continue
-                refs = argument.get("evidence_refs")
-                if not isinstance(refs, list) or not refs or not all(
-                    isinstance(ref, str) and ref.strip() for ref in refs
-                ):
-                    issues.append(
-                        {
-                            "code": "missing_debate_evidence_refs",
-                            "message": f"{symbol_id}: every final-debate argument requires evidence_refs",
-                            "symbol_id": symbol_id,
-                        }
-                    )
-                    break
-    return issues
-
-
-def compact_debate_payload_errors(payload: Any, spec: dict[str, Any]) -> list[dict[str, Any]]:
-    errors: list[dict[str, Any]] = []
-    phase = str(spec.get("debate_phase") or "").strip()
-    role = str(spec.get("agent_role") or "").strip()
-    side = "bull" if role == "debate-bull" else "bear"
-    expected_symbols = normalize_symbol_ids(spec.get("symbol_ids") or spec.get("symbols"))
-    expected_kind = DEBATE_PHASE_ARGUMENT_KINDS.get(phase, "")
-    if not isinstance(payload, dict):
-        return [{"code": "invalid_debate_schema", "message": "judge-debate JSON must be an object"}]
-    for field, expected in (("stage", DEBATE_STAGE), ("phase", phase), ("side", side)):
-        if payload.get(field) != expected:
-            errors.append(
-                {
-                    "code": "invalid_debate_schema",
-                    "message": f"judge-debate JSON {field} must be {expected}",
-                }
-            )
-    symbols = payload.get("symbols")
-    if not isinstance(symbols, list):
-        errors.append({"code": "invalid_debate_schema", "message": "judge-debate JSON must include a symbols array"})
-        return errors
-
-    opponent_ids: dict[str, set[str]] = {}
-    if phase != "opening":
-        artifacts = normalize_artifact_paths(spec.get("artifact_paths"))
-        opponent_path = resolve_artifact_path(artifacts.get("opponent_opening", ""), str(spec.get("workspace_dir", "")))
-        try:
-            opponent_payload = read_json_if_exists(opponent_path)
-        except (OSError, json.JSONDecodeError) as exc:
-            opponent_payload = None
-            errors.append(
-                {
-                    "code": "invalid_opponent_debate_artifact",
-                    "message": f"cannot read opponent_opening {opponent_path}: {exc}",
-                }
-            )
-        opponent_ids = debate_argument_ids_by_symbol(opponent_payload)
-
-    seen_symbols: set[str] = set()
-    seen_argument_ids: set[str] = set()
-    phase_id = phase
-    for index, symbol in enumerate(symbols):
-        if not isinstance(symbol, dict):
-            errors.append({"code": "invalid_debate_schema", "message": f"symbols[{index}] must be an object"})
-            continue
-        symbol_id = symbol_key(symbol)
-        if not symbol_id:
-            errors.append({"code": "invalid_debate_schema", "message": f"symbols[{index}] missing symbol_id"})
-            continue
-        if symbol_id in seen_symbols:
-            errors.append({"code": "invalid_debate_schema", "message": f"duplicate debate symbol {symbol_id}"})
-        seen_symbols.add(symbol_id)
-        if symbol_id not in expected_symbols:
-            errors.append({"code": "invalid_debate_schema", "message": f"unexpected debate symbol {symbol_id}"})
-        if not str(symbol.get("symbol_name") or "").strip():
-            errors.append({"code": "invalid_debate_schema", "message": f"{symbol_id} missing symbol_name"})
-        arguments = symbol.get("arguments")
-        if not isinstance(arguments, list) or not arguments:
-            errors.append({"code": "invalid_debate_schema", "message": f"{symbol_id} must include non-empty arguments"})
-            arguments = []
-        for argument_index, argument in enumerate(arguments):
-            if not isinstance(argument, dict):
-                errors.append(
-                    {
-                        "code": "invalid_debate_schema",
-                        "message": f"{symbol_id}.arguments[{argument_index}] must be an object",
-                    }
-                )
-                continue
-            argument_id = str(argument.get("argument_id") or "").strip()
-            expected_prefix = f"{symbol_id}-{side}-{phase_id}-"
-            if not argument_id.startswith(expected_prefix) or not argument_id.removeprefix(expected_prefix).isdigit():
-                errors.append(
-                    {
-                        "code": "invalid_debate_schema",
-                        "message": f"{symbol_id}.arguments[{argument_index}].argument_id must match {expected_prefix}<number>",
-                    }
-                )
-            if argument_id in seen_argument_ids:
-                errors.append({"code": "invalid_debate_schema", "message": f"duplicate argument_id {argument_id}"})
-            seen_argument_ids.add(argument_id)
-            if argument.get("kind") != expected_kind:
-                errors.append(
-                    {
-                        "code": "invalid_debate_schema",
-                        "message": f"{argument_id or symbol_id} kind must be {expected_kind}",
-                    }
-                )
-            targets = argument.get("targets")
-            if not isinstance(targets, list) or not all(isinstance(target, str) and target.strip() for target in targets):
-                errors.append({"code": "invalid_debate_schema", "message": f"{argument_id or symbol_id} targets must be a string array"})
-                targets = []
-            if phase == "opening" and targets:
-                errors.append({"code": "invalid_debate_schema", "message": f"{argument_id or symbol_id} opening targets must be empty"})
-            if phase != "opening":
-                if not targets:
-                    errors.append({"code": "invalid_debate_schema", "message": f"{argument_id or symbol_id} must target an opponent argument"})
-                invalid_targets = sorted(set(targets) - opponent_ids.get(symbol_id, set()))
-                if invalid_targets:
-                    errors.append(
-                        {
-                            "code": "invalid_debate_target",
-                            "message": f"{argument_id or symbol_id} references unknown opponent arguments: {', '.join(invalid_targets)}",
-                        }
-                    )
-            if not str(argument.get("statement") or "").strip():
-                errors.append({"code": "invalid_debate_schema", "message": f"{argument_id or symbol_id} missing statement"})
-            evidence_refs = argument.get("evidence_refs")
-            if not isinstance(evidence_refs, list) or not all(isinstance(ref, str) for ref in evidence_refs):
-                errors.append({"code": "invalid_debate_schema", "message": f"{argument_id or symbol_id} evidence_refs must be a string array"})
-        for list_field in ("concessions", "unresolved_conflicts"):
-            value = symbol.get(list_field)
-            if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-                errors.append({"code": "invalid_debate_schema", "message": f"{symbol_id}.{list_field} must be a string array"})
-        final_position = symbol.get("final_position")
-        if phase == "opening" and not isinstance(final_position, str):
-            errors.append({"code": "invalid_debate_schema", "message": f"{symbol_id}.final_position must be a string"})
-
-    missing_symbols = [symbol_id for symbol_id in expected_symbols if symbol_id not in seen_symbols]
-    if missing_symbols:
-        errors.append(
-            {
-                "code": "invalid_debate_schema",
-                "message": "judge-debate output missing symbols: " + ", ".join(missing_symbols),
-            }
-        )
     return errors
 
 
@@ -2376,8 +1933,6 @@ def append_model_usage(
         "stage": str(spec["stage"]),
         "agent_role": str(spec["agent_role"]),
         "task_name": str(spec["task_name"]),
-        "debate_phase": str(spec.get("debate_phase") or ""),
-        "session_id": str(spec.get("resume_session_id") or ""),
         "model": model,
         "model_reasoning_effort": reasoning_effort,
     }
@@ -2465,13 +2020,10 @@ def spec_fingerprint(spec: dict[str, Any]) -> str:
             "artifact_paths",
             "symbol_ids",
             "symbols",
-            "debate_phase",
-            "resume_session_id",
             "review_contract_version",
             "review_scope_reasons",
             "portfolio_snapshot",
             "extra_instructions",
-            "retry_of_task_name",
         )
     }
     relevant["artifact_content_sha256"] = artifact_content_fingerprints(spec)
@@ -2516,12 +2068,7 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
     raw_output_path.parent.mkdir(parents=True, exist_ok=True)
     slice_paths = write_review_input_slices(spec)
     prompt_spec = spec_with_review_slices(spec, slice_paths)
-    if compact_debate_prompt(prompt_spec):
-        prompt_mode = "compact_debate"
-    elif compact_review_prompt(prompt_spec):
-        prompt_mode = "compact_review"
-    else:
-        prompt_mode = "raw"
+    prompt_mode = "compact_review" if compact_review_prompt(prompt_spec) else "raw"
 
     started_at = now_iso()
     started = time.monotonic()
@@ -2531,10 +2078,7 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
         reasoning_effort=effort,
         started_at=started_at,
     )
-    resume_session_id = str(spec.get("resume_session_id") or "").strip()
     cmd = [os.getenv("CODEX_BIN", "codex"), "exec"]
-    if resume_session_id:
-        cmd.append("resume")
     cmd.extend(
         [
             "--json",
@@ -2549,8 +2093,6 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
     )
     if env_bool("CODEX_BYPASS_APPROVALS_AND_SANDBOX", True):
         cmd.append("--dangerously-bypass-approvals-and-sandbox")
-    if resume_session_id:
-        cmd.append(resume_session_id)
     cmd.append(build_prompt(prompt_spec))
 
     env = os.environ.copy()
@@ -2610,9 +2152,6 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
     parse_errors: list[dict[str, Any]] = []
     text_errors: list[dict[str, Any]] = []
     compact_review_errors: list[dict[str, Any]] = []
-    compact_debate_errors: list[dict[str, Any]] = []
-    debate_decision_issues: list[dict[str, Any]] = []
-    session_errors: list[dict[str, Any]] = []
     if stage in TEXT_OUTPUT_STAGES:
         # Collection text stages return cache paths, fixed missing-cache messages,
         # or concise Markdown summaries. The launcher records that text and
@@ -2635,28 +2174,7 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
                 else None,
             )
             errors.extend(compact_review_errors)
-        if stage == DEBATE_STAGE and prompt_mode == "compact_debate" and parsed_json is not None:
-            compact_debate_errors = compact_debate_payload_errors(parsed_json, prompt_spec)
-            debate_decision_issues = debate_final_decision_issues(parsed_json, prompt_spec)
-            compact_debate_errors.extend(debate_decision_issues)
-            errors.extend(compact_debate_errors)
     event_thread_id = str(event_summary.get("thread_id") or "").strip()
-    session_id = resume_session_id or event_thread_id
-    if stage == DEBATE_STAGE and not session_id:
-        session_errors.append(
-            {
-                "code": "missing_debate_session_id",
-                "message": "judge-debate requires thread.started.thread_id so later turns can resume the same agent",
-            }
-        )
-    if resume_session_id and event_thread_id and event_thread_id != resume_session_id:
-        session_errors.append(
-            {
-                "code": "resumed_session_id_mismatch",
-                "message": f"codex resumed {event_thread_id}, expected {resume_session_id}",
-            }
-        )
-    errors.extend(session_errors)
     if returncode not in (0, None):
         errors.append({"code": "nonzero_returncode", "message": f"codex exec exited with {returncode}"})
     if stderr.strip():
@@ -2673,8 +2191,6 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
             and parsed_json is not None
             and not parse_errors
             and not compact_review_errors
-            and not compact_debate_errors
-            and not session_errors
             else "failed"
         )
     retention = "always" if stage in AUDIT_LOG_STAGES else raw_retention_mode()
@@ -2720,15 +2236,10 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
         "degraded_dependencies": degraded_dependencies,
         "parsed_json": parsed_json,
         "parsed_text": parsed_text,
-        "debate_decision_issues": debate_decision_issues,
-        "debate_final_decision_ready": not debate_decision_issues,
         "errors": errors,
         "command": [part for part in cmd[:-1]],
         "prompt_mode": prompt_mode,
-        "debate_phase": str(spec.get("debate_phase") or ""),
-        "resume_session_id": resume_session_id,
-        "session_id": session_id,
-        "reported_session_id": event_thread_id,
+        "session_id": event_thread_id,
         "review_input_paths": slice_paths,
         "spec_fingerprint": fingerprint,
         "reused_existing_wrapper": False,

@@ -52,11 +52,10 @@ CHART_RECENT_ROW_LIMITS = {
     "monthly": 4,
     "intraday": 5,
 }
-# Bumped when the judge-review/execution contract changes shape. Version 2
-# replaces the legacy score-band direction fields with
-# review_scope_reasons/decision_basis/decision_guard, so a cached spec or
-# artifact built under the old contract can never masquerade as the new one.
-REVIEW_CONTRACT_VERSION = 2
+# Bumped when the judge-review contract changes shape. Version 3 removes the
+# standalone debate input and requires a bounded opposing_view in Judge output,
+# so cached version-2 specs cannot masquerade as the current contract.
+REVIEW_CONTRACT_VERSION = 3
 STRATEGY_POLICY_CONFIG_ENV = "DAILY_TRADING_STRATEGY_POLICY_CONFIG"
 STRATEGY_POLICY_CONFIG_FILENAME = "daily-trading-strategy-policy.yaml"
 STRATEGY_ADVISORY_LABELS = {
@@ -215,22 +214,9 @@ def validate_strategy_policy_config(payload: Any, source: Path) -> dict[str, Any
     if low is None or moderate is None or low < 0 or moderate < low:
         raise ValueError(f"strategy policy concentration_levels are invalid: {source}")
 
-    guards = payload.get("execution_guards") if isinstance(payload.get("execution_guards"), dict) else {}
-    top_k = guards.get("unheld_review_top_k")
+    top_k = payload.get("unheld_review_top_k")
     if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 0:
-        raise ValueError(f"strategy policy execution_guards.unheld_review_top_k must be a non-negative integer: {source}")
-    profit_protection_max_reduction_pct = finite_float_value(guards.get("profit_protection_max_reduction_pct"))
-    concentration_rebalance_cap_pct = finite_float_value(guards.get("concentration_rebalance_cap_pct"))
-    concentration_rebalance_max_reduction_pct = finite_float_value(guards.get("concentration_rebalance_max_reduction_pct"))
-    max_daily_turnover_pct = finite_float_value(guards.get("max_daily_turnover_pct"))
-    for name, value in (
-        ("profit_protection_max_reduction_pct", profit_protection_max_reduction_pct),
-        ("concentration_rebalance_cap_pct", concentration_rebalance_cap_pct),
-        ("concentration_rebalance_max_reduction_pct", concentration_rebalance_max_reduction_pct),
-        ("max_daily_turnover_pct", max_daily_turnover_pct),
-    ):
-        if value is None or value <= 0 or value > 100:
-            raise ValueError(f"strategy policy execution_guards.{name} must be a number in (0, 100]: {source}")
+        raise ValueError(f"strategy policy unheld_review_top_k must be a non-negative integer: {source}")
 
     return {
         "schema_version": str(payload.get("schema_version") or "1"),
@@ -243,13 +229,7 @@ def validate_strategy_policy_config(payload: Any, source: Path) -> dict[str, Any
             "low_lte_pct": low,
             "moderate_lte_pct": moderate,
         },
-        "execution_guards": {
-            "unheld_review_top_k": top_k,
-            "profit_protection_max_reduction_pct": profit_protection_max_reduction_pct,
-            "concentration_rebalance_cap_pct": concentration_rebalance_cap_pct,
-            "concentration_rebalance_max_reduction_pct": concentration_rebalance_max_reduction_pct,
-            "max_daily_turnover_pct": max_daily_turnover_pct,
-        },
+        "unheld_review_top_k": top_k,
     }
 
 
@@ -1709,7 +1689,7 @@ def build_second_spec(args: argparse.Namespace) -> dict[str, Any]:
     analyst_review = load_json(Path(args.analyst_review or output_dir / "analyst-review.json"))
     portfolio = read_json_arg(args.portfolio_json)
     strategy_policy, _ = load_strategy_policy_config(getattr(args, "strategy_policy_config", ""))
-    unheld_review_top_k = int(strategy_policy["execution_guards"]["unheld_review_top_k"])
+    unheld_review_top_k = int(strategy_policy["unheld_review_top_k"])
     eligible = set(eligible_symbol_ids(decision_brief))
     holding_set = {symbol_id for symbol_id in normalize_symbol_ids(portfolio.get("holding", [])) if symbol_id in eligible}
     brief_by_symbol = indexed_symbols(decision_brief.get("symbols"))
@@ -1777,10 +1757,6 @@ def build_second_spec(args: argparse.Namespace) -> dict[str, Any]:
             "analyst_review": artifact_path(args.analyst_review or output_dir / "analyst-review.json", absolute_paths),
             "persona": artifact_path(daily_pipeline_dir / "prompts" / "judge.md", absolute_paths),
             "review_format": artifact_path(daily_pipeline_dir / "prompts" / "judge-review-format.md", absolute_paths),
-            "debate_bull_persona": artifact_path(daily_pipeline_dir / "prompts" / "debate-bull.md", absolute_paths),
-            "debate_bear_persona": artifact_path(daily_pipeline_dir / "prompts" / "debate-bear.md", absolute_paths),
-            "debate_format": artifact_path(daily_pipeline_dir / "prompts" / "debate-format.md", absolute_paths),
-            "debate_artifact": artifact_path(output_dir / "judge-debate.json", absolute_paths),
         },
         "symbol_ids": selected,
         "review_scope_reasons": review_scope_reasons,
@@ -1834,10 +1810,9 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
     artifact = common_envelope(run_id, started_at, "execution")
     artifact.update(
         {
-            # Bumped: orders now carry requested/canonical target, decision_basis,
-            # decision_guard, and requested_action/canonical_action -- an old
-            # score-band-era execution.json can never be mistaken for this contract.
-            "schema_version": "2",
+            # Version 3 carries the Judge's direct target without a separate
+            # strategy-authorization guard; broker/order checks still run later.
+            "schema_version": "3",
             "request_type": args.request_type,
             "requires_main_agent_order_execution": False,
             "required_main_agent_actions": [],
@@ -1967,7 +1942,6 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
                 "requested_action": item.get("requested_action") or "hold",
                 "canonical_action": item.get("canonical_action") or "hold",
                 "decision_basis": item.get("decision_basis") or "none",
-                "decision_guard": item.get("decision_guard") if isinstance(item.get("decision_guard"), dict) else {},
                 "holding_state_status": holding_state_status,
                 "holding_state_reasons": list(account_item.get("holding_state_reasons") or []),
                 "current_live_holding_quantity": current_qty,

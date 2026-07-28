@@ -22,7 +22,6 @@ from ..scripts.run_subagent import (
     compact_position_cost_context,
     compact_prompt,
     compact_review_payload_errors,
-    debate_final_decision_issues,
     launcher_model_effort,
     load_json,
     load_subagent_model_config,
@@ -91,12 +90,6 @@ def assert_all_supported_stages_use_expected_models() -> None:
             model_config["judge_review"]["model"],
             model_config["judge_review"]["model_reasoning_effort"],
         ),
-        (
-            "judge-debate",
-            "debate-bull",
-            model_config["judge_review"]["model"],
-            model_config["judge_review"]["model_reasoning_effort"],
-        ),
     ]
     for stage, role, model, effort in cases:
         assert_model_effort(stage, role, model=model, effort=effort)
@@ -149,44 +142,7 @@ else:
         }
     else:
         prompt = sys.argv[-1] if sys.argv else ""
-        if "stage: judge-debate" in prompt:
-            phase = next((value for value in ("opening", "rebuttal-1") if f"debate_phase: {value}" in prompt), "opening")
-            side = "bull" if "debate_side: bull" in prompt else "bear"
-            opponent = "bear" if side == "bull" else "bull"
-            symbol_line = next((line for line in prompt.splitlines() if line.startswith("symbol_ids: ")), "symbol_ids: 005930")
-            symbols = [value.strip() for value in symbol_line.split(":", 1)[1].split(",") if value.strip()]
-            kind = {"opening": "claim", "rebuttal-1": "rebuttal"}[phase]
-            payload = {
-                "stage": "judge-debate",
-                "phase": phase,
-                "side": side,
-                "symbols": [
-                    {
-                        "symbol_id": symbol,
-                        "symbol_name": symbol,
-                        "arguments": [
-                            {
-                                "argument_id": f"{symbol}-{side}-{phase}-1",
-                                "kind": kind,
-                                "targets": [] if phase == "opening" else [f"{symbol}-{opponent}-opening-1"],
-                                "statement": f"{side} {phase} self-test",
-                                "evidence_refs": [f"decision-brief:{symbol}:price"],
-                            }
-                        ],
-                        "concessions": [],
-                        "unresolved_conflicts": [],
-                        "final_position": "" if phase == "opening" else f"{side} final position",
-                        **(
-                            {"recommended_action": "hold", "target_holding_quantity": 0}
-                            if phase != "opening"
-                            else {}
-                        ),
-                    }
-                    for symbol in symbols
-                ],
-                "errors": [],
-            }
-        elif "stage: analyst-review" in prompt or "stage: judge-review" in prompt:
+        if "stage: analyst-review" in prompt or "stage: judge-review" in prompt:
             stage = "judge-review" if "stage: judge-review" in prompt else "analyst-review"
             symbol_line = next((line for line in prompt.splitlines() if line.startswith("symbol_ids: ")), "symbol_ids: 005930")
             review_symbols = (
@@ -251,6 +207,16 @@ else:
                                 "relative_attractiveness_rank": 1,
                                 "decision_basis": "none",
                                 "evidence_refs": ["analyst-review:005930:analyst-quality-value"],
+                                "opposing_view": {
+                                    "increase_case": {
+                                        "summary": "increase case self-test",
+                                        "evidence_refs": ["analyst-review:005930:analyst-quality-value"],
+                                    },
+                                    "reduce_case": {
+                                        "summary": "reduce case self-test",
+                                        "evidence_refs": ["analyst-review:005930:analyst-news-flow"],
+                                    },
+                                },
                             }
                             if stage == "judge-review"
                             else first_payload
@@ -264,13 +230,7 @@ else:
             payload = {"ok": True, "argv": sys.argv[1:]}
     output_path.write_text(json.dumps(payload), encoding="utf-8")
 if "--json" in sys.argv:
-    prompt = sys.argv[-1] if sys.argv else ""
-    if "agent_role: debate-bull" in prompt:
-        thread_id = "00000000-0000-4000-8000-000000000001"
-    elif "agent_role: debate-bear" in prompt:
-        thread_id = "00000000-0000-4000-8000-000000000002"
-    else:
-        thread_id = "00000000-0000-4000-8000-000000000099"
+    thread_id = "00000000-0000-4000-8000-000000000099"
     print(json.dumps({"type": "thread.started", "thread_id": thread_id}))
     if os.environ.get("FAKE_CODEX_DIAGNOSTIC_EVENTS") == "1":
         print(json.dumps({"type": "event_msg", "payload": {"type": "tool_call", "tool_name": "shell", "command": ["cat", "artifact.json"]}}))
@@ -331,70 +291,12 @@ def compact_spec(tmp: Path, *, stage: str, agent_role: str, task_name: str) -> d
         "persona": f"prompts/{agent_role}.md",
         "review_format": "prompts/analyst-review-format.md",
     }
-    if stage == "judge-review":
-        payload["artifact_paths"]["debate_artifact"] = str(
-            tmp / "reports" / "runs" / "self-test" / "judge-debate.json"
-        )
     payload["symbol_ids"] = ["005930", {"symbol_id": "000660"}, "005930"]
-    return payload
-
-
-def compact_debate_spec(
-    tmp: Path,
-    *,
-    side: str,
-    phase: str,
-    task_name: str,
-    session_id: str = "",
-) -> dict[str, Any]:
-    run_dir = tmp / "reports" / "runs" / "self-test"
-    payload = {
-        "run_id": "self-test",
-        "started_at": "2026-06-08T09:00:00+09:00",
-        "stage": "judge-debate",
-        "agent_role": f"debate-{side}",
-        "task_name": task_name,
-        "debate_phase": phase,
-        "workspace_dir": str(tmp),
-        "output_dir": str(run_dir),
-        "artifact_paths": {
-            "persona": f"prompts/debate-{side}.md",
-            "debate_format": "prompts/debate-format.md",
-        },
-        "symbol_ids": ["005930", "000660"],
-        "review_scope_reasons": {"005930": "held_position", "000660": "unheld_score_rank"},
-    }
-    if phase == "opening":
-        payload["artifact_paths"].update(
-            {
-                "decision_brief": str(run_dir / "decision-brief.json"),
-                "analyst_review": str(run_dir / "analyst-review.json"),
-            }
-        )
-    else:
-        opponent = "bear" if side == "bull" else "bull"
-        payload["resume_session_id"] = session_id
-        payload["artifact_paths"].update(
-            {
-                "opponent_opening": str(run_dir / "debate" / f"opening-{opponent}-compact.json"),
-            }
-        )
     return payload
 
 
 def write_sample_review_inputs(tmp: Path) -> None:
     run_dir = tmp / "reports" / "runs" / "self-test"
-    write_json(
-        run_dir / "judge-debate.json",
-        {
-            "schema_version": "1",
-            "run_id": "self-test",
-            "stage": "judge-debate",
-            "status": "success",
-            "phases": [],
-            "errors": [],
-        },
-    )
     write_json(
         run_dir / "execution.json",
         {
@@ -683,69 +585,30 @@ def assert_compact_review_prompt(tmp: Path) -> None:
         "analyst_review:",
         "For judge-review, use the selected-symbol analyst-review slice from analyst_review; agent_scores excluded from aggregation are intentionally omitted from this judgment input.",
         "The supplied symbols are every eligible held symbol (review_scope_reasons=held_position, regardless of score or missing score) plus the top-ranked unheld symbols by score (review_scope_reasons=unheld_score_rank).",
-        "Return no separate action. Return target_position_value_krw plus decision_basis (none|thesis|profit_protection|concentration_rebalance), evidence_refs (compact string list), reason_code, and one_line_reason.",
-        "When the supplied usable evidence itself is insufficient or conflicting, the default decision is hold at the baseline with decision_basis=none.",
+        "Return no separate action. Return target_position_value_krw, reason_code, and one_line_reason.",
+        "decision_basis (none|thesis|profit_protection|concentration_rebalance) is optional audit metadata.",
+        "Conflict alone is not a hold rule.",
         "final_first_score is the simple mean of the included analyst view scores",
-        "For a held symbol with a low score, an intact long-term thesis favors holding despite the low score",
+        "For a held symbol with a low score, treat thesis integrity as one input, not a reduction gate",
         "Use strategy_context and symbol_strategy_context as advisory inputs for target_position_value_krw, not as order allow/block rules.",
         "Use position_cost_context (average_purchase_price, purchase_amount, current_review_price, pct_distance_from_average_price) as reference information for profit/loss, risk, and position adjustments.",
         "Determine final direction and target exposure by considering thesis, market evidence, and portfolio risk together.",
-        "debate_artifact:",
-        "The Python pipeline already completed bull/bear opening and rebuttal-1 final arguments.",
-        "Do not spawn or resume debate agents and do not request another round.",
-        "If debate_artifact status is incomplete, or if the completed debate remains balanced or directionally insufficient, hold at the baseline.",
+        "For every supplied symbol, first build a compact opposing_view: the single strongest exposure-increase/maintain case (increase_case) and the single strongest exposure-reduce/avoid case (reduce_case)",
+        "Return opposing_view: {increase_case: {summary, evidence_refs}, reduce_case: {summary, evidence_refs}}.",
         "Optional evidence marked missing, failed, empty, unavailable, or excluded_from_aggregation is non-directional",
         "Do not infer safety, risk, favorable news, thesis integrity, or thesis damage from the absence of optional evidence.",
         "Do not use optional-domain coverage counts or completeness to decide evidence sufficiency",
         "target_position_value_krw",
         "No additional buy",
-        "same-day buy history is unknown",
+        "additional_buy_reason may record new evidence",
         "recent trade history is unknown",
     ]
     missing = [part for part in second_required_parts if part not in second_prompt]
     if missing:
         raise AssertionError(f"compact judge-review prompt missing {missing}: {second_prompt}")
-    if "spawn the bull/bear" in second_prompt or "hard stop after two rounds" in second_prompt:
+    if "spawn the bull/bear" in second_prompt or "hard stop after two rounds" in second_prompt or "debate_artifact" in second_prompt:
         raise AssertionError(f"judge prompt still owns debate orchestration: {second_prompt}")
 
-    opening_prompt = build_prompt(
-        compact_debate_spec(
-            tmp,
-            side="bull",
-            phase="opening",
-            task_name="debate-bull-opening",
-        )
-    )
-    opening_required = [
-        "stage: judge-debate",
-        "debate_phase: opening",
-        "debate_side: bull",
-        "persona: prompts/debate-bull.md",
-        "debate_format: prompts/debate-format.md",
-        "Opening: independently present the strongest supported case",
-        "Every argument.kind must be claim",
-    ]
-    missing = [part for part in opening_required if part not in opening_prompt]
-    if missing:
-        raise AssertionError(f"compact opening prompt missing {missing}: {opening_prompt}")
-    rebuttal_prompt = build_prompt(
-        compact_debate_spec(
-            tmp,
-            side="bull",
-            phase="rebuttal-1",
-            task_name="debate-bull-rebuttal-1",
-            session_id="00000000-0000-4000-8000-000000000001",
-        )
-    )
-    if (
-        "resume_session_id: 00000000-0000-4000-8000-000000000001" not in rebuttal_prompt
-        or "opponent_opening:" not in rebuttal_prompt
-        or "own_previous_turn" in rebuttal_prompt
-        or "Every argument.kind must be rebuttal" not in rebuttal_prompt
-        or "recommended_action must be buy|hold|sell" not in rebuttal_prompt
-        or "target_holding_quantity must be a non-negative integer" not in rebuttal_prompt
-    ):
-        raise AssertionError(f"compact resumed rebuttal prompt missing session contract: {rebuttal_prompt}")
     scoped_spec = compact_spec(tmp, stage="judge-review", agent_role="judge", task_name="second-scoped")
     scoped_spec["review_scope_reasons"] = {"005930": "held_position", "000660": "unheld_score_rank"}
     scoped_spec["portfolio_snapshot"] = [
@@ -1095,13 +958,6 @@ def assert_review_input_slices(tmp: Path) -> None:
     if unavailable_context.get("coverage_status") != "unavailable" or unavailable_context.get("inspected_run_count") != 0:
         raise AssertionError(f"zero prior executions should produce unavailable recent-trade coverage: {unavailable_context}")
 
-    debate_opening_slices = write_review_input_slices(
-        compact_debate_spec(tmp, side="bull", phase="opening", task_name="cost-context-debate-bull-opening")
-    )
-    debate_review_core = load_json(Path(debate_opening_slices["review_core"]))
-    for debate_symbol in debate_review_core.get("symbols", []):
-        if "position_cost_context" in debate_symbol:
-            raise AssertionError(f"judge-debate opening input must not receive position_cost_context: {debate_symbol}")
 
     failed_account_dir = tmp / "reports" / "runs" / "self-test-failed-account"
     write_json(
@@ -1194,18 +1050,8 @@ def assert_review_input_slices(tmp: Path) -> None:
         raise AssertionError("an account artifact with an unrecognized status must never be treated as confirmed holdings")
 
 
-def assert_debate_optional_evidence_policy() -> None:
+def assert_optional_evidence_policy() -> None:
     prompt_dir = Path(__file__).resolve().parents[1] / "prompts"
-    shared_required = [
-        "optional evidence는 주장·약점·반박에 사용하지 않는다",
-        "정보 부재를 위험·안전, 호재·악재, thesis 유지·훼손의 근거로 추론하지 않는다",
-        "지원되는 논거 없음",
-    ]
-    for name in ("debate-bull.md", "debate-bear.md"):
-        text = (prompt_dir / name).read_text(encoding="utf-8")
-        missing = [part for part in shared_required if part not in text]
-        if missing:
-            raise AssertionError(f"{name} missing optional-evidence policy {missing}")
     judge_text = (prompt_dir / "judge.md").read_text(encoding="utf-8")
     if "optional evidence 부재는 어느 방향의 논거로도 세지 않는다" not in judge_text:
         raise AssertionError("judge.md missing non-directional optional-evidence policy")
@@ -1217,7 +1063,7 @@ def assert_debate_optional_evidence_policy() -> None:
     format_text = (prompt_dir / "judge-review-format.md").read_text(encoding="utf-8")
     if "unavailable news is neutral rather than favorable or adverse" not in format_text:
         raise AssertionError("judge-review-format.md missing unavailable-news neutrality policy")
-    if "coverage_status=complete" not in format_text or "same-day buy history is unknown" not in format_text:
+    if "coverage_status=complete" not in format_text or "recent trade history is unknown" not in format_text:
         raise AssertionError("judge-review-format.md missing trade-history coverage policy")
     analyst_format_text = (prompt_dir / "analyst-review-format.md").read_text(encoding="utf-8")
     quality_text = (prompt_dir / "analyst-quality-risk.md").read_text(encoding="utf-8")
@@ -1288,7 +1134,7 @@ def step_invalid_spec_and_compact_schema_checks(tmp: Path) -> list[str]:
         assert_prompt_compaction()
         assert_compact_review_prompt(tmp)
         assert_review_input_slices(tmp)
-        assert_debate_optional_evidence_policy()
+        assert_optional_evidence_policy()
         missing_brief = compact_spec(
             tmp, stage="analyst-review", agent_role="analyst-momentum-news", task_name="missing-brief"
         )
@@ -1307,30 +1153,6 @@ def step_invalid_spec_and_compact_schema_checks(tmp: Path) -> list[str]:
         )
         missing_analyst_review["artifact_paths"].pop("analyst_review")
         assert_invalid_spec(missing_analyst_review, "artifact_paths.analyst_review")
-        missing_debate_artifact = compact_spec(
-            tmp,
-            stage="judge-review",
-            agent_role="judge",
-            task_name="missing-debate-artifact",
-        )
-        missing_debate_artifact["artifact_paths"].pop("debate_artifact")
-        assert_invalid_spec(missing_debate_artifact, "artifact_paths.debate_artifact")
-        missing_resume = compact_debate_spec(
-            tmp,
-            side="bull",
-            phase="rebuttal-1",
-            task_name="missing-resume",
-        )
-        assert_invalid_spec(missing_resume, "resume_session_id")
-        missing_opponent_opening = compact_debate_spec(
-            tmp,
-            side="bull",
-            phase="rebuttal-1",
-            task_name="missing-opponent-opening",
-            session_id="00000000-0000-4000-8000-000000000001",
-        )
-        missing_opponent_opening["artifact_paths"].pop("opponent_opening")
-        assert_invalid_spec(missing_opponent_opening, "artifact_paths.opponent_opening")
         assert_invalid_spec(
             compact_spec(
                 tmp,
@@ -1472,8 +1294,10 @@ def step_invalid_spec_and_compact_schema_checks(tmp: Path) -> list[str]:
                         "one_line_reason": "유지한다.",
                         "target_position_value_krw": 560000,
                         "relative_attractiveness_rank": 1,
-                        "decision_basis": "none",
-                        "evidence_refs": ["analyst-review:005930:analyst-quality-value"],
+                        "opposing_view": {
+                            "increase_case": {"summary": "increase case", "evidence_refs": []},
+                            "reduce_case": {"summary": "reduce case", "evidence_refs": []},
+                        },
                     }
                 ],
             },
@@ -1574,6 +1398,10 @@ def step_invalid_spec_and_compact_schema_checks(tmp: Path) -> list[str]:
                         "relative_attractiveness_rank": 1,
                         "decision_basis": "thesis",
                         "evidence_refs": ["analyst-review:005930:analyst-quality-value"],
+                        "opposing_view": {
+                            "increase_case": {"summary": "increase case", "evidence_refs": []},
+                            "reduce_case": {"summary": "reduce case", "evidence_refs": []},
+                        },
                     }
                 ],
             },
@@ -1793,79 +1621,6 @@ def step_custom_model_config_checks(tmp: Path, argv_log: Path) -> list[str]:
     return failures
 
 
-def step_debate_session_checks(tmp: Path, argv_log: Path) -> list[str]:
-    """Persistent debate sessions across opening and resumed rebuttal phases."""
-    failures: list[str] = []
-    write_sample_review_inputs(tmp)
-    opening_specs = [
-        compact_debate_spec(
-            tmp,
-            side=side,
-            phase="opening",
-            task_name=f"debate-{side}-opening",
-        )
-        for side in ("bull", "bear")
-    ]
-    opening_group = run_group(opening_specs, max_workers=2)
-    if opening_group.get("status") != "success" or len(opening_group.get("wrappers") or []) != 2:
-        failures.append(f"persistent debate opening group failed: {opening_group}")
-    opening_by_side = {
-        wrapper.get("agent_role", "").removeprefix("debate-"): wrapper
-        for wrapper in opening_group.get("wrappers", [])
-    }
-    expected_session_ids = {
-        "bull": "00000000-0000-4000-8000-000000000001",
-        "bear": "00000000-0000-4000-8000-000000000002",
-    }
-    if {side: wrapper.get("session_id") for side, wrapper in opening_by_side.items()} != expected_session_ids:
-        failures.append(f"opening did not capture stable debate session ids: {opening_by_side}")
-    for side, wrapper in opening_by_side.items():
-        write_json(
-            tmp / "reports" / "runs" / "self-test" / "debate" / f"opening-{side}-compact.json",
-            wrapper["parsed_json"],
-        )
-    for phase in ("rebuttal-1",):
-        phase_specs = []
-        for side in ("bull", "bear"):
-            opponent = "bear" if side == "bull" else "bull"
-            phase_spec = compact_debate_spec(
-                tmp,
-                side=side,
-                phase=phase,
-                task_name=f"debate-{side}-{phase}",
-                session_id=expected_session_ids[side],
-            )
-            phase_spec["artifact_paths"]["opponent_opening"] = str(
-                tmp / "reports" / "runs" / "self-test" / "debate" / f"opening-{opponent}-compact.json"
-            )
-            phase_specs.append(phase_spec)
-        phase_group = run_group(phase_specs, max_workers=2)
-        if phase_group.get("status") != "success":
-            failures.append(f"persistent debate {phase} group failed: {phase_group}")
-            break
-        phase_by_side = {
-            wrapper.get("agent_role", "").removeprefix("debate-"): wrapper
-            for wrapper in phase_group.get("wrappers", [])
-        }
-        if any(
-            wrapper.get("session_id") != expected_session_ids.get(side)
-            or wrapper.get("resume_session_id") != expected_session_ids.get(side)
-            or wrapper.get("event_retention") != "always"
-            or not wrapper.get("event_log_retained")
-            for side, wrapper in phase_by_side.items()
-        ):
-            failures.append(f"{phase} did not resume and retain the original sessions: {phase_by_side}")
-    debate_argv = [
-        json.loads(line)
-        for line in argv_log.read_text(encoding="utf-8").splitlines()
-        if "stage: judge-debate" in line
-    ]
-    resume_argv = [argv for argv in debate_argv if "resume" in argv]
-    if len(debate_argv) != 4 or len(resume_argv) != 2:
-        failures.append(f"fixed debate should use 2 openings and 2 resumed turns: {debate_argv}")
-    return failures
-
-
 def step_compact_review_checks(tmp: Path) -> list[str]:
     """A compact-review spec produces a decision-brief input slice."""
     failures: list[str] = []
@@ -2065,7 +1820,6 @@ def run_self_test() -> int:
             failures.extend(step_model_selection_checks(tmp, argv_log))
             failures.extend(step_event_diagnostics_checks(tmp))
             failures.extend(step_custom_model_config_checks(tmp, argv_log))
-            failures.extend(step_debate_session_checks(tmp, argv_log))
             failures.extend(step_compact_review_checks(tmp))
             failures.extend(step_wrapper_reuse_checks(tmp, argv_log))
             failures.extend(step_judge_review_reuse_checks(tmp, argv_log))
@@ -2109,7 +1863,6 @@ class RunSelfTestStepsAreIndividuallyDiscoverableTest(unittest.TestCase):
         cls.model_selection_failures = step_model_selection_checks(cls.tmp, cls.argv_log)
         cls.event_diagnostics_failures = step_event_diagnostics_checks(cls.tmp)
         cls.custom_model_config_failures = step_custom_model_config_checks(cls.tmp, cls.argv_log)
-        cls.debate_session_failures = step_debate_session_checks(cls.tmp, cls.argv_log)
         cls.compact_review_failures = step_compact_review_checks(cls.tmp)
         cls.wrapper_reuse_failures = step_wrapper_reuse_checks(cls.tmp, cls.argv_log)
         cls.judge_review_reuse_failures = step_judge_review_reuse_checks(cls.tmp, cls.argv_log)
@@ -2134,9 +1887,6 @@ class RunSelfTestStepsAreIndividuallyDiscoverableTest(unittest.TestCase):
 
     def test_step_custom_model_config_checks(self) -> None:
         self.assertEqual(self.custom_model_config_failures, [])
-
-    def test_step_debate_session_checks(self) -> None:
-        self.assertEqual(self.debate_session_failures, [])
 
     def test_step_compact_review_checks(self) -> None:
         self.assertEqual(self.compact_review_failures, [])
@@ -2171,7 +1921,6 @@ class RunSubagentSelfTest(unittest.TestCase):
             "step_model_selection_checks",
             "step_event_diagnostics_checks",
             "step_custom_model_config_checks",
-            "step_debate_session_checks",
             "step_compact_review_checks",
             "step_wrapper_reuse_checks",
             "step_judge_review_reuse_checks",
@@ -2195,7 +1944,7 @@ class RunSubagentSelfTest(unittest.TestCase):
             f"{__name__}.step_model_selection_checks", return_value=[]
         ), patch(f"{__name__}.step_event_diagnostics_checks", return_value=[]), patch(
             f"{__name__}.step_custom_model_config_checks", return_value=[]
-        ), patch(f"{__name__}.step_debate_session_checks", return_value=[]), patch(
+        ), patch(
             f"{__name__}.step_compact_review_checks", return_value=[]
         ), patch(f"{__name__}.step_wrapper_reuse_checks", return_value=[]), patch(
             f"{__name__}.step_judge_review_reuse_checks", return_value=[]
@@ -2922,45 +2671,6 @@ class RunSubagentSelfTest(unittest.TestCase):
                 by_symbol["000660"]["prior_thesis_context"]["thesis_definition"]["core_rationale"],
                 "repaired between symbols",
             )
-
-    def test_rebuttal_final_decision_issues_validate_action_and_quantity(self) -> None:
-        spec = {
-            "debate_phase": "rebuttal-1",
-            "symbol_ids": ["005930"],
-            "portfolio_snapshot": [
-                {"symbol_id": "005930", "current_live_holding_quantity": 2}
-            ],
-        }
-        payload = {
-            "symbols": [
-                {
-                    "symbol_id": "005930",
-                    "arguments": [{"evidence_refs": ["decision-brief:005930:price"]}],
-                    "final_position": "hold",
-                    "recommended_action": "hold",
-                    "target_holding_quantity": 2,
-                }
-            ]
-        }
-        self.assertEqual(debate_final_decision_issues(payload, spec), [])
-
-        payload["symbols"][0]["target_holding_quantity"] = "2"
-        self.assertIn(
-            "invalid_debate_target_holding_quantity",
-            {item["code"] for item in debate_final_decision_issues(payload, spec)},
-        )
-
-        payload["symbols"][0]["recommended_action"] = "buy"
-        payload["symbols"][0]["target_holding_quantity"] = 1
-        payload["symbols"][0]["arguments"][0]["evidence_refs"] = []
-        codes = {item["code"] for item in debate_final_decision_issues(payload, spec)}
-        self.assertEqual(
-            codes,
-            {
-                "inconsistent_debate_action_quantity",
-                "missing_debate_evidence_refs",
-            },
-        )
 
     def test_step_text_output_checks_accepts_non_json_collection_output(self) -> None:
         """A representative direct call into one of run_self_test's extracted
