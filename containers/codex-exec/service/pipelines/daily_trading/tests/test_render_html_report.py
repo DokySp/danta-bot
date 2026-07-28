@@ -1053,6 +1053,48 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
         self.assertIn("최종 보유수량 5주", rendered)
         self.assertNotIn("최종(포지션 변화) 5주", rendered)
 
+    def test_inspector_shows_current_holding_status_on_symbol_choices_and_detail(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            write_json(
+                run_dir / "analyst-review.json",
+                {
+                    "symbols": [
+                        {"symbol_id": "005930", "symbol_name": "삼성전자", "final_first_score": 5, "agent_scores": []},
+                        {"symbol_id": "000660", "symbol_name": "SK하이닉스", "final_first_score": 4, "agent_scores": []},
+                        {"symbol_id": "035420", "symbol_name": "NAVER", "final_first_score": 3, "agent_scores": []},
+                    ]
+                },
+            )
+            write_json(run_dir / "judge-review.json", {"symbols": []})
+            write_json(run_dir / "judge-review-spec.json", {"schema_version": "2", "review_scope_reasons": {}})
+            write_json(run_dir / "judge-debate.json", {})
+            rendered = render_time_symbol_inspector(
+                [
+                    {
+                        "path": run_dir,
+                        "summary": {"started_at": "2026-07-27T10:00:00+09:00", "review_summary": {"symbols": []}},
+                        "execution": {"orders": []},
+                        "decision": {
+                            "symbols": [
+                                {"symbol_id": "005930", "account_exposure": {"current_live_holding_quantity": 3}},
+                                {"symbol_id": "000660", "account_exposure": {"current_live_holding_quantity": 0}},
+                                {"symbol_id": "035420", "account_exposure": {}},
+                            ]
+                        },
+                        "is_preflight_only": False,
+                    }
+                ],
+                [],
+            )
+
+        self.assertEqual(rendered.count('class="mini-badge held">보유 3주</b>'), 1)
+        self.assertEqual(rendered.count('class="mini-badge unheld">비보유</b>'), 1)
+        self.assertEqual(rendered.count('class="mini-badge unknown">보유 미기록</b>'), 1)
+        self.assertIn('<span class="badge ok">보유 3주</span>', rendered)
+        self.assertIn('<span class="badge muted">비보유</span>', rendered)
+        self.assertIn('<span class="badge muted">보유 미기록</span>', rendered)
+
     def test_inspector_does_not_badge_lifecycle_only_cancellation_as_trade(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             run_dir = Path(temporary)
