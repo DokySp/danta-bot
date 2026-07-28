@@ -859,6 +859,26 @@ THESIS_GATE_REASON_LABELS = {
 }
 
 
+def thesis_status_display(final_item: dict[str, Any] | None) -> tuple[str, str] | None:
+    if not isinstance(final_item, dict):
+        return None
+    assessment = final_item.get("thesis_assessment")
+    if isinstance(assessment, dict):
+        status = str(assessment.get("status") or "uncertain")
+        return (
+            f"Thesis {THESIS_ASSESSMENT_LABELS.get(status, status)}",
+            THESIS_ASSESSMENT_CSS.get(status, "muted"),
+        )
+    if isinstance(final_item.get("thesis_definition"), dict):
+        return "Thesis 신규", "info"
+    if any(
+        isinstance(final_item.get(field), dict)
+        for field in ("prior_thesis_context", "protected_loss_gate")
+    ):
+        return "Thesis 평가 미기록", "muted"
+    return None
+
+
 def render_thesis_condition_items(conditions: Any, matched_ids: set[str]) -> str:
     rows = []
     for condition in conditions if isinstance(conditions, list) else []:
@@ -884,6 +904,8 @@ def render_thesis_section(final_item: dict[str, Any]) -> str:
         return ""
 
     blocks = []
+    status_display = thesis_status_display(final_item)
+    status_label, status_css = status_display or ("Thesis 평가 미기록", "muted")
     matched_ids = set(assessment.get("matched_invalidation_condition_ids") or []) if assessment else set()
 
     if prior_context is not None:
@@ -904,13 +926,13 @@ def render_thesis_section(final_item: dict[str, Any]) -> str:
 
     if assessment is not None:
         status = str(assessment.get("status") or "uncertain")
-        status_label = THESIS_ASSESSMENT_LABELS.get(status, status)
-        status_css = THESIS_ASSESSMENT_CSS.get(status, "muted")
+        assessment_status_label = THESIS_ASSESSMENT_LABELS.get(status, status)
+        assessment_status_css = THESIS_ASSESSMENT_CSS.get(status, "muted")
         cited = assessment.get("cited_argument_ids") or []
         cited_text = ", ".join(f"<code>{esc(value)}</code>" for value in cited) if cited else "-"
         blocks.append(
             "<div class=\"thesis-assessment\"><h4>이번 run 판단</h4>"
-            f"<p><span class=\"badge {status_css}\">{esc(status_label)}</span></p>"
+            f"<p><span class=\"badge {assessment_status_css}\">{esc(assessment_status_label)}</span></p>"
             f"<p>인용 근거: {cited_text}</p></div>"
         )
 
@@ -931,7 +953,12 @@ def render_thesis_section(final_item: dict[str, Any]) -> str:
             f"<ul class=\"thesis-conditions\">{render_thesis_condition_items(successor.get('invalidation_conditions'), set())}</ul></div>"
         )
 
-    return f'<div class="thesis-block">{"".join(blocks)}</div>'
+    return (
+        f'<section class="thesis-card thesis-{esc(status_css)}">'
+        '<div class="thesis-card-head"><div><p class="kicker">INVESTMENT THESIS</p>'
+        f'<h3>투자 논지 (Thesis)</h3></div><span class="badge {esc(status_css)}">{esc(status_label)}</span></div>'
+        f'<div class="thesis-block">{"".join(blocks)}</div></section>'
+    )
 
 
 def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[str, Any]]) -> str:
@@ -1159,6 +1186,17 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
             judge_scope_status = judge_symbol_scope_status(symbol_id, final_item, judge_scope_reasons, has_judge_scope_metadata)
             judge_label = JUDGE_SCOPE_STATUS_LABELS[judge_scope_status]
             holding_label, holding_badge_class = holding_status_display(decision_by_symbol.get(symbol_id))
+            thesis_display = thesis_status_display(final_item)
+            thesis_badge = (
+                f'<b class="mini-badge thesis-{esc(thesis_display[1])}">{esc(thesis_display[0])}</b>'
+                if thesis_display is not None
+                else ""
+            )
+            thesis_focus_badge = (
+                f'<span class="badge {esc(thesis_display[1])}">{esc(thesis_display[0])}</span>'
+                if thesis_display is not None
+                else ""
+            )
             judge_badge_class = {
                 "resolved": "judge",
                 "unresolved_in_scope": "attempt",
@@ -1178,7 +1216,7 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
             symbol_buttons.append(
                 f'<button type="button" class="trade-symbol-button{group_class}{" active" if is_active_symbol else ""}" data-symbol-target="{esc(composite_key)}">'
                 f'<span class="symbol-button-left"><span class="symbol-button-status"><b class="mini-badge {judge_badge_class}">{judge_label}</b>'
-                f'<b class="mini-badge {holding_badge_class}">{esc(holding_label)}</b>{attempt_badge}</span>'
+                f'<b class="mini-badge {holding_badge_class}">{esc(holding_label)}</b>{thesis_badge}{attempt_badge}</span>'
                 f'<strong class="symbol-button-name" title="{esc(symbol_name)}">{esc(symbol_name)}</strong></span>'
                 f'<span class="symbol-button-right"><b class="symbol-score">{decimal(analyst_item.get("final_first_score"))}</b><code>{esc(symbol_id)}</code></span></button>'
             )
@@ -1222,6 +1260,7 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
 
             if final_item:
                 account_exposure = (decision_by_symbol.get(symbol_id) or {}).get("account_exposure") or {}
+                thesis_html = render_thesis_section(final_item)
                 decision_evidence_html = render_decision_evidence(
                     final_item.get("one_line_reason"), debate_argument_index, run_index, symbol_id
                 )
@@ -1255,14 +1294,14 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
                 requested_action_display = judge_field_display(final_item, "requested_action", CANONICAL_ACTION_LABELS)
                 canonical_action_display = judge_field_display(final_item, "canonical_action", CANONICAL_ACTION_LABELS)
                 judge_html = (
-                    f"<article class=\"final-card full\"><div><h3>Final Judge</h3><span class=\"badge info\">rank {number(final_item.get('relative_attractiveness_rank'))}</span>"
+                    f"{thesis_html}<article class=\"final-card full\"><div><h3>Final Judge</h3><span class=\"badge info\">rank {number(final_item.get('relative_attractiveness_rank'))}</span>"
                     f"<span class=\"badge info\">근거(basis) {esc(basis_display)}</span>{guard_html}</div>"
                     f"<div class=\"final-numbers\"><span>현재 {number(account_exposure.get('current_live_holding_quantity'))}주{expected_text}</span>"
                     f"<span>최종 보유수량 {number(final_item.get('final_holding_quantity'))}주</span>"
                     f"<span>요청목표 {number(final_item.get('requested_target_position_value_krw'))}원 → 확정목표 {number(final_item.get('target_position_value_krw'))}원</span>"
                     f"<span>{esc(requested_action_display)} → {esc(canonical_action_display)}(대기반영 기준)</span></div>"
                     f"<p><code>{esc(final_item.get('reason_code'))}</code></p><p>{esc(final_item.get('one_line_reason'))}</p>"
-                    f"{decision_evidence_html}{render_thesis_section(final_item)}</article>{''.join(phase_blocks)}"
+                    f"{decision_evidence_html}</article>{''.join(phase_blocks)}"
                 )
             elif judge_scope_status == "unresolved_in_scope":
                 judge_html = '<div class="empty-state">이 종목은 Judge 심사대상(review_scope)이었지만 이 run의 judge-review.json에 유효한 결과가 없습니다(미해결).</div>'
@@ -1322,6 +1361,7 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
                 f"<div class=\"symbol-focus-head\"><div><p class=\"kicker\">RUN {esc(run_time)} · SYMBOL ANALYSIS</p><h2>{esc(symbol_name)} <code>{esc(symbol_id)}</code></h2>"
                 f"<p>{esc(trade_note)}</p></div><div class=\"focus-badges\"><span class=\"badge info\" title=\"참고용 advisory 점수이며 매수/매도 판단이 아닙니다\">Analyst 참고점수(advisory) {decimal(analyst_item.get('final_first_score'))}</span>"
                 f"<span class=\"badge {'ok' if holding_badge_class == 'held' else 'muted'}\">{esc(holding_label)}</span>"
+                f"{thesis_focus_badge}"
                 f"<span class=\"badge {'ok' if final_item else 'muted'}\">{esc(judge_label)}</span></div></div>"
                 f"<section class=\"inline-analysis\"><h3>Analyst 상세 점수</h3><div class=\"table-wrap\"><table><thead><tr><th>역할</th><th>점수</th><th>집계</th><th>코드</th><th>상세 근거</th><th>누락 데이터</th></tr></thead><tbody>{''.join(score_rows)}</tbody></table></div></section>"
                 f"<section class=\"inline-judge\"><h3>Judge 단계별 판단</h3>{judge_html}</section></section>"
@@ -2348,7 +2388,7 @@ def build_html(runs_root: Path, target_run: str) -> str:
     .financial-list {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }} .financial-card {{ padding:17px; border:1px solid var(--line); border-radius:15px; background:var(--subtle); }} .financial-body {{ padding:13px; border-radius:11px; background:#fff; }} .financial-body ul {{ margin:0; padding-left:20px; }} .evidence-title {{ display:flex; gap:10px; align-items:flex-start; margin-bottom:12px; }} .evidence-title h3 {{ margin:0; }} .evidence-title p {{ margin:4px 0 0; color:var(--muted); font-size:12px; }} .source-note {{ margin:12px 0 0; color:var(--muted); font-size:11px; }}
     .news-timeline {{ position:relative; display:grid; gap:12px; padding-left:22px; }} .news-timeline::before {{ content:""; position:absolute; left:7px; top:9px; bottom:9px; width:2px; background:linear-gradient(var(--accent),var(--accent-2)); }} .news-run {{ position:relative; padding:16px; border:1px solid var(--line); border-radius:15px; background:var(--subtle); }} .news-run::before {{ content:""; position:absolute; left:-22px; top:22px; width:11px; height:11px; border:3px solid var(--bg); border-radius:50%; background:var(--accent); }} .news-run-head {{ display:flex; justify-content:space-between; gap:10px; margin-bottom:9px; }} .news-run-head>div {{ display:flex; align-items:center; flex-wrap:wrap; gap:8px; }} .news-time {{ display:grid; width:50px; height:28px; place-items:center; border-radius:8px; background:var(--accent); color:#fff; font-size:12px; font-weight:900; }} .news-run-head span:not(.news-time):not(.badge) {{ color:var(--muted); font-size:11px; }} .news-run-body {{ padding:4px 12px; border-radius:11px; background:#fff; }} .news-item {{ padding:10px 0; border-bottom:1px solid var(--line); }} .news-item:last-child {{ border-bottom:0; }} .news-item time {{ margin-left:8px; color:var(--muted); font-size:11px; }} .news-item p {{ margin:5px 0 0; }} .empty-state {{ padding:12px; border-radius:9px; background:var(--subtle); color:var(--muted); font-size:12px; }}
     .time-wheel {{ position:relative; width:min(100%,360px); margin:14px auto 20px; }} .time-wheel-caption {{ display:block; margin-bottom:6px; color:var(--muted); font-size:11px; font-weight:800; text-align:center; }} .time-wheel::after {{ position:absolute; right:0; bottom:68px; left:0; height:68px; border:1px solid rgba(78,92,232,.28); border-radius:14px; background:rgba(78,92,232,.06); content:""; pointer-events:none; }} .time-selector {{ position:relative; display:flex; height:204px; padding-block:68px; overflow-x:hidden; overflow-y:auto; flex-direction:column; scroll-snap-type:y mandatory; scrollbar-width:none; overscroll-behavior-y:contain; -webkit-mask-image:linear-gradient(transparent,#000 29%,#000 71%,transparent); mask-image:linear-gradient(transparent,#000 29%,#000 71%,transparent); }} .time-selector::-webkit-scrollbar {{ display:none; }} .time-button {{ display:grid; min-height:68px; flex:0 0 68px; padding:10px 16px; border:0; border-radius:13px; background:transparent; color:var(--text); cursor:pointer; grid-template-columns:74px minmax(0,1fr); grid-template-rows:1fr 1fr; align-items:center; text-align:left; scroll-snap-align:center; scroll-snap-stop:always; opacity:.48; transform:scale(.92); transition:opacity .16s ease,transform .16s ease,color .16s ease; }} .time-button:hover {{ color:var(--accent); opacity:.75; }} .time-button.active {{ color:var(--accent); opacity:1; transform:scale(1); }} .time-button strong {{ grid-row:1/-1; font-size:22px; }} .time-button span,.time-button small {{ color:inherit; font-size:10px; }} .time-analysis-panel {{ display:none; }} .time-analysis-panel.active {{ display:block; animation:page-in .18s ease; }} .time-panel-head {{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; padding-top:4px; }} .time-panel-head p {{ color:var(--muted); }} .run-activity {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:9px; margin:12px 0 19px; }} .activity-card {{ padding:13px; border:1px solid var(--line); border-radius:12px; background:#fff; }} .activity-card.order {{ border-left:4px solid var(--accent); }} .activity-card.filled {{ border-left:4px solid var(--ok); background:linear-gradient(145deg,#fff,var(--ok-bg)); }} .activity-card.fill {{ border-left:4px solid var(--accent-2); }} .activity-card.blocked {{ border-left:4px solid var(--bad); background:linear-gradient(145deg,#fff,var(--bad-bg)); }} .activity-card span,.activity-card strong,.activity-card small {{ display:block; }} .activity-card span,.activity-card small {{ color:var(--muted); font-size:11px; }}
-    .trade-symbol-selector {{ display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:9px; margin-bottom:16px; }} .trade-symbol-button {{ display:grid; min-width:0; padding:12px; border:1px solid var(--line); border-radius:13px; background:var(--subtle); color:var(--text); text-align:left; cursor:pointer; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:10px; transition:.16s ease; }} .trade-symbol-button.group-trade {{ border-color:#a9ddcc; background:var(--ok-bg); }} .trade-symbol-button.group-guard {{ border-color:#f3bbc2; background:var(--bad-bg); }} .trade-symbol-button:hover {{ border-color:#aab4ff; transform:translateY(-1px); }} .trade-symbol-button.active {{ border-color:var(--accent); box-shadow:0 8px 22px rgba(78,92,232,.12); }} .trade-symbol-button.group-trade.active {{ background:linear-gradient(145deg,var(--ok-bg),#eefaf7); }} .trade-symbol-button.group-guard.active {{ background:linear-gradient(145deg,var(--bad-bg),#fff4f5); }} .symbol-button-left {{ display:flex; min-width:0; flex-direction:column; }} .symbol-button-status {{ display:flex; min-height:19px; flex-wrap:wrap; gap:4px; }} .symbol-button-name {{ display:-webkit-box; min-width:0; min-height:2.6em; margin-top:4px; overflow:hidden; color:var(--text); font-size:13px; line-height:1.3; text-overflow:ellipsis; white-space:normal; -webkit-box-orient:vertical; -webkit-line-clamp:2; }} .symbol-button-right {{ display:flex; flex:0 0 auto; align-items:flex-end; flex-direction:column; gap:3px; text-align:right; }} .symbol-button-right code {{ color:var(--muted); font-size:10px; }} .symbol-score {{ display:block; padding:0; background:transparent; color:var(--text); font-size:13px; font-weight:800; line-height:1.2; }} .trade-symbol-button.active .symbol-score {{ background:transparent; color:var(--accent); }} .mini-badge {{ padding:2px 5px; border-radius:999px; font-size:9px; }} .mini-badge.judge,.mini-badge.held {{ color:var(--ok); background:var(--ok-bg); }} .mini-badge.analyst,.mini-badge.unheld,.mini-badge.unknown {{ color:var(--muted); background:#e9eef5; }} .mini-badge.trade {{ color:var(--accent); background:var(--accent-bg); }} .mini-badge.attempt {{ color:var(--bad); background:var(--bad-bg); }} .symbol-analysis-panel {{ display:none; padding:20px; border:1px solid var(--line); border-radius:16px; background:linear-gradient(145deg,#fff,var(--subtle)); }} .symbol-analysis-panel.active {{ display:block; animation:page-in .18s ease; }} .symbol-focus-head {{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }} .symbol-focus-head h2 {{ margin-bottom:5px; }} .symbol-focus-head p {{ color:var(--muted); }} .focus-badges {{ display:flex; flex-wrap:wrap; justify-content:flex-end; gap:6px; }} .inline-analysis,.inline-judge {{ margin-top:20px; }} .compact-phase {{ margin-top:18px; padding-top:15px; }} .final-card.full {{ margin-top:12px; }}
+    .trade-symbol-selector {{ display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:9px; margin-bottom:16px; }} .trade-symbol-button {{ display:grid; min-width:0; padding:12px; border:1px solid var(--line); border-radius:13px; background:var(--subtle); color:var(--text); text-align:left; cursor:pointer; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:10px; transition:.16s ease; }} .trade-symbol-button.group-trade {{ border-color:#a9ddcc; background:var(--ok-bg); }} .trade-symbol-button.group-guard {{ border-color:#f3bbc2; background:var(--bad-bg); }} .trade-symbol-button:hover {{ border-color:#aab4ff; transform:translateY(-1px); }} .trade-symbol-button.active {{ border-color:var(--accent); box-shadow:0 8px 22px rgba(78,92,232,.12); }} .trade-symbol-button.group-trade.active {{ background:linear-gradient(145deg,var(--ok-bg),#eefaf7); }} .trade-symbol-button.group-guard.active {{ background:linear-gradient(145deg,var(--bad-bg),#fff4f5); }} .symbol-button-left {{ display:flex; min-width:0; flex-direction:column; }} .symbol-button-status {{ display:flex; min-height:19px; flex-wrap:wrap; gap:4px; }} .symbol-button-name {{ display:-webkit-box; min-width:0; min-height:2.6em; margin-top:4px; overflow:hidden; color:var(--text); font-size:13px; line-height:1.3; text-overflow:ellipsis; white-space:normal; -webkit-box-orient:vertical; -webkit-line-clamp:2; }} .symbol-button-right {{ display:flex; flex:0 0 auto; align-items:flex-end; flex-direction:column; gap:3px; text-align:right; }} .symbol-button-right code {{ color:var(--muted); font-size:10px; }} .symbol-score {{ display:block; padding:0; background:transparent; color:var(--text); font-size:13px; font-weight:800; line-height:1.2; }} .trade-symbol-button.active .symbol-score {{ background:transparent; color:var(--accent); }} .mini-badge {{ padding:2px 5px; border-radius:999px; font-size:9px; }} .mini-badge.judge,.mini-badge.held,.mini-badge.thesis-ok {{ color:var(--ok); background:var(--ok-bg); }} .mini-badge.analyst,.mini-badge.unheld,.mini-badge.unknown,.mini-badge.thesis-muted {{ color:var(--muted); background:#e9eef5; }} .mini-badge.trade,.mini-badge.thesis-info {{ color:var(--accent); background:var(--accent-bg); }} .mini-badge.attempt,.mini-badge.thesis-bad {{ color:var(--bad); background:var(--bad-bg); }} .mini-badge.thesis-warn {{ color:var(--warn); background:var(--warn-bg); }} .symbol-analysis-panel {{ display:none; padding:20px; border:1px solid var(--line); border-radius:16px; background:linear-gradient(145deg,#fff,var(--subtle)); }} .symbol-analysis-panel.active {{ display:block; animation:page-in .18s ease; }} .symbol-focus-head {{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }} .symbol-focus-head h2 {{ margin-bottom:5px; }} .symbol-focus-head p {{ color:var(--muted); }} .focus-badges {{ display:flex; flex-wrap:wrap; justify-content:flex-end; gap:6px; }} .inline-analysis,.inline-judge {{ margin-top:20px; }} .compact-phase {{ margin-top:18px; padding-top:15px; }} .final-card.full {{ margin-top:12px; }}
     .decision-hero {{ background:linear-gradient(145deg,#fff,#f4f6ff); }} .decision-hero>div:first-child p:last-child {{ color:var(--muted); }} .decision-meta {{ display:flex; flex-wrap:wrap; gap:8px; }} .decision-meta>span {{ padding:7px 9px; border:1px solid var(--line); border-radius:9px; background:#fff; font-size:12px; }} .decision-orders {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin-top:14px; }} .decision-orders article {{ padding:13px; border-radius:12px; background:linear-gradient(135deg,var(--accent-bg),#eefaf7); }} .decision-orders span,.decision-orders strong,.decision-orders small {{ display:block; }} .decision-orders span,.decision-orders small {{ color:var(--muted); font-size:11px; }}
     .analyst-list {{ display:grid; gap:14px; }} .analyst-card {{ padding:17px; border:1px solid var(--line); border-radius:14px; background:var(--subtle); }} .card-title {{ display:flex; align-items:flex-start; gap:10px; margin-bottom:12px; }} .card-title h3,.card-title h4 {{ margin:0; }} .card-title p {{ margin:3px 0 0; color:var(--muted); font-size:13px; }} .index {{ display:grid; flex:0 0 30px; height:30px; place-items:center; border-radius:9px; background:var(--accent-bg); color:var(--accent); font-weight:900; }}
     .phase,.final-section {{ margin-top:26px; padding-top:22px; border-top:3px solid var(--line); }} .phase-title {{ display:flex; align-items:baseline; gap:12px; margin-bottom:12px; }} .phase-title span {{ font-size:22px; font-weight:900; }} .phase-title small {{ color:var(--muted); }}
@@ -2358,11 +2398,11 @@ def build_html(runs_root: Path, target_run: str) -> str:
     .debate-meta {{ display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:10px; }} .debate-meta>div,.position {{ padding:12px; border-radius:10px; background:var(--accent-bg); }} .debate-meta ul {{ margin:7px 0 0; padding-left:20px; }} .position {{ margin-top:10px; }} .position p {{ margin:5px 0 0; }}
     .final-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }} .final-card {{ padding:15px; border:1px solid var(--line); border-radius:12px; background:var(--subtle); }} .final-card h3 {{ display:inline; }} .final-card p {{ margin:8px 0 0; }} .final-numbers {{ display:flex; flex-wrap:wrap; gap:7px; margin-top:10px; }} .final-numbers span {{ padding:5px 8px; border-radius:8px; background:var(--accent-bg); font-size:12px; font-weight:700; }}
     .decision-evidence {{ margin-top:12px; padding-top:12px; border-top:1px dashed var(--line); }} .decision-evidence h4 {{ margin:0 0 6px; font-size:12px; color:var(--muted); }} .decision-evidence ul {{ display:grid; gap:6px; margin:0; padding:0; list-style:none; }} .decision-evidence-item {{ padding:8px 10px; border-radius:9px; background:#fff; border-left:4px solid var(--bull); }} .decision-evidence-item.bear {{ border-left-color:var(--bear); }} .decision-evidence-item a {{ color:var(--accent); font-weight:700; text-decoration:none; }} .decision-evidence-item a:hover {{ text-decoration:underline; }} .decision-evidence-item p {{ margin:4px 0 0; font-size:12px; }}
-    .thesis-block {{ display:grid; gap:8px; margin-top:12px; padding-top:12px; border-top:1px dashed var(--line); }} .thesis-block h4 {{ margin:0 0 4px; font-size:12px; color:var(--muted); }} .thesis-block p {{ margin:0; font-size:12px; }} .thesis-source {{ color:var(--muted); }} .thesis-conditions {{ display:grid; gap:4px; margin:4px 0 0; padding-left:16px; font-size:12px; }} .thesis-condition.matched {{ font-weight:700; }}
+    .thesis-card {{ padding:18px; margin-top:12px; border:1px solid var(--line); border-left:5px solid var(--accent); border-radius:14px; background:linear-gradient(145deg,#fff,var(--accent-bg)); box-shadow:0 10px 25px rgba(31,47,77,.07); }} .thesis-card.thesis-ok {{ border-left-color:var(--ok); }} .thesis-card.thesis-warn {{ border-left-color:var(--warn); }} .thesis-card.thesis-bad {{ border-left-color:var(--bad); }} .thesis-card-head {{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }} .thesis-card-head h3 {{ margin:2px 0 0; font-size:18px; }} .thesis-block {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; margin-top:14px; }} .thesis-block>div {{ padding:12px; border:1px solid var(--line); border-radius:10px; background:rgba(255,255,255,.9); }} .thesis-block h4 {{ margin:0 0 5px; font-size:12px; color:var(--muted); }} .thesis-block p {{ margin:0; font-size:12px; }} .thesis-source {{ color:var(--muted); }} .thesis-conditions {{ display:grid; gap:4px; margin:5px 0 0; padding-left:16px; font-size:12px; }} .thesis-condition.matched {{ font-weight:700; }}
     footer {{ padding:24px 4px 0; color:var(--muted); font-size:12px; text-align:center; }}
     @media(max-width:1000px) {{ .trade-symbol-selector {{ grid-template-columns:repeat(4,minmax(0,1fr)); }} }}
     @media(max-width:900px) {{ .chart-grid-wrap,.financial-list,.portfolio-chart-layout {{ grid-template-columns:1fr; }} .trade-symbol-selector {{ grid-template-columns:repeat(3,minmax(0,1fr)); }} .run-activity {{ grid-template-columns:repeat(2,minmax(0,1fr)); }} }}
-    @media(max-width:800px) {{ main {{ width:min(100% - 16px,720px); margin-top:8px; }} .app-header {{ padding-inline:4px; }} .hero,.panel,.decision-hero,.combined-chart-card {{ padding:19px; border-radius:17px; }} .metrics,.coverage,.trade-symbol-selector {{ grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }} .section-head,.symbol-focus-head,.time-panel-head {{ display:block; }} .section-head>.badge,.symbol-focus-head>.badge,.time-panel-head>.badge {{ margin-top:8px; }} .focus-badges {{ justify-content:flex-start; margin-top:8px; }} .debate-meta,.final-grid,.decision-orders {{ grid-template-columns:1fr; }} .news-run-head {{ display:block; }} .news-run-head>div+div {{ margin-top:7px; }} }}
+    @media(max-width:800px) {{ main {{ width:min(100% - 16px,720px); margin-top:8px; }} .app-header {{ padding-inline:4px; }} .hero,.panel,.decision-hero,.combined-chart-card {{ padding:19px; border-radius:17px; }} .metrics,.coverage,.trade-symbol-selector {{ grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }} .section-head,.symbol-focus-head,.time-panel-head {{ display:block; }} .section-head>.badge,.symbol-focus-head>.badge,.time-panel-head>.badge {{ margin-top:8px; }} .focus-badges {{ justify-content:flex-start; margin-top:8px; }} .debate-meta,.final-grid,.decision-orders,.thesis-block {{ grid-template-columns:1fr; }} .news-run-head {{ display:block; }} .news-run-head>div+div {{ margin-top:7px; }} }}
     @media(max-width:480px) {{ .metrics strong,.coverage strong {{ font-size:16px; }} .phase-title {{ display:block; }} .phase-title small {{ display:block; margin-top:4px; }} .trade-symbol-selector,.run-activity,.sector-legend {{ grid-template-columns:repeat(2,minmax(0,1fr)); }} .portfolio-chart-layout {{ padding:12px; }} }}
     @media print {{ body {{ background:#fff; }} main {{ width:100%; margin:0; }} .app-header,.tab-bar {{ display:none; }} .tab-page {{ display:block !important; }} .hero,.panel,.metrics article,.chart-card {{ box-shadow:none; break-inside:avoid; }} .table-wrap {{ overflow:visible; }} }}
   </style>

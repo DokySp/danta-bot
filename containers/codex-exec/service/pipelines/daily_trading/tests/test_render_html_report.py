@@ -352,6 +352,8 @@ REQUIRED_CUMULATIVE_REPORT_STRINGS = [
     "신규/후속 thesis",
     "재고 정상화 이후 신규 성장 사이클 진입",
     "demand-collapse",
+    "투자 논지 (Thesis)",
+    'class="mini-badge thesis-bad">Thesis 훼손</b>',
     "외부종목",
     "계좌 전체 일별 체결 조회",
     "주문·체결 통합 원장",
@@ -524,6 +526,16 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
         self.addCleanup(temp_dir.cleanup)
         missing = check_cumulative_report_contains_required_strings(rendered)
         self.assertEqual(missing, [])
+
+    def test_cumulative_report_promotes_thesis_before_its_final_judge_card(self) -> None:
+        rendered, _runs_root, temp_dir = scenario_build_cumulative_report()
+        self.addCleanup(temp_dir.cleanup)
+        thesis_index = rendered.find("투자 논지 (Thesis)")
+        target_final_judge_index = rendered.find("Final Judge", thesis_index)
+
+        self.assertGreaterEqual(thesis_index, 0)
+        self.assertGreater(target_final_judge_index, thesis_index)
+        self.assertIn('<span class="badge bad">Thesis 훼손</span>', rendered)
 
     def test_cumulative_report_excludes_forbidden_strings(self) -> None:
         rendered, runs_root, temp_dir = scenario_build_cumulative_report()
@@ -1242,6 +1254,9 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
             },
         }
         rendered = render_thesis_section(final_item)
+        self.assertIn('class="thesis-card thesis-bad"', rendered)
+        self.assertIn("투자 논지 (Thesis)", rendered)
+        self.assertIn('<span class="badge bad">Thesis 훼손</span>', rendered)
         self.assertIn("이전 thesis", rendered)
         self.assertIn("prior-run-&lt;xss&gt;", rendered)
         self.assertNotIn("<xss>", rendered)
