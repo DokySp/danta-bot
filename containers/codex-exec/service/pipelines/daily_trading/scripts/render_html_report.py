@@ -1341,9 +1341,25 @@ def render_run_timeline(runs: list[dict[str, Any]]) -> str:
     """
 
 
-def normalized_positions(values: list[float], top: float, plot_height: float) -> list[float]:
-    low = min(values) if values else 0.0
-    high = max(values) if values else 1.0
+def relative_changes(values: list[float], denominator: float) -> list[float]:
+    if not values or denominator == 0:
+        return [0.0 for _ in values]
+    baseline = values[0]
+    return [(value - baseline) / abs(denominator) * 100 for value in values]
+
+
+def normalized_positions(
+    values: list[float],
+    top: float,
+    plot_height: float,
+    *,
+    low: float | None = None,
+    high: float | None = None,
+) -> list[float]:
+    if low is None:
+        low = min(values) if values else 0.0
+    if high is None:
+        high = max(values) if values else 1.0
     span = high - low
     if span == 0:
         return [top + plot_height / 2 for _ in values]
@@ -1403,16 +1419,45 @@ def render_combined_chart(runs: list[dict[str, Any]]) -> str:
             '<p class="kicker">INTRADAY COMBINED CHART</p><h2>계좌·시장 통합 추이</h2>'
             '</div></div><div class="empty-state">총평가·평가손익 시계열을 그릴 수 있는 run이 없습니다.</div></section>'
         )
-    total_y = normalized_positions(total_values, top, plot_height)
-    pnl_y = normalized_positions(pnl_values, top, plot_height)
     asset_indexes = [index for index, value in enumerate(asset_values) if value is not None]
     available_asset_values = [float(asset_values[index]) for index in asset_indexes]
-    available_asset_y = normalized_positions(available_asset_values, top, plot_height)
-    asset_y_by_index = dict(zip(asset_indexes, available_asset_y))
     kospi_indexes = [index for index, value in enumerate(kospi_values) if value is not None]
     available_kospi_values = [float(kospi_values[index]) for index in kospi_indexes]
-    available_kospi_y = normalized_positions(available_kospi_values, top, plot_height)
+    total_changes = relative_changes(total_values, total_values[0])
+    # PnL can start at zero or be negative, so express its movement as a percentage-point
+    # contribution relative to the account's first total evaluation rather than dividing by PnL.
+    pnl_changes = relative_changes(pnl_values, total_values[0])
+    asset_changes = relative_changes(
+        available_asset_values,
+        available_asset_values[0] if available_asset_values else 0.0,
+    )
+    kospi_changes = relative_changes(
+        available_kospi_values,
+        available_kospi_values[0] if available_kospi_values else 0.0,
+    )
+    shared_changes = total_changes + pnl_changes + asset_changes + kospi_changes
+    shared_low = min(shared_changes)
+    shared_high = max(shared_changes)
+    total_y = normalized_positions(total_changes, top, plot_height, low=shared_low, high=shared_high)
+    pnl_y = normalized_positions(pnl_changes, top, plot_height, low=shared_low, high=shared_high)
+    available_asset_y = normalized_positions(
+        asset_changes,
+        top,
+        plot_height,
+        low=shared_low,
+        high=shared_high,
+    )
+    asset_y_by_index = dict(zip(asset_indexes, available_asset_y))
+    asset_change_by_index = dict(zip(asset_indexes, asset_changes))
+    available_kospi_y = normalized_positions(
+        kospi_changes,
+        top,
+        plot_height,
+        low=shared_low,
+        high=shared_high,
+    )
     kospi_y_by_index = dict(zip(kospi_indexes, available_kospi_y))
+    kospi_change_by_index = dict(zip(kospi_indexes, kospi_changes))
     pnl_overlaps_total = len(total_y) == len(pnl_y) and all(
         abs(total_point - pnl_point) < 0.5 for total_point, pnl_point in zip(total_y, pnl_y)
     )
@@ -1447,6 +1492,12 @@ def render_combined_chart(runs: list[dict[str, Any]]) -> str:
                 else None,
                 "regime": regime,
                 "regimeLabel": REGIME_LABELS.get(regime, regime),
+                "totalChangePercent": round(total_changes[index], 2),
+                "pnlImpactPercent": round(pnl_changes[index], 2),
+                "assetChangePercent": round(asset_change_by_index[index], 2) if index in asset_change_by_index else None,
+                "kospiChangeFromFirstPercent": round(kospi_change_by_index[index], 2)
+                if index in kospi_change_by_index
+                else None,
                 "totalY": round(total_y[index], 2),
                 "pnlY": round(pnl_y[index], 2),
                 "assetY": round(asset_y_by_index[index], 2) if index in asset_y_by_index else None,
@@ -1464,6 +1515,7 @@ def render_combined_chart(runs: list[dict[str, Any]]) -> str:
     pnl_run_points = "" if pnl_overlaps_total else render_run_points(xs, dict(enumerate(pnl_y)), "pnl-point")
     asset_run_points = render_run_points(xs, asset_y_by_index, "asset-point")
     kospi_run_points = render_run_points(xs, kospi_y_by_index, "kospi-point")
+    zero_y = normalized_positions([0.0], top, plot_height, low=shared_low, high=shared_high)[0]
     if kospi_indexes:
         latest_kospi_index = kospi_indexes[-1]
         kospi_legend = (
@@ -1487,11 +1539,12 @@ def render_combined_chart(runs: list[dict[str, Any]]) -> str:
         asset_range = "<span>KIS 총자산 조회 실패</span>"
     return f"""
     <section class="combined-chart-card" data-chart-points="{points_json}">
-      <div class="chart-head"><div><p class="kicker">INTRADAY COMBINED CHART</p><h2>계좌·시장 통합 추이</h2><p>서로 다른 단위는 각 series의 당일 범위로 정규화했습니다. 평가손익과 총평가의 궤적이 같으면 총평가 선만 표시하되 hover에는 두 값을 모두 제공합니다. 확인되지 않은 원금이나 계좌수익률은 추정하지 않습니다.</p></div></div>
+      <div class="chart-head"><div><p class="kicker">INTRADAY COMBINED CHART</p><h2>계좌·시장 통합 추이</h2><p>각 series의 첫 관측값을 0%로 둔 상대 변화율을 하나의 공통 축에 표시합니다. 따라서 시작점은 같지만 끝점은 실제 상대 변화가 같을 때만 만납니다. 평가손익은 첫 총평가액 대비 손익 변화 기여도이며, 총평가와 상대변화 궤적이 같으면 총평가 선만 표시하되 hover에는 두 값을 모두 제공합니다. 확인되지 않은 원금이나 계좌수익률은 추정하지 않습니다.</p></div></div>
       <div class="chart-legend"><span><i style="--legend:#4f6df5"></i>총평가</span><span><i style="--legend:#e14c68"></i>평가손익</span><span><i style="--legend:#8b5cf6"></i>{asset_legend}</span><span><i style="--legend:#0b9a86"></i>{kospi_legend}</span></div>
       <div class="interactive-chart">
         <svg class="interactive-line-chart" viewBox="0 0 {width} {height}" role="img" aria-label="총평가 평가손익 KIS 총자산 KOSPI 통합 시계열">
           {''.join(grid)}
+          <line x1="{left}" y1="{zero_y:.2f}" x2="{left + plot_width}" y2="{zero_y:.2f}" class="chart-zero"/>
           <polyline points="{total_points}" class="series-line total-line"/>
           {pnl_line}
           {asset_line}
@@ -1512,7 +1565,7 @@ def render_combined_chart(runs: list[dict[str, Any]]) -> str:
         <input class="chart-range-slider" type="range" min="0" max="{len(rows) - 1}" step="1" value="{len(rows) - 1}" aria-label="차트 조회 시점">
         <div class="chart-scrubber-ends"><span>{esc(rows[0]['time'])}</span><span>{esc(rows[-1]['time'])}</span></div>
       </div>
-      <div class="series-ranges"><span>총평가 {number(min(total_values))}~{number(max(total_values))}원</span><span>평가손익 {number(min(pnl_values))}~{number(max(pnl_values))}원</span>{asset_range}{kospi_range}</div>
+      <div class="series-ranges"><span>공통축 {signed_decimal(shared_low)}~{signed_decimal(shared_high)}%</span><span>총평가 {number(min(total_values))}~{number(max(total_values))}원</span><span>평가손익 {number(min(pnl_values))}~{number(max(pnl_values))}원</span>{asset_range}{kospi_range}</div>
     </section>
     """
 
@@ -2150,7 +2203,7 @@ def build_html(runs_root: Path, target_run: str) -> str:
     .table-wrap {{ width:100%; overflow-x:auto; border:1px solid var(--line); border-radius:12px; }} table {{ width:100%; border-collapse:collapse; min-width:760px; }} th,td {{ padding:11px 12px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; font-size:13px; }} th {{ position:sticky; top:0; background:#eef3f9; color:#475569; font-size:12px; }} tr:last-child td {{ border-bottom:0; }}
     .positive {{ color:var(--ok); }} .negative {{ color:var(--bad); }}
     .warning-list {{ display:grid; gap:9px; margin-top:18px; }} .warning {{ padding:14px; border-left:4px solid var(--warn); border-radius:10px; background:var(--warn-bg); }} .warning.bad-border {{ border-left-color:var(--bad); background:var(--bad-bg); }} .warning p {{ margin:4px 0 0; font-size:13px; }}
-    .combined-chart-card {{ padding:24px; margin-top:16px; border:1px solid var(--line); border-radius:22px; background:var(--surface); box-shadow:var(--shadow); }} .chart-legend {{ display:flex; flex-wrap:wrap; gap:14px; margin:13px 0 4px; color:var(--muted); font-size:12px; }} .chart-legend span {{ display:flex; align-items:center; gap:6px; }} .chart-legend i {{ width:22px; height:4px; border-radius:999px; background:var(--legend); }} .interactive-chart {{ position:relative; }} .interactive-line-chart {{ display:block; width:100%; height:auto; overflow:visible; }} .series-line {{ fill:none; stroke-width:4; stroke-linecap:round; stroke-linejoin:round; }} .total-line {{ stroke:#4f6df5; }} .pnl-line {{ stroke:#e14c68; stroke-dasharray:11 7; }} .asset-line {{ stroke:#8b5cf6; stroke-dasharray:4 5; }} .kospi-line {{ stroke:#0b9a86; }} .chart-cursor {{ stroke:#617089; stroke-width:1.5; stroke-dasharray:5 5; opacity:0; }} .chart-marker {{ stroke:#fff; stroke-width:3; opacity:0; }} .total-marker {{ fill:#4f6df5; }} .pnl-marker {{ fill:#e14c68; }} .asset-marker {{ fill:#8b5cf6; }} .kospi-marker {{ fill:#0b9a86; }} .series-point {{ stroke:#fff; stroke-width:1.5; opacity:.85; pointer-events:none; }} .total-point {{ fill:#4f6df5; }} .pnl-point {{ fill:#e14c68; }} .asset-point {{ fill:#8b5cf6; }} .kospi-point {{ fill:#0b9a86; }} .chart-hit-area {{ fill:transparent; cursor:crosshair; pointer-events:all; touch-action:none; }} .chart-tooltip {{ position:absolute; z-index:5; min-width:190px; padding:11px 13px; border:1px solid rgba(220,228,239,.9); border-radius:12px; background:rgba(20,29,52,.94); color:#fff; box-shadow:0 12px 32px rgba(18,27,50,.25); opacity:0; pointer-events:none; transform:translate(-50%,-112%); transition:opacity .12s ease; font-size:12px; }} .chart-tooltip.visible {{ opacity:1; }} .chart-tooltip strong,.chart-tooltip span {{ display:block; }} .chart-tooltip strong {{ margin-bottom:5px; }} .chart-tooltip span {{ color:#d8e0f3; }} .chart-scrubber {{ padding:8px 5px 0; }} .chart-scrubber-label,.chart-scrubber-ends {{ display:flex; align-items:center; justify-content:space-between; gap:12px; }} .chart-scrubber-label {{ margin-bottom:3px; color:var(--muted); font-size:12px; font-weight:800; }} .chart-scrubber-time {{ color:var(--accent); font-weight:900; }} .chart-range-slider {{ width:100%; accent-color:var(--accent); cursor:ew-resize; touch-action:pan-x; }} .chart-scrubber-ends {{ color:var(--muted); font-size:10px; }} .series-ranges {{ display:flex; justify-content:flex-end; flex-wrap:wrap; gap:13px; color:var(--muted); font-size:11px; }}
+    .combined-chart-card {{ padding:24px; margin-top:16px; border:1px solid var(--line); border-radius:22px; background:var(--surface); box-shadow:var(--shadow); }} .chart-legend {{ display:flex; flex-wrap:wrap; gap:14px; margin:13px 0 4px; color:var(--muted); font-size:12px; }} .chart-legend span {{ display:flex; align-items:center; gap:6px; }} .chart-legend i {{ width:22px; height:4px; border-radius:999px; background:var(--legend); }} .interactive-chart {{ position:relative; }} .interactive-line-chart {{ display:block; width:100%; height:auto; overflow:visible; }} .series-line {{ fill:none; stroke-width:4; stroke-linecap:round; stroke-linejoin:round; }} .total-line {{ stroke:#4f6df5; }} .pnl-line {{ stroke:#e14c68; stroke-dasharray:11 7; }} .asset-line {{ stroke:#8b5cf6; stroke-dasharray:4 5; }} .kospi-line {{ stroke:#0b9a86; }} .chart-zero {{ stroke:#9ca7b8; stroke-width:1.5; }} .chart-cursor {{ stroke:#617089; stroke-width:1.5; stroke-dasharray:5 5; opacity:0; }} .chart-marker {{ stroke:#fff; stroke-width:3; opacity:0; }} .total-marker {{ fill:#4f6df5; }} .pnl-marker {{ fill:#e14c68; }} .asset-marker {{ fill:#8b5cf6; }} .kospi-marker {{ fill:#0b9a86; }} .series-point {{ stroke:#fff; stroke-width:1.5; opacity:.85; pointer-events:none; }} .total-point {{ fill:#4f6df5; }} .pnl-point {{ fill:#e14c68; }} .asset-point {{ fill:#8b5cf6; }} .kospi-point {{ fill:#0b9a86; }} .chart-hit-area {{ fill:transparent; cursor:crosshair; pointer-events:all; touch-action:none; }} .chart-tooltip {{ position:absolute; z-index:5; min-width:190px; padding:11px 13px; border:1px solid rgba(220,228,239,.9); border-radius:12px; background:rgba(20,29,52,.94); color:#fff; box-shadow:0 12px 32px rgba(18,27,50,.25); opacity:0; pointer-events:none; transform:translate(-50%,-112%); transition:opacity .12s ease; font-size:12px; }} .chart-tooltip.visible {{ opacity:1; }} .chart-tooltip strong,.chart-tooltip span {{ display:block; }} .chart-tooltip strong {{ margin-bottom:5px; }} .chart-tooltip span {{ color:#d8e0f3; }} .chart-scrubber {{ padding:8px 5px 0; }} .chart-scrubber-label,.chart-scrubber-ends {{ display:flex; align-items:center; justify-content:space-between; gap:12px; }} .chart-scrubber-label {{ margin-bottom:3px; color:var(--muted); font-size:12px; font-weight:800; }} .chart-scrubber-time {{ color:var(--accent); font-weight:900; }} .chart-range-slider {{ width:100%; accent-color:var(--accent); cursor:ew-resize; touch-action:pan-x; }} .chart-scrubber-ends {{ color:var(--muted); font-size:10px; }} .series-ranges {{ display:flex; justify-content:flex-end; flex-wrap:wrap; gap:13px; color:var(--muted); font-size:11px; }}
     .portfolio-chart-layout {{ display:grid; grid-template-columns:minmax(300px,.85fr) minmax(320px,1.15fr); align-items:center; gap:28px; padding:20px; margin-bottom:12px; border:1px solid var(--line); border-radius:16px; background:var(--subtle); }} .portfolio-pie {{ position:relative; width:min(100%,430px); margin:auto; }} .portfolio-pie-svg {{ display:block; width:100%; height:auto; filter:drop-shadow(0 12px 22px rgba(24,36,64,.12)); }} .pie-slice {{ stroke:#fff; stroke-width:2; cursor:pointer; outline:none; transition:opacity .15s ease,stroke-width .15s ease; }} .pie-slice:hover,.pie-slice.active,.pie-slice:focus {{ opacity:.8; stroke-width:5; }} .pie-tooltip {{ position:absolute; z-index:6; min-width:205px; padding:11px 13px; border-radius:12px; background:rgba(20,29,52,.95); color:#fff; box-shadow:0 12px 32px rgba(18,27,50,.25); opacity:0; pointer-events:none; transform:translate(-50%,-112%); transition:opacity .1s ease; font-size:12px; }} .pie-tooltip.visible {{ opacity:1; }} .pie-tooltip strong,.pie-tooltip span {{ display:block; }} .pie-tooltip strong {{ margin-bottom:4px; }} .pie-tooltip span {{ color:#d8e0f3; }} .sector-legend {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; }} .sector-legend>div:first-child {{ grid-column:1/-1; }} .sector-legend h3 {{ margin:0; }} .sector-legend>div:first-child p:last-child {{ margin:3px 0 5px; color:var(--muted); font-size:12px; }} .sector-legend-item {{ display:flex; align-items:center; gap:9px; padding:10px; border:1px solid var(--line); border-radius:11px; background:#fff; }} .sector-legend-item i {{ width:13px; height:34px; flex:0 0 13px; border-radius:999px; background:var(--sector-color); }} .sector-legend-item strong,.sector-legend-item small {{ display:block; }} .sector-legend-item small {{ color:var(--muted); font-size:10px; }} .holdings-table {{ margin-top:14px; }}
     .chart-grid-wrap {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; margin-top:16px; }} .chart-card {{ padding:20px; overflow:hidden; border:1px solid var(--line); border-radius:20px; background:var(--surface); box-shadow:var(--shadow); }} .chart-head {{ display:flex; justify-content:space-between; gap:12px; }} .chart-head h3 {{ margin:0; font-size:19px; }} .chart-head p {{ margin:5px 0 0; color:var(--muted); font-size:12px; }} .chart-stat {{ min-width:100px; text-align:right; }} .chart-stat span,.chart-stat strong {{ display:block; }} .chart-stat span {{ color:var(--muted); font-size:11px; }} .line-chart {{ display:block; width:100%; height:auto; margin-top:5px; overflow:visible; }} .chart-grid {{ stroke:#e5eaf2; stroke-width:1; }} .chart-y,.chart-x {{ fill:#738096; font-size:15px; }} .chart-point {{ stroke:#fff; stroke-width:3; }} .chart-range {{ display:flex; justify-content:flex-end; flex-wrap:wrap; gap:14px; color:var(--muted); font-size:11px; }} .chart-range strong {{ color:var(--text); }}
     .financial-list {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }} .financial-card {{ padding:17px; border:1px solid var(--line); border-radius:15px; background:var(--subtle); }} .financial-body {{ padding:13px; border-radius:11px; background:#fff; }} .financial-body ul {{ margin:0; padding-left:20px; }} .evidence-title {{ display:flex; gap:10px; align-items:flex-start; margin-bottom:12px; }} .evidence-title h3 {{ margin:0; }} .evidence-title p {{ margin:4px 0 0; color:var(--muted); font-size:12px; }} .source-note {{ margin:12px 0 0; color:var(--muted); font-size:11px; }}
@@ -2319,16 +2372,17 @@ def build_html(runs_root: Path, target_run: str) -> str:
           markers[key].setAttribute('cy', point[key + 'Y']);
           markers[key].style.opacity = '1';
         }}
+        const signedPercent = (value) => (Number(value) >= 0 ? '+' : '') + Number(value).toLocaleString('ko-KR', {{ minimumFractionDigits: 2, maximumFractionDigits: 2 }}) + '%';
         const kospiText = point.kospi === null
           ? 'KOSPI 조회 실패'
-          : 'KOSPI ' + Number(point.kospi).toLocaleString('ko-KR', {{ minimumFractionDigits: 2, maximumFractionDigits: 2 }}) + ' (' + (Number(point.kospiChangePercent) >= 0 ? '+' : '') + Number(point.kospiChangePercent).toLocaleString('ko-KR', {{ minimumFractionDigits: 2, maximumFractionDigits: 2 }}) + '%)';
+          : 'KOSPI ' + Number(point.kospi).toLocaleString('ko-KR', {{ minimumFractionDigits: 2, maximumFractionDigits: 2 }}) + ' (첫 관측 대비 ' + signedPercent(point.kospiChangeFromFirstPercent) + ')';
         const assetText = point.asset === null
           ? 'KIS 총자산 조회 실패'
-          : 'KIS 총자산 ' + Number(point.asset).toLocaleString('ko-KR') + '원';
+          : 'KIS 총자산 ' + Number(point.asset).toLocaleString('ko-KR') + '원 (첫 관측 대비 ' + signedPercent(point.assetChangePercent) + ')';
         setTooltipRows(tooltip, [
           point.time,
-          '총평가 ' + Number(point.total).toLocaleString('ko-KR') + '원',
-          '평가손익 ' + Number(point.pnl).toLocaleString('ko-KR') + '원',
+          '총평가 ' + Number(point.total).toLocaleString('ko-KR') + '원 (첫 관측 대비 ' + signedPercent(point.totalChangePercent) + ')',
+          '평가손익 ' + Number(point.pnl).toLocaleString('ko-KR') + '원 (첫 총평가 대비 기여 ' + signedPercent(point.pnlImpactPercent) + 'p)',
           assetText,
           kospiText,
           'regime ' + point.regimeLabel + ' (' + point.regime + ')',

@@ -363,6 +363,7 @@ REQUIRED_CUMULATIVE_REPORT_STRINGS = [
     "regimeLabel&quot;:&quot;강세",
     "regime&quot;:&quot;risk_on",
     "KIS 총자산 10,500,000원",
+    'class="series-line pnl-line"',
     'class="series-line asset-line"',
     "asset&quot;:10500000",
     "'KIS 총자산 ' + Number(point.asset)",
@@ -389,7 +390,6 @@ FORBIDDEN_CUMULATIVE_REPORT_STRINGS = [
     "초기 원금",
     "계좌 누적수익률",
     "https://",
-    'class="series-line pnl-line"',
     "innerHTML",
     "재무 수집 supplied",
     "확인된 체결 전체",
@@ -1587,7 +1587,7 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
     def test_combined_chart_omits_pnl_points_when_pnl_overlaps_total(self) -> None:
         runs = [
             self._combined_chart_run("2026-07-15T09:00:00+09:00", total=10_000_000, pnl=90_000),
-            self._combined_chart_run("2026-07-15T09:30:00+09:00", total=10_050_000, pnl=95_000),
+            self._combined_chart_run("2026-07-15T09:30:00+09:00", total=10_050_000, pnl=140_000),
         ]
 
         rendered = render_combined_chart(runs)
@@ -1595,6 +1595,35 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
         self.assertNotIn('class="series-line pnl-line"', rendered)
         self.assertNotIn('class="series-point pnl-point"', rendered)
         self.assertEqual(rendered.count('class="series-point total-point"'), 2)
+
+    def test_combined_chart_uses_one_relative_change_axis_without_forcing_endpoints_together(self) -> None:
+        runs = [
+            self._combined_chart_run(
+                "2026-07-15T09:00:00+09:00",
+                total=100,
+                pnl=0,
+                asset=200,
+                kospi=1000,
+                kospi_change=0,
+            ),
+            self._combined_chart_run(
+                "2026-07-15T09:30:00+09:00",
+                total=90,
+                pnl=-5,
+                asset=198,
+                kospi=990,
+                kospi_change=-1,
+            ),
+        ]
+
+        rendered = render_combined_chart(runs)
+
+        self.assertIn("첫 관측값을 0%로 둔 상대 변화율을 하나의 공통 축", rendered)
+        self.assertIn('points="58.00,34.00 1072.00,320.00" class="series-line total-line"', rendered)
+        self.assertIn('points="58.00,34.00 1072.00,177.00" class="series-line pnl-line"', rendered)
+        self.assertIn('points="58.00,34.00 1072.00,62.60" class="series-line asset-line"', rendered)
+        self.assertIn('points="58.00,34.00 1072.00,62.60" class="series-line kospi-line"', rendered)
+        self.assertIn('class="chart-zero"', rendered)
 
     def test_combined_chart_skips_points_for_runs_missing_asset_or_kospi(self) -> None:
         runs = [
