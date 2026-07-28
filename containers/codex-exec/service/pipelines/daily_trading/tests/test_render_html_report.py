@@ -30,6 +30,7 @@ from ..scripts.render_html_report import (
     argument_anchor_id,
     build_html,
     cumulative_today_fills,
+    find_daily_history,
     find_runs,
     fresh_recheck_audit_summary,
     judge_field_display,
@@ -37,6 +38,7 @@ from ..scripts.render_html_report import (
     order_status_badge,
     parse_cited_argument_ids,
     render_combined_chart,
+    render_chart_periods,
     render_header,
     render_market_and_quality,
     render_thesis_section,
@@ -367,6 +369,11 @@ REQUIRED_CUMULATIVE_REPORT_STRINGS = [
     'class="series-line asset-line"',
     "asset&quot;:10500000",
     "'KIS 총자산 ' + Number(point.asset)",
+    'data-chart-period-target="week"',
+    'data-chart-period-target="month"',
+    "최근 1주 계좌·시장 추이",
+    "최근 1개월 계좌·시장 추이",
+    "button.dataset.chartPeriodTarget",
     'class="trade-symbol-button group-trade active"',
     'class="chart-range-slider"',
     'max="2"',
@@ -1562,6 +1569,83 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
             "market": {"indexes": indexes},
             "decision": {"strategy_context": {"regime": "neutral"}},
         }
+
+    def test_daily_history_uses_latest_chartable_run_per_date_within_range(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runs_root = Path(temporary)
+
+            def add_run(run_id: str, started_at: str, total: int | None) -> None:
+                account = (
+                    {"total_evaluation_amount": total, "total_pnl_amount": total // 100}
+                    if total is not None
+                    else {}
+                )
+                write_json(
+                    runs_root / run_id / "pipeline-summary.json",
+                    {
+                        "run_id": run_id,
+                        "started_at": started_at,
+                        "account_display_summary": account,
+                    },
+                )
+
+            add_run("outside-month", "2026-06-27T15:00:00+09:00", 1_000)
+            add_run("day-old", "2026-07-21T09:00:00+09:00", 2_000)
+            add_run("day-latest", "2026-07-21T15:00:00+09:00", 2_100)
+            add_run("invalid-latest", "2026-07-22T15:00:00+09:00", None)
+            add_run("target", "2026-07-27T11:00:00+09:00", 3_000)
+            add_run("after-target", "2026-07-27T13:00:00+09:00", 3_100)
+
+            history = find_daily_history(
+                runs_root,
+                "2026-07-27T12:00:00+09:00",
+                calendar_days=30,
+            )
+
+        self.assertEqual(
+            [item["summary"]["run_id"] for item in history],
+            ["day-latest", "target"],
+        )
+
+    def test_chart_periods_offer_intraday_week_and_month_views(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runs_root = Path(temporary)
+            for run_id, started_at, total in (
+                ("week-start", "2026-07-21T15:00:00+09:00", 10_000),
+                ("target", "2026-07-27T11:00:00+09:00", 10_500),
+            ):
+                write_json(
+                    runs_root / run_id / "pipeline-summary.json",
+                    {
+                        "run_id": run_id,
+                        "started_at": started_at,
+                        "account_display_summary": {
+                            "total_evaluation_amount": total,
+                            "total_pnl_amount": total // 100,
+                        },
+                    },
+                )
+            intraday_runs = [
+                self._combined_chart_run(
+                    "2026-07-27T11:00:00+09:00",
+                    total=10_500,
+                    pnl=105,
+                )
+            ]
+
+            rendered = render_chart_periods(
+                runs_root,
+                "2026-07-27T11:00:00+09:00",
+                intraday_runs,
+            )
+
+        self.assertIn('data-chart-period-target="intraday"', rendered)
+        self.assertIn('data-chart-period-target="week"', rendered)
+        self.assertIn('data-chart-period-target="month"', rendered)
+        self.assertIn("최근 1주 계좌·시장 추이", rendered)
+        self.assertIn("최근 1개월 계좌·시장 추이", rendered)
+        self.assertIn(">07-21<", rendered)
+        self.assertEqual(rendered.count('class="chart-period-panel active"'), 1)
 
     def test_combined_chart_marks_every_run_on_every_rendered_series(self) -> None:
         runs = [

@@ -9,6 +9,7 @@ import json
 import math
 import re
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -349,6 +350,53 @@ def find_runs(runs_root: Path, target_started_at: str) -> list[dict[str, Any]]:
             for item in orders
         ]
     return ordered_runs
+
+
+def find_daily_history(
+    runs_root: Path,
+    target_started_at: str,
+    *,
+    calendar_days: int = 30,
+) -> list[dict[str, Any]]:
+    if calendar_days < 1:
+        return []
+    try:
+        target_date = date.fromisoformat(target_started_at[:10])
+    except ValueError:
+        return []
+    first_date = target_date - timedelta(days=calendar_days - 1)
+    latest_by_date: dict[date, dict[str, Any]] = {}
+    for path in runs_root.iterdir():
+        summary_path = path / "pipeline-summary.json"
+        if not path.is_dir() or not summary_path.is_file():
+            continue
+        summary = load_json(summary_path)
+        started_at = str(summary.get("started_at") or "")
+        if not started_at or started_at > target_started_at:
+            continue
+        try:
+            started_date = date.fromisoformat(started_at[:10])
+        except ValueError:
+            continue
+        if started_date < first_date or started_date > target_date:
+            continue
+        account = summary.get("account_display_summary")
+        account = account if isinstance(account, dict) else {}
+        try:
+            float(account.get("total_evaluation_amount"))
+            float(account.get("total_pnl_amount"))
+        except (TypeError, ValueError):
+            continue
+        prior = latest_by_date.get(started_date)
+        if prior is not None and str(prior["summary"].get("started_at") or "") >= started_at:
+            continue
+        latest_by_date[started_date] = {
+            "path": path,
+            "summary": summary,
+            "decision": load_json(path / "decision-brief.json"),
+            "market": load_json(path / "market-index-snapshot.json"),
+        }
+    return [latest_by_date[key] for key in sorted(latest_by_date)]
 
 
 def order_link_ids(item: dict[str, Any]) -> set[str]:
@@ -1373,7 +1421,30 @@ def render_run_points(xs: list[float], ys_by_index: dict[int, float], class_name
     )
 
 
-def render_combined_chart(runs: list[dict[str, Any]]) -> str:
+def render_combined_chart(
+    runs: list[dict[str, Any]],
+    *,
+    period: str = "intraday",
+) -> str:
+    period_config = {
+        "intraday": {
+            "kicker": "INTRADAY COMBINED CHART",
+            "title": "계좌·시장 통합 추이",
+            "scope": "당일 각 run",
+        },
+        "week": {
+            "kicker": "7-DAY COMBINED CHART",
+            "title": "최근 1주 계좌·시장 추이",
+            "scope": "최근 7일의 거래일별 마지막 유효 run",
+        },
+        "month": {
+            "kicker": "30-DAY COMBINED CHART",
+            "title": "최근 1개월 계좌·시장 추이",
+            "scope": "최근 30일의 거래일별 마지막 유효 run",
+        },
+    }.get(period, {})
+    if not period_config:
+        raise ValueError(f"unsupported chart period: {period}")
     width, height = 1100, 390
     left, right, top, bottom = 58, 28, 34, 70
     plot_width = width - left - right
@@ -1416,7 +1487,7 @@ def render_combined_chart(runs: list[dict[str, Any]]) -> str:
     if not chart_runs:
         return (
             '<section class="combined-chart-card"><div class="chart-head"><div>'
-            '<p class="kicker">INTRADAY COMBINED CHART</p><h2>계좌·시장 통합 추이</h2>'
+            f'<p class="kicker">{esc(period_config["kicker"])}</p><h2>{esc(period_config["title"])}</h2>'
             '</div></div><div class="empty-state">총평가·평가손익 시계열을 그릴 수 있는 run이 없습니다.</div></section>'
         )
     asset_indexes = [index for index, value in enumerate(asset_values) if value is not None]
@@ -1475,13 +1546,16 @@ def render_combined_chart(runs: list[dict[str, Any]]) -> str:
         strategy_context = run["decision"].get("strategy_context")
         strategy_context = strategy_context if isinstance(strategy_context, dict) else {}
         regime = str(strategy_context.get("regime") or "-")
-        if index % 2 == 0 or index == len(chart_runs) - 1:
+        started_at = str(run["summary"].get("started_at") or "")
+        point_label = time_text(started_at) if period == "intraday" else started_at[5:10]
+        label_step = max(1, math.ceil(len(chart_runs) / 6))
+        if index % label_step == 0 or index == len(chart_runs) - 1:
             x_labels.append(
-                f'<text x="{x:.2f}" y="{height - 29}" text-anchor="middle" class="chart-x">{esc(time_text(run["summary"].get("started_at")))}</text>'
+                f'<text x="{x:.2f}" y="{height - 29}" text-anchor="middle" class="chart-x">{esc(point_label)}</text>'
             )
         rows.append(
             {
-                "time": time_text(run["summary"].get("started_at")),
+                "time": point_label,
                 "x": round(x, 2),
                 "total": int(total_values[index]),
                 "pnl": int(pnl_values[index]),
@@ -1538,8 +1612,8 @@ def render_combined_chart(runs: list[dict[str, Any]]) -> str:
         asset_legend = "KIS 총자산 조회 실패"
         asset_range = "<span>KIS 총자산 조회 실패</span>"
     return f"""
-    <section class="combined-chart-card" data-chart-points="{points_json}">
-      <div class="chart-head"><div><p class="kicker">INTRADAY COMBINED CHART</p><h2>계좌·시장 통합 추이</h2><p>각 series의 첫 관측값을 0%로 둔 상대 변화율을 하나의 공통 축에 표시합니다. 따라서 시작점은 같지만 끝점은 실제 상대 변화가 같을 때만 만납니다. 평가손익은 첫 총평가액 대비 손익 변화 기여도이며, 총평가와 상대변화 궤적이 같으면 총평가 선만 표시하되 hover에는 두 값을 모두 제공합니다. 확인되지 않은 원금이나 계좌수익률은 추정하지 않습니다.</p></div></div>
+    <section class="combined-chart-card" data-chart-points="{points_json}" data-chart-period="{esc(period)}">
+      <div class="chart-head"><div><p class="kicker">{esc(period_config['kicker'])}</p><h2>{esc(period_config['title'])}</h2><p>{esc(period_config['scope'])}의 관측값을 사용합니다. 각 series의 첫 관측값을 0%로 둔 상대 변화율을 하나의 공통 축에 표시합니다. 따라서 시작점은 같지만 끝점은 실제 상대 변화가 같을 때만 만납니다. 평가손익은 첫 총평가액 대비 손익 변화 기여도이며, 총평가와 상대변화 궤적이 같으면 총평가 선만 표시하되 hover에는 두 값을 모두 제공합니다. 계좌선은 입출금을 보정한 수익률이 아니며 확인되지 않은 원금이나 계좌수익률은 추정하지 않습니다.</p></div></div>
       <div class="chart-legend"><span><i style="--legend:#4f6df5"></i>총평가</span><span><i style="--legend:#e14c68"></i>평가손익</span><span><i style="--legend:#8b5cf6"></i>{asset_legend}</span><span><i style="--legend:#0b9a86"></i>{kospi_legend}</span></div>
       <div class="interactive-chart">
         <svg class="interactive-line-chart" viewBox="0 0 {width} {height}" role="img" aria-label="총평가 평가손익 KIS 총자산 KOSPI 통합 시계열">
@@ -1568,6 +1642,49 @@ def render_combined_chart(runs: list[dict[str, Any]]) -> str:
       <div class="series-ranges"><span>공통축 {signed_decimal(shared_low)}~{signed_decimal(shared_high)}%</span><span>총평가 {number(min(total_values))}~{number(max(total_values))}원</span><span>평가손익 {number(min(pnl_values))}~{number(max(pnl_values))}원</span>{asset_range}{kospi_range}</div>
     </section>
     """
+
+
+def render_chart_periods(
+    runs_root: Path,
+    target_started_at: str,
+    intraday_runs: list[dict[str, Any]],
+) -> str:
+    history_runs = find_daily_history(runs_root, target_started_at, calendar_days=30)
+    try:
+        target_date = date.fromisoformat(target_started_at[:10])
+    except ValueError:
+        target_date = None
+    week_start = target_date - timedelta(days=6) if target_date is not None else None
+    week_runs = [
+        run
+        for run in history_runs
+        if week_start is not None
+        and date.fromisoformat(str(run["summary"].get("started_at") or "")[:10]) >= week_start
+    ]
+    period_specs = [
+        ("intraday", "당일", intraday_runs),
+        ("week", "1주", week_runs),
+        ("month", "1개월", history_runs),
+    ]
+    buttons = []
+    panels = []
+    for index, (period, label, period_runs) in enumerate(period_specs):
+        is_active = index == 0
+        buttons.append(
+            f'<button type="button" class="chart-period-button{" active" if is_active else ""}" '
+            f'data-chart-period-target="{esc(period)}" role="tab" aria-selected="{str(is_active).lower()}">'
+            f"{esc(label)}</button>"
+        )
+        panels.append(
+            f'<div class="chart-period-panel{" active" if is_active else ""}" '
+            f'data-chart-period-panel="{esc(period)}" role="tabpanel">'
+            f"{render_combined_chart(period_runs, period=period)}</div>"
+        )
+    return (
+        '<section class="chart-period-switcher">'
+        '<div class="chart-period-tabs" role="tablist" aria-label="계좌·시장 그래프 기간">'
+        f'{"".join(buttons)}</div>{"".join(panels)}</section>'
+    )
 
 
 def pie_slice_path(cx: float, cy: float, radius: float, start_angle: float, end_angle: float) -> str:
@@ -2139,7 +2256,11 @@ def build_html(runs_root: Path, target_run: str) -> str:
         raise ValueError(f"no daily-trading runs found through {target_started_at}")
     fills, fill_status, fill_scope = cumulative_today_fills(runs)
     trade_html, submitted_orders = render_trade_ledger(runs, fills, fill_status, fill_scope)
-    overview = render_header(summary, len(runs), fills, submitted_orders) + render_combined_chart(runs)
+    overview = render_header(summary, len(runs), fills, submitted_orders) + render_chart_periods(
+        runs_root,
+        target_started_at,
+        runs,
+    )
     trades = trade_html + render_time_symbol_inspector(runs, fills)
     evidence = render_news_timeline(runs) + render_market_news_timeline(runs) + render_financial_details(target_dir)
     operations = (
@@ -2203,6 +2324,7 @@ def build_html(runs_root: Path, target_run: str) -> str:
     .table-wrap {{ width:100%; overflow-x:auto; border:1px solid var(--line); border-radius:12px; }} table {{ width:100%; border-collapse:collapse; min-width:760px; }} th,td {{ padding:11px 12px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; font-size:13px; }} th {{ position:sticky; top:0; background:#eef3f9; color:#475569; font-size:12px; }} tr:last-child td {{ border-bottom:0; }}
     .positive {{ color:var(--ok); }} .negative {{ color:var(--bad); }}
     .warning-list {{ display:grid; gap:9px; margin-top:18px; }} .warning {{ padding:14px; border-left:4px solid var(--warn); border-radius:10px; background:var(--warn-bg); }} .warning.bad-border {{ border-left-color:var(--bad); background:var(--bad-bg); }} .warning p {{ margin:4px 0 0; font-size:13px; }}
+    .chart-period-tabs {{ display:flex; width:max-content; gap:5px; padding:5px; margin:16px 0 -6px auto; border:1px solid var(--line); border-radius:12px; background:var(--surface); }} .chart-period-button {{ padding:7px 13px; border:0; border-radius:8px; background:transparent; color:var(--muted); cursor:pointer; font-size:12px; font-weight:800; }} .chart-period-button.active {{ background:var(--accent); color:#fff; }} .chart-period-panel {{ display:none; }} .chart-period-panel.active {{ display:block; animation:page-in .18s ease; }}
     .combined-chart-card {{ padding:24px; margin-top:16px; border:1px solid var(--line); border-radius:22px; background:var(--surface); box-shadow:var(--shadow); }} .chart-legend {{ display:flex; flex-wrap:wrap; gap:14px; margin:13px 0 4px; color:var(--muted); font-size:12px; }} .chart-legend span {{ display:flex; align-items:center; gap:6px; }} .chart-legend i {{ width:22px; height:4px; border-radius:999px; background:var(--legend); }} .interactive-chart {{ position:relative; }} .interactive-line-chart {{ display:block; width:100%; height:auto; overflow:visible; }} .series-line {{ fill:none; stroke-width:4; stroke-linecap:round; stroke-linejoin:round; }} .total-line {{ stroke:#4f6df5; }} .pnl-line {{ stroke:#e14c68; stroke-dasharray:11 7; }} .asset-line {{ stroke:#8b5cf6; stroke-dasharray:4 5; }} .kospi-line {{ stroke:#0b9a86; }} .chart-zero {{ stroke:#9ca7b8; stroke-width:1.5; }} .chart-cursor {{ stroke:#617089; stroke-width:1.5; stroke-dasharray:5 5; opacity:0; }} .chart-marker {{ stroke:#fff; stroke-width:3; opacity:0; }} .total-marker {{ fill:#4f6df5; }} .pnl-marker {{ fill:#e14c68; }} .asset-marker {{ fill:#8b5cf6; }} .kospi-marker {{ fill:#0b9a86; }} .series-point {{ stroke:#fff; stroke-width:1.5; opacity:.85; pointer-events:none; }} .total-point {{ fill:#4f6df5; }} .pnl-point {{ fill:#e14c68; }} .asset-point {{ fill:#8b5cf6; }} .kospi-point {{ fill:#0b9a86; }} .chart-hit-area {{ fill:transparent; cursor:crosshair; pointer-events:all; touch-action:none; }} .chart-tooltip {{ position:absolute; z-index:5; min-width:190px; padding:11px 13px; border:1px solid rgba(220,228,239,.9); border-radius:12px; background:rgba(20,29,52,.94); color:#fff; box-shadow:0 12px 32px rgba(18,27,50,.25); opacity:0; pointer-events:none; transform:translate(-50%,-112%); transition:opacity .12s ease; font-size:12px; }} .chart-tooltip.visible {{ opacity:1; }} .chart-tooltip strong,.chart-tooltip span {{ display:block; }} .chart-tooltip strong {{ margin-bottom:5px; }} .chart-tooltip span {{ color:#d8e0f3; }} .chart-scrubber {{ padding:8px 5px 0; }} .chart-scrubber-label,.chart-scrubber-ends {{ display:flex; align-items:center; justify-content:space-between; gap:12px; }} .chart-scrubber-label {{ margin-bottom:3px; color:var(--muted); font-size:12px; font-weight:800; }} .chart-scrubber-time {{ color:var(--accent); font-weight:900; }} .chart-range-slider {{ width:100%; accent-color:var(--accent); cursor:ew-resize; touch-action:pan-x; }} .chart-scrubber-ends {{ color:var(--muted); font-size:10px; }} .series-ranges {{ display:flex; justify-content:flex-end; flex-wrap:wrap; gap:13px; color:var(--muted); font-size:11px; }}
     .portfolio-chart-layout {{ display:grid; grid-template-columns:minmax(300px,.85fr) minmax(320px,1.15fr); align-items:center; gap:28px; padding:20px; margin-bottom:12px; border:1px solid var(--line); border-radius:16px; background:var(--subtle); }} .portfolio-pie {{ position:relative; width:min(100%,430px); margin:auto; }} .portfolio-pie-svg {{ display:block; width:100%; height:auto; filter:drop-shadow(0 12px 22px rgba(24,36,64,.12)); }} .pie-slice {{ stroke:#fff; stroke-width:2; cursor:pointer; outline:none; transition:opacity .15s ease,stroke-width .15s ease; }} .pie-slice:hover,.pie-slice.active,.pie-slice:focus {{ opacity:.8; stroke-width:5; }} .pie-tooltip {{ position:absolute; z-index:6; min-width:205px; padding:11px 13px; border-radius:12px; background:rgba(20,29,52,.95); color:#fff; box-shadow:0 12px 32px rgba(18,27,50,.25); opacity:0; pointer-events:none; transform:translate(-50%,-112%); transition:opacity .1s ease; font-size:12px; }} .pie-tooltip.visible {{ opacity:1; }} .pie-tooltip strong,.pie-tooltip span {{ display:block; }} .pie-tooltip strong {{ margin-bottom:4px; }} .pie-tooltip span {{ color:#d8e0f3; }} .sector-legend {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; }} .sector-legend>div:first-child {{ grid-column:1/-1; }} .sector-legend h3 {{ margin:0; }} .sector-legend>div:first-child p:last-child {{ margin:3px 0 5px; color:var(--muted); font-size:12px; }} .sector-legend-item {{ display:flex; align-items:center; gap:9px; padding:10px; border:1px solid var(--line); border-radius:11px; background:#fff; }} .sector-legend-item i {{ width:13px; height:34px; flex:0 0 13px; border-radius:999px; background:var(--sector-color); }} .sector-legend-item strong,.sector-legend-item small {{ display:block; }} .sector-legend-item small {{ color:var(--muted); font-size:10px; }} .holdings-table {{ margin-top:14px; }}
     .chart-grid-wrap {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; margin-top:16px; }} .chart-card {{ padding:20px; overflow:hidden; border:1px solid var(--line); border-radius:20px; background:var(--surface); box-shadow:var(--shadow); }} .chart-head {{ display:flex; justify-content:space-between; gap:12px; }} .chart-head h3 {{ margin:0; font-size:19px; }} .chart-head p {{ margin:5px 0 0; color:var(--muted); font-size:12px; }} .chart-stat {{ min-width:100px; text-align:right; }} .chart-stat span,.chart-stat strong {{ display:block; }} .chart-stat span {{ color:var(--muted); font-size:11px; }} .line-chart {{ display:block; width:100%; height:auto; margin-top:5px; overflow:visible; }} .chart-grid {{ stroke:#e5eaf2; stroke-width:1; }} .chart-y,.chart-x {{ fill:#738096; font-size:15px; }} .chart-point {{ stroke:#fff; stroke-width:3; }} .chart-range {{ display:flex; justify-content:flex-end; flex-wrap:wrap; gap:14px; color:var(--muted); font-size:11px; }} .chart-range strong {{ color:var(--text); }}
@@ -2324,6 +2446,20 @@ def build_html(runs_root: Path, target_run: str) -> str:
       symbolButtons.forEach((button) => button.addEventListener('click', () => selectSymbol(button.dataset.symbolTarget)));
       const initialSymbol = symbolButtons.find((button) => button.classList.contains('active')) || symbolButtons[0];
       if (initialSymbol) selectSymbol(initialSymbol.dataset.symbolTarget);
+    }});
+
+    document.querySelectorAll('.chart-period-switcher').forEach((switcher) => {{
+      const periodButtons = [...switcher.querySelectorAll('.chart-period-button')];
+      const periodPanels = [...switcher.querySelectorAll('.chart-period-panel')];
+      const selectPeriod = (period) => {{
+        periodButtons.forEach((button) => {{
+          const active = button.dataset.chartPeriodTarget === period;
+          button.classList.toggle('active', active);
+          button.setAttribute('aria-selected', String(active));
+        }});
+        periodPanels.forEach((panel) => panel.classList.toggle('active', panel.dataset.chartPeriodPanel === period));
+      }};
+      periodButtons.forEach((button) => button.addEventListener('click', () => selectPeriod(button.dataset.chartPeriodTarget)));
     }});
 
     document.querySelectorAll('.combined-chart-card').forEach((card) => {{
