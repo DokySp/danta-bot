@@ -58,24 +58,6 @@ class SchedulerDailyTradingFailureClassificationTest(unittest.TestCase):
         )
 
     @patch("service.scheduler.scheduler.TypingIndicator", return_value=nullcontext())
-    def test_daily_trading_job_is_routed_as_scheduled_invocation(self, _typing: Mock) -> None:
-        """The broker-preflight cost reduction is disabled if the scheduler
-        ever forgets to mark its own runs as scheduled -- every schedule
-        invocation must always route to invocation_type="scheduled".
-        """
-        scheduler = self.scheduler()
-        scheduler.daily_trading_direct_runner.run.return_value = DailyTradingDirectResult(
-            output="completed output", html_report_path=None
-        )
-        daily_trading_config = {"env": "acct", "request_type": "real-submit", "submit_orders": True}
-
-        scheduler._run_job("daily-1", "", "chat", "route", None, None, daily_trading_config)
-
-        scheduler.daily_trading_direct_runner.run.assert_called_once_with(
-            daily_trading_config, "chat", "route", invocation_type="scheduled"
-        )
-
-    @patch("service.scheduler.scheduler.TypingIndicator", return_value=nullcontext())
     def test_html_delivery_failure_is_reported_after_successful_trade(self, _typing: Mock) -> None:
         scheduler = self.scheduler()
         scheduler.daily_trading_direct_runner.run.return_value = DailyTradingDirectResult(

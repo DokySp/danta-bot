@@ -104,7 +104,6 @@ def build_daily_trading_command(
     context: Any,
     raw_config: Any,
     run_dir: Path,
-    invocation_type: str = "manual",
 ) -> tuple[list[str], DailyTradingScheduleConfig]:
     schedule_config = validate_daily_trading_config(raw_config)
     cmd = [
@@ -125,8 +124,6 @@ def build_daily_trading_command(
         schedule_config.request_type,
         "--order-path",
         schedule_config.order_path,
-        "--invocation-type",
-        invocation_type,
     ]
     if schedule_config.submit_orders:
         cmd.append("--submit-orders")

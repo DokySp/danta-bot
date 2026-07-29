@@ -892,36 +892,6 @@ def failed_price_artifact(symbols: list[str], *, run_id: str, started_at: str, e
     }
 
 
-def skipped_price_artifact(symbols: list[str], *, run_id: str, started_at: str, reason: str) -> dict[str, Any]:
-    rows = [
-        {
-            "schema_version": "1",
-            "symbol_id": symbol,
-            "symbol_name": symbol,
-            "product_type": "unresolved",
-            "price": {"current_or_last": None, "observed_at": "", "snapshot_mode": "skipped"},
-            "eligible_for_review": False,
-            "required_missing": [],
-            "local_signals": [],
-            "sources": [],
-            "errors": [],
-        }
-        for symbol in symbols
-    ]
-    return {
-        "schema_version": "1",
-        "run_id": run_id,
-        "started_at": started_at,
-        "generated_at": now_kst_iso(),
-        "stage": "price-chart",
-        "status": "success",
-        "skipped": True,
-        "skip_reason": reason,
-        "errors": [],
-        "symbols": rows,
-    }
-
-
 def balance_params(cano: str, product_code: str, ctx_fk100: str = "", ctx_nk100: str = "") -> dict[str, str]:
     return {
         "CANO": cano,
@@ -1663,112 +1633,35 @@ def build_collection_summary(
     }
 
 
-def load_existing_json(path: Path) -> Any | None:
-    if not path.exists():
-        return None
-    try:
-        return read_json(path)
-    except (OSError, json.JSONDecodeError):
-        return None
-
-
-def valid_reused_account_artifact(payload: Any, *, run_id: str) -> bool:
-    """Identity/status check before a full-review continuation reuses a preflight artifact.
-
-    Requires the artifact to belong to this exact run_id and to be a fully
-    successful, non-skipped collection (not "partial", "failed", missing, or
-    any other unknown status; not skipped_account_artifact()'s
-    status="success"/skipped=True/account_summary={} placeholder), so a
-    stale, mismatched, or incomplete file can never be silently treated as
-    this run's already-validated account snapshot.
-    """
-    if not isinstance(payload, dict):
-        return False
-    if str(payload.get("run_id") or "") != str(run_id):
-        return False
-    if str(payload.get("status") or "") != "success":
-        return False
-    if bool(payload.get("skipped")):
-        return False
-    return isinstance(payload.get("symbols"), list)
-
-
-def valid_reused_today_fills_artifact(payload: Any, *, run_id: str) -> bool:
-    """Identity/status/scope check before reusing a preflight today-fills artifact.
-
-    Requires the exact run_id, a fully successful (non-partial, non-skipped)
-    account-scoped fill lookup, so an incomplete or narrower-scope lookup
-    from the preflight can never be silently trusted as complete.
-    """
-    if not isinstance(payload, dict):
-        return False
-    if str(payload.get("run_id") or "") != str(run_id):
-        return False
-    if str(payload.get("status") or "") != "success":
-        return False
-    if bool(payload.get("skipped")):
-        return False
-    if payload.get("fill_scope") != "account":
-        return False
-    return isinstance(payload.get("fills"), list)
-
-
 def command_collect(args: argparse.Namespace) -> int:
     symbols = parse_symbols(args.symbols)
     env_dv = normalize_trading_env(args.env)
     started_at = args.started_at or now_kst_iso()
     output_dir = Path(args.output_dir).expanduser()
-    reuse_account = bool(getattr(args, "reuse_account", False))
-    skip_account_asset = bool(getattr(args, "skip_account_asset", False))
-    account_path = output_dir / "account-before-order.json"
-    today_fills_path = output_dir / "today-fills.json"
     try:
         app_key, app_secret = kis_credentials(env_dv)
         token, token_status, token_expires_at = fetch_token(app_key, app_secret, env_dv, args.retries)
     except Exception as exc:  # noqa: BLE001 - write sanitized auth failure artifacts
         error = safe_error(exc, code="auth_failed", stage="main-evidence-collection", source="direct_kis.auth", required=True)
-        if getattr(args, "skip_price_chart", False):
-            price_artifact = skipped_price_artifact(symbols, run_id=args.run_id, started_at=started_at, reason="broker-preflight snapshot")
-        else:
-            price_artifact = failed_price_artifact(symbols, run_id=args.run_id, started_at=started_at, error=error)
+        price_artifact = failed_price_artifact(symbols, run_id=args.run_id, started_at=started_at, error=error)
+        account_artifact = failed_account_artifact(symbols, run_id=args.run_id, started_at=started_at, env_dv=env_dv, request_type=args.request_type, error=error)
+        account_asset_snapshot = failed_account_asset_snapshot(
+            run_id=args.run_id,
+            started_at=started_at,
+            env_dv=env_dv,
+            error=safe_error(exc, code="auth_failed", stage="account-asset-snapshot", source="direct_kis.auth", required=False),
+        )
+        today_fills_artifact = failed_today_fills_artifact(
+            symbols,
+            run_id=args.run_id,
+            started_at=started_at,
+            env_dv=env_dv,
+            error=safe_error(exc, code="auth_failed", stage="today-fills", source="direct_kis.auth", required=False),
+        )
         write_json(output_dir / "price-chart.json", price_artifact)
-        if reuse_account:
-            # Do not overwrite the already-validated preflight account/fills
-            # artifacts with a failure placeholder; only price/account-asset
-            # collection failed here.
-            account_artifact = load_existing_json(account_path) or failed_account_artifact(
-                symbols, run_id=args.run_id, started_at=started_at, env_dv=env_dv, request_type=args.request_type, error=error
-            )
-            today_fills_artifact = load_existing_json(today_fills_path) or failed_today_fills_artifact(
-                symbols,
-                run_id=args.run_id,
-                started_at=started_at,
-                env_dv=env_dv,
-                error=safe_error(exc, code="auth_failed", stage="today-fills", source="direct_kis.auth", required=False),
-            )
-        else:
-            account_artifact = failed_account_artifact(symbols, run_id=args.run_id, started_at=started_at, env_dv=env_dv, request_type=args.request_type, error=error)
-            today_fills_artifact = failed_today_fills_artifact(
-                symbols,
-                run_id=args.run_id,
-                started_at=started_at,
-                env_dv=env_dv,
-                error=safe_error(exc, code="auth_failed", stage="today-fills", source="direct_kis.auth", required=False),
-            )
-            write_json(account_path, account_artifact)
-            write_json(today_fills_path, today_fills_artifact)
-        if skip_account_asset:
-            account_asset_snapshot = skipped_account_asset_snapshot(
-                run_id=args.run_id, started_at=started_at, env_dv=env_dv, reason="skip-account-asset option"
-            )
-        else:
-            account_asset_snapshot = failed_account_asset_snapshot(
-                run_id=args.run_id,
-                started_at=started_at,
-                env_dv=env_dv,
-                error=safe_error(exc, code="auth_failed", stage="account-asset-snapshot", source="direct_kis.auth", required=False),
-            )
+        write_json(output_dir / "account-before-order.json", account_artifact)
         write_json(output_dir / "account-asset-snapshot.json", account_asset_snapshot)
+        write_json(output_dir / "today-fills.json", today_fills_artifact)
         summary = build_collection_summary(
             run_id=args.run_id,
             started_at=started_at,
@@ -1786,99 +1679,24 @@ def command_collect(args: argparse.Namespace) -> int:
         print(json.dumps({"status": summary["status"], "paths": summary["paths"], "counts": summary["counts"], "warnings": summary["warnings"], "errors": summary["errors"]}, ensure_ascii=False, indent=2, sort_keys=True))
         return 1
 
-    if getattr(args, "skip_price_chart", False):
-        price_artifact = skipped_price_artifact(
-            symbols, run_id=args.run_id, started_at=started_at, reason="broker-preflight snapshot"
-        )
-    else:
-        price_artifact = collect_price_chart(
-            symbols,
-            run_id=args.run_id,
-            started_at=started_at,
-            env_dv=env_dv,
-            market=args.market,
-            app_key=app_key,
-            app_secret=app_secret,
-            token=token,
-            retries=args.retries,
-            include_extended=not args.skip_extended_market_evidence,
-        )
+    price_artifact = collect_price_chart(
+        symbols,
+        run_id=args.run_id,
+        started_at=started_at,
+        env_dv=env_dv,
+        market=args.market,
+        app_key=app_key,
+        app_secret=app_secret,
+        token=token,
+        retries=args.retries,
+        include_extended=not args.skip_extended_market_evidence,
+    )
     price_path = output_dir / "price-chart.json"
     write_json(price_path, price_artifact)
 
     children = [price_artifact]
-    reuse_validation_failed = False
-    if reuse_account:
-        reused_account = load_existing_json(account_path)
-        if valid_reused_account_artifact(reused_account, run_id=args.run_id):
-            account_artifact = reused_account
-        else:
-            reuse_validation_failed = True
-            account_artifact = failed_account_artifact(
-                symbols,
-                run_id=args.run_id,
-                started_at=started_at,
-                env_dv=env_dv,
-                request_type=args.request_type,
-                error=safe_error(
-                    "reused account-before-order artifact missing or invalid for this run",
-                    code="reuse_account_invalid",
-                    stage="account-before-order",
-                    source="local.account-before-order.json",
-                    required=True,
-                ),
-            )
-            write_json(account_path, account_artifact)
-        reused_today_fills = load_existing_json(today_fills_path)
-        if valid_reused_today_fills_artifact(reused_today_fills, run_id=args.run_id):
-            today_fills_artifact = reused_today_fills
-        else:
-            reuse_validation_failed = True
-            today_fills_artifact = failed_today_fills_artifact(
-                symbols,
-                run_id=args.run_id,
-                started_at=started_at,
-                env_dv=env_dv,
-                error=safe_error(
-                    "reused today-fills artifact missing or invalid for this run",
-                    code="reuse_today_fills_invalid",
-                    stage="today-fills",
-                    source="local.today-fills.json",
-                    required=True,
-                ),
-            )
-            write_json(today_fills_path, today_fills_artifact)
-        if skip_account_asset:
-            account_asset_snapshot = skipped_account_asset_snapshot(
-                run_id=args.run_id, started_at=started_at, env_dv=env_dv, reason="skip-account-asset option"
-            )
-        else:
-            try:
-                account_asset_snapshot = collect_account_asset_snapshot(
-                    run_id=args.run_id,
-                    started_at=started_at,
-                    env_dv=env_dv,
-                    app_key=app_key,
-                    app_secret=app_secret,
-                    token=token,
-                    retries=args.retries,
-                )
-            except Exception as exc:  # noqa: BLE001 - optional account asset stage is non-blocking
-                account_asset_snapshot = failed_account_asset_snapshot(
-                    run_id=args.run_id,
-                    started_at=started_at,
-                    env_dv=env_dv,
-                    error=safe_error(exc, code="account_asset_snapshot_failed", stage="account-asset-snapshot", source="direct_kis.inquire_account_balance", required=False),
-                )
-            if account_asset_snapshot.get("status") == "success" and not account_asset_snapshot.get("skipped"):
-                try:
-                    append_account_asset_history(account_asset_history_path(output_dir), account_asset_snapshot)
-                except Exception as exc:  # noqa: BLE001 - history persistence must not fail required collection
-                    account_asset_snapshot["status"] = "partial"
-                    account_asset_snapshot.setdefault("errors", []).append(
-                        safe_error(exc, code="account_asset_history_append_failed", stage="account-asset-snapshot", source=str(account_asset_history_path(output_dir)), required=False)
-                    )
-    elif args.skip_account:
+    account_path = output_dir / "account-before-order.json"
+    if args.skip_account:
         account_artifact = skipped_account_artifact(
             symbols,
             run_id=args.run_id,
@@ -1913,36 +1731,31 @@ def command_collect(args: argparse.Namespace) -> int:
             max_pages=args.max_account_pages,
             request_type=args.request_type,
         )
-        if skip_account_asset:
-            account_asset_snapshot = skipped_account_asset_snapshot(
-                run_id=args.run_id, started_at=started_at, env_dv=env_dv, reason="skip-account-asset option"
+        try:
+            account_asset_snapshot = collect_account_asset_snapshot(
+                run_id=args.run_id,
+                started_at=started_at,
+                env_dv=env_dv,
+                app_key=app_key,
+                app_secret=app_secret,
+                token=token,
+                retries=args.retries,
             )
-        else:
+        except Exception as exc:  # noqa: BLE001 - optional account asset stage is non-blocking
+            account_asset_snapshot = failed_account_asset_snapshot(
+                run_id=args.run_id,
+                started_at=started_at,
+                env_dv=env_dv,
+                error=safe_error(exc, code="account_asset_snapshot_failed", stage="account-asset-snapshot", source="direct_kis.inquire_account_balance", required=False),
+            )
+        if account_asset_snapshot.get("status") == "success" and not account_asset_snapshot.get("skipped"):
             try:
-                account_asset_snapshot = collect_account_asset_snapshot(
-                    run_id=args.run_id,
-                    started_at=started_at,
-                    env_dv=env_dv,
-                    app_key=app_key,
-                    app_secret=app_secret,
-                    token=token,
-                    retries=args.retries,
+                append_account_asset_history(account_asset_history_path(output_dir), account_asset_snapshot)
+            except Exception as exc:  # noqa: BLE001 - history persistence must not fail required collection
+                account_asset_snapshot["status"] = "partial"
+                account_asset_snapshot.setdefault("errors", []).append(
+                    safe_error(exc, code="account_asset_history_append_failed", stage="account-asset-snapshot", source=str(account_asset_history_path(output_dir)), required=False)
                 )
-            except Exception as exc:  # noqa: BLE001 - optional account asset stage is non-blocking
-                account_asset_snapshot = failed_account_asset_snapshot(
-                    run_id=args.run_id,
-                    started_at=started_at,
-                    env_dv=env_dv,
-                    error=safe_error(exc, code="account_asset_snapshot_failed", stage="account-asset-snapshot", source="direct_kis.inquire_account_balance", required=False),
-                )
-            if account_asset_snapshot.get("status") == "success" and not account_asset_snapshot.get("skipped"):
-                try:
-                    append_account_asset_history(account_asset_history_path(output_dir), account_asset_snapshot)
-                except Exception as exc:  # noqa: BLE001 - history persistence must not fail required collection
-                    account_asset_snapshot["status"] = "partial"
-                    account_asset_snapshot.setdefault("errors", []).append(
-                        safe_error(exc, code="account_asset_history_append_failed", stage="account-asset-snapshot", source=str(account_asset_history_path(output_dir)), required=False)
-                    )
         try:
             today_fills_artifact = collect_today_fills_artifact(
                 symbols,
@@ -1964,7 +1777,7 @@ def command_collect(args: argparse.Namespace) -> int:
             )
     write_json(account_path, account_artifact)
     write_json(output_dir / "account-asset-snapshot.json", account_asset_snapshot)
-    write_json(today_fills_path, today_fills_artifact)
+    write_json(output_dir / "today-fills.json", today_fills_artifact)
     children.append(account_artifact)
 
     summary = build_collection_summary(
@@ -1983,10 +1796,6 @@ def command_collect(args: argparse.Namespace) -> int:
     summary_path = output_dir / "collection-summary.json"
     write_json(summary_path, summary)
     print(json.dumps({"status": summary["status"], "paths": summary["paths"], "counts": summary["counts"], "warnings": summary["warnings"]}, ensure_ascii=False, indent=2, sort_keys=True))
-    # An invalid reused artifact must fail this command outright, never a bare
-    # "partial" that a caller could mistake for a usable (if degraded) result.
-    if reuse_validation_failed:
-        return 1
     return 0 if summary["status"] in {"success", "partial"} else 1
 
 
@@ -2017,25 +1826,6 @@ def build_parser() -> argparse.ArgumentParser:
     collect_parser.add_argument("--market", default="J")
     collect_parser.add_argument("--request-type", default="analysis", choices=["analysis", "prepare", "demo-submit", "real-submit"])
     collect_parser.add_argument("--skip-account", action="store_true")
-    collect_parser.add_argument(
-        "--skip-price-chart",
-        action="store_true",
-        help="Skip all-universe price/chart collection; account/fills-only broker snapshot for preflight.",
-    )
-    collect_parser.add_argument(
-        "--skip-account-asset",
-        action="store_true",
-        help="Skip the optional account-asset snapshot/history append (preflight does not need it).",
-    )
-    collect_parser.add_argument(
-        "--reuse-account",
-        action="store_true",
-        help=(
-            "Reuse and validate the existing account-before-order.json/today-fills.json for this "
-            "run-id instead of re-collecting them; for the full-review continuation after a broker "
-            "preflight already collected and lifecycle-reconciled them."
-        ),
-    )
     collect_parser.add_argument("--skip-extended-market-evidence", action="store_true", help="Collect only identity/current price/account artifacts.")
     collect_parser.add_argument("--retries", type=int, default=3)
     collect_parser.add_argument("--max-account-pages", type=int, default=20)

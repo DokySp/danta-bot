@@ -89,19 +89,6 @@ BASIS_LABELS = {
     "concentration_rebalance": "집중도조정",
 }
 GUARD_STATUS_LABELS = {"allowed": "허용", "blocked": "차단", "no_change": "변경없음 처리"}
-REVIEW_TRIGGER_DECISION_LABELS = {"full": "전체 리뷰 실행", "skipped": "생략(변경 없음)", "safety_block": "안전 차단"}
-REVIEW_TRIGGER_REASON_LABELS = {
-    "manual_invocation": "수동/전체 실행 요청",
-    "first_safe_run_of_day": "당일 최초 안전 실행",
-    "broker_fingerprint_changed": "브로커 상태 변경 감지",
-    "fixed_review_time_due": "예정 리뷰 시각 도래",
-    "account_lookup_failed": "계좌 조회 실패",
-    "order_lifecycle_lookup_incomplete": "미체결 주문 조회 미완료",
-    "orderable_cash_unavailable": "주문가능금액 조회 불가",
-    "holding_state_issue_detected": "보유수량 상태 불일치 감지",
-    "today_fills_lookup_incomplete": "당일 체결 조회 미완료",
-    "unexpected_non_universe_holding": "유니버스 외 예상외 보유 종목",
-}
 SCOPE_REASON_LABELS = {"held_position": "보유 심사대상", "unheld_score_rank": "비보유 상위선정"}
 JUDGE_ERROR_LABELS = {
     "missing_judge_symbol": "Judge 결과 누락",
@@ -416,26 +403,6 @@ def render(summary: dict[str, Any]) -> str:
             f"<b>이번 run</b> {esc(execution.get('request_type') or '-')} · 신규주문 {new_order_count} · 정정 {correction_count} · 취소 {cancellation_count} · 차단·실패 {blocked_failed_count} · 스킵 {skipped_count}",
         ]
     )
-    review_trigger = summary.get("review_trigger") if isinstance(summary.get("review_trigger"), dict) else {}
-    if review_trigger:
-        trigger_decision_raw = text(review_trigger.get("decision"))
-        trigger_line = f"- 리뷰 트리거: {REVIEW_TRIGGER_DECISION_LABELS.get(trigger_decision_raw, trigger_decision_raw or '-')}"
-        reasons = review_trigger.get("reasons") if isinstance(review_trigger.get("reasons"), list) else []
-        if reasons:
-            trigger_line += " (" + ", ".join(REVIEW_TRIGGER_REASON_LABELS.get(text(r), text(r)) for r in reasons) + ")"
-        due_slot = review_trigger.get("due_slot")
-        if due_slot:
-            # due_slot is the fixed-time slot being applied/evaluated THIS run, not a future slot.
-            trigger_line += f" · 적용 정기 슬롯 {esc(due_slot)}"
-        changed_components = review_trigger.get("changed_components") if isinstance(review_trigger.get("changed_components"), list) else []
-        if changed_components:
-            trigger_line += " · 변경 감지: " + ", ".join(esc(str(c)) for c in changed_components)
-        safety_reasons = review_trigger.get("safety_reasons") if isinstance(review_trigger.get("safety_reasons"), list) else []
-        if safety_reasons:
-            trigger_line += " · 안전 문제: " + ", ".join(REVIEW_TRIGGER_REASON_LABELS.get(text(r), text(r)) for r in safety_reasons)
-        lines.append(trigger_line)
-        if trigger_decision_raw in {"full", "skipped"} and not review_trigger.get("trigger_state_persisted"):
-            lines.append("- ⚠️ 리뷰 트리거 상태 저장 실패(다음 실행에서 재평가됨)")
     if as_int(broker_summary.get("submitted_cash_order_count")) > 0:
         unresolved_count = (
             as_int(broker_summary.get("partially_filled_order_count"))

@@ -42,8 +42,7 @@ def _acquire_direct_run_lock(workspace_dir: Path) -> Any:
     """Serialize daily-trading direct executions across scheduler/Telegram threads.
 
     Blocks until any other in-flight scheduled/manual daily-trading run
-    releases the lock, so the broker-preflight review-trigger state file is
-    never read/updated by two overlapping runs at once.
+    releases the lock so account/order snapshots and submissions do not overlap.
     """
     lock_path = workspace_dir / _DIRECT_RUN_LOCK_RELATIVE_PATH
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -76,11 +75,10 @@ class DailyTradingDirectRunner:
         raw_config: Any,
         chat_id: str | None = None,
         route: str | None = None,
-        invocation_type: str = "manual",
     ) -> DailyTradingDirectResult:
         lock_handle = _acquire_direct_run_lock(self.config.workspace_dir)
         try:
-            return self._run_locked(raw_config, chat_id, route, invocation_type)
+            return self._run_locked(raw_config, chat_id, route)
         finally:
             _release_direct_run_lock(lock_handle)
 
@@ -89,15 +87,12 @@ class DailyTradingDirectRunner:
         raw_config: Any,
         chat_id: str | None,
         route: str | None,
-        invocation_type: str,
     ) -> DailyTradingDirectResult:
         context = new_codex_run_context()
         run_dir = self.config.workspace_dir / "reports" / "runs" / context.run_id
         run_dir.mkdir(parents=True, exist_ok=True)
         usage_before = read_usage_snapshot(self.config)
-        cmd, schedule_config = build_daily_trading_command(
-            self.config, context, raw_config, run_dir, invocation_type=invocation_type
-        )
+        cmd, schedule_config = build_daily_trading_command(self.config, context, raw_config, run_dir)
         logging.info("running scheduled daily-trading pipeline command=%s", shlex.join(cmd))
         env = os.environ.copy()
         env["CODEX_MCP_TRADING_ENV"] = schedule_config.env

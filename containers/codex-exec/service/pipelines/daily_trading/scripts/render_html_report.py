@@ -34,24 +34,6 @@ DECISION_BASIS_LABELS = {
     "concentration_rebalance": "집중도조정",
 }
 GUARD_STATUS_LABELS = {"allowed": "허용", "blocked": "차단", "no_change": "변경없음 처리"}
-REVIEW_TRIGGER_DECISION_LABELS = {"full": "전체 리뷰 실행", "skipped": "생략(변경 없음)", "safety_block": "안전 차단"}
-REVIEW_TRIGGER_REASON_LABELS = {
-    "manual_invocation": "수동/전체 실행 요청",
-    "first_safe_run_of_day": "당일 최초 안전 실행",
-    "broker_fingerprint_changed": "브로커 상태 변경 감지",
-    "fixed_review_time_due": "예정 리뷰 시각 도래",
-    "account_lookup_failed": "계좌 조회 실패",
-    "order_lifecycle_lookup_incomplete": "미체결 주문 조회 미완료",
-    "orderable_cash_unavailable": "주문가능금액 조회 불가",
-    "holding_state_issue_detected": "보유수량 상태 불일치 감지",
-    "today_fills_lookup_incomplete": "당일 체결 조회 미완료",
-    "unexpected_non_universe_holding": "유니버스 외 예상외 보유 종목",
-}
-
-
-def review_trigger_reason_label(value: Any) -> str:
-    raw = str(value or "")
-    return REVIEW_TRIGGER_REASON_LABELS.get(raw, raw or "-")
 NOT_RECORDED = "미기록"
 
 
@@ -299,11 +281,6 @@ def find_runs(runs_root: Path, target_started_at: str) -> list[dict[str, Any]]:
                 "lifecycle": load_json(path / "order-lifecycle.json"),
                 "decision": load_json(path / "decision-brief.json"),
                 "market": load_json(path / "market-index-snapshot.json"),
-                # Only build_summary's full-review path ever adds "review_summary"; a
-                # short-circuit (safety_block/skipped preflight) summary never does, so this is a
-                # reliable signal that the run never reached decision-brief/analyst/judge at all --
-                # it must not be rendered as an empty full-review run.
-                "is_preflight_only": "review_summary" not in summary,
             }
         )
     ordered_runs = sorted(runs, key=lambda item: str(item["summary"].get("started_at") or ""))
@@ -965,9 +942,6 @@ def render_thesis_section(final_item: dict[str, Any]) -> str:
 
 
 def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[str, Any]]) -> str:
-    # A preflight-only run never reached Analyst/Judge -- it must not appear in the time wheel as
-    # an empty Analyst/Judge run.
-    runs = [run for run in runs if not run.get("is_preflight_only")]
     fill_by_order = {
         str(item.get("order_id")): item
         for item in fills
@@ -1399,34 +1373,6 @@ def render_run_timeline(runs: list[dict[str, Any]]) -> str:
         summary = run["summary"]
         tokens = (((summary.get("token_usage") or {}).get("total") or {}).get("total_tokens") or 0)
         total_tokens += int(tokens)
-        if run.get("is_preflight_only"):
-            # A preflight-only run (safety_block or a skipped/unchanged scheduled check) never
-            # reached decision-brief/Analyst/Judge; showing 0/0/0 and regime "-" reads as an empty
-            # full review that ran and found nothing, which is not what happened.
-            trigger = summary.get("review_trigger") if isinstance(summary.get("review_trigger"), dict) else {}
-            decision_raw = str(trigger.get("decision") or "-")
-            decision_label = REVIEW_TRIGGER_DECISION_LABELS.get(decision_raw, decision_raw)
-            reasons = trigger.get("reasons") if isinstance(trigger.get("reasons"), list) else []
-            reason_text = ", ".join(review_trigger_reason_label(r) for r in reasons) or "-"
-            detail_parts = [reason_text]
-            due_slot = trigger.get("due_slot")
-            if due_slot:
-                detail_parts.append(f"적용 정기 슬롯 {due_slot}")
-            if decision_raw == "skipped":
-                persisted = trigger.get("trigger_state_persisted")
-                if persisted is True:
-                    detail_parts.append("상태 저장 성공")
-                elif persisted is False:
-                    detail_parts.append("상태 저장 실패(다음 실행에서 재평가)")
-                else:
-                    detail_parts.append("상태 저장 결과 미기록")
-            rows.append(
-                f'<tr class="preflight-row"><td>{time_text(summary.get("started_at"))}</td>'
-                f'<td><span class="badge info">사전점검</span></td>'
-                f'<td colspan="5">{esc(decision_label)}({esc(decision_raw)}) · {esc(" · ".join(detail_parts))}</td>'
-                f"<td>{number(tokens)}</td></tr>"
-            )
-            continue
         account = summary.get("account_display_summary") if isinstance(summary.get("account_display_summary"), dict) else {}
         submitted, blocked, skipped = execution_counts(run["execution"])
         strategy = run["decision"].get("strategy_context") if isinstance(run["decision"].get("strategy_context"), dict) else {}
@@ -1888,44 +1834,6 @@ def render_policy_panel(summary: dict[str, Any]) -> str:
     """
 
 
-def render_review_trigger_panel(summary: dict[str, Any]) -> str:
-    """Final review-trigger decision/persistence state for the target run, rendered after
-    finalize_review_gate_state so full_review_completed and trigger_state_persisted reflect what
-    actually happened, not the pre-finalize snapshot."""
-    trigger = summary.get("review_trigger") if isinstance(summary.get("review_trigger"), dict) else {}
-    if not trigger:
-        return ""
-    decision_raw = str(trigger.get("decision") or "-")
-    decision_label = REVIEW_TRIGGER_DECISION_LABELS.get(decision_raw, decision_raw)
-    reasons = trigger.get("reasons") if isinstance(trigger.get("reasons"), list) else []
-    reason_text = ", ".join(review_trigger_reason_label(r) for r in reasons) or "-"
-    changed = trigger.get("changed_components") if isinstance(trigger.get("changed_components"), list) else []
-    safety_reasons = trigger.get("safety_reasons") if isinstance(trigger.get("safety_reasons"), list) else []
-    persisted = trigger.get("trigger_state_persisted")
-    if decision_raw == "safety_block":
-        persist_badge = '<span class="badge info">저장 대상 아님</span>'
-    elif persisted is True:
-        persist_badge = '<span class="badge ok">저장 성공</span>'
-    elif persisted is False:
-        persist_badge = '<span class="badge warn">저장 실패</span>'
-    else:
-        persist_badge = '<span class="badge warn">저장 결과 미기록</span>'
-    return f"""
-    <section class="panel" id="review-trigger">
-      <div class="section-head"><div><p class="kicker">REVIEW TRIGGER</p><h2>리뷰 트리거 최종 상태</h2></div></div>
-      <div class="table-wrap"><table><thead><tr><th>항목</th><th>값</th></tr></thead><tbody>
-        <tr><td>결정</td><td>{esc(decision_label)}({esc(decision_raw)})</td></tr>
-        <tr><td>사유</td><td>{esc(reason_text)}</td></tr>
-        <tr><td>적용 정기 슬롯</td><td>{esc(str(trigger.get('due_slot') or '-'))}</td></tr>
-        <tr><td>변경 감지 항목</td><td>{esc(', '.join(str(c) for c in changed) or '-')}</td></tr>
-        <tr><td>안전 문제</td><td>{esc(', '.join(review_trigger_reason_label(r) for r in safety_reasons) or '-')}</td></tr>
-        <tr><td>전체 리뷰 완료</td><td>{'예' if trigger.get('full_review_completed') else '아니오'}</td></tr>
-        <tr><td>트리거 상태 저장</td><td>{persist_badge}</td></tr>
-      </tbody></table></div>
-    </section>
-    """
-
-
 def render_market_and_quality(target_dir: Path, summary: dict[str, Any]) -> str:
     decision = load_json(target_dir / "decision-brief.json")
     market = load_json(target_dir / "market-index-snapshot.json")
@@ -2328,7 +2236,6 @@ def build_html(runs_root: Path, target_run: str) -> str:
         + render_holdings(target_dir, summary)
         + render_market_and_quality(target_dir, summary)
         + render_policy_panel(summary)
-        + render_review_trigger_panel(summary)
     )
 
     tab_buttons = [

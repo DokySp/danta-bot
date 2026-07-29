@@ -91,9 +91,6 @@ def make_run(runs_root: Path, run_id: str, started_at: str, *, target: bool) -> 
         },
         "token_usage": {"total": {"total_tokens": 123}},
         "stages": [{"stage": "execution-plan", "status": "success", "detail": "status=success"}],
-        # Presence of "review_summary" is exactly the signal is_preflight_only relies on to tell
-        # a full-review run apart from a short-circuit (safety_block/skipped preflight) one; every
-        # run built by this fixture reached full review, so it must have this key.
         "review_summary": {"symbol_count": 2},
     }
     if target:
@@ -841,45 +838,6 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
         self.assertIn("15.0%", rendered)
         self.assertEqual(render_policy_panel({}), "")
 
-    def test_render_review_trigger_panel_shows_final_decision_and_persistence(self) -> None:
-        from ..scripts.render_html_report import render_review_trigger_panel
-
-        rendered = render_review_trigger_panel(
-            {
-                "review_trigger": {
-                    "decision": "full",
-                    "reasons": ["broker_fingerprint_changed"],
-                    "due_slot": "09:05",
-                    "changed_components": ["account"],
-                    "safety_reasons": [],
-                    "full_review_completed": True,
-                    "trigger_state_persisted": False,
-                }
-            }
-        )
-        self.assertIn("리뷰 트리거 최종 상태", rendered)
-        self.assertIn("브로커 상태 변경 감지", rendered)
-        self.assertIn("09:05", rendered)
-        self.assertIn("account", rendered)
-        self.assertIn("저장 실패", rendered)
-        self.assertEqual(render_review_trigger_panel({}), "")
-
-    def test_render_review_trigger_panel_does_not_call_safety_block_a_persistence_failure(self) -> None:
-        from ..scripts.render_html_report import render_review_trigger_panel
-
-        rendered = render_review_trigger_panel(
-            {
-                "review_trigger": {
-                    "decision": "safety_block",
-                    "reasons": ["account_lookup_failed"],
-                    "safety_reasons": ["account_lookup_failed"],
-                    "full_review_completed": False,
-                }
-            }
-        )
-        self.assertIn("저장 대상 아님", rendered)
-        self.assertNotIn("저장 실패", rendered)
-
     def test_valid_analyst_score_matches_pipeline_not_selected_count_contract(self) -> None:
         self.assertTrue(valid_analyst_score(0))
         self.assertTrue(valid_analyst_score("10"))
@@ -916,71 +874,6 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
             "legacy_unknown",
         )
 
-    def test_render_run_timeline_shows_preflight_only_run_distinctly_not_as_empty_full_run(self) -> None:
-        from ..scripts.render_html_report import render_run_timeline
-
-        preflight_run = {
-            "summary": {
-                "started_at": "2026-07-27T09:05:00+09:00",
-                "token_usage": {"total": {"total_tokens": 10}},
-                "review_trigger": {
-                    "decision": "skipped",
-                    "reasons": ["fixed_review_time_due"],
-                    "due_slot": "09:05",
-                    "trigger_state_persisted": False,
-                },
-                # No "review_summary" key at all -- this is the short-circuit signal.
-            },
-            "execution": {},
-            "decision": {},
-            "market": {},
-            "is_preflight_only": True,
-        }
-        full_run = {
-            "summary": {
-                "started_at": "2026-07-27T09:10:00+09:00",
-                "token_usage": {"total": {"total_tokens": 20}},
-                "account_display_summary": {},
-                "review_summary": {"symbol_count": 1},
-            },
-            "execution": {"orders": [{"result": "submitted"}]},
-            "decision": {"strategy_context": {"regime": "risk_on"}},
-            "market": {"indexes": []},
-            "is_preflight_only": False,
-        }
-        rendered = render_run_timeline([preflight_run, full_run])
-        self.assertIn("사전점검", rendered)
-        self.assertIn("생략(변경 없음)", rendered)
-        self.assertIn("예정 리뷰 시각 도래", rendered)
-        self.assertIn("적용 정기 슬롯 09:05", rendered)
-        self.assertIn("상태 저장 실패", rendered)
-        # A preflight-only row must not render the generic 0/0/0 full-run shape; the (non-preflight)
-        # full run has one submitted order, so any "0 / 0 / 0" left over would have to be a
-        # mistakenly-rendered preflight row.
-        self.assertNotIn("0 / 0 / 0", rendered)
-
-    def test_render_time_symbol_inspector_excludes_preflight_only_runs_from_analyst_judge_wheel(self) -> None:
-        preflight_run = {
-            "path": Path("/nonexistent/preflight-run"),
-            "summary": {"started_at": "2026-07-27T09:05:00+09:00"},
-            "execution": {},
-            "decision": {},
-            "is_preflight_only": True,
-        }
-        full_run = {
-            "path": Path("/nonexistent/full-run"),
-            "summary": {"started_at": "2026-07-27T09:10:00+09:00"},
-            "execution": {"orders": []},
-            "decision": {},
-            "is_preflight_only": False,
-        }
-        rendered = render_time_symbol_inspector([preflight_run, full_run], [])
-        # Only the full run's time button should appear; the preflight-only run is excluded
-        # entirely rather than shown as an empty Analyst/Judge run.
-        self.assertEqual(rendered.count("data-time-target="), 1)
-        self.assertNotIn("09:05", rendered)
-        self.assertIn("09:10", rendered)
-
     def test_inspector_treats_existing_v1_spec_without_scope_key_as_unknown(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             run_dir = Path(temporary)
@@ -998,7 +891,6 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
                         "summary": {"started_at": "2026-07-27T10:00:00+09:00", "review_summary": {"symbols": []}},
                         "execution": {"orders": []},
                         "decision": {},
-                        "is_preflight_only": False,
                     }
                 ],
                 [],
@@ -1030,7 +922,6 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
                         "summary": {"started_at": "2026-07-27T10:00:00+09:00", "review_summary": {"symbols": []}},
                         "execution": {"orders": []},
                         "decision": {},
-                        "is_preflight_only": False,
                     }
                 ],
                 [],
@@ -1082,7 +973,6 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
                                 {"symbol_id": "005930", "account_exposure": {"current_live_holding_quantity": 3}}
                             ]
                         },
-                        "is_preflight_only": False,
                     }
                 ],
                 [],
@@ -1121,7 +1011,6 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
                                 {"symbol_id": "035420", "account_exposure": {}},
                             ]
                         },
-                        "is_preflight_only": False,
                     }
                 ],
                 [],
@@ -1162,7 +1051,6 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
                             ]
                         },
                         "decision": {},
-                        "is_preflight_only": False,
                     }
                 ],
                 [],

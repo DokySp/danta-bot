@@ -542,67 +542,6 @@ class OrderLineLifecycleTest(unittest.TestCase):
         self.assertNotIn("- 0주", line)
 
 
-class ReviewTriggerRenderTest(unittest.TestCase):
-    BASE_PAYLOAD = {
-        "run_id": "trigger-test",
-        "status": "success",
-        "account_display_summary": {},
-        "evidence_summary": {},
-        "today_fills_summary": {"status": "success", "skipped": False, "fill_count": 0},
-        "execution": {"request_type": "real-submit", "status": "success", "orders": []},
-        "review_summary": {},
-        "token_usage": {"total": {"total_tokens": 0}},
-    }
-
-    def test_due_slot_uses_applied_slot_wording_not_next_slot_wording(self) -> None:
-        payload = dict(self.BASE_PAYLOAD)
-        payload["review_trigger"] = {
-            "decision": "full",
-            "reasons": ["fixed_review_time_due"],
-            "due_slot": "09:05",
-            "full_review_completed": True,
-            "trigger_state_persisted": True,
-        }
-        rendered = render(payload)
-        self.assertIn("적용 정기 슬롯 09:05", rendered)
-        self.assertNotIn("다음 예정 슬롯", rendered)
-
-    def test_persistence_failure_is_visible_not_reported_as_success(self) -> None:
-        payload = dict(self.BASE_PAYLOAD)
-        payload["review_trigger"] = {
-            "decision": "full",
-            "reasons": ["broker_fingerprint_changed"],
-            "due_slot": None,
-            "full_review_completed": True,
-            "trigger_state_persisted": False,
-        }
-        rendered = render(payload)
-        self.assertIn("저장 실패", rendered)
-
-    def test_persistence_success_does_not_show_a_failure_warning(self) -> None:
-        payload = dict(self.BASE_PAYLOAD)
-        payload["review_trigger"] = {
-            "decision": "full",
-            "reasons": ["broker_fingerprint_changed"],
-            "due_slot": None,
-            "full_review_completed": True,
-            "trigger_state_persisted": True,
-        }
-        rendered = render(payload)
-        self.assertNotIn("저장 실패", rendered)
-
-    def test_safety_trigger_reasons_are_localized(self) -> None:
-        payload = dict(self.BASE_PAYLOAD)
-        payload["review_trigger"] = {
-            "decision": "safety_block",
-            "reasons": ["account_lookup_failed"],
-            "safety_reasons": ["account_lookup_failed"],
-        }
-        rendered = render(payload)
-        self.assertIn("계좌 조회 실패", rendered)
-        self.assertNotIn("account_lookup_failed", rendered)
-
-
 class PolicyMentionTest(unittest.TestCase):
     BASE_PAYLOAD = {
         "run_id": "policy-test",

@@ -1427,19 +1427,6 @@ print(json.dumps(execution, ensure_ascii=False))
             )
         )
         submit_summary = submit_pipeline.run()
-        review_trigger = (
-            submit_summary.get("review_trigger")
-            if isinstance(submit_summary.get("review_trigger"), dict)
-            else {}
-        )
-        if not review_trigger.get("full_review_completed") or not review_trigger.get("trigger_state_persisted"):
-            failures.append(f"full review did not persist its finalized trigger view: {review_trigger}")
-        final_html = (submit_run_dir / "daily-trading-report.html").read_text(encoding="utf-8")
-        if "리뷰 트리거 최종 상태" not in final_html or "저장 성공" not in final_html:
-            failures.append("final HTML was not rerendered from the finalized trigger state")
-        final_telegram = (submit_run_dir / "telegram-summary.txt").read_text(encoding="utf-8")
-        if "리뷰 트리거: 전체 리뷰 실행" not in final_telegram or "리뷰 트리거 상태 저장 실패" in final_telegram:
-            failures.append("final Telegram summary did not use the finalized trigger state")
         submit_stages = [item.get("stage") for item in load_json(submit_run_dir / "run.json").get("stages", []) if isinstance(item, dict)]
         if "order-lifecycle-preflight" not in submit_stages:
             failures.append(f"submit-orders pipeline did not run lifecycle preflight: {submit_stages}")
@@ -2489,50 +2476,3 @@ class RunDailyTradingPipelineSelfTest(unittest.TestCase):
             self.assertEqual(normalized["canonical_action"], "hold")
             self.assertNotIn("decision_guard", normalized)
             self.assertIn("thesis_definition", normalized)
-
-
-class FinalReviewReportRefreshTest(unittest.TestCase):
-    def test_telegram_reads_the_second_html_render_availability(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            output_dir = Path(temporary)
-            summary_path = output_dir / "pipeline-summary.json"
-            html_path = output_dir / "daily-trading-report.html"
-            html_path.write_text("first render", encoding="utf-8")
-
-            pipeline = object.__new__(Pipeline)
-            pipeline.output_dir = output_dir
-            pipeline.summary_path = summary_path
-            pipeline.load_summary_stages = mock.Mock(
-                side_effect=[
-                    [{"stage": "html-report", "status": "partial"}],
-                    [
-                        {"stage": "html-report", "status": "partial"},
-                        {"stage": "telegram-summary", "status": "success"},
-                    ],
-                ]
-            )
-
-            def fail_second_html_render() -> None:
-                html_path.unlink()
-
-            telegram_observed_availability: list[bool] = []
-            telegram_observed_stages: list[list[dict]] = []
-
-            def capture_telegram_input() -> None:
-                persisted = load_json(summary_path)
-                telegram_observed_availability.append(bool(persisted.get("html_report_available")))
-                telegram_observed_stages.append(persisted.get("stages") or [])
-
-            pipeline.write_html_report = mock.Mock(side_effect=fail_second_html_render)
-            pipeline.write_telegram_summary = mock.Mock(side_effect=capture_telegram_input)
-            summary = {"html_report_available": True, "stages": []}
-
-            pipeline.refresh_final_review_reports(summary)
-
-            self.assertEqual(telegram_observed_availability, [False])
-            self.assertEqual(
-                telegram_observed_stages,
-                [[{"stage": "html-report", "status": "partial"}]],
-            )
-            self.assertFalse(summary["html_report_available"])
-            self.assertEqual(summary["stages"][-1]["stage"], "telegram-summary")
