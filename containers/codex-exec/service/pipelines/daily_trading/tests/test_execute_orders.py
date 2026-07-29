@@ -2654,6 +2654,34 @@ class ExecuteOrdersSelfTest(unittest.TestCase):
             self.assertEqual(by_symbol["005930"]["holding_state_status"], "consistent")
             self.assertEqual(by_symbol["042660"]["holding_state_status"], "inconsistent")
 
+    def test_previous_submitted_cash_orders_includes_deferred_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            output_dir = workspace / "reports" / "runs" / "current"
+            retry_dir = workspace / "memory" / "deferred-buy-retry"
+            output_dir.mkdir(parents=True)
+            retry_dir.mkdir(parents=True)
+            write_json(
+                retry_dir / "source--035420.json",
+                {
+                    "state": "submitted",
+                    "source_run_id": "source",
+                    "completed_at": "2026-07-29T00:16:00+00:00",
+                    "symbol_id": "035420",
+                    "symbol_name": "NAVER",
+                    "submitted_quantity": 4,
+                    "refreshed_expected_holding_quantity": 0,
+                    "order_or_reservation_id": "retry-1",
+                },
+            )
+
+            orders = execute_orders_module.previous_submitted_cash_orders(output_dir, "20260729")
+
+            self.assertEqual(
+                [(item["order_id"], item["symbol_id"], item["requested_quantity"]) for item in orders],
+                [("retry-1", "035420", 4)],
+            )
+
     def test_unverified_holding_still_allows_cancel_only_reconciliation(self) -> None:
         execution = {
             "orders": [

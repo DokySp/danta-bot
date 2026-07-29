@@ -878,6 +878,44 @@ def previous_submitted_cash_orders(output_dir: Path, day: str) -> list[dict[str,
                     "order_api": "order_cash",
                 }
             )
+
+    workspace_dir = next(
+        (parent.parent for parent in output_dir.resolve().parents if parent.name == "reports"),
+        runs_dir.parent,
+    )
+    retry_dir = workspace_dir / "memory" / "deferred-buy-retry"
+    for path in sorted(retry_dir.glob("*.json"), reverse=True):
+        try:
+            retry = load_json(path)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(retry, dict):
+            continue
+        order_id = str(retry.get("order_or_reservation_id") or "").strip()
+        started_at = str(retry.get("completed_at") or retry.get("attempted_at") or "").strip()
+        if (
+            retry.get("state") != "submitted"
+            or not order_id
+            or order_id in seen_order_ids
+            or execution_order_day({"started_at": started_at}) != day
+        ):
+            continue
+        seen_order_ids.add(order_id)
+        result.append(
+            {
+                "run_id": retry.get("source_run_id") or path.stem,
+                "started_at": started_at,
+                "symbol_id": symbol_key(retry),
+                "symbol_name": retry.get("symbol_name") or symbol_key(retry),
+                "direction": "buy",
+                "order_id": order_id,
+                "requested_quantity": as_int(retry.get("submitted_quantity")),
+                "current_live_holding_quantity": as_int(retry.get("refreshed_expected_holding_quantity")),
+                "row_id": path.name,
+                "order_path": "immediate",
+                "order_api": "order_cash",
+            }
+        )
     return result
 
 
