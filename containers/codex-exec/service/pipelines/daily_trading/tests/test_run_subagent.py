@@ -28,9 +28,8 @@ from ..scripts.run_subagent import (
     mcp_degraded_dependencies,
     normalize_compact_review_payload,
     normalize_thesis_condition_id,
-    prior_thesis_context,
+    prior_decision_context,
     RunArtifactJsonCache,
-    recent_submitted_trade_context,
     run_group,
     run_one,
     symbol_key,
@@ -368,8 +367,55 @@ def write_sample_review_inputs(tmp: Path) -> None:
                     "direction": "buy",
                     "result": "submitted",
                     "validated_order_quantity": 1,
+                    "order_or_reservation_id": "older-order-1",
                 }
             ],
+        },
+    )
+    write_json(
+        older_run_dir / "judge-review.json",
+        {
+            "run_id": "self-test-older",
+            "started_at": "2026-06-08T08:00:00+09:00",
+            "status": "success",
+            "symbols": [
+                {
+                    "symbol_id": "005930",
+                    "target_position_value_krw": 630000,
+                    "final_holding_quantity": 9,
+                    "reason_code": "prior_reduce",
+                    "one_line_reason": "직전 목표를 9주로 조정",
+                    "thesis_definition": {
+                        "core_rationale": "quality moat",
+                        "invalidation_conditions": [
+                            {"condition_id": "margin-compression", "description": "margin compresses"}
+                        ],
+                    },
+                }
+            ],
+        },
+    )
+    write_json(
+        run_dir / "order-lifecycle.json",
+        {
+            "previous_submitted_cash_orders": [
+                {
+                    "run_id": "self-test-older",
+                    "started_at": "2026-06-08T08:00:00+09:00",
+                    "symbol_id": "005930",
+                    "direction": "buy",
+                    "order_id": "older-order-1",
+                    "requested_quantity": 1,
+                    "broker_reconciliation": {
+                        "status": "filled",
+                        "terminal": True,
+                        "filled_quantity": 1,
+                        "rejected_quantity": 0,
+                        "canceled_quantity": 0,
+                        "remaining_quantity": 0,
+                    },
+                }
+            ]
         },
     )
     write_json(
@@ -601,7 +647,7 @@ def assert_compact_review_prompt(tmp: Path) -> None:
         "target_position_value_krw",
         "No additional buy",
         "additional_buy_reason may record new evidence",
-        "recent trade history is unknown",
+        "prior_decision_context links the latest earlier Judge target",
     ]
     missing = [part for part in second_required_parts if part not in second_prompt]
     if missing:
@@ -712,17 +758,16 @@ def assert_review_input_slices(tmp: Path) -> None:
                 raise AssertionError(f"review-core kept direction examples: {first_symbol}")
             if "target_position_value_krw" not in holding_context.get("target_position_value_semantics", ""):
                 raise AssertionError(f"review-core did not add target value semantics: {first_symbol}")
-            if "recent_trade_context" not in first_symbol:
-                raise AssertionError(f"review-core did not add recent trade context: {first_symbol}")
-            recent_trades = first_symbol.get("recent_trade_context", {}).get("recent_submitted_trades", [])
-            if len(recent_trades) != 1 or recent_trades[0].get("direction") != "sell":
-                raise AssertionError(f"review-core did not preserve recent submitted trade context: {first_symbol}")
-            inspected_runs = first_symbol.get("recent_trade_context", {}).get("inspected_run_ids", [])
-            if inspected_runs != ["self-test-newer-other", "self-test-prev"]:
-                raise AssertionError(f"review-core inspected wrong recent runs: {first_symbol}")
-            recent_context = first_symbol.get("recent_trade_context", {})
-            if recent_context.get("coverage_status") != "complete" or recent_context.get("inspected_run_count") != 2:
-                raise AssertionError(f"review-core did not mark complete recent-trade coverage: {first_symbol}")
+            prior = first_symbol.get("prior_decision_context", {})
+            if prior.get("source_run_id") != "self-test-older" or prior.get("final_holding_quantity") != 9:
+                raise AssertionError(f"review-core did not add the prior decision: {first_symbol}")
+            outcomes = prior.get("order_outcomes", [])
+            if len(outcomes) != 1 or outcomes[0].get("broker_status") != "filled":
+                raise AssertionError(f"review-core did not link the prior order outcome: {first_symbol}")
+            if prior.get("subsequent_fill_summary", {}).get("buy_quantity") != 3:
+                raise AssertionError(f"review-core did not link subsequent confirmed fills: {first_symbol}")
+            if prior.get("realized_pnl", {}).get("status") != "unavailable":
+                raise AssertionError(f"review-core must not estimate unavailable realized pnl: {first_symbol}")
             position_cost_context = first_symbol.get("position_cost_context", {})
             if position_cost_context.get("status") != "held_available" or position_cost_context.get("held") is not True:
                 raise AssertionError(f"judge-review review-core dropped position_cost_context: {first_symbol}")
@@ -907,58 +952,6 @@ def assert_review_input_slices(tmp: Path) -> None:
             if len(source_scores) != 2 or not source_scores[0].get("excluded_from_aggregation"):
                 raise AssertionError(f"judge slice filtering mutated canonical analyst-review: {source_payload}")
 
-    coverage_probe = tmp / "coverage-probe"
-    current_run = coverage_probe / "current"
-    current_run.mkdir(parents=True, exist_ok=True)
-    write_json(
-        coverage_probe / "previous" / "execution.json",
-        {
-            "run_id": "coverage-previous",
-            "started_at": "2026-06-07T09:00:00+09:00",
-            "orders": [],
-        },
-    )
-    partial_context = recent_submitted_trade_context(current_run, "005930", run_limit=2)
-    if partial_context.get("coverage_status") != "partial" or partial_context.get("inspected_run_count") != 1:
-        raise AssertionError(f"one of two requested prior runs should produce partial coverage: {partial_context}")
-    if partial_context.get("recent_submitted_trades") or "only when coverage_status=complete" not in str(partial_context.get("policy")):
-        raise AssertionError(f"partial empty recent-trade history should remain explicitly unknown: {partial_context}")
-    if any(
-        phrase in str(partial_context.get("policy") or "").lower()
-        for phrase in ("score-band", "allowed candidate direction", "direction preconditions")
-    ):
-        raise AssertionError(f"retired score/direction gate leaked into recent-trade context: {partial_context}")
-    write_json(coverage_probe / "invalid-orders" / "execution.json", {"run_id": "invalid-orders"})
-    malformed_path = coverage_probe / "malformed" / "execution.json"
-    malformed_path.parent.mkdir(parents=True, exist_ok=True)
-    malformed_path.write_text("{invalid", encoding="utf-8")
-    invalid_context = recent_submitted_trade_context(current_run, "005930", run_limit=2)
-    if invalid_context.get("coverage_status") != "partial" or invalid_context.get("invalid_execution_count") != 2:
-        raise AssertionError(f"invalid execution artifacts should prevent complete recent-trade coverage: {invalid_context}")
-
-    complete_probe = tmp / "complete-coverage-probe"
-    complete_current = complete_probe / "current"
-    complete_current.mkdir(parents=True, exist_ok=True)
-    for index in range(2):
-        write_json(
-            complete_probe / f"previous-{index}" / "execution.json",
-            {
-                "run_id": f"complete-previous-{index}",
-                "started_at": f"2026-06-0{index + 6}T09:00:00+09:00",
-                "orders": [],
-            },
-        )
-    complete_context = recent_submitted_trade_context(complete_current, "005930", run_limit=2)
-    if complete_context.get("coverage_status") != "complete" or complete_context.get("recent_submitted_trades"):
-        raise AssertionError(f"two valid empty executions should confirm complete empty recent-trade history: {complete_context}")
-
-    unavailable_probe = tmp / "unavailable-coverage-probe" / "current"
-    unavailable_probe.mkdir(parents=True, exist_ok=True)
-    unavailable_context = recent_submitted_trade_context(unavailable_probe, "005930", run_limit=2)
-    if unavailable_context.get("coverage_status") != "unavailable" or unavailable_context.get("inspected_run_count") != 0:
-        raise AssertionError(f"zero prior executions should produce unavailable recent-trade coverage: {unavailable_context}")
-
-
     failed_account_dir = tmp / "reports" / "runs" / "self-test-failed-account"
     write_json(
         failed_account_dir / "account-before-order.json",
@@ -1063,8 +1056,8 @@ def assert_optional_evidence_policy() -> None:
     format_text = (prompt_dir / "judge-review-format.md").read_text(encoding="utf-8")
     if "unavailable news is neutral rather than favorable or adverse" not in format_text:
         raise AssertionError("judge-review-format.md missing unavailable-news neutrality policy")
-    if "coverage_status=complete" not in format_text or "recent trade history is unknown" not in format_text:
-        raise AssertionError("judge-review-format.md missing trade-history coverage policy")
+    if "prior_decision_context" not in format_text or "realized_pnl.status=unavailable" not in format_text:
+        raise AssertionError("judge-review-format.md missing prior-decision continuity policy")
     analyst_format_text = (prompt_dir / "analyst-review-format.md").read_text(encoding="utf-8")
     quality_text = (prompt_dir / "analyst-quality-risk.md").read_text(encoding="utf-8")
     if "no_financial_excluded" not in analyst_format_text or "no_financial_excluded" not in quality_text:
@@ -1967,13 +1960,35 @@ class RunSubagentSelfTest(unittest.TestCase):
         self.assertEqual(dependencies[0]["server_identifier_source"], "stderr")
         self.assertEqual(dependencies[0]["http_status"], 503)
 
-    def test_recent_trade_context_uses_current_lifecycle_status(self) -> None:
+    def test_prior_decision_context_links_decision_execution_and_fills(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_name:
             runs_dir = Path(tmp_name) / "runs"
             previous = runs_dir / "previous"
             current = runs_dir / "current"
             previous.mkdir(parents=True)
             current.mkdir(parents=True)
+            thesis = {
+                "core_rationale": "quality moat",
+                "invalidation_conditions": [{"condition_id": "cond-a", "description": "description a"}],
+            }
+            write_json(
+                previous / "judge-review.json",
+                {
+                    "run_id": "previous",
+                    "started_at": "2026-07-15T14:30:00+09:00",
+                    "status": "success",
+                    "symbols": [
+                        {
+                            "symbol_id": "042660",
+                            "target_position_value_krw": 700000,
+                            "final_holding_quantity": 7,
+                            "reason_code": "increase_target",
+                            "one_line_reason": "목표 비중 확대",
+                            "thesis_definition": thesis,
+                        }
+                    ],
+                },
+            )
             write_json(
                 previous / "execution.json",
                 {
@@ -1984,11 +1999,8 @@ class RunSubagentSelfTest(unittest.TestCase):
                             "symbol_id": "042660",
                             "direction": "buy",
                             "result": "submitted",
-                            "order_path": "immediate",
-                            "order_api": "order_cash",
                             "validated_order_quantity": 1,
                             "order_or_reservation_id": "reject-1",
-                            "broker_reconciliation": {"status": "unconfirmed"},
                         }
                     ],
                 },
@@ -1998,12 +2010,16 @@ class RunSubagentSelfTest(unittest.TestCase):
                 {
                     "previous_submitted_cash_orders": [
                         {
+                            "run_id": "previous",
+                            "started_at": "2026-07-15T14:30:00+09:00",
+                            "symbol_id": "042660",
+                            "direction": "buy",
                             "order_id": "reject-1",
                             "broker_reconciliation": {
                                 "status": "rejected",
-                                "terminal": True,
                                 "filled_quantity": 0,
                                 "rejected_quantity": 1,
+                                "canceled_quantity": 0,
                                 "remaining_quantity": 0,
                             },
                         }
@@ -2011,91 +2027,34 @@ class RunSubagentSelfTest(unittest.TestCase):
                 },
             )
 
-            context = recent_submitted_trade_context(current, "042660", run_limit=1)
-
-            trade = context["recent_submitted_trades"][0]
-            self.assertEqual(trade["broker_status"], "rejected")
-            self.assertTrue(trade["broker_terminal"])
-            self.assertEqual(trade["broker_rejected_quantity"], 1)
-
-    def test_prior_thesis_context_selects_latest_earlier_successful_valid_definition(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_name:
-            runs_dir = Path(tmp_name) / "runs"
-            current = runs_dir / "current"
-            current.mkdir(parents=True)
-
-            def write_run(run_id: str, started_at: str, status: str, thesis: dict) -> None:
-                run_dir = runs_dir / run_id
-                run_dir.mkdir(parents=True, exist_ok=True)
-                write_json(
-                    run_dir / "judge-review.json",
-                    {
-                        "run_id": run_id,
-                        "started_at": started_at,
-                        "status": status,
-                        "symbols": [{"symbol_id": "005930", "thesis_definition": thesis}],
-                    },
-                )
-
-            valid = {
-                "core_rationale": "quality moat",
-                "invalidation_conditions": [{"condition_id": "cond-a", "description": "description a"}],
-            }
-            current_started_at = "2026-06-02T09:00:00+09:00"
-            write_run("future-run", "2026-06-05T09:00:00+09:00", "success", dict(valid, core_rationale="future"))
-            write_run("equal-time-run", current_started_at, "success", dict(valid, core_rationale="equal-time"))
-            write_run("partial-run", "2026-06-01T12:00:00+09:00", "partial", dict(valid, core_rationale="partial"))
-            write_run("failed-run", "2026-06-01T11:00:00+09:00", "failed", dict(valid, core_rationale="failed"))
-            malformed_dir = runs_dir / "malformed-run"
-            malformed_dir.mkdir(parents=True, exist_ok=True)
-            (malformed_dir / "judge-review.json").write_text("not json", encoding="utf-8")
-            write_run("empty-thesis-run", "2026-06-01T13:00:00+09:00", "success", {"core_rationale": "", "invalidation_conditions": []})
-            write_run("older-valid-run", "2026-06-01T08:00:00+09:00", "success", dict(valid, core_rationale="older-valid"))
-            write_run("latest-valid-run", "2026-06-01T20:00:00+09:00", "success", dict(valid, core_rationale="latest-valid"))
-
-            context = prior_thesis_context(current, "005930", current_started_at)
-            self.assertEqual(context["status"], "available")
-            self.assertEqual(context["source_run_id"], "latest-valid-run")
-            self.assertEqual(context["thesis_definition"]["core_rationale"], "latest-valid")
-
-            # No symbol match at all -> explicit no_prior_thesis, not a crash.
-            missing_context = prior_thesis_context(current, "999999", current_started_at)
-            self.assertEqual(missing_context["status"], "no_prior_thesis")
-            self.assertIsNone(missing_context["thesis_definition"])
-
-    def test_prior_thesis_context_treats_naive_started_at_as_kst_matching_pipeline(self) -> None:
-        # Reproduction: current=2026-06-02T09:00:00+09:00, prior started_at is naive
-        # "2026-06-02T01:00:00". run_daily_trading_pipeline.parse_kst_datetime treats a
-        # naive timestamp as KST (01:00 KST is strictly before 09:00 KST -> eligible).
-        # run_subagent.parse_iso_datetime must agree, not treat it as UTC (which would
-        # be 01:00 UTC == 10:00 KST, i.e. after current, and wrongly excluded).
-        with tempfile.TemporaryDirectory() as tmp_name:
-            runs_dir = Path(tmp_name) / "runs"
-            current = runs_dir / "current"
-            current.mkdir(parents=True)
-            prior_dir = runs_dir / "naive-prior-run"
-            prior_dir.mkdir(parents=True)
-            write_json(
-                prior_dir / "judge-review.json",
+            context = prior_decision_context(
+                current,
+                "042660",
+                "2026-07-15T15:00:00+09:00",
                 {
-                    "run_id": "naive-prior-run",
-                    "started_at": "2026-06-02T01:00:00",
-                    "status": "success",
-                    "symbols": [
+                    "collection_status": "complete",
+                    "fill_count": 21,
+                    "fills": [
                         {
-                            "symbol_id": "005930",
-                            "thesis_definition": {
-                                "core_rationale": "quality moat",
-                                "invalidation_conditions": [{"condition_id": "cond-a", "description": "description a"}],
-                            },
+                            "filled_at": "2026-07-15T14:40:00+09:00",
+                            "direction": "sell",
+                            "quantity": 2,
                         }
                     ],
                 },
             )
-            context = prior_thesis_context(current, "005930", "2026-06-02T09:00:00+09:00")
-            self.assertEqual(context["status"], "available")
-            self.assertEqual(context["source_run_id"], "naive-prior-run")
-            self.assertEqual(context["thesis_definition"]["core_rationale"], "quality moat")
+
+            self.assertEqual(context["source_run_id"], "previous")
+            self.assertEqual(context["final_holding_quantity"], 7)
+            self.assertEqual(context["order_outcomes"][0]["broker_status"], "rejected")
+            self.assertEqual(context["subsequent_fill_summary"]["coverage_status"], "partial")
+            self.assertEqual(context["subsequent_fill_summary"]["sell_quantity"], 2)
+            self.assertEqual(context["thesis_definition"], thesis)
+            self.assertEqual(context["realized_pnl"]["status"], "unavailable")
+            self.assertEqual(
+                prior_decision_context(current, "999999", "2026-07-15T15:00:00+09:00")["status"],
+                "no_prior_decision",
+            )
 
     def test_normalize_thesis_condition_id_preserves_korean_and_rejects_unusable_input(self) -> None:
         # Mirrors run_daily_trading_pipeline.normalize_thesis_condition_id exactly.
@@ -2141,112 +2100,6 @@ class RunSubagentSelfTest(unittest.TestCase):
             "invalidation_conditions": [{"condition_id": "cond-a", "description": "description a"}],
         }
         self.assertTrue(thesis_definition_is_valid(valid_fields))
-
-    def test_prior_thesis_context_rejects_prior_with_non_string_thesis_fields(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_name:
-            runs_dir = Path(tmp_name) / "runs"
-            current = runs_dir / "current"
-            current.mkdir(parents=True)
-            prior_dir = runs_dir / "numeric-fields-prior-run"
-            prior_dir.mkdir(parents=True)
-            write_json(
-                prior_dir / "judge-review.json",
-                {
-                    "run_id": "numeric-fields-prior-run",
-                    "started_at": "2026-06-01T09:00:00+09:00",
-                    "status": "success",
-                    "symbols": [
-                        {
-                            "symbol_id": "005930",
-                            "thesis_definition": {
-                                "core_rationale": 1,
-                                "invalidation_conditions": [{"condition_id": 1, "description": 1}],
-                            },
-                        }
-                    ],
-                },
-            )
-            context = prior_thesis_context(current, "005930", "2026-06-02T09:00:00+09:00")
-            self.assertEqual(context["status"], "no_prior_thesis")
-
-    def test_prior_thesis_context_breaks_ties_by_source_run_id_when_started_at_matches(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_name:
-            runs_dir = Path(tmp_name) / "runs"
-            current = runs_dir / "current"
-            current.mkdir(parents=True)
-            same_started_at = "2026-06-01T09:00:00+09:00"
-
-            def write_run(run_id: str, core_rationale: str) -> None:
-                run_dir = runs_dir / run_id
-                run_dir.mkdir(parents=True, exist_ok=True)
-                write_json(
-                    run_dir / "judge-review.json",
-                    {
-                        "run_id": run_id,
-                        "started_at": same_started_at,
-                        "status": "success",
-                        "symbols": [
-                            {
-                                "symbol_id": "005930",
-                                "thesis_definition": {
-                                    "core_rationale": core_rationale,
-                                    "invalidation_conditions": [{"condition_id": "cond-a", "description": "description a"}],
-                                },
-                            }
-                        ],
-                    },
-                )
-
-            write_run("tie-run-aaa", "from aaa")
-            write_run("tie-run-zzz", "from zzz")
-
-            context = prior_thesis_context(current, "005930", "2026-06-02T09:00:00+09:00")
-            self.assertEqual(context["status"], "available")
-            self.assertEqual(context["source_run_id"], "tie-run-zzz")
-            # Same deterministic winner as run_daily_trading_pipeline.load_prior_thesis
-            # for the identical fixture (see test_load_prior_thesis_breaks_ties_by_source_run_id_when_started_at_matches).
-            self.assertEqual(context["thesis_definition"]["core_rationale"], "from zzz")
-
-    def test_write_review_input_slices_surfaces_prior_thesis_context(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_name:
-            tmp = Path(tmp_name)
-            write_sample_review_inputs(tmp)
-            prior_dir = tmp / "reports" / "runs" / "self-test-prior-thesis"
-            prior_dir.mkdir(parents=True, exist_ok=True)
-            write_json(
-                prior_dir / "judge-review.json",
-                {
-                    "run_id": "self-test-prior-thesis",
-                    "started_at": "2026-06-07T09:00:00+09:00",
-                    "status": "success",
-                    "symbols": [
-                        {
-                            "symbol_id": "005930",
-                            "thesis_definition": {
-                                "core_rationale": "quality moat and pricing power",
-                                "invalidation_conditions": [
-                                    {"condition_id": "margin-compression", "description": "gross margin drops below prior guidance"}
-                                ],
-                            },
-                        }
-                    ],
-                },
-            )
-            payload = compact_spec(tmp, stage="judge-review", agent_role="judge", task_name="prior-thesis-slice")
-            slice_paths = write_review_input_slices(payload)
-            core = load_json(Path(slice_paths["review_core"]))
-            symbol = next(item for item in core["symbols"] if item.get("symbol_id") == "005930")
-            prior = symbol.get("prior_thesis_context")
-            self.assertIsNotNone(prior)
-            self.assertEqual(prior["status"], "available")
-            self.assertEqual(prior["source_run_id"], "self-test-prior-thesis")
-            self.assertEqual(
-                prior["thesis_definition"]["invalidation_conditions"],
-                [{"condition_id": "margin-compression", "description": "gross margin drops below prior guidance"}],
-            )
-
-            other_symbol = next(item for item in core["symbols"] if item.get("symbol_id") == "000660")
-            self.assertEqual(other_symbol.get("prior_thesis_context", {}).get("status"), "no_prior_thesis")
 
     def test_run_artifact_json_cache_reads_stable_file_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_name:
@@ -2385,292 +2238,6 @@ class RunSubagentSelfTest(unittest.TestCase):
             write_json(path, {"run_id": "fixed", "orders": []})
             fixed = cache.read(path)
             self.assertEqual(fixed["run_id"], "fixed")
-
-    def test_recent_submitted_trade_context_reuses_execution_json_across_symbols_in_one_call(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_name:
-            runs_dir = Path(tmp_name) / "runs"
-            current = runs_dir / "current"
-            current.mkdir(parents=True)
-            write_json(
-                runs_dir / "previous" / "execution.json",
-                {
-                    "run_id": "previous",
-                    "started_at": "2026-06-07T09:00:00+09:00",
-                    "orders": [
-                        {
-                            "symbol_id": "005930",
-                            "direction": "buy",
-                            "result": "submitted",
-                            "order_or_reservation_id": "order-1",
-                            "validated_order_quantity": 3,
-                        },
-                        {
-                            "symbol_id": "000660",
-                            "direction": "sell",
-                            "result": "submitted",
-                            "order_or_reservation_id": "order-2",
-                            "validated_order_quantity": 5,
-                        },
-                    ],
-                },
-            )
-            cache = RunArtifactJsonCache()
-            real_json_load = json.load
-            with patch("json.load", side_effect=real_json_load) as mock_load:
-                first = recent_submitted_trade_context(current, "005930", run_limit=2, cache=cache)
-                second = recent_submitted_trade_context(current, "000660", run_limit=2, cache=cache)
-                # Two symbols share the same prior execution.json; the cache should
-                # parse it only once for both recent_submitted_trade_context calls.
-                self.assertEqual(mock_load.call_count, 1)
-            self.assertEqual(first["recent_submitted_trades"][0]["order_id"], "order-1")
-            self.assertEqual(second["recent_submitted_trades"][0]["order_id"], "order-2")
-
-    def test_recent_submitted_trade_context_distinguishes_missing_from_present_null_execution(self) -> None:
-        # A run directory with no execution.json at all is skipped outright (it never
-        # ran an execution stage). A run directory whose execution.json exists but
-        # parses to JSON null is a real, present-but-invalid artifact and must count
-        # against coverage, exactly like any other malformed execution payload.
-        with tempfile.TemporaryDirectory() as tmp_name:
-            runs_dir = Path(tmp_name) / "runs"
-            current = runs_dir / "current"
-            current.mkdir(parents=True)
-            missing_run = runs_dir / "missing-execution-run"
-            missing_run.mkdir(parents=True)
-            null_run = runs_dir / "null-execution-run"
-            null_run.mkdir(parents=True)
-            (null_run / "execution.json").write_text("null", encoding="utf-8")
-
-            context = recent_submitted_trade_context(current, "005930", run_limit=2)
-            self.assertEqual(context["invalid_execution_count"], 1)
-            self.assertEqual(context["inspected_run_count"], 0)
-            self.assertEqual(context["coverage_status"], "unavailable")
-
-            cached_context = recent_submitted_trade_context(
-                current, "005930", run_limit=2, cache=RunArtifactJsonCache()
-            )
-            self.assertEqual(cached_context, context)
-
-    def test_recent_submitted_trade_context_cache_optional_matches_uncached_output(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_name:
-            runs_dir = Path(tmp_name) / "runs"
-            current = runs_dir / "current"
-            current.mkdir(parents=True)
-            write_json(
-                runs_dir / "previous" / "execution.json",
-                {
-                    "run_id": "previous",
-                    "started_at": "2026-06-07T09:00:00+09:00",
-                    "orders": [
-                        {
-                            "symbol_id": "005930",
-                            "direction": "buy",
-                            "result": "submitted",
-                            "order_or_reservation_id": "order-1",
-                            "validated_order_quantity": 3,
-                        }
-                    ],
-                },
-            )
-            uncached = recent_submitted_trade_context(current, "005930", run_limit=2)
-            cached = recent_submitted_trade_context(current, "005930", run_limit=2, cache=RunArtifactJsonCache())
-            self.assertEqual(uncached, cached)
-
-    def test_prior_thesis_context_cache_optional_matches_uncached_output(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_name:
-            runs_dir = Path(tmp_name) / "runs"
-            current = runs_dir / "current"
-            current.mkdir(parents=True)
-            prior_dir = runs_dir / "prior-run"
-            prior_dir.mkdir(parents=True)
-            write_json(
-                prior_dir / "judge-review.json",
-                {
-                    "run_id": "prior-run",
-                    "started_at": "2026-06-01T09:00:00+09:00",
-                    "status": "success",
-                    "symbols": [
-                        {
-                            "symbol_id": "005930",
-                            "thesis_definition": {
-                                "core_rationale": "quality moat",
-                                "invalidation_conditions": [{"condition_id": "cond-a", "description": "description a"}],
-                            },
-                        }
-                    ],
-                },
-            )
-            current_started_at = "2026-06-02T09:00:00+09:00"
-            uncached = prior_thesis_context(current, "005930", current_started_at)
-            cached = prior_thesis_context(current, "005930", current_started_at, cache=RunArtifactJsonCache())
-            self.assertEqual(uncached, cached)
-
-    def test_write_review_input_slices_reuses_history_reads_across_symbols(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_name:
-            tmp = Path(tmp_name)
-            write_sample_review_inputs(tmp)
-            prior_dir = tmp / "reports" / "runs" / "self-test-cache-thesis"
-            prior_dir.mkdir(parents=True, exist_ok=True)
-            write_json(
-                prior_dir / "judge-review.json",
-                {
-                    "run_id": "self-test-cache-thesis",
-                    "started_at": "2026-06-07T09:00:00+09:00",
-                    "status": "success",
-                    "symbols": [
-                        {
-                            "symbol_id": "005930",
-                            "thesis_definition": {
-                                "core_rationale": "quality moat",
-                                "invalidation_conditions": [{"condition_id": "cond-a", "description": "description a"}],
-                            },
-                        },
-                        {
-                            "symbol_id": "000660",
-                            "thesis_definition": {
-                                "core_rationale": "cyclical upswing",
-                                "invalidation_conditions": [{"condition_id": "cond-b", "description": "description b"}],
-                            },
-                        },
-                    ],
-                },
-            )
-            payload = compact_spec(tmp, stage="judge-review", agent_role="judge", task_name="cache-reuse-slice")
-            real_json_load = json.load
-            with patch("json.load", side_effect=real_json_load) as mock_load:
-                slice_paths = write_review_input_slices(payload)
-                judge_review_reads = [
-                    call.args[0]
-                    for call in mock_load.call_args_list
-                    if Path(getattr(call.args[0], "name", "")).name == "judge-review.json"
-                ]
-                # Both symbols resolve their prior thesis from the same run directory;
-                # the shared enrichment-call cache should parse it only once.
-                self.assertEqual(len(judge_review_reads), 1)
-            core = load_json(Path(slice_paths["review_core"]))
-            by_symbol = {item["symbol_id"]: item for item in core["symbols"]}
-            self.assertEqual(by_symbol["005930"]["prior_thesis_context"]["status"], "available")
-            self.assertEqual(by_symbol["000660"]["prior_thesis_context"]["status"], "available")
-
-    def test_add_judge_review_holding_context_dict_symbols_preserves_order_and_reuses_history(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_name:
-            runs_dir = Path(tmp_name) / "runs"
-            current = runs_dir / "current"
-            current.mkdir(parents=True)
-            prior = runs_dir / "prior"
-            write_json(
-                prior / "execution.json",
-                {
-                    "run_id": "prior",
-                    "started_at": "2026-06-01T09:00:00+09:00",
-                    "orders": [],
-                },
-            )
-            write_json(
-                prior / "judge-review.json",
-                {
-                    "run_id": "prior",
-                    "started_at": "2026-06-01T09:00:00+09:00",
-                    "status": "success",
-                    "symbols": [
-                        {
-                            "symbol_id": symbol_id,
-                            "thesis_definition": {
-                                "core_rationale": f"rationale-{symbol_id}",
-                                "invalidation_conditions": [
-                                    {"condition_id": "cond-a", "description": "description a"}
-                                ],
-                            },
-                        }
-                        for symbol_id in ("005930", "000660")
-                    ],
-                },
-            )
-            payload = {
-                "symbols": {
-                    "005930": {"symbol_id": "005930", "marker": "first"},
-                    "000660": {"symbol_id": "000660", "marker": "second"},
-                }
-            }
-            real_json_load = json.load
-            with patch("json.load", side_effect=real_json_load) as mock_load:
-                enriched = add_judge_review_holding_context(
-                    payload,
-                    current,
-                    "2026-06-02T09:00:00+09:00",
-                )
-
-            symbols = enriched["symbols"]
-            self.assertEqual(list(symbols), ["005930", "000660"])
-            self.assertEqual(symbols["005930"]["marker"], "first")
-            self.assertEqual(symbols["000660"]["marker"], "second")
-            self.assertEqual(symbols["005930"]["prior_thesis_context"]["source_run_id"], "prior")
-            self.assertEqual(symbols["000660"]["prior_thesis_context"]["source_run_id"], "prior")
-            history_reads = [
-                Path(getattr(call.args[0], "name", "")).name
-                for call in mock_load.call_args_list
-                if Path(getattr(call.args[0], "name", "")).name in {"execution.json", "judge-review.json"}
-            ]
-            self.assertEqual(history_reads, ["execution.json", "judge-review.json"])
-
-    def test_add_judge_review_holding_context_observes_artifact_repaired_between_symbols(self) -> None:
-        # A frozen whole-call snapshot was explicitly rejected because overlapping
-        # runs/writers can finish while later symbols in the same call are still
-        # being processed. This proves the per-call cache does not recreate that
-        # frozen-snapshot behavior: a judge-review.json that is malformed when the
-        # first symbol is evaluated, then repaired via the project's atomic
-        # temp-file replace before the second symbol is evaluated, must be observed
-        # by that second symbol within the same add_judge_review_holding_context call.
-        with tempfile.TemporaryDirectory() as tmp_name:
-            runs_dir = Path(tmp_name) / "runs"
-            current = runs_dir / "current"
-            current.mkdir(parents=True)
-            late_run = runs_dir / "late-run"
-            late_run.mkdir(parents=True)
-            (late_run / "judge-review.json").write_text("{not valid json", encoding="utf-8")
-
-            original_build_holding_context = run_subagent_module.build_holding_quantity_context
-
-            def repair_before_second_symbol(symbol: dict[str, Any]) -> dict[str, Any]:
-                if symbol_key(symbol) == "000660":
-                    replacement = late_run / "judge-review.json.tmp"
-                    write_json(
-                        replacement,
-                        {
-                            "run_id": "late-run",
-                            "started_at": "2026-06-01T09:00:00+09:00",
-                            "status": "success",
-                            "symbols": [
-                                {
-                                    "symbol_id": "000660",
-                                    "thesis_definition": {
-                                        "core_rationale": "repaired between symbols",
-                                        "invalidation_conditions": [
-                                            {"condition_id": "cond-a", "description": "description a"}
-                                        ],
-                                    },
-                                }
-                            ],
-                        },
-                    )
-                    replacement.replace(late_run / "judge-review.json")
-                return original_build_holding_context(symbol)
-
-            payload = {"symbols": [{"symbol_id": "005930"}, {"symbol_id": "000660"}]}
-            with patch(
-                "service.pipelines.daily_trading.scripts.run_subagent.build_holding_quantity_context",
-                side_effect=repair_before_second_symbol,
-            ):
-                enriched = add_judge_review_holding_context(payload, current, "2026-06-02T09:00:00+09:00")
-
-            by_symbol = {item["symbol_id"]: item for item in enriched["symbols"]}
-            # 005930 is evaluated while the file is still malformed.
-            self.assertEqual(by_symbol["005930"]["prior_thesis_context"]["status"], "no_prior_thesis")
-            # 000660 is evaluated after the repair lands, within the same call.
-            self.assertEqual(by_symbol["000660"]["prior_thesis_context"]["status"], "available")
-            self.assertEqual(
-                by_symbol["000660"]["prior_thesis_context"]["thesis_definition"]["core_rationale"],
-                "repaired between symbols",
-            )
 
     def test_step_text_output_checks_accepts_non_json_collection_output(self) -> None:
         """A representative direct call into one of run_self_test's extracted

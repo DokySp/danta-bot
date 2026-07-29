@@ -886,11 +886,6 @@ def build_holding_quantity_context(symbol: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def run_started_sort_key(run_dir: Path, payload: dict[str, Any]) -> tuple[str, str]:
-    started_at = str(payload.get("started_at") or "").strip()
-    return (started_at or run_dir.name, run_dir.name)
-
-
 class RunArtifactJsonCache:
     """Reuses parsed JSON for unchanged files within one enrichment call.
 
@@ -951,122 +946,6 @@ def read_json_cached(path: Path, cache: RunArtifactJsonCache | None) -> Any | No
     if cache is None:
         return read_json_if_exists(path)
     return cache.read(path)
-
-
-def recent_submitted_trade_context(
-    output_dir: Path,
-    symbol_id: str,
-    run_limit: int = 2,
-    cache: RunArtifactJsonCache | None = None,
-) -> dict[str, Any]:
-    unavailable = {
-        "recent_submitted_trades": [],
-        "inspected_run_ids": [],
-        "coverage_status": "unavailable",
-        "requested_run_count": max(run_limit, 0),
-        "inspected_run_count": 0,
-        "invalid_execution_count": 0,
-        "policy": "An empty recent_submitted_trades list confirms no recent trades only when coverage_status=complete; otherwise history is unknown.",
-    }
-    if not symbol_id or run_limit <= 0:
-        return unavailable
-    runs_dir = output_dir.parent
-    if not runs_dir.is_dir():
-        return unavailable
-    lifecycle = read_json_cached(output_dir / "order-lifecycle.json", cache)
-    lifecycle_orders = (
-        lifecycle.get("previous_submitted_cash_orders", [])
-        if isinstance(lifecycle, dict)
-        else []
-    )
-    lifecycle_by_order_id = {
-        str(item.get("order_id") or "").strip(): item
-        for item in lifecycle_orders
-        if isinstance(item, dict) and str(item.get("order_id") or "").strip()
-    }
-
-    previous_runs: list[tuple[tuple[str, str], Path, dict[str, Any]]] = []
-    invalid_execution_count = 0
-    for run_dir in (path for path in runs_dir.iterdir() if path.is_dir()):
-        if run_dir.resolve() == output_dir.resolve():
-            continue
-        execution_path = run_dir / "execution.json"
-        if not execution_path.exists():
-            continue
-        try:
-            payload = read_json_cached(execution_path, cache)
-        except (OSError, ValueError):
-            invalid_execution_count += 1
-            continue
-        if not isinstance(payload, dict) or not isinstance(payload.get("orders"), list):
-            invalid_execution_count += 1
-            continue
-        previous_runs.append((run_started_sort_key(run_dir, payload), run_dir, payload))
-    previous_runs.sort(key=lambda item: item[0], reverse=True)
-
-    trades: list[dict[str, Any]] = []
-    inspected_runs: list[str] = []
-    for _, run_dir, payload in previous_runs[:run_limit]:
-        inspected_runs.append(str(payload.get("run_id") or run_dir.name))
-        orders = payload.get("orders")
-        if not isinstance(orders, list):
-            continue
-        for order in orders:
-            if not isinstance(order, dict) or symbol_key(order) != symbol_id:
-                continue
-            direction = str(order.get("direction", "")).lower()
-            result = str(order.get("result", "")).lower()
-            if direction not in {"buy", "sell"} or not result.startswith("submitted"):
-                continue
-            order_id = str(order.get("order_or_reservation_id") or "").strip()
-            lifecycle_order = lifecycle_by_order_id.get(order_id, {})
-            broker = (
-                lifecycle_order.get("broker_reconciliation")
-                if isinstance(lifecycle_order.get("broker_reconciliation"), dict)
-                else order.get("broker_reconciliation")
-                if isinstance(order.get("broker_reconciliation"), dict)
-                else {}
-            )
-            trades.append(
-                {
-                    "run_id": payload.get("run_id") or run_dir.name,
-                    "started_at": payload.get("started_at") or "",
-                    "direction": direction,
-                    "result": order.get("result"),
-                    "submitted_quantity": int_or_zero(order.get("validated_order_quantity")),
-                    "current_live_holding_quantity": int_or_zero(order.get("current_live_holding_quantity")),
-                    "expected_holding_quantity": int_or_zero(order.get("expected_holding_quantity")),
-                    "final_holding_quantity": int_or_zero(order.get("final_holding_quantity")),
-                    "additional_required_quantity": int_or_zero(order.get("additional_required_quantity")),
-                    "order_path": order.get("order_path") or "",
-                    "order_api": order.get("order_api") or "",
-                    "order_id": order_id,
-                    "broker_status": broker.get("status") or "unconfirmed",
-                    "broker_terminal": bool(broker.get("terminal")),
-                    "broker_filled_quantity": int_or_zero(broker.get("filled_quantity")),
-                    "broker_rejected_quantity": int_or_zero(broker.get("rejected_quantity")),
-                    "broker_canceled_quantity": int_or_zero(broker.get("canceled_quantity")),
-                    "broker_remaining_quantity": int_or_zero(broker.get("remaining_quantity")),
-                    "reason": str(order.get("reason") or "")[:120],
-                }
-            )
-    inspected_run_count = len(inspected_runs)
-    coverage_status = (
-        "complete"
-        if inspected_run_count >= run_limit and invalid_execution_count == 0
-        else "partial"
-        if inspected_run_count
-        else "unavailable"
-    )
-    return {
-        "recent_submitted_trades": trades,
-        "inspected_run_ids": inspected_runs,
-        "coverage_status": coverage_status,
-        "requested_run_count": run_limit,
-        "inspected_run_count": inspected_run_count,
-        "invalid_execution_count": invalid_execution_count,
-        "policy": "Recent submitted trades are context for sizing; an empty list confirms no recent trades only when coverage_status=complete. No candidate direction is preassigned, and analyst scores remain advisory ranking/reporting context only.",
-    }
 
 
 DAILY_TRADING_TIMEZONE = ZoneInfo("Asia/Seoul")
@@ -1145,18 +1024,14 @@ def thesis_definition_is_valid(thesis: Any) -> bool:
     return False
 
 
-def prior_thesis_context(
+def prior_decision_context(
     output_dir: Path,
     symbol_id: str,
     current_started_at: str = "",
+    today_trade_context: dict[str, Any] | None = None,
     cache: RunArtifactJsonCache | None = None,
 ) -> dict[str, Any]:
-    unavailable = {
-        "thesis_definition": None,
-        "source_run_id": "",
-        "status": "no_prior_thesis",
-        "policy": "A missing prior thesis means no earlier run recorded a structured thesis for this symbol. It is non-directional context and does not authorize or block the current target.",
-    }
+    unavailable = {"status": "no_prior_decision", "realized_pnl": {"status": "unavailable"}}
     if not symbol_id:
         return unavailable
     runs_dir = output_dir.parent
@@ -1166,7 +1041,8 @@ def prior_thesis_context(
     if current_started is None:
         return unavailable
     current = output_dir.resolve()
-    best: tuple[datetime, str, dict[str, Any]] | None = None
+    best: tuple[datetime, str, Path, dict[str, Any]] | None = None
+    best_thesis: tuple[datetime, str, dict[str, Any]] | None = None
     for run_dir in (path for path in runs_dir.iterdir() if path.is_dir()):
         if run_dir.resolve() == current:
             continue
@@ -1185,25 +1061,114 @@ def prior_thesis_context(
         for item in symbols:
             if not isinstance(item, dict) or symbol_key(item) != symbol_id:
                 continue
-            thesis = item.get("thesis_definition")
-            if not thesis_definition_is_valid(thesis):
-                continue
             source_run_id = str(payload.get("run_id") or run_dir.name)
             candidate_key = (candidate_started, source_run_id)
-            # Secondary key (source_run_id) breaks ties when two eligible runs share
-            # the exact same started_at, matching run_daily_trading_pipeline.load_prior_thesis
-            # so both selection paths agree instead of depending on iteration order.
             if best is None or candidate_key > (best[0], best[1]):
-                best = (candidate_started, source_run_id, thesis)
+                best = (candidate_started, source_run_id, run_dir, item)
+            thesis = item.get("thesis_definition")
+            if thesis_definition_is_valid(thesis) and (
+                best_thesis is None or candidate_key > (best_thesis[0], best_thesis[1])
+            ):
+                best_thesis = (candidate_started, source_run_id, thesis)
     if best is None:
         return unavailable
-    _, source_run_id, thesis = best
-    return {
-        "thesis_definition": thesis,
-        "source_run_id": source_run_id,
-        "status": "available",
-        "policy": "This thesis_definition is historical decision context. Assess it honestly and return a valid successor definition when useful; neither this definition nor thesis_assessment authorizes or blocks the current target.",
+    decided_at, source_run_id, source_run_dir, decision = best
+    lifecycle = read_json_cached(output_dir / "order-lifecycle.json", cache)
+    lifecycle_orders = lifecycle.get("previous_submitted_cash_orders", []) if isinstance(lifecycle, dict) else []
+    lifecycle_by_order_id = {
+        str(item.get("order_id") or "").strip(): item
+        for item in lifecycle_orders
+        if isinstance(item, dict) and str(item.get("order_id") or "").strip()
     }
+
+    outcomes: list[dict[str, Any]] = []
+    seen_order_ids: set[str] = set()
+
+    def append_outcome(order: dict[str, Any], started_at: str) -> None:
+        order_id = str(order.get("order_or_reservation_id") or order.get("order_id") or "").strip()
+        result_text = str(order.get("result") or ("submitted" if order_id else ""))
+        lifecycle_order = lifecycle_by_order_id.get(order_id, {})
+        broker = (
+            lifecycle_order.get("broker_reconciliation")
+            if isinstance(lifecycle_order.get("broker_reconciliation"), dict)
+            else order.get("broker_reconciliation")
+            if isinstance(order.get("broker_reconciliation"), dict)
+            else {}
+        )
+        outcomes.append(
+            {
+                "started_at": started_at,
+                "direction": str(order.get("direction") or ""),
+                "result": result_text,
+                "reason": str(order.get("reason") or "")[:120],
+                "submitted_quantity": int_or_zero(
+                    order.get("validated_order_quantity") or order.get("requested_quantity")
+                )
+                if order_id or result_text.lower().startswith("submitted")
+                else 0,
+                "order_id": order_id,
+                "broker_status": str(broker.get("status") or ("unconfirmed" if order_id else "not_submitted")),
+                "broker_filled_quantity": int_or_zero(broker.get("filled_quantity")),
+                "broker_rejected_quantity": int_or_zero(broker.get("rejected_quantity")),
+                "broker_canceled_quantity": int_or_zero(broker.get("canceled_quantity")),
+                "broker_remaining_quantity": int_or_zero(broker.get("remaining_quantity")),
+            }
+        )
+        if order_id:
+            seen_order_ids.add(order_id)
+
+    try:
+        execution = read_json_cached(source_run_dir / "execution.json", cache)
+    except (OSError, ValueError):
+        execution = None
+    if isinstance(execution, dict) and isinstance(execution.get("orders"), list):
+        for order in execution["orders"]:
+            if isinstance(order, dict) and symbol_key(order) == symbol_id:
+                append_outcome(order, str(execution.get("started_at") or ""))
+    for order in lifecycle_orders:
+        if not isinstance(order, dict) or symbol_key(order) != symbol_id:
+            continue
+        order_id = str(order.get("order_id") or "").strip()
+        order_started_at = str(order.get("started_at") or "")
+        order_started = parse_iso_datetime(order_started_at)
+        if order_id in seen_order_ids or order_started is None or order_started < decided_at:
+            continue
+        append_outcome(order, order_started_at)
+
+    trade_context = today_trade_context if isinstance(today_trade_context, dict) else {}
+    source_fills = trade_context.get("fills", [])
+    subsequent_fills = []
+    for fill in source_fills:
+        if not isinstance(fill, dict):
+            continue
+        filled_at = parse_iso_datetime(fill.get("filled_at"))
+        if filled_at is not None and filled_at >= decided_at:
+            subsequent_fills.append(fill)
+    coverage_status = str(trade_context.get("collection_status") or "unavailable")
+    if int_or_zero(trade_context.get("fill_count")) > len(source_fills):
+        coverage_status = "partial"
+    fill_summary = {
+        "coverage_status": coverage_status,
+        "fill_count": len(subsequent_fills),
+        "buy_quantity": sum(int_or_zero(item.get("quantity")) for item in subsequent_fills if item.get("direction") == "buy"),
+        "sell_quantity": sum(int_or_zero(item.get("quantity")) for item in subsequent_fills if item.get("direction") == "sell"),
+    }
+    result = {
+        "status": "available",
+        "source_run_id": source_run_id,
+        "decided_at": decided_at.isoformat(),
+        "target_position_value_krw": non_negative_number_value(decision.get("target_position_value_krw")),
+        "final_holding_quantity": non_negative_int_value(decision.get("final_holding_quantity")),
+        "reason_code": str(decision.get("reason_code") or ""),
+        "one_line_reason": str(decision.get("one_line_reason") or "")[:240],
+        "order_outcomes": outcomes,
+        "subsequent_fill_summary": fill_summary,
+        "realized_pnl": {"status": "unavailable"},
+    }
+    if best_thesis is not None:
+        result["thesis_source_run_id"] = best_thesis[1]
+        result["thesis_definition"] = best_thesis[2]
+    return result
 
 
 def add_judge_review_holding_context(payload: Any, output_dir: Path | None = None, current_started_at: str = "") -> Any:
@@ -1218,11 +1183,12 @@ def add_judge_review_holding_context(payload: Any, output_dir: Path | None = Non
             if isinstance(item, dict):
                 copied = dict(item)
                 copied["holding_quantity_context"] = build_holding_quantity_context(copied)
-                copied["recent_trade_context"] = recent_submitted_trade_context(
-                    context_output_dir, symbol_key(copied), cache=cache
-                )
-                copied["prior_thesis_context"] = prior_thesis_context(
-                    context_output_dir, symbol_key(copied), current_started_at, cache=cache
+                copied["prior_decision_context"] = prior_decision_context(
+                    context_output_dir,
+                    symbol_key(copied),
+                    current_started_at,
+                    copied.get("today_trade_timeline_context"),
+                    cache,
                 )
                 enriched.append(copied)
             else:
@@ -1236,9 +1202,12 @@ def add_judge_review_holding_context(payload: Any, output_dir: Path | None = Non
             symbol_id: dict(
                 item,
                 holding_quantity_context=build_holding_quantity_context(item),
-                recent_trade_context=recent_submitted_trade_context(context_output_dir, symbol_id, cache=cache),
-                prior_thesis_context=prior_thesis_context(
-                    context_output_dir, symbol_id, current_started_at, cache=cache
+                prior_decision_context=prior_decision_context(
+                    context_output_dir,
+                    symbol_id,
+                    current_started_at,
+                    item.get("today_trade_timeline_context"),
+                    cache,
                 ),
             )
             if isinstance(item, dict)
@@ -1569,12 +1538,12 @@ def compact_review_prompt(spec: dict[str, Any]) -> str | None:
                 "The pipeline derives final_holding_quantity from target_position_value_krw / price.current_or_last with Decimal ROUND_HALF_UP; judge-supplied final_holding_quantity is optional and ignored for sizing.",
                 "No additional buy, no extra exposure, or 추가 확대 없음 means target_position_value_krw must stay at the baseline (holding_quantity_context.expected_holding_quantity * price.current_or_last), not 0.",
                 "When increasing after a same-day buy, additional_buy_reason may record new evidence or materially changed price/portfolio context; it is optional audit text and never an authorization gate.",
-                "Treat an empty recent_trade_context.recent_submitted_trades list as confirmed absence only when coverage_status=complete; otherwise recent trade history is unknown and its absence is non-directional.",
+                "prior_decision_context links the latest earlier Judge target and reason to its order outcomes and subsequent confirmed-fill summary. Compare it with current evidence before changing the target; it is continuity context, never a hold or trade gate.",
                 "For a held symbol with a low score, treat thesis integrity as one input, not a reduction gate. Thesis damage can support reduction, but relative attractiveness, concentration, profit/loss risk, opportunity cost, or a stronger alternative may independently support reducing or exiting even when the thesis remains intact.",
                 "Use strategy_context and symbol_strategy_context as advisory inputs for target_position_value_krw, not as order allow/block rules.",
                 "Use position_cost_context (average_purchase_price, purchase_amount, current_review_price, pct_distance_from_average_price) as reference information for profit/loss, risk, and position adjustments. Determine final direction and target exposure by considering thesis, market evidence, and portfolio risk together.",
-                "prior_thesis_context reports an earlier structured thesis_definition when available. Use it as decision context, not as a mechanical authorization condition.",
-                "When prior thesis materially affects the target, you may return thesis_assessment: {status: intact|damaged|uncertain, matched_invalidation_condition_ids: [...]} and/or a new thesis_definition for future context. These are audit fields; missing or malformed values do not block the target.",
+                "prior_decision_context may carry the latest valid historical thesis_definition even when it came from an older decision. Use it as context, not as a mechanical authorization condition.",
+                "When the historical thesis materially affects the target, you may return thesis_assessment: {status: intact|damaged|uncertain, matched_invalidation_condition_ids: [...]} and/or a new thesis_definition for future context. These are audit fields; missing or malformed values do not block the target. realized_pnl.status=unavailable is non-directional and must not be estimated.",
             ]
         )
         if review_scope_reasons:
