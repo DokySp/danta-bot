@@ -1687,18 +1687,27 @@ def build_second_spec(args: argparse.Namespace) -> dict[str, Any]:
     output_dir = Path(args.output_dir)
     decision_brief = load_json(Path(args.decision_brief or output_dir / "decision-brief.json"))
     analyst_review = load_json(Path(args.analyst_review or output_dir / "analyst-review.json"))
+    account_path = output_dir / "account-before-order.json"
+    account = load_json(account_path) if account_path.is_file() else {}
     portfolio = read_json_arg(args.portfolio_json)
     strategy_policy, _ = load_strategy_policy_config(getattr(args, "strategy_policy_config", ""))
     unheld_review_top_k = int(strategy_policy["unheld_review_top_k"])
     eligible = set(eligible_symbol_ids(decision_brief))
     holding_set = {symbol_id for symbol_id in normalize_symbol_ids(portfolio.get("holding", [])) if symbol_id in eligible}
+    active_order_set = (
+        {
+            symbol_id
+            for symbol_id, quantities in active_quantities(account).items()
+            if symbol_id in eligible and (quantities["buy"] or quantities["sell"])
+        }
+        if account.get("active_order_lookup_performed") is True
+        else set()
+    )
     brief_by_symbol = indexed_symbols(decision_brief.get("symbols"))
 
-    # No score band and no assigned candidate direction: every eligible held
-    # symbol is always in scope (even with a missing/unusable score), and up to
-    # unheld_review_top_k unheld symbols with valid scores are added by
-    # deterministic descending-score-then-symbol-id rank. The judge proposes one
-    # target_position_value_krw per symbol; Python derives the action.
+    # No score band and no assigned candidate direction: every eligible held or
+    # active-order symbol is always in scope, and up to unheld_review_top_k other
+    # unheld symbols with valid scores are added by deterministic rank.
     scores_by_symbol: dict[str, float] = {}
     for item in analyst_review.get("symbols", []):
         symbol_id = symbol_key(item)
@@ -1710,9 +1719,11 @@ def build_second_spec(args: argparse.Namespace) -> dict[str, Any]:
     review_scope_reasons: dict[str, str] = {}
     for symbol_id in sorted(holding_set):
         review_scope_reasons[symbol_id] = "held_position"
+    for symbol_id in sorted(active_order_set - holding_set):
+        review_scope_reasons[symbol_id] = "active_order"
 
     unheld_ranked = sorted(
-        (symbol_id for symbol_id in scores_by_symbol if symbol_id not in holding_set),
+        (symbol_id for symbol_id in scores_by_symbol if symbol_id not in review_scope_reasons),
         key=lambda symbol_id: (-scores_by_symbol[symbol_id], symbol_id),
     )
     for symbol_id in unheld_ranked[:unheld_review_top_k]:
@@ -1991,7 +2002,11 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
         artifact["orders"].append(
             {
                 "symbol_id": symbol_id,
-                "symbol_name": account_item.get("symbol_name") or next(
+                "symbol_name": (
+                    account_item.get("symbol_name")
+                    if account_item.get("symbol_name") != symbol_id
+                    else None
+                ) or next(
                     (row.get("symbol_name") for row in active_rows if row.get("symbol_name")),
                     symbol_id,
                 ),

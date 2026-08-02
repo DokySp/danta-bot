@@ -711,12 +711,13 @@ class PolicyMentionTest(unittest.TestCase):
                 {
                     "symbol_id": "005930",
                     "symbol_name": "삼성전자",
-                    "scope_reason": "held_position",
+                    "scope_reason": "active_order",
                     "judge_error_code": "invalid_final_holding_quantity",
                 }
             ],
         }
         rendered = render(payload)
+        self.assertIn("활성주문 심사대상", rendered)
         self.assertIn("최종수량 값 오류", rendered)
         self.assertNotIn("invalid_final_holding_quantity", rendered)
 

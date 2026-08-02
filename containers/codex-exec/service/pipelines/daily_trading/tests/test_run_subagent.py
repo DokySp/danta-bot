@@ -630,7 +630,7 @@ def assert_compact_review_prompt(tmp: Path) -> None:
         "stage: judge-review",
         "analyst_review:",
         "For judge-review, use the selected-symbol analyst-review slice from analyst_review; agent_scores excluded from aggregation are intentionally omitted from this judgment input.",
-        "The supplied symbols are every eligible held symbol (review_scope_reasons=held_position, regardless of score or missing score) plus the top-ranked unheld symbols by score (review_scope_reasons=unheld_score_rank).",
+        "The supplied symbols are every eligible held symbol (review_scope_reasons=held_position, regardless of score or missing score), every eligible symbol with an active order (review_scope_reasons=active_order), plus the top-ranked remaining unheld symbols by score (review_scope_reasons=unheld_score_rank).",
         "Return no separate action. Return target_position_value_krw, reason_code, and one_line_reason.",
         "decision_basis (none|thesis|profit_protection|concentration_rebalance) is optional audit metadata.",
         "Conflict alone is not a hold rule.",
@@ -656,12 +656,12 @@ def assert_compact_review_prompt(tmp: Path) -> None:
         raise AssertionError(f"judge prompt still owns debate orchestration: {second_prompt}")
 
     scoped_spec = compact_spec(tmp, stage="judge-review", agent_role="judge", task_name="second-scoped")
-    scoped_spec["review_scope_reasons"] = {"005930": "held_position", "000660": "unheld_score_rank"}
+    scoped_spec["review_scope_reasons"] = {"005930": "held_position", "000660": "active_order"}
     scoped_spec["portfolio_snapshot"] = [
         {"symbol_id": "005930", "symbol_name": "삼성전자", "final_first_score": 3.5, "current_live_holding_quantity": 5, "valuation_amount": 350000, "pnl_rate": -3.2}
     ]
     scoped_prompt = build_prompt(scoped_spec)
-    if "review_scope_reasons: 000660=unheld_score_rank,005930=held_position" not in scoped_prompt:
+    if "review_scope_reasons: 000660=active_order,005930=held_position" not in scoped_prompt:
         raise AssertionError(f"review_scope_reasons missing from judge prompt: {scoped_prompt}")
     if "candidate_directions" in scoped_prompt or "score_band" in scoped_prompt:
         raise AssertionError(f"removed candidate-direction/score-band language leaked into judge prompt: {scoped_prompt}")

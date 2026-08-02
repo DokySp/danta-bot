@@ -1786,7 +1786,7 @@ class RunDailyTradingPipelineSelfTest(unittest.TestCase):
             # 402340 is in review scope but its judge decision is invalid, so it must stay unresolved.
             write_json(
                 run_dir / "judge-review-spec.json",
-                {"review_scope_reasons": {"005930": "unheld_score_rank", "000660": "held_position", "402340": "unheld_score_rank"}},
+                {"review_scope_reasons": {"005930": "unheld_score_rank", "000660": "held_position", "402340": "active_order"}},
             )
             write_json(
                 run_dir / "judge-review.json",
@@ -1827,8 +1827,9 @@ class RunDailyTradingPipelineSelfTest(unittest.TestCase):
             self.assertEqual(review["unresolved_review_scope_count"], 1)
             self.assertNotIn("402340", {row["symbol_id"] for row in review["symbols"]})
             # Review-scope composition counts remain for diagnostics but are no longer the reported verdict.
-            self.assertEqual(review["unheld_review_scope_count"], 2)
+            self.assertEqual(review["unheld_review_scope_count"], 1)
             self.assertEqual(review["held_review_scope_count"], 1)
+            self.assertEqual(review["active_order_review_scope_count"], 1)
             # Only a valid-scored, out-of-scope symbol counts as "미선정";
             # missing-score rows are retained for audit but are not scored rows.
             self.assertEqual(review["hold_symbol_count"], 1)
@@ -1838,7 +1839,7 @@ class RunDailyTradingPipelineSelfTest(unittest.TestCase):
             self.assertEqual(len(unresolved), 1)
             self.assertEqual(unresolved[0]["symbol_id"], "402340")
             self.assertEqual(unresolved[0]["symbol_name"], "SK스퀘어")
-            self.assertEqual(unresolved[0]["scope_reason"], "unheld_score_rank")
+            self.assertEqual(unresolved[0]["scope_reason"], "active_order")
             self.assertEqual(unresolved[0]["judge_error_code"], "invalid_final_holding_quantity")
 
     def test_build_review_summary_canonical_action_enum_counts_and_expected_baseline_fallback(self) -> None:

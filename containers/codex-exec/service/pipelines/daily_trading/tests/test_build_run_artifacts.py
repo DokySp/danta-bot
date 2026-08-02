@@ -827,15 +827,35 @@ def step_second_spec_checks(tmp: Path, run_dir: Path) -> list[str]:
                 f"held symbol with no usable score must still reach judge-review: {held_missing_score_spec}"
             )
 
-        # unheld_review_top_k=0 must exclude the unheld symbol entirely; the held symbol always stays.
+        # unheld_review_top_k=0 excludes ordinary unheld symbols, but an active-order symbol stays.
         zero_top_k_policy = tmp / "strategy-policy-zero-top-k.yaml"
         base_policy_text = Path(default_strategy_policy_config_path()).read_text(encoding="utf-8")
         zero_top_k_policy.write_text(base_policy_text.replace("unheld_review_top_k: 5", "unheld_review_top_k: 0"), encoding="utf-8")
-        zero_top_k_spec = build_second_spec(
-            second_spec_args(str(run_dir / "analyst-review.json"), "judge-review-spec-zero-top-k.json", strategy_policy_config=str(zero_top_k_policy))
-        )
-        if zero_top_k_spec["symbol_ids"] != ["005930"] or zero_top_k_spec.get("review_scope_reasons") != {"005930": "held_position"}:
-            failures.append(f"unheld_review_top_k=0 must exclude unheld symbols: {zero_top_k_spec}")
+        account_path = run_dir / "account-before-order.json"
+        original_account = load_json(account_path)
+        account_with_active_order = json.loads(json.dumps(original_account))
+        account_with_active_order["active_order_lookup_performed"] = True
+        account_with_active_order["active_orders"] = [
+            {
+                "symbol_id": "000660",
+                "symbol_name": "SK하이닉스",
+                "direction": "buy",
+                "remaining_quantity": 1,
+                "active_status": "active",
+            }
+        ]
+        write_json(account_path, account_with_active_order)
+        try:
+            zero_top_k_spec = build_second_spec(
+                second_spec_args(str(run_dir / "analyst-review.json"), "judge-review-spec-zero-top-k.json", strategy_policy_config=str(zero_top_k_policy))
+            )
+        finally:
+            write_json(account_path, original_account)
+        if zero_top_k_spec["symbol_ids"] != ["000660", "005930"] or zero_top_k_spec.get("review_scope_reasons") != {
+            "005930": "held_position",
+            "000660": "active_order",
+        }:
+            failures.append(f"active-order symbol must stay in Judge scope when unheld_review_top_k=0: {zero_top_k_spec}")
         write_json(
             run_dir / "judge-review.json",
             {
@@ -1390,7 +1410,7 @@ class BuildRunArtifactsSelfTest(unittest.TestCase):
                     "symbols": [
                         {
                             "symbol_id": "005930",
-                            "symbol_name": "삼성전자",
+                            "symbol_name": "005930",
                             "current_live_holding_quantity": 10,
                             "current_price": 70000,
                             "holding_state_status": "consistent",
@@ -1463,6 +1483,7 @@ class BuildRunArtifactsSelfTest(unittest.TestCase):
             self.assertTrue(by_symbol["005930"]["active_cancel_only"])
             self.assertEqual(by_symbol["005930"]["direction"], "sell")
             self.assertEqual(by_symbol["005930"]["reason"], "stale_active_order_requires_cancellation")
+            self.assertEqual(by_symbol["005930"]["symbol_name"], "삼성전자")
             self.assertTrue(by_symbol["000660"]["reconciliation_only"])
             self.assertEqual(by_symbol["000660"]["direction"], "buy")
             self.assertEqual(
