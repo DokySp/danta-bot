@@ -1030,8 +1030,9 @@ def prior_decision_context(
     current_started_at: str = "",
     today_trade_context: dict[str, Any] | None = None,
     cache: RunArtifactJsonCache | None = None,
+    symbol_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    unavailable = {"status": "no_prior_decision", "realized_pnl": {"status": "unavailable"}}
+    unavailable = {"status": "no_prior_decision"}
     if not symbol_id:
         return unavailable
     runs_dir = output_dir.parent
@@ -1041,7 +1042,7 @@ def prior_decision_context(
     if current_started is None:
         return unavailable
     current = output_dir.resolve()
-    best: tuple[datetime, str, Path, dict[str, Any]] | None = None
+    decisions: list[tuple[datetime, str, Path, dict[str, Any]]] = []
     best_thesis: tuple[datetime, str, dict[str, Any]] | None = None
     for run_dir in (path for path in runs_dir.iterdir() if path.is_dir()):
         if run_dir.resolve() == current:
@@ -1063,16 +1064,38 @@ def prior_decision_context(
                 continue
             source_run_id = str(payload.get("run_id") or run_dir.name)
             candidate_key = (candidate_started, source_run_id)
-            if best is None or candidate_key > (best[0], best[1]):
-                best = (candidate_started, source_run_id, run_dir, item)
+            decisions.append((candidate_started, source_run_id, run_dir, item))
             thesis = item.get("thesis_definition")
             if thesis_definition_is_valid(thesis) and (
                 best_thesis is None or candidate_key > (best_thesis[0], best_thesis[1])
             ):
                 best_thesis = (candidate_started, source_run_id, thesis)
-    if best is None:
+    if not decisions:
         return unavailable
-    decided_at, source_run_id, source_run_dir, decision = best
+    decisions.sort(key=lambda item: (item[0], item[1]))
+    decided_at, source_run_id, source_run_dir, decision = decisions[-1]
+    current_day = current_started.astimezone(DAILY_TRADING_TIMEZONE).strftime("%Y%m%d")
+
+    def decision_day(item: tuple[datetime, str, Path, dict[str, Any]]) -> str:
+        return item[0].astimezone(DAILY_TRADING_TIMEZONE).strftime("%Y%m%d")
+
+    def target_path(day: str) -> list[int]:
+        path: list[int] = []
+        for item in decisions:
+            quantity = non_negative_int_value(item[3].get("final_holding_quantity"))
+            if decision_day(item) == day and quantity is not None and (not path or path[-1] != quantity):
+                path.append(quantity)
+        return path
+
+    today_fills = read_json_cached(output_dir / "today-fills.json", cache)
+    previous_evidence = today_fills.get("previous_session") if isinstance(today_fills, dict) else None
+    evidence_day = "".join(
+        character
+        for character in str(previous_evidence.get("session_date") or "")
+        if character.isdigit()
+    ) if isinstance(previous_evidence, dict) else ""
+    previous_days = [decision_day(item) for item in decisions if decision_day(item) < current_day]
+    previous_day = evidence_day if len(evidence_day) == 8 and evidence_day < current_day else max(previous_days, default="")
     lifecycle = read_json_cached(output_dir / "order-lifecycle.json", cache)
     lifecycle_orders = lifecycle.get("previous_submitted_cash_orders", []) if isinstance(lifecycle, dict) else []
     lifecycle_by_order_id = {
@@ -1153,17 +1176,112 @@ def prior_decision_context(
         "buy_quantity": sum(int_or_zero(item.get("quantity")) for item in subsequent_fills if item.get("direction") == "buy"),
         "sell_quantity": sum(int_or_zero(item.get("quantity")) for item in subsequent_fills if item.get("direction") == "sell"),
     }
+
+    previous_fills = [
+        item
+        for item in previous_evidence.get("fills", [])
+        if isinstance(item, dict)
+        and symbol_key(item) == symbol_id
+        and item.get("direction") in {"buy", "sell"}
+        and int_or_zero(item.get("filled_quantity")) > 0
+    ] if isinstance(previous_evidence, dict) and evidence_day == previous_day else []
+    previous_fills.sort(key=lambda item: (str(item.get("filled_at") or ""), str(item.get("order_id") or "")))
+    previous_coverage = (
+        str(previous_evidence.get("fill_collection_status") or "unavailable")
+        if isinstance(previous_evidence, dict) and evidence_day == previous_day
+        else "unavailable"
+    )
+    end_holding_quantity: int | None = None
+    account = read_json_cached(output_dir / "account-before-order.json", cache)
+    account_symbols = account.get("symbols", []) if isinstance(account, dict) else []
+    account_item = next(
+        (item for item in account_symbols if isinstance(item, dict) and symbol_key(item) == symbol_id),
+        None,
+    ) if isinstance(account_symbols, list) else None
+    if (
+        isinstance(account, dict)
+        and not account.get("skipped")
+        and str(account.get("status") or "") in {"success", "partial"}
+        and isinstance(account_item, dict)
+        and account_item.get("snapshot_row_available") is True
+    ):
+        current_quantity = non_negative_int_value(account_item.get("current_live_holding_quantity"))
+        if current_quantity is not None:
+            candidate_quantity = (
+                current_quantity
+                - int_or_zero(account_item.get("today_buy_quantity"))
+                + int_or_zero(account_item.get("today_sell_quantity"))
+            )
+            end_holding_quantity = candidate_quantity if candidate_quantity >= 0 else None
+
+    realized_pnl = {"status": "unavailable", "scope": "symbol_session"}
+    pnl_evidence = previous_evidence.get("realized_pnl") if isinstance(previous_evidence, dict) else None
+    covered_symbols = pnl_evidence.get("covered_symbols", []) if isinstance(pnl_evidence, dict) else []
+    if (
+        evidence_day == previous_day
+        and isinstance(pnl_evidence, dict)
+        and pnl_evidence.get("status") == "available"
+        and symbol_id in covered_symbols
+    ):
+        pnl_rows = pnl_evidence.get("symbols", [])
+        realized_pnl = {
+            "status": "available",
+            "scope": "symbol_session",
+            "amount_krw": sum(
+                int_or_zero(item.get("amount_krw"))
+                for item in pnl_rows if isinstance(item, dict) and symbol_key(item) == symbol_id
+            ) if isinstance(pnl_rows, list) else 0,
+            "source_api": str(pnl_evidence.get("source_api") or ""),
+        }
+
+    close_vs_last_fill_pct: float | None = None
+    chart_context = symbol_context.get("chart_context") if isinstance(symbol_context, dict) else None
+    daily_rows = chart_context.get("recent_daily", []) if isinstance(chart_context, dict) else []
+    previous_close = next(
+        (
+            non_negative_number_value(row.get("close"))
+            for row in daily_rows
+            if isinstance(row, dict)
+            and "".join(character for character in str(row.get("date") or "") if character.isdigit()) == previous_day
+        ),
+        None,
+    ) if isinstance(daily_rows, list) else None
+    last_fill_price = non_negative_number_value(previous_fills[-1].get("filled_price")) if previous_fills else None
+    if previous_coverage == "complete" and previous_close is not None and last_fill_price not in {None, 0}:
+        close_vs_last_fill_pct = round(((float(previous_close) - float(last_fill_price)) / float(last_fill_price)) * 100, 2)
+
     result = {
         "status": "available",
-        "source_run_id": source_run_id,
-        "decided_at": decided_at.isoformat(),
-        "target_position_value_krw": non_negative_number_value(decision.get("target_position_value_krw")),
-        "final_holding_quantity": non_negative_int_value(decision.get("final_holding_quantity")),
-        "reason_code": str(decision.get("reason_code") or ""),
-        "one_line_reason": str(decision.get("one_line_reason") or "")[:240],
-        "order_outcomes": outcomes,
-        "subsequent_fill_summary": fill_summary,
-        "realized_pnl": {"status": "unavailable"},
+        "previous_session": {
+            "session_date": (
+                f"{previous_day[0:4]}-{previous_day[4:6]}-{previous_day[6:8]}" if len(previous_day) == 8 else ""
+            ),
+            "target_quantity_path": target_path(previous_day),
+            "fill_summary": {
+                "coverage_status": previous_coverage,
+                "fill_count": len(previous_fills),
+                "buy_quantity": sum(
+                    int_or_zero(item.get("filled_quantity")) for item in previous_fills if item.get("direction") == "buy"
+                ),
+                "sell_quantity": sum(
+                    int_or_zero(item.get("filled_quantity")) for item in previous_fills if item.get("direction") == "sell"
+                ),
+                "end_holding_quantity": end_holding_quantity,
+            },
+            "realized_pnl": realized_pnl,
+            "close_vs_last_fill_pct": close_vs_last_fill_pct,
+        },
+        "latest_decision": {
+            "source_run_id": source_run_id,
+            "decided_at": decided_at.isoformat(),
+            "target_position_value_krw": non_negative_number_value(decision.get("target_position_value_krw")),
+            "final_holding_quantity": non_negative_int_value(decision.get("final_holding_quantity")),
+            "reason_code": str(decision.get("reason_code") or ""),
+            "one_line_reason": str(decision.get("one_line_reason") or "")[:240],
+            "order_outcomes": outcomes,
+            "subsequent_fill_summary": fill_summary,
+        },
+        "current_session_target_path": target_path(current_day),
     }
     if best_thesis is not None:
         result["thesis_source_run_id"] = best_thesis[1]
@@ -1189,6 +1307,7 @@ def add_judge_review_holding_context(payload: Any, output_dir: Path | None = Non
                     current_started_at,
                     copied.get("today_trade_timeline_context"),
                     cache,
+                    copied,
                 )
                 enriched.append(copied)
             else:
@@ -1208,6 +1327,7 @@ def add_judge_review_holding_context(payload: Any, output_dir: Path | None = Non
                     current_started_at,
                     item.get("today_trade_timeline_context"),
                     cache,
+                    item,
                 ),
             )
             if isinstance(item, dict)
@@ -1538,12 +1658,12 @@ def compact_review_prompt(spec: dict[str, Any]) -> str | None:
                 "The pipeline derives final_holding_quantity from target_position_value_krw / price.current_or_last with Decimal ROUND_HALF_UP; judge-supplied final_holding_quantity is optional and ignored for sizing.",
                 "No additional buy, no extra exposure, or 추가 확대 없음 means target_position_value_krw must stay at the baseline (holding_quantity_context.expected_holding_quantity * price.current_or_last), not 0.",
                 "When increasing after a same-day buy, additional_buy_reason may record new evidence or materially changed price/portfolio context; it is optional audit text and never an authorization gate.",
-                "prior_decision_context links the latest earlier Judge target and reason to its order outcomes and subsequent confirmed-fill summary. Compare it with current evidence before changing the target; it is continuity context, never a hold or trade gate.",
+                "prior_decision_context carries the previous session target-quantity path and broker outcomes, the latest earlier Judge decision, and the current-session target path. Treat the prior decision as a starting hypothesis, not a constraint. When changing or reversing the target, include the key new evidence in one_line_reason; never judge the prior decision from realized P&L or hindsight price alone. This context is never a hold or trade gate.",
                 "For a held symbol with a low score, treat thesis integrity as one input, not a reduction gate. Thesis damage can support reduction, but relative attractiveness, concentration, profit/loss risk, opportunity cost, or a stronger alternative may independently support reducing or exiting even when the thesis remains intact.",
                 "Use strategy_context and symbol_strategy_context as advisory inputs for target_position_value_krw, not as order allow/block rules.",
                 "Use position_cost_context (average_purchase_price, purchase_amount, current_review_price, pct_distance_from_average_price) as reference information for profit/loss, risk, and position adjustments. Determine final direction and target exposure by considering thesis, market evidence, and portfolio risk together.",
                 "prior_decision_context may carry the latest valid historical thesis_definition even when it came from an older decision. Use it as context, not as a mechanical authorization condition.",
-                "When the historical thesis materially affects the target, you may return thesis_assessment: {status: intact|damaged|uncertain, matched_invalidation_condition_ids: [...]} and/or a new thesis_definition for future context. These are audit fields; missing or malformed values do not block the target. realized_pnl.status=unavailable is non-directional and must not be estimated.",
+                "When the historical thesis materially affects the target, you may return thesis_assessment: {status: intact|damaged|uncertain, matched_invalidation_condition_ids: [...]} and/or a new thesis_definition for future context. These are audit fields; missing or malformed values do not block the target. previous_session.realized_pnl is a symbol-session KIS fact when available; unavailable outcome fields are non-directional and must not be estimated.",
             ]
         )
         if review_scope_reasons:

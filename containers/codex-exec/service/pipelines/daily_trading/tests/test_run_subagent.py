@@ -647,7 +647,7 @@ def assert_compact_review_prompt(tmp: Path) -> None:
         "target_position_value_krw",
         "No additional buy",
         "additional_buy_reason may record new evidence",
-        "prior_decision_context links the latest earlier Judge target",
+        "prior_decision_context carries the previous session target-quantity path",
     ]
     missing = [part for part in second_required_parts if part not in second_prompt]
     if missing:
@@ -759,14 +759,17 @@ def assert_review_input_slices(tmp: Path) -> None:
             if "target_position_value_krw" not in holding_context.get("target_position_value_semantics", ""):
                 raise AssertionError(f"review-core did not add target value semantics: {first_symbol}")
             prior = first_symbol.get("prior_decision_context", {})
-            if prior.get("source_run_id") != "self-test-older" or prior.get("final_holding_quantity") != 9:
+            latest = prior.get("latest_decision", {})
+            if latest.get("source_run_id") != "self-test-older" or latest.get("final_holding_quantity") != 9:
                 raise AssertionError(f"review-core did not add the prior decision: {first_symbol}")
-            outcomes = prior.get("order_outcomes", [])
+            outcomes = latest.get("order_outcomes", [])
             if len(outcomes) != 1 or outcomes[0].get("broker_status") != "filled":
                 raise AssertionError(f"review-core did not link the prior order outcome: {first_symbol}")
-            if prior.get("subsequent_fill_summary", {}).get("buy_quantity") != 3:
+            if latest.get("subsequent_fill_summary", {}).get("buy_quantity") != 3:
                 raise AssertionError(f"review-core did not link subsequent confirmed fills: {first_symbol}")
-            if prior.get("realized_pnl", {}).get("status") != "unavailable":
+            if prior.get("current_session_target_path") != [9]:
+                raise AssertionError(f"review-core did not add the current-session target path: {first_symbol}")
+            if prior.get("previous_session", {}).get("realized_pnl", {}).get("status") != "unavailable":
                 raise AssertionError(f"review-core must not estimate unavailable realized pnl: {first_symbol}")
             position_cost_context = first_symbol.get("position_cost_context", {})
             if position_cost_context.get("status") != "held_available" or position_cost_context.get("held") is not True:
@@ -1056,7 +1059,7 @@ def assert_optional_evidence_policy() -> None:
     format_text = (prompt_dir / "judge-review-format.md").read_text(encoding="utf-8")
     if "unavailable news is neutral rather than favorable or adverse" not in format_text:
         raise AssertionError("judge-review-format.md missing unavailable-news neutrality policy")
-    if "prior_decision_context" not in format_text or "realized_pnl.status=unavailable" not in format_text:
+    if "prior_decision_context" not in format_text or "previous_session.realized_pnl.scope=symbol_session" not in format_text:
         raise AssertionError("judge-review-format.md missing prior-decision continuity policy")
     analyst_format_text = (prompt_dir / "analyst-review-format.md").read_text(encoding="utf-8")
     quality_text = (prompt_dir / "analyst-quality-risk.md").read_text(encoding="utf-8")
@@ -1963,8 +1966,10 @@ class RunSubagentSelfTest(unittest.TestCase):
     def test_prior_decision_context_links_decision_execution_and_fills(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_name:
             runs_dir = Path(tmp_name) / "runs"
+            previous_open = runs_dir / "previous-open"
             previous = runs_dir / "previous"
             current = runs_dir / "current"
+            previous_open.mkdir(parents=True)
             previous.mkdir(parents=True)
             current.mkdir(parents=True)
             thesis = {
@@ -1972,10 +1977,19 @@ class RunSubagentSelfTest(unittest.TestCase):
                 "invalidation_conditions": [{"condition_id": "cond-a", "description": "description a"}],
             }
             write_json(
+                previous_open / "judge-review.json",
+                {
+                    "run_id": "previous-open",
+                    "started_at": "2026-07-14T09:00:00+09:00",
+                    "status": "success",
+                    "symbols": [{"symbol_id": "042660", "final_holding_quantity": 9}],
+                },
+            )
+            write_json(
                 previous / "judge-review.json",
                 {
                     "run_id": "previous",
-                    "started_at": "2026-07-15T14:30:00+09:00",
+                    "started_at": "2026-07-14T14:30:00+09:00",
                     "status": "success",
                     "symbols": [
                         {
@@ -1993,7 +2007,7 @@ class RunSubagentSelfTest(unittest.TestCase):
                 previous / "execution.json",
                 {
                     "run_id": "previous",
-                    "started_at": "2026-07-15T14:30:00+09:00",
+                    "started_at": "2026-07-14T14:30:00+09:00",
                     "orders": [
                         {
                             "symbol_id": "042660",
@@ -2011,7 +2025,7 @@ class RunSubagentSelfTest(unittest.TestCase):
                     "previous_submitted_cash_orders": [
                         {
                             "run_id": "previous",
-                            "started_at": "2026-07-15T14:30:00+09:00",
+                            "started_at": "2026-07-14T14:30:00+09:00",
                             "symbol_id": "042660",
                             "direction": "buy",
                             "order_id": "reject-1",
@@ -2026,6 +2040,51 @@ class RunSubagentSelfTest(unittest.TestCase):
                     ]
                 },
             )
+            write_json(
+                current / "today-fills.json",
+                {
+                    "stage": "today-fills",
+                    "status": "success",
+                    "previous_session": {
+                        "status": "available",
+                        "session_date": "20260714",
+                        "fill_collection_status": "complete",
+                        "fills": [
+                            {
+                                "symbol_id": "042660",
+                                "direction": "sell",
+                                "filled_at": "2026-07-14T15:15:00+09:00",
+                                "filled_quantity": 2,
+                                "filled_price": 100000,
+                                "order_id": "previous-fill",
+                            }
+                        ],
+                        "realized_pnl": {
+                            "status": "available",
+                            "scope": "symbol_session",
+                            "covered_symbols": ["042660"],
+                            "symbols": [{"symbol_id": "042660", "amount_krw": -949846}],
+                            "source_api": "direct_kis.inquire_period_trade_profit",
+                        },
+                    },
+                },
+            )
+            write_json(
+                current / "account-before-order.json",
+                {
+                    "status": "success",
+                    "skipped": False,
+                    "symbols": [
+                        {
+                            "symbol_id": "042660",
+                            "snapshot_row_available": True,
+                            "current_live_holding_quantity": 0,
+                            "today_buy_quantity": 0,
+                            "today_sell_quantity": 2,
+                        }
+                    ],
+                },
+            )
 
             context = prior_decision_context(
                 current,
@@ -2033,24 +2092,46 @@ class RunSubagentSelfTest(unittest.TestCase):
                 "2026-07-15T15:00:00+09:00",
                 {
                     "collection_status": "complete",
-                    "fill_count": 21,
+                    "fill_count": 2,
+                    "buy_quantity": 1,
+                    "sell_quantity": 2,
                     "fills": [
                         {
                             "filled_at": "2026-07-15T14:40:00+09:00",
                             "direction": "sell",
                             "quantity": 2,
+                        },
+                        {
+                            "filled_at": "2026-07-15T14:50:00+09:00",
+                            "direction": "buy",
+                            "quantity": 1,
                         }
                     ],
                 },
+                symbol_context={
+                    "chart_context": {
+                        "recent_daily": [
+                            {"date": "20260715", "close": 95000},
+                            {"date": "20260714", "close": 90000},
+                        ]
+                    }
+                },
             )
 
-            self.assertEqual(context["source_run_id"], "previous")
-            self.assertEqual(context["final_holding_quantity"], 7)
-            self.assertEqual(context["order_outcomes"][0]["broker_status"], "rejected")
-            self.assertEqual(context["subsequent_fill_summary"]["coverage_status"], "partial")
-            self.assertEqual(context["subsequent_fill_summary"]["sell_quantity"], 2)
+            latest = context["latest_decision"]
+            self.assertEqual(latest["source_run_id"], "previous")
+            self.assertEqual(latest["final_holding_quantity"], 7)
+            self.assertEqual(latest["order_outcomes"][0]["broker_status"], "rejected")
+            self.assertEqual(latest["subsequent_fill_summary"]["coverage_status"], "complete")
+            self.assertEqual(latest["subsequent_fill_summary"]["sell_quantity"], 2)
+            previous_session = context["previous_session"]
+            self.assertEqual(previous_session["target_quantity_path"], [9, 7])
+            self.assertEqual(previous_session["fill_summary"]["sell_quantity"], 2)
+            self.assertEqual(previous_session["fill_summary"]["end_holding_quantity"], 2)
+            self.assertEqual(previous_session["realized_pnl"]["amount_krw"], -949846)
+            self.assertEqual(previous_session["close_vs_last_fill_pct"], -10.0)
+            self.assertEqual(context["current_session_target_path"], [])
             self.assertEqual(context["thesis_definition"], thesis)
-            self.assertEqual(context["realized_pnl"]["status"], "unavailable")
             self.assertEqual(
                 prior_decision_context(current, "999999", "2026-07-15T15:00:00+09:00")["status"],
                 "no_prior_decision",

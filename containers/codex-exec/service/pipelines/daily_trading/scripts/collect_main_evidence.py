@@ -76,6 +76,10 @@ ENDPOINTS = {
         "tr_id_real": "TTTC8001R",
         "tr_id_demo": "VTTC8001R",
     },
+    "inquire_period_trade_profit": {
+        "path": "/uapi/domestic-stock/v1/trading/inquire-period-trade-profit",
+        "tr_id": "TTTC8715R",
+    },
 }
 
 SENSITIVE_KEYS = {
@@ -1008,6 +1012,7 @@ def normalize_holding(row: dict[str, Any], *, observed_at: str) -> dict[str, Any
     return {
         "symbol_id": symbol,
         "symbol_name": text_first(row, ("prdt_name", "prdt_abrv_name", "hts_kor_isnm")) or symbol,
+        "snapshot_row_available": True,
         "current_live_holding_quantity": holding_quantity(row),
         "ord_psbl_qty": parse_int(first_present(row, ("ord_psbl_qty", "sell_psbl_qty", "slpsblqty"))) or 0,
         "current_price": parse_int(first_present(row, ("prpr", "stck_prpr", "now_pric"))),
@@ -1191,19 +1196,31 @@ def merge_duplicate_fills(fills: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(by_key.values())
 
 
-def collect_today_fills_artifact(
-    symbols: list[str],
+def previous_market_session_day(price_artifact: Any, started_at: str) -> str:
+    current_day = datetime.fromisoformat(started_at).astimezone(KST).strftime("%Y%m%d")
+    days: list[str] = []
+    symbols = price_artifact.get("symbols") if isinstance(price_artifact, dict) else []
+    for symbol in symbols if isinstance(symbols, list) else []:
+        charts = symbol.get("charts") if isinstance(symbol, dict) else None
+        daily = charts.get("daily") if isinstance(charts, dict) else []
+        for row in daily if isinstance(daily, list) else []:
+            day = "".join(character for character in str(row.get("date") or "") if character.isdigit())
+            if len(day) == 8 and day < current_day:
+                days.append(day)
+    return max(days, default="")
+
+
+def collect_day_fills(
+    day: str,
     *,
-    run_id: str,
-    started_at: str,
     env_dv: str,
     app_key: str,
     app_secret: str,
     token: str,
     retries: int,
-) -> dict[str, Any]:
+    default_required: bool,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     cano, product = account_parts(env_dv)
-    day = datetime.fromisoformat(started_at).astimezone(KST).strftime("%Y%m%d") if started_at else datetime.now(KST).strftime("%Y%m%d")
     raw_rows: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
     for query_name, extra_params in daily_ccld_query_variants():
@@ -1229,10 +1246,10 @@ def collect_today_fills_artifact(
                     code="today_fills_query_variant_failed",
                     stage="today-fills",
                     source=f"direct_kis.inquire_daily_ccld.{query_name}",
-                    required=query_name == "default",
+                    required=default_required and query_name == "default",
                 )
             )
-            if query_name == "default":
+            if default_required and query_name == "default":
                 raise
     observed_at = now_kst_iso()
     fills = [
@@ -1248,6 +1265,164 @@ def collect_today_fills_artifact(
     ]
     fills = merge_duplicate_fills(fills)
     fills.sort(key=lambda item: (str(item.get("filled_at") or ""), str(item.get("order_id") or "")))
+    return fills, errors
+
+
+def fetch_period_trade_profit_rows(
+    *,
+    day: str,
+    app_key: str,
+    app_secret: str,
+    token: str,
+    retries: int,
+) -> list[dict[str, Any]]:
+    cano, product = account_parts("real")
+    rows: list[dict[str, Any]] = []
+    ctx_fk100 = ""
+    ctx_nk100 = ""
+    tr_cont = ""
+    for _page in range(20):
+        body, response_headers = call_endpoint(
+            "inquire_period_trade_profit",
+            {
+                "CANO": cano,
+                "ACNT_PRDT_CD": product,
+                "SORT_DVSN": "02",
+                "INQR_STRT_DT": day,
+                "INQR_END_DT": day,
+                "CBLC_DVSN": "00",
+                "PDNO": "",
+                "CTX_AREA_FK100": ctx_fk100,
+                "CTX_AREA_NK100": ctx_nk100,
+            },
+            app_key,
+            app_secret,
+            token,
+            retries,
+            env_dv="real",
+            tr_cont=tr_cont,
+        )
+        rows.extend(normalize_output(body.get("output1")))
+        ctx_fk100, ctx_nk100 = continuation_context(body)
+        next_tr_cont = response_headers.get("tr_cont", "").strip()
+        if next_tr_cont not in {"F", "M"}:
+            break
+        tr_cont = "N"
+        time.sleep(0.2)
+    return rows
+
+
+def unavailable_previous_session(reason: str) -> dict[str, Any]:
+    return {
+        "status": "unavailable",
+        "session_date": "",
+        "fill_collection_status": "unavailable",
+        "fills": [],
+        "realized_pnl": {"status": "unavailable", "scope": "symbol_session", "reason": reason},
+        "errors": [],
+    }
+
+
+def collect_previous_session(
+    symbols: list[str],
+    *,
+    day: str,
+    env_dv: str,
+    app_key: str,
+    app_secret: str,
+    token: str,
+    retries: int,
+) -> dict[str, Any]:
+    if not day:
+        return unavailable_previous_session("previous_market_session_unavailable")
+    fills, fill_errors = collect_day_fills(
+        day,
+        env_dv=env_dv,
+        app_key=app_key,
+        app_secret=app_secret,
+        token=token,
+        retries=retries,
+        default_required=False,
+    )
+    fills = [item for item in fills if str(item.get("symbol_id") or "") in symbols]
+    errors = list(fill_errors)
+    realized_pnl: dict[str, Any] = {
+        "status": "unavailable",
+        "scope": "symbol_session",
+        "covered_symbols": symbols,
+        "symbols": [],
+        "reason": "unsupported_in_demo" if env_dv == "demo" else "collection_failed",
+    }
+    if env_dv == "real":
+        try:
+            totals: dict[str, int] = {}
+            names: dict[str, str] = {}
+            for row in fetch_period_trade_profit_rows(
+                day=day,
+                app_key=app_key,
+                app_secret=app_secret,
+                token=token,
+                retries=retries,
+            ):
+                symbol = normalize_symbol_key(first_present(row, ("pdno", "PDNO")))
+                trade_day = "".join(character for character in text_first(row, ("trad_dt", "TRAD_DT")) if character.isdigit())
+                amount = parse_int(first_present(row, ("rlzt_pfls", "RLZT_PFLS")))
+                if symbol not in symbols or (trade_day and trade_day != day) or amount is None:
+                    continue
+                totals[symbol] = totals.get(symbol, 0) + amount
+                names[symbol] = text_first(row, ("prdt_name", "PRDT_NAME")) or symbol
+            realized_pnl = {
+                "status": "available",
+                "scope": "symbol_session",
+                "covered_symbols": symbols,
+                "symbols": [
+                    {"symbol_id": symbol, "symbol_name": names[symbol], "amount_krw": amount}
+                    for symbol, amount in sorted(totals.items())
+                ],
+                "source_api": "direct_kis.inquire_period_trade_profit",
+            }
+        except Exception as exc:  # noqa: BLE001 - previous-session P&L is optional evidence
+            errors.append(
+                safe_error(
+                    exc,
+                    code="previous_session_realized_pnl_failed",
+                    stage="today-fills",
+                    source="direct_kis.inquire_period_trade_profit",
+                    required=False,
+                )
+            )
+    return {
+        "status": "partial" if errors or realized_pnl.get("status") != "available" else "available",
+        "session_date": day,
+        "fill_collection_status": "partial" if fill_errors else "complete",
+        "fills": fills,
+        "realized_pnl": realized_pnl,
+        "errors": errors,
+    }
+
+
+def collect_today_fills_artifact(
+    symbols: list[str],
+    *,
+    run_id: str,
+    started_at: str,
+    env_dv: str,
+    app_key: str,
+    app_secret: str,
+    token: str,
+    retries: int,
+    previous_session_day: str = "",
+) -> dict[str, Any]:
+    day = datetime.fromisoformat(started_at).astimezone(KST).strftime("%Y%m%d") if started_at else datetime.now(KST).strftime("%Y%m%d")
+    fills, errors = collect_day_fills(
+        day,
+        env_dv=env_dv,
+        app_key=app_key,
+        app_secret=app_secret,
+        token=token,
+        retries=retries,
+        default_required=True,
+    )
     return {
         "schema_version": "1",
         "run_id": run_id,
@@ -1263,6 +1438,15 @@ def collect_today_fills_artifact(
         "source_queries": [name for name, _ in daily_ccld_query_variants()],
         "symbols": [{"symbol_id": symbol} for symbol in symbols],
         "fills": fills,
+        "previous_session": collect_previous_session(
+            symbols,
+            day=previous_session_day,
+            env_dv=env_dv,
+            app_key=app_key,
+            app_secret=app_secret,
+            token=token,
+            retries=retries,
+        ),
         "errors": errors,
     }
 
@@ -1282,6 +1466,7 @@ def skipped_today_fills_artifact(symbols: list[str], *, run_id: str, started_at:
         "fill_scope": "account",
         "symbols": [{"symbol_id": symbol} for symbol in symbols],
         "fills": [],
+        "previous_session": unavailable_previous_session(reason),
         "errors": [],
     }
 
@@ -1301,6 +1486,7 @@ def failed_today_fills_artifact(symbols: list[str], *, run_id: str, started_at: 
         "fill_scope": "account",
         "symbols": [{"symbol_id": symbol} for symbol in symbols],
         "fills": [],
+        "previous_session": unavailable_previous_session(error.get("code") or "collection_failed"),
         "errors": [error],
     }
 
@@ -1455,11 +1641,11 @@ def collect_account_artifact(symbols: list[str], *, run_id: str, started_at: str
     for row in rows:
         normalized = normalize_holding(row, observed_at=observed_at)
         symbol = normalized["symbol_id"]
-        if not symbol or normalized["current_live_holding_quantity"] <= 0:
+        if not symbol:
             continue
         if symbol in universe:
             holdings_by_symbol[symbol] = normalized
-        else:
+        elif normalized["current_live_holding_quantity"] > 0:
             non_universe.append(normalized)
 
     symbol_rows = []
@@ -1470,6 +1656,7 @@ def collect_account_artifact(symbols: list[str], *, run_id: str, started_at: str
                 {
                     "symbol_id": symbol,
                     "symbol_name": symbol,
+                    "snapshot_row_available": False,
                     "current_live_holding_quantity": 0,
                     "ord_psbl_qty": 0,
                     "current_price": None,
@@ -1766,6 +1953,7 @@ def command_collect(args: argparse.Namespace) -> int:
                 app_secret=app_secret,
                 token=token,
                 retries=args.retries,
+                previous_session_day=previous_market_session_day(price_artifact, started_at),
             )
         except Exception as exc:  # noqa: BLE001 - fill timeline is useful but non-blocking
             today_fills_artifact = failed_today_fills_artifact(

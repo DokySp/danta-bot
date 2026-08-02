@@ -43,6 +43,7 @@ from ..scripts.collect_main_evidence import (
     parse_float,
     parse_int,
     parse_symbols,
+    previous_market_session_day,
     safe_error,
     skipped_account_asset_snapshot,
     summarize_investor_flow,
@@ -525,7 +526,19 @@ class CollectMainEvidenceSelfTest(unittest.TestCase):
     def test_account_collection_success_does_not_require_order_gates(self) -> None:
         with patch(
             "service.pipelines.daily_trading.scripts.collect_main_evidence.fetch_account_balance",
-            return_value=([], {"dnca_tot_amt": "1000", "tot_evlu_amt": "2000"}, []),
+            return_value=(
+                [
+                    {
+                        "pdno": "005930",
+                        "prdt_name": "Samsung",
+                        "hldg_qty": "0",
+                        "thdt_buyqty": "0",
+                        "thdt_sll_qty": "2",
+                    }
+                ],
+                {"dnca_tot_amt": "1000", "tot_evlu_amt": "2000"},
+                [],
+            ),
         ):
             artifact = collect_account_artifact(
                 ["005930"],
@@ -543,6 +556,8 @@ class CollectMainEvidenceSelfTest(unittest.TestCase):
         self.assertEqual(artifact["status"], "success")
         self.assertEqual(artifact["order_gate_status"], "not_run")
         self.assertEqual(artifact["warnings"], [])
+        self.assertTrue(artifact["symbols"][0]["snapshot_row_available"])
+        self.assertEqual(artifact["symbols"][0]["today_sell_quantity"], 2)
 
     def test_today_fills_preserve_account_wide_symbols(self) -> None:
         outside_universe_row = {
@@ -555,6 +570,16 @@ class CollectMainEvidenceSelfTest(unittest.TestCase):
             "ord_tmd": "101500",
             "odno": "outside-1",
         }
+        previous_session_row = {
+            "pdno": "005930",
+            "prdt_name": "Samsung",
+            "sll_buy_dvsn_cd": "01",
+            "tot_ccld_qty": "3",
+            "avg_prvs": "71000",
+            "ord_dt": "20260617",
+            "ord_tmd": "151500",
+            "odno": "previous-1",
+        }
         with (
             patch(
                 "service.pipelines.daily_trading.scripts.collect_main_evidence.account_parts",
@@ -566,7 +591,20 @@ class CollectMainEvidenceSelfTest(unittest.TestCase):
             ),
             patch(
                 "service.pipelines.daily_trading.scripts.collect_main_evidence.fetch_daily_ccld_rows",
-                return_value=[outside_universe_row],
+                side_effect=lambda **kwargs: [
+                    outside_universe_row if kwargs["day"] == "20260618" else previous_session_row
+                ],
+            ),
+            patch(
+                "service.pipelines.daily_trading.scripts.collect_main_evidence.fetch_period_trade_profit_rows",
+                return_value=[
+                    {
+                        "trad_dt": "20260617",
+                        "pdno": "005930",
+                        "prdt_name": "Samsung",
+                        "rlzt_pfls": "-3694",
+                    }
+                ],
             ),
         ):
             artifact = collect_today_fills_artifact(
@@ -578,10 +616,26 @@ class CollectMainEvidenceSelfTest(unittest.TestCase):
                 app_secret="masked",
                 token="masked",
                 retries=0,
+                previous_session_day="20260617",
             )
 
         self.assertEqual(artifact["fill_scope"], "account")
         self.assertEqual([item["symbol_id"] for item in artifact["fills"]], ["999999"])
+        previous = artifact["previous_session"]
+        self.assertEqual(previous["fill_collection_status"], "complete")
+        self.assertEqual(previous["fills"][0]["filled_quantity"], 3)
+        self.assertEqual(previous["realized_pnl"]["symbols"][0]["amount_krw"], -3694)
+        self.assertEqual(
+            previous_market_session_day(
+                {
+                    "symbols": [
+                        {"charts": {"daily": [{"date": "20260618"}, {"date": "20260617"}]}}
+                    ]
+                },
+                "2026-06-18T10:30:00+09:00",
+            ),
+            "20260617",
+        )
 
 
 class ParsingAndSummaryHelperTest(unittest.TestCase):
