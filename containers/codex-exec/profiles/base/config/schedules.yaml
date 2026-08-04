@@ -2,8 +2,7 @@ schedules:
   - id: market-news
     enabled: true
     cron: "*/15 * * * *"
-    market_news:
-      config_file: /app/config/market-news.yaml
+    market_news: {}
 
   - id: collect-financial-information
     enabled: true

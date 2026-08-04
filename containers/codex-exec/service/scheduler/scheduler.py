@@ -113,41 +113,7 @@ class Scheduler:
                 reasoning_effort or ("none" if market_news_config is not None else "daily-trading-runtime"),
             )
             if market_news_config is not None:
-                result = self.market_news_direct_runner.run(market_news_config)
-                if isinstance(result, dict) and result.get("status") == "skipped_rate_limited" and result.get("alert"):
-                    logging.warning(
-                        "market-news provider rate limited id=%s provider=%s cooldown_until=%s",
-                        job_id,
-                        result.get("provider"),
-                        result.get("rate_limited_until"),
-                    )
-                    warning = (
-                        f"<b>market-news provider rate limited</b>\n"
-                        f"<code>{html.escape(job_id)}</code>\n"
-                        f"<pre>provider={html.escape(str(result.get('provider') or ''))} "
-                        f"cooldown_until={html.escape(str(result.get('rate_limited_until') or ''))}</pre>"
-                    )
-                    try:
-                        self.gateway.send_message(warning, chat_id_text, route_text)
-                    except Exception as delivery_exc:  # noqa: BLE001 - collection succeeded; only delivery failed
-                        logging.exception(
-                            "market-news rate-limit warning Telegram delivery failed id=%s", job_id
-                        )
-                        delivery_fallback = (
-                            f"<b>market-news 요금제한 경고 Telegram 전송 실패</b>\n"
-                            f"<code>{html.escape(job_id)}</code>\n"
-                            f"<pre>{html.escape(str(delivery_exc))}</pre>"
-                        )
-                        try:
-                            self.gateway.send_message(
-                                error_message_with_run_context(delivery_exc, delivery_fallback),
-                                chat_id_text,
-                                route_text,
-                            )
-                        except Exception:  # noqa: BLE001 - do not misclassify as a runner failure
-                            logging.exception(
-                                "market-news rate-limit warning delivery fallback also failed id=%s", job_id
-                            )
+                self.market_news_direct_runner.run(market_news_config)
                 return
             with TypingIndicator(
                 self.gateway,

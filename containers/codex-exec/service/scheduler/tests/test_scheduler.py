@@ -88,9 +88,9 @@ class SchedulerDailyTradingFailureClassificationTest(unittest.TestCase):
     def test_market_news_success_is_log_only(self) -> None:
         scheduler = self.scheduler()
 
-        scheduler._run_job("market-news", "", None, None, None, None, None, {"config_file": "/tmp/market-news.yaml"})
+        scheduler._run_job("market-news", "", None, None, None, None, None, {})
 
-        scheduler.market_news_direct_runner.run.assert_called_once_with({"config_file": "/tmp/market-news.yaml"})
+        scheduler.market_news_direct_runner.run.assert_called_once_with({})
         scheduler.runner.run_once.assert_not_called()
         scheduler.gateway.send_message.assert_not_called()
 
@@ -105,78 +105,13 @@ class SchedulerDailyTradingFailureClassificationTest(unittest.TestCase):
         self.assertIn("market-news direct runner failed", message)
         self.assertIn("domestic source failed", message)
 
-    def test_market_news_rate_limited_alert_sends_one_warning_message(self) -> None:
-        scheduler = self.scheduler()
-        scheduler.market_news_direct_runner.run.return_value = {
-            "status": "skipped_rate_limited",
-            "alert": True,
-            "provider": "gdelt_doc_2",
-            "rate_limited_until": "2026-07-19T13:00:00+00:00",
-        }
-
-        scheduler._run_job("market-news", "", "chat", "route", None, None, None, {})
-
-        scheduler.gateway.send_message.assert_called_once()
-        message = scheduler.gateway.send_message.call_args.args[0]
-        self.assertIn("rate limited", message)
-        self.assertNotIn("direct runner failed", message)
-
-    def test_market_news_rate_limited_alert_delivery_failure_is_not_reported_as_runner_failure(self) -> None:
-        scheduler = self.scheduler()
-        scheduler.market_news_direct_runner.run.return_value = {
-            "status": "skipped_rate_limited",
-            "alert": True,
-            "provider": "gdelt_doc_2",
-            "rate_limited_until": "2026-07-19T13:00:00+00:00",
-        }
-        scheduler.gateway.send_message.side_effect = [RuntimeError("gateway unavailable"), None]
-
-        scheduler._run_job("market-news", "", "chat", "route", None, None, None, {})
-
-        self.assertEqual(scheduler.gateway.send_message.call_count, 2)
-        fallback = scheduler.gateway.send_message.call_args_list[1].args[0]
-        self.assertNotIn("direct runner failed", fallback)
-
-    def test_market_news_rate_limited_double_delivery_failure_is_not_reported_as_runner_failure(self) -> None:
-        scheduler = self.scheduler()
-        scheduler.market_news_direct_runner.run.return_value = {
-            "status": "skipped_rate_limited",
-            "alert": True,
-            "provider": "gdelt_doc_2",
-            "rate_limited_until": "2026-07-19T13:00:00+00:00",
-        }
-        scheduler.gateway.send_message.side_effect = [
-            RuntimeError("warning unavailable"),
-            RuntimeError("fallback unavailable"),
-            None,
-        ]
-
-        scheduler._run_job("market-news", "", "chat", "route", None, None, None, {})
-
-        self.assertEqual(scheduler.gateway.send_message.call_count, 2)
-        for call in scheduler.gateway.send_message.call_args_list:
-            self.assertNotIn("direct runner failed", call.args[0])
-
-    def test_market_news_rate_limited_skip_without_alert_is_silent(self) -> None:
-        scheduler = self.scheduler()
-        scheduler.market_news_direct_runner.run.return_value = {
-            "status": "skipped_rate_limited",
-            "alert": False,
-            "provider": "gdelt_doc_2",
-            "rate_limited_until": "2026-07-19T13:00:00+00:00",
-        }
-
-        scheduler._run_job("market-news", "", "chat", "route", None, None, None, {})
-
-        scheduler.gateway.send_message.assert_not_called()
-
     def test_base_schedule_declares_deterministic_market_news_job(self) -> None:
         codex_exec_root = Path(__file__).resolve().parents[3]
         schedules = parse_yaml_schedule(codex_exec_root / "profiles" / "base" / "config" / "schedules.yaml")
         market_job = next(item for item in schedules if item.get("id") == "market-news")
 
         self.assertEqual(market_job.get("cron"), "*/15 * * * *")
-        self.assertEqual((market_job.get("market_news") or {}).get("config_file"), "/app/config/market-news.yaml")
+        self.assertEqual(market_job.get("market_news"), {})
         self.assertFalse(str(market_job.get("message") or "").strip())
 
 

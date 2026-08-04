@@ -15,6 +15,15 @@ from ..market_news.storage import MarketNewsStore
 
 
 KST = ZoneInfo("Asia/Seoul")
+MARKET_NEWS_PRIORITY_TERMS = (
+    "금리", "환율", "달러", "원화", "증시", "코스피", "코스닥", "주식", "채권", "국채",
+    "물가", "인플레이션", "경제", "경기", "성장률", "수출", "무역", "관세", "유가", "원유",
+    "금융", "은행", "연준", "한국은행", "통화", "재정", "정책", "규제", "제재", "전쟁",
+    "분쟁", "선거", "공급망", "반도체", "실적",
+    "stock market", "interest rate", "exchange rate", "bond yield", "inflation", "economy",
+    "economic", "recession", "central bank", "federal reserve", "tariff", "sanction", "conflict",
+    "geopolit", "election", "currency", "crude oil", "supply chain", "earnings",
+)
 
 
 def parse_datetime(value: Any) -> datetime | None:
@@ -148,34 +157,46 @@ def merge_unique(base: dict[str, Any], incoming: dict[str, Any]) -> None:
 
 def select_market_items(items: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
     max_items = max(1, limit)
+    priority_indexes = [
+        index
+        for index in range(len(items))
+        if any(
+            term in str(items[index].get("title") or "").casefold()
+            for term in MARKET_NEWS_PRIORITY_TERMS
+        )
+    ]
+    priority_set = set(priority_indexes)
+    fallback_indexes = [index for index in range(len(items)) if index not in priority_set]
     selected_indexes: list[int] = []
     selected_set: set[int] = set()
-    source_cursors = {"domestic": 0, "global": 0}
-    while len(selected_indexes) < max_items:
-        progressed = False
-        for source_id in ("domestic", "global"):
-            cursor = source_cursors[source_id]
-            while cursor < len(items):
-                index = cursor
-                cursor += 1
-                if index in selected_set:
-                    continue
-                source_ids = {str(value) for value in items[index].get("source_ids") or []}
-                if source_id not in source_ids:
-                    continue
-                selected_indexes.append(index)
-                selected_set.add(index)
-                progressed = True
+    for candidate_indexes in (priority_indexes, fallback_indexes):
+        source_cursors = {"domestic": 0, "global": 0}
+        while len(selected_indexes) < max_items:
+            progressed = False
+            for source_id in ("domestic", "global"):
+                cursor = source_cursors[source_id]
+                while cursor < len(candidate_indexes):
+                    index = candidate_indexes[cursor]
+                    cursor += 1
+                    if index in selected_set:
+                        continue
+                    source_ids = {str(value) for value in items[index].get("source_ids") or []}
+                    if source_id not in source_ids:
+                        continue
+                    selected_indexes.append(index)
+                    selected_set.add(index)
+                    progressed = True
+                    break
+                source_cursors[source_id] = cursor
+                if len(selected_indexes) >= max_items:
+                    break
+            if not progressed:
                 break
-            source_cursors[source_id] = cursor
+        for index in candidate_indexes:
             if len(selected_indexes) >= max_items:
                 break
-        if not progressed:
-            break
-    for index in range(len(items)):
-        if len(selected_indexes) >= max_items:
-            break
-        if index not in selected_set:
+            if index in selected_set:
+                continue
             selected_indexes.append(index)
             selected_set.add(index)
     return [items[index] for index in sorted(selected_indexes)]

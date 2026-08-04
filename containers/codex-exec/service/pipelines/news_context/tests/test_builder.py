@@ -9,9 +9,25 @@ from pathlib import Path
 
 import yaml
 
-from ...market_news.collector import parse_gdelt_articles
+from ...market_news.collector import canonicalize_url, title_hash
 from ...market_news.storage import MarketNewsStore
 from ..builder import build_news_context, market_status, select_market_items
+
+
+def market_article(title: str, url: str, published_at: str) -> dict[str, str]:
+    return {
+        "provider_article_id": url,
+        "canonical_url": canonicalize_url(url),
+        "title_hash": title_hash(title),
+        "title": title,
+        "url": url,
+        "domain": "example.com",
+        "source_country": "",
+        "source_language": "",
+        "published_at": published_at,
+        "collected_at": published_at,
+        "classification": "market_news",
+    }
 
 
 class NewsContextBuilderTest(unittest.TestCase):
@@ -55,17 +71,13 @@ class NewsContextBuilderTest(unittest.TestCase):
             )
             db_path = workspace / "memory" / "market-news" / "market-news.sqlite3"
             store = MarketNewsStore(db_path)
-            duplicate = parse_gdelt_articles(
-                {"articles": [{"title": "Weekend chip news", "url": "https://example.com/chip", "seendate": "20260718T010000Z"}]},
-                source_id="global",
-                collected_at="2026-07-18T01:05:00+00:00",
+            duplicate = market_article(
+                "Weekend chip news", "https://example.com/chip", "2026-07-18T01:00:00+00:00"
             )
-            distinct = parse_gdelt_articles(
-                {"articles": [{"title": "Global sanctions update", "url": "https://example.com/sanctions", "seendate": "20260719T090000Z"}]},
-                source_id="global",
-                collected_at="2026-07-19T09:05:00+00:00",
+            distinct = market_article(
+                "Global sanctions update", "https://example.com/sanctions", "2026-07-19T09:00:00+00:00"
             )
-            store.upsert_articles("global", "gdelt", duplicate + distinct)
+            store.upsert_articles("global", "kis_open_api", [duplicate, distinct])
             store.record_run(
                 source_id="global",
                 started_at="2026-07-19T09:05:00+00:00",
@@ -115,40 +127,57 @@ class NewsContextBuilderTest(unittest.TestCase):
 
         self.assertEqual({item["title"] for item in selected}, {"global-0", "domestic"})
 
+    def test_market_selection_prioritizes_material_titles_without_discarding_others(self) -> None:
+        items = [
+            {"title": "지역 행사 안내", "source_ids": ["domestic"]},
+            {"title": "Federal Reserve interest rate decision", "source_ids": ["global"]},
+            {"title": "한국은행 금리 결정", "source_ids": ["domestic"]},
+        ]
+
+        selected = select_market_items(items, 2)
+
+        self.assertEqual(
+            {item["title"] for item in selected},
+            {"Federal Reserve interest rate decision", "한국은행 금리 결정"},
+        )
+        self.assertEqual(len(select_market_items(items, 3)), 3)
+
+    def test_material_titles_outrank_source_balance(self) -> None:
+        items = [
+            {"title": "지역 행사 안내", "source_ids": ["domestic"]},
+            {"title": "Federal Reserve interest rate decision", "source_ids": ["global"]},
+            {"title": "Global inflation update", "source_ids": ["global"]},
+        ]
+
+        selected = select_market_items(items, 2)
+
+        self.assertEqual(
+            {item["title"] for item in selected},
+            {"Federal Reserve interest rate decision", "Global inflation update"},
+        )
+
     def test_database_candidates_are_limited_per_source_before_balancing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             workspace = Path(temp_name)
             db_path = workspace / "memory" / "market-news" / "market-news.sqlite3"
             store = MarketNewsStore(db_path)
-            domestic = parse_gdelt_articles(
-                {
-                    "articles": [
-                        {
-                            "title": f"Domestic market item {index}",
-                            "url": f"https://domestic.example/{index}",
-                            "seendate": f"20260719T{12 - index // 60:02d}{59 - index % 60:02d}00Z",
-                        }
-                        for index in range(110)
-                    ]
-                },
-                source_id="domestic",
-                collected_at="2026-07-19T13:00:00+00:00",
-            )
-            global_items = parse_gdelt_articles(
-                {
-                    "articles": [
-                        {
-                            "title": "Older global market item",
-                            "url": "https://global.example/older",
-                            "seendate": "20260719T090000Z",
-                        }
-                    ]
-                },
-                source_id="global",
-                collected_at="2026-07-19T13:00:00+00:00",
-            )
-            store.upsert_articles("domestic", "gdelt", domestic)
-            store.upsert_articles("global", "gdelt", global_items)
+            domestic = [
+                market_article(
+                    f"Domestic market item {index}",
+                    f"https://domestic.example/{index}",
+                    f"2026-07-19T{12 - index // 60:02d}:{59 - index % 60:02d}:00+00:00",
+                )
+                for index in range(110)
+            ]
+            global_items = [
+                market_article(
+                    "Older global market item",
+                    "https://global.example/older",
+                    "2026-07-19T09:00:00+00:00",
+                )
+            ]
+            store.upsert_articles("domestic", "kis_open_api", domestic)
+            store.upsert_articles("global", "kis_open_api", global_items)
             for source_id in ("domestic", "global"):
                 store.record_run(
                     source_id=source_id,

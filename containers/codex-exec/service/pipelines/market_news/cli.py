@@ -13,22 +13,15 @@ CODEX_EXEC_ROOT = Path(__file__).resolve().parents[3]
 if str(CODEX_EXEC_ROOT) not in sys.path:
     sys.path.insert(0, str(CODEX_EXEC_ROOT))
 
-from service.pipelines.market_news.collector import (  # noqa: E402
-    collect_market_news,
-    resolve_config_path,
-    resolve_db_path,
-)
+from service.pipelines.market_news.collector import collect_market_news, resolve_db_path  # noqa: E402
 from service.pipelines.market_news.storage import MarketNewsStore  # noqa: E402
 
 
 def command_collect(args: argparse.Namespace) -> int:
     workspace = args.workspace_dir.expanduser().resolve()
-    result = collect_market_news(
-        config_path=resolve_config_path(args.config),
-        db_path=resolve_db_path(workspace, args.db_path),
-    )
+    result = collect_market_news(db_path=resolve_db_path(workspace, args.db_path))
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
-    return 0 if result["status"] in {"success", "skipped_locked"} else 1
+    return 0 if result["status"] in {"success", "partial", "skipped_locked"} else 1
 
 
 def command_status(args: argparse.Namespace) -> int:
@@ -58,7 +51,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     collect = subparsers.add_parser("collect")
     collect.add_argument("--workspace-dir", type=Path, default=Path("."))
-    collect.add_argument("--config", default="")
     collect.add_argument("--db-path", default="")
 
     status = subparsers.add_parser("status")
