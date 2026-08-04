@@ -1024,6 +1024,93 @@ def thesis_definition_is_valid(thesis: Any) -> bool:
     return False
 
 
+def analyst_history_context(
+    output_dir: Path,
+    symbol_id: str,
+    current_started_at: str = "",
+    cache: RunArtifactJsonCache | None = None,
+) -> dict[str, Any]:
+    unavailable = {"status": "no_prior_analyst_assessment"}
+    current_started = parse_iso_datetime(current_started_at)
+    if not symbol_id or current_started is None or not output_dir.parent.is_dir():
+        return unavailable
+
+    records: list[tuple[datetime, tuple[Any, ...], dict[str, Any]]] = []
+    for path in output_dir.parent.glob("*/analyst-review.json"):
+        if path.parent.resolve() == output_dir.resolve():
+            continue
+        try:
+            payload = read_json_cached(path, cache)
+        except (OSError, ValueError):
+            continue
+        if (
+            not isinstance(payload, dict)
+            or payload.get("stage") != "analyst-review"
+            or payload.get("status") not in {"success", "partial"}
+        ):
+            continue
+        assessed_at = parse_iso_datetime(payload.get("started_at"))
+        if assessed_at is None or not assessed_at < current_started:
+            continue
+        symbol = next(
+            (item for item in payload.get("symbols", []) if isinstance(item, dict) and symbol_key(item) == symbol_id),
+            None,
+        )
+        if not isinstance(symbol, dict):
+            continue
+        views: dict[str, dict[str, Any]] = {}
+        for item in symbol.get("agent_scores", []):
+            if not isinstance(item, dict) or item.get("excluded_from_aggregation"):
+                continue
+            role = str(item.get("agent_role") or "").strip()
+            score = review_score_value(item.get("score"))
+            if not role or score is None:
+                continue
+            views[role] = {
+                "score": score,
+                "reason_code": str(item.get("reason_code") or ""),
+                "one_line_reason": str(item.get("one_line_reason") or "")[:160],
+            }
+        if views:
+            records.append(
+                (
+                    assessed_at,
+                    tuple((role, item["score"], item["reason_code"]) for role, item in sorted(views.items())),
+                    {
+                        "source_run_id": str(payload.get("run_id") or path.parent.name),
+                        "assessed_at": assessed_at.isoformat(),
+                        "views": views,
+                    },
+                )
+            )
+
+    if not records:
+        return unavailable
+    records.sort(key=lambda item: (item[0], item[2]["source_run_id"]))
+    current_day = current_started.astimezone(DAILY_TRADING_TIMEZONE).date()
+    previous = next(
+        (item for item in reversed(records) if item[0].astimezone(DAILY_TRADING_TIMEZONE).date() < current_day),
+        None,
+    )
+    latest_signature = previous[1] if previous else None
+    current_changes: list[dict[str, Any]] = []
+    for item in records:
+        if item[0].astimezone(DAILY_TRADING_TIMEZONE).date() != current_day:
+            continue
+        if item[1] != latest_signature:
+            current_changes.append(item[2])
+        latest_signature = item[1]
+
+    # ponytail: current analyst-review is separate, so the last three actual stance changes are enough context.
+    result = {
+        "status": "available",
+        "current_session_changes": current_changes[-3:],
+    }
+    if previous:
+        result["previous_session"] = previous[2]
+    return result
+
+
 def prior_decision_context(
     output_dir: Path,
     symbol_id: str,
@@ -1309,6 +1396,12 @@ def add_judge_review_holding_context(payload: Any, output_dir: Path | None = Non
                     cache,
                     copied,
                 )
+                copied["analyst_history_context"] = analyst_history_context(
+                    context_output_dir,
+                    symbol_key(copied),
+                    current_started_at,
+                    cache,
+                )
                 enriched.append(copied)
             else:
                 enriched.append(item)
@@ -1328,6 +1421,12 @@ def add_judge_review_holding_context(payload: Any, output_dir: Path | None = Non
                     item.get("today_trade_timeline_context"),
                     cache,
                     item,
+                ),
+                analyst_history_context=analyst_history_context(
+                    context_output_dir,
+                    symbol_id,
+                    current_started_at,
+                    cache,
                 ),
             )
             if isinstance(item, dict)
@@ -1658,7 +1757,7 @@ def compact_review_prompt(spec: dict[str, Any]) -> str | None:
                 "The pipeline derives final_holding_quantity from target_position_value_krw / price.current_or_last with Decimal ROUND_HALF_UP; judge-supplied final_holding_quantity is optional and ignored for sizing.",
                 "No additional buy, no extra exposure, or 추가 확대 없음 means target_position_value_krw must stay at the baseline (holding_quantity_context.expected_holding_quantity * price.current_or_last), not 0.",
                 "When increasing after a same-day buy, additional_buy_reason may record new evidence or materially changed price/portfolio context; it is optional audit text and never an authorization gate.",
-                "prior_decision_context carries the previous session target-quantity path and broker outcomes, the latest earlier Judge decision, and the current-session target path. Treat the prior decision as a starting hypothesis, not a constraint. When changing or reversing the target, include the key new evidence in one_line_reason; never judge the prior decision from realized P&L or hindsight price alone. This context is never a hold or trade gate.",
+                "Read prior_decision_context and analyst_history_context first; past Analyst assessments are interpretation history, not fresh evidence, votes, averages, or gates. Treat the previous target as an ongoing plan over its thesis/rationale horizon and change it only when new evidence supports enough expected portfolio improvement after transaction and opportunity costs, while urgent material risk may override it immediately. For a change or reversal, put the new evidence, horizon, and net benefit or urgency in one_line_reason; never judge from realized P&L or hindsight alone. This is a Judge objective, not a code gate.",
                 "For a held symbol with a low score, treat thesis integrity as one input, not a reduction gate. Thesis damage can support reduction, but relative attractiveness, concentration, profit/loss risk, opportunity cost, or a stronger alternative may independently support reducing or exiting even when the thesis remains intact.",
                 "Use strategy_context and symbol_strategy_context as advisory inputs for target_position_value_krw, not as order allow/block rules.",
                 "Use position_cost_context (average_purchase_price, purchase_amount, current_review_price, pct_distance_from_average_price) as reference information for profit/loss, risk, and position adjustments. Determine final direction and target exposure by considering thesis, market evidence, and portfolio risk together.",

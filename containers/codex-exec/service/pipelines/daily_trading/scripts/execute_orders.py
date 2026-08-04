@@ -823,6 +823,17 @@ def reconcile_submitted_cash_orders(
         )
     if summary_status != "success" and execution.get("status") == "success":
         execution["status"] = "partial"
+    elif (
+        summary_status == "success"
+        and execution.get("status") == "partial"
+        and not execution.get("errors")
+        and not any(
+            isinstance(item, dict) and item.get("result") in {"blocked", "failed"}
+            for key in ("orders", "order_adjustments")
+            for item in execution.get(key, [])
+        )
+    ):
+        execution["status"] = "success"
     return summary
 
 
@@ -2390,6 +2401,33 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
     return execution
 
 
+def terminal_reconcile(args: argparse.Namespace) -> dict[str, Any]:
+    output_dir = Path(args.output_dir)
+    execution_path = output_dir / "execution.json"
+    execution = load_json(execution_path)
+    unresolved = any(
+        isinstance(order, dict)
+        and order.get("result") == "submitted"
+        and order.get("order_path") == "immediate"
+        and order.get("direction") in {"buy", "sell"}
+        and not (
+            isinstance(order.get("broker_reconciliation"), dict)
+            and order["broker_reconciliation"].get("terminal") is True
+        )
+        for order in execution.get("orders", [])
+    )
+    if not unresolved:
+        return execution
+    reconcile_submitted_cash_orders(
+        Kis(env_dv(args.env), args.retries),
+        execution,
+        poll_delays=(0.0,),
+    )
+    execution["generated_at"] = now_iso()
+    write_json(execution_path, execution)
+    return execution
+
+
 def self_test() -> int:
     """Run the extracted test suite through the legacy CLI contract."""
     codex_exec_root = Path(__file__).resolve().parents[4]
@@ -2467,6 +2505,10 @@ def parser() -> argparse.ArgumentParser:
     preflight.add_argument("--retries", type=int, default=2)
     preflight.add_argument("--reservation-start-date", default="")
     preflight.add_argument("--reservation-end-date", default="")
+    terminal = sub.add_parser("terminal-reconcile", help="Refresh unresolved submitted cash orders once before reporting.")
+    terminal.add_argument("--output-dir", required=True)
+    terminal.add_argument("--env", default=os.environ.get("CODEX_MCP_TRADING_ENV", "acct"))
+    terminal.add_argument("--retries", type=int, default=2)
     probe = sub.add_parser("probe-api", help="Run read-only KIS order/account API probes.")
     probe.add_argument("--env", default=os.environ.get("CODEX_MCP_TRADING_ENV", "acct"))
     probe.add_argument("--symbol", default="")
@@ -2486,6 +2528,10 @@ def main(argv: list[str] | None = None) -> int:
         return probe_api(args)
     if args.command == "preflight":
         payload = order_lifecycle_preflight(args)
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0 if payload.get("status") != "failed" else 1
+    if args.command == "terminal-reconcile":
+        payload = terminal_reconcile(args)
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
         return 0 if payload.get("status") != "failed" else 1
     payload = execute(args)

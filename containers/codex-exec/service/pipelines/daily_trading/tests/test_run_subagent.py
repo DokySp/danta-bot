@@ -18,6 +18,7 @@ from ..scripts.run_subagent import (
     RUNTIME_CONFIG_ENV,
     account_holdings_by_symbol,
     add_judge_review_holding_context,
+    analyst_history_context,
     build_prompt,
     compact_position_cost_context,
     compact_prompt,
@@ -647,7 +648,9 @@ def assert_compact_review_prompt(tmp: Path) -> None:
         "target_position_value_krw",
         "No additional buy",
         "additional_buy_reason may record new evidence",
-        "prior_decision_context carries the previous session target-quantity path",
+        "Read prior_decision_context and analyst_history_context first",
+        "Treat the previous target as an ongoing plan over its thesis/rationale horizon",
+        "This is a Judge objective, not a code gate.",
     ]
     missing = [part for part in second_required_parts if part not in second_prompt]
     if missing:
@@ -771,6 +774,8 @@ def assert_review_input_slices(tmp: Path) -> None:
                 raise AssertionError(f"review-core did not add the current-session target path: {first_symbol}")
             if prior.get("previous_session", {}).get("realized_pnl", {}).get("status") != "unavailable":
                 raise AssertionError(f"review-core must not estimate unavailable realized pnl: {first_symbol}")
+            if first_symbol.get("analyst_history_context", {}).get("status") != "no_prior_analyst_assessment":
+                raise AssertionError(f"review-core did not add compact analyst history context: {first_symbol}")
             position_cost_context = first_symbol.get("position_cost_context", {})
             if position_cost_context.get("status") != "held_available" or position_cost_context.get("held") is not True:
                 raise AssertionError(f"judge-review review-core dropped position_cost_context: {first_symbol}")
@@ -1059,7 +1064,11 @@ def assert_optional_evidence_policy() -> None:
     format_text = (prompt_dir / "judge-review-format.md").read_text(encoding="utf-8")
     if "unavailable news is neutral rather than favorable or adverse" not in format_text:
         raise AssertionError("judge-review-format.md missing unavailable-news neutrality policy")
-    if "prior_decision_context" not in format_text or "previous_session.realized_pnl.scope=symbol_session" not in format_text:
+    if (
+        "prior_decision_context" not in format_text
+        or "analyst_history_context" not in format_text
+        or "previous_session.realized_pnl.scope=symbol_session" not in format_text
+    ):
         raise AssertionError("judge-review-format.md missing prior-decision continuity policy")
     analyst_format_text = (prompt_dir / "analyst-review-format.md").read_text(encoding="utf-8")
     quality_text = (prompt_dir / "analyst-quality-risk.md").read_text(encoding="utf-8")
@@ -2136,6 +2145,56 @@ class RunSubagentSelfTest(unittest.TestCase):
                 prior_decision_context(current, "999999", "2026-07-15T15:00:00+09:00")["status"],
                 "no_prior_decision",
             )
+
+    def test_analyst_history_keeps_previous_close_and_intraday_stance_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            runs_dir = Path(tmp_name) / "runs"
+            current = runs_dir / "current"
+            current.mkdir(parents=True)
+
+            def write_assessment(run_id: str, started_at: str, score: Any, reason_code: str, *, excluded: bool = False) -> None:
+                write_json(
+                    runs_dir / run_id / "analyst-review.json",
+                    {
+                        "run_id": run_id,
+                        "started_at": started_at,
+                        "stage": "analyst-review",
+                        "status": "success",
+                        "symbols": [
+                            {
+                                "symbol_id": "005930",
+                                "agent_scores": [
+                                    {
+                                        "agent_role": "analyst-momentum-cycle",
+                                        "score": score,
+                                        "reason_code": reason_code,
+                                        "one_line_reason": run_id,
+                                        "excluded_from_aggregation": excluded,
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                )
+
+            for args in (
+                ("previous-open", "2026-08-03T09:00:00+09:00", 5, "neutral"),
+                ("previous-close", "2026-08-03T15:00:00+09:00", 6, "positive"),
+                ("same-stance", "2026-08-04T09:00:00+09:00", 6, "positive"),
+                ("first-change", "2026-08-04T10:00:00+09:00", 4, "negative"),
+                ("repeat-change", "2026-08-04T11:00:00+09:00", 4, "negative"),
+                ("second-change", "2026-08-04T12:00:00+09:00", 7, "recovered"),
+                ("excluded", "2026-08-04T12:10:00+09:00", 0, "excluded"),
+                ("future", "2026-08-04T14:00:00+09:00", 0, "future"),
+            ):
+                write_assessment(*args, excluded=args[0] == "excluded")
+
+            context = analyst_history_context(current, "005930", "2026-08-04T13:00:00+09:00")
+
+            self.assertEqual(context["status"], "available")
+            self.assertEqual(context["previous_session"]["source_run_id"], "previous-close")
+            self.assertEqual([item["source_run_id"] for item in context["current_session_changes"]], ["first-change", "second-change"])
+            self.assertEqual(context["previous_session"]["views"]["analyst-momentum-cycle"]["score"], 6)
 
     def test_normalize_thesis_condition_id_preserves_korean_and_rejects_unusable_input(self) -> None:
         # Mirrors run_daily_trading_pipeline.normalize_thesis_condition_id exactly.

@@ -1367,6 +1367,32 @@ class Pipeline:
             raise RuntimeError("order-execution failed")
         return execution
 
+    def run_terminal_order_reconciliation(self) -> None:
+        if not getattr(self.args, "submit_orders", False) or self.args.request_type not in {"demo-submit", "real-submit"}:
+            return
+        result = self.run_cmd(
+            "order-execution-terminal-reconcile",
+            [
+                sys.executable,
+                self.order_execution_script(),
+                "terminal-reconcile",
+                "--output-dir",
+                str(self.output_dir),
+                "--env",
+                self.args.env,
+            ],
+            required=False,
+        )
+        execution = load_json_if_exists(self.output_dir / "execution.json") or {}
+        status = str(execution.get("status") or "partial")
+        stage_status = "success" if result.returncode == 0 and status == "success" else "partial"
+        for stage in reversed(self.stages):
+            if stage.get("stage") == "order-execution":
+                stage["status"] = stage_status
+                stage["detail"] = f"status={status}; terminal reconciliation {'checked' if result.returncode == 0 else 'failed'}"
+                self.write_run_json(status=self.pipeline_status())
+                break
+
     def finalize_account_order_gate_status(self, execution: dict[str, Any]) -> str:
         account_path = self.output_dir / "account-before-order.json"
         account = load_json_if_exists(account_path) or {}
@@ -3075,6 +3101,7 @@ class Pipeline:
         if token_summary is not None:
             detail = "main/sub-agent token summary built" if self.args.main_events else "sub-agent token summary built"
             self.add_stage("token-summary", "success", detail=detail, required=False, path=self.output_dir / "token-summary.json")
+        self.run_terminal_order_reconciliation()
         return self.build_summary(portfolio)
 
 

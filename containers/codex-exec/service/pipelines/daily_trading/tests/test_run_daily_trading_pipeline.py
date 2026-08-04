@@ -1376,6 +1376,18 @@ if "preflight" in sys.argv:
     print(json.dumps(lifecycle, ensure_ascii=False))
     raise SystemExit(0)
 execution = json.loads(execution_path.read_text(encoding="utf-8"))
+if "terminal-reconcile" in sys.argv:
+    filled = 0
+    for item in execution.get("orders", []):
+        if isinstance(item, dict) and item.get("result") == "submitted" and item.get("order_path") == "immediate":
+            item["broker_reconciliation"] = {"status": "filled", "terminal": True, "filled_quantity": item.get("validated_order_quantity", 0)}
+            filled += 1
+    execution["broker_reconciliation"] = {"status": "success", "submitted_cash_order_count": filled, "filled_order_count": filled}
+    execution["status"] = "success"
+    execution["errors"] = []
+    execution_path.write_text(json.dumps(execution, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(json.dumps(execution, ensure_ascii=False))
+    raise SystemExit(0)
 account = json.loads(account_path.read_text(encoding="utf-8"))
 account["active_order_lookup_performed"] = True
 account["order_available_lookup_performed"] = True
@@ -1387,7 +1399,9 @@ for item in orders:
         item["reason"] = "fake_submit_order"
         item["order_or_reservation_id"] = "fake-resv-1"
         item["attempts"] = [{"api_name": "order_resv", "result": "submitted"}]
-execution["status"] = "success"
+        if item.get("order_path") == "immediate":
+            item["broker_reconciliation"] = {"status": "pending", "terminal": False, "remaining_quantity": item.get("validated_order_quantity", 0)}
+execution["status"] = "partial"
 execution["requires_main_agent_order_execution"] = False
 execution["required_main_agent_actions"] = []
 execution["order_execution_mode"] = "submit"
@@ -1439,6 +1453,9 @@ print(json.dumps(execution, ensure_ascii=False))
         submit_execution = submit_summary.get("execution") if isinstance(submit_summary.get("execution"), dict) else {}
         if submit_execution.get("requires_main_agent_order_execution") is not False:
             failures.append(f"submit-orders summary did not clear execution handoff: {submit_execution}")
+        broker = submit_execution.get("broker_reconciliation") if isinstance(submit_execution.get("broker_reconciliation"), dict) else {}
+        if broker.get("status") != "success" or broker.get("filled_order_count") != broker.get("submitted_cash_order_count"):
+            failures.append(f"terminal reconciliation was not reflected in the final summary: {submit_execution}")
         submit_telegram = Path(str(submit_summary.get("telegram_summary_path") or ""))
         if not submit_telegram.exists():
             failures.append(f"submit-orders summary did not render telegram summary: {submit_telegram}")

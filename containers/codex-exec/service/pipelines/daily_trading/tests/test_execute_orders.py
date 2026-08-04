@@ -32,6 +32,7 @@ from ..scripts.execute_orders import (
     reconcile,
     refresh_gates,
     reconcile_submitted_cash_orders,
+    terminal_reconcile,
     write_json,
 )
 
@@ -2502,6 +2503,58 @@ class ExecuteOrdersSelfTest(unittest.TestCase):
         self.assertEqual(pending["status"], "pending")
         self.assertFalse(pending["terminal"])
         self.assertEqual(pending["remaining_quantity"], 2)
+
+    def test_terminal_reconcile_refreshes_pending_order_once_and_restores_status(self) -> None:
+        class FilledBrokerKis:
+            cano = "12345678"
+            product = "01"
+
+            def call(self, name: str, **_: Any) -> dict[str, Any]:
+                self.last_api = name
+                return {
+                    "output1": [
+                        {
+                            "odno": "pending-1",
+                            "ord_qty": "1",
+                            "tot_ccld_qty": "1",
+                            "rjct_qty": "0",
+                            "rmn_qty": "0",
+                            "avg_prvs": "70000",
+                        }
+                    ]
+                }
+
+        with tempfile.TemporaryDirectory() as tmp_name:
+            output_dir = Path(tmp_name)
+            write_json(
+                output_dir / "execution.json",
+                {
+                    "started_at": "2026-08-04T14:30:00+09:00",
+                    "status": "partial",
+                    "errors": [{"code": "broker_order_status_unconfirmed"}],
+                    "orders": [
+                        {
+                            "symbol_id": "005930",
+                            "direction": "buy",
+                            "result": "submitted",
+                            "order_path": "immediate",
+                            "validated_order_quantity": 1,
+                            "order_or_reservation_id": "pending-1",
+                            "broker_reconciliation": {"status": "pending", "terminal": False},
+                        }
+                    ],
+                },
+            )
+            args = argparse.Namespace(output_dir=str(output_dir), env="acct", retries=0)
+            with patch.object(execute_orders_module, "Kis", return_value=FilledBrokerKis()):
+                terminal_reconcile(args)
+
+            persisted = load_json(output_dir / "execution.json")
+            self.assertEqual(persisted["status"], "success")
+            self.assertEqual(persisted["orders"][0]["broker_reconciliation"]["status"], "filled")
+            self.assertEqual(persisted["errors"], [])
+            with patch.object(execute_orders_module, "Kis", side_effect=AssertionError("terminal order must not be queried twice")):
+                terminal_reconcile(args)
 
     def test_broker_reconciliation_reads_kis_cancel_confirm_quantity(self) -> None:
         canceled = normalize_broker_reconciliation(
