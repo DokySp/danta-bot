@@ -927,7 +927,7 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
                 [],
             )
 
-        self.assertIn("Judge 심사범위: 보유 0 · 비보유 상위선정 0 · 미선정 1 · 미해결 0", rendered)
+        self.assertIn("Judge 심사범위: 보유 0 · 비보유 심사대상 0 · 미선정 1 · 미해결 0", rendered)
 
     def test_inspector_uses_review_summary_expected_holding_and_labels_final_as_quantity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

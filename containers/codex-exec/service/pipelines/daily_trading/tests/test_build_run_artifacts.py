@@ -31,6 +31,7 @@ from ..scripts.build_run_artifacts import (
     financial_summary_for,
     load_json,
     load_strategy_policy_config,
+    mark_news_flow_exclusions,
     mark_quality_value_excluded_without_financial,
     symbol_news_summary_for,
     pipeline_dir,
@@ -109,6 +110,12 @@ def step_decision_brief_evidence_and_strategy_context_checks(tmp: Path, run_dir:
         )
         if price_only_quality.get("excluded_from_aggregation") is not True:
             failures.append(f"price-only quality-value score should be excluded from aggregation: {price_only_quality}")
+        directional_news = mark_news_flow_exclusions(
+            {"agent_role": "analyst-news-flow", "score": 7, "excluded_from_aggregation": True},
+            {"symbol_news_summary": [{"content": "직접 연결된 중요 뉴스"}]},
+        )
+        if directional_news.get("excluded_from_aggregation") is not False:
+            failures.append(f"directional news score should remain in aggregation: {directional_news}")
         opinion_only_financial = financial_summary_for(
             {
                 "symbols": {
@@ -409,6 +416,11 @@ def step_first_specs_and_analyst_review_checks(tmp: Path, run_dir: Path) -> list
     """build_first_specs analyst-review sub-agent spec construction and a successful build_analyst_review aggregation."""
     failures: list[str] = []
     try:
+        decision_brief = load_json(run_dir / "decision-brief.json")
+        next(item for item in decision_brief["symbols"] if item["symbol_id"] == "000660")["symbol_news_summary"] = [
+            {"article_date": "2026-06-18T09:30:00+09:00", "content": "직접 연결됐지만 방향성 없는 뉴스"}
+        ]
+        write_json(run_dir / "decision-brief.json", decision_brief)
         first_specs = build_first_specs(
             argparse.Namespace(
                 output_dir=run_dir,
@@ -504,6 +516,18 @@ def step_first_specs_and_analyst_review_checks(tmp: Path, run_dir: Path) -> list
             failures.append(f"no-news news-flow should be excluded from aggregation count: {analyst_review}")
         review_by_symbol = {item.get("symbol_id"): item for item in analyst_review.get("symbols", [])}
         missing_financial_review = review_by_symbol.get("000660", {})
+        neutral_news_scores = [
+            item
+            for item in missing_financial_review.get("agent_scores", [])
+            if item.get("agent_role") == "analyst-news-flow"
+        ]
+        if (
+            not neutral_news_scores
+            or neutral_news_scores[0].get("score") != 5
+            or neutral_news_scores[0].get("reason_code") != "hold_neutral"
+            or neutral_news_scores[0].get("excluded_from_aggregation") is not True
+        ):
+            failures.append(f"neutral news-flow score should be excluded from aggregation: {missing_financial_review}")
         missing_financial_scores = [
             item
             for item in missing_financial_review.get("agent_scores", [])
@@ -784,7 +808,7 @@ def step_second_spec_checks(tmp: Path, run_dir: Path) -> list[str]:
             failures.append(f"judge spec must use review contract version 3: {second_spec}")
         if second_spec["symbol_ids"] != ["000660", "005930"]:
             failures.append(f"unexpected second spec symbols: {second_spec}")
-        if second_spec.get("review_scope_reasons") != {"005930": "held_position", "000660": "unheld_score_rank"}:
+        if second_spec.get("review_scope_reasons") != {"005930": "held_position", "000660": "symbol_news"}:
             failures.append(f"review_scope_reasons missing held/unheld provenance: {second_spec}")
         if "candidate_directions" in second_spec or "score_band_thresholds" in second_spec:
             failures.append(f"removed score-band/candidate-direction fields must not reappear: {second_spec}")

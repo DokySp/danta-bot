@@ -555,8 +555,7 @@ def merge_cache(date_hyphen: str, path: Path, symbol_rows: list[tuple[str, str, 
 def filter_rows(rows: list[dict[str, Any]], symbol_id: str, symbol_name: str, date_hyphen: str) -> list[dict[str, Any]]:
     target_date = api_date(date_hyphen)
     dated = [item for item in rows if row_date_digits(item) == target_date]
-    matched = [item for item in dated if row_matches_symbol(item, symbol_id, symbol_name)]
-    return matched or dated
+    return [item for item in dated if row_matches_symbol(item, symbol_id, symbol_name)]
 
 
 def command_get(args: argparse.Namespace) -> int:

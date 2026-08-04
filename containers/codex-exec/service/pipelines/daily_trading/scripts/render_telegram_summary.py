@@ -89,7 +89,12 @@ BASIS_LABELS = {
     "concentration_rebalance": "집중도조정",
 }
 GUARD_STATUS_LABELS = {"allowed": "허용", "blocked": "차단", "no_change": "변경없음 처리"}
-SCOPE_REASON_LABELS = {"held_position": "보유 심사대상", "active_order": "활성주문 심사대상", "unheld_score_rank": "비보유 상위선정"}
+SCOPE_REASON_LABELS = {
+    "held_position": "보유 심사대상",
+    "active_order": "활성주문 심사대상",
+    "symbol_news": "종목뉴스 심사대상",
+    "unheld_score_rank": "비보유 상위선정",
+}
 JUDGE_ERROR_LABELS = {
     "missing_judge_symbol": "Judge 결과 누락",
     "duplicate_judge_symbol": "Judge 결과 중복",
@@ -496,7 +501,7 @@ def render(summary: dict[str, Any]) -> str:
         lines.append(
             f"- Judge 검토: 보유 심사대상 {as_int(review.get('held_review_scope_count'))}"
             f"{active_order_scope}"
-            f" · 비보유 상위선정 {as_int(review.get('unheld_review_scope_count'))}"
+            f" · 비보유 심사대상 {as_int(review.get('unheld_review_scope_count'))}"
             f" · 미선정 {as_int(review.get('hold_symbol_count'))}"
         )
     # In-scope-but-unresolved (missing/duplicate/invalid Judge result) is never the same as

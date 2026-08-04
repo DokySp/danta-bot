@@ -630,7 +630,7 @@ def assert_compact_review_prompt(tmp: Path) -> None:
         "stage: judge-review",
         "analyst_review:",
         "For judge-review, use the selected-symbol analyst-review slice from analyst_review; agent_scores excluded from aggregation are intentionally omitted from this judgment input.",
-        "The supplied symbols are every eligible held symbol (review_scope_reasons=held_position, regardless of score or missing score), every eligible symbol with an active order (review_scope_reasons=active_order), plus the top-ranked remaining unheld symbols by score (review_scope_reasons=unheld_score_rank).",
+        "The supplied symbols are every eligible held symbol (review_scope_reasons=held_position, regardless of score or missing score), every eligible symbol with an active order (review_scope_reasons=active_order), every eligible symbol with directly linked symbol news (review_scope_reasons=symbol_news), plus the top-ranked remaining unheld symbols by score (review_scope_reasons=unheld_score_rank).",
         "Return no separate action. Return target_position_value_krw, reason_code, and one_line_reason.",
         "decision_basis (none|thesis|profit_protection|concentration_rebalance) is optional audit metadata.",
         "Conflict alone is not a hold rule.",

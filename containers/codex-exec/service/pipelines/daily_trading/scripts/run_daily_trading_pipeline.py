@@ -2340,7 +2340,9 @@ class Pipeline:
             "unresolved_review_scope": unresolved_review_scope,
             "held_review_scope_count": sum(1 for reason in review_scope_reasons.values() if reason == "held_position"),
             "active_order_review_scope_count": sum(1 for reason in review_scope_reasons.values() if reason == "active_order"),
-            "unheld_review_scope_count": sum(1 for reason in review_scope_reasons.values() if reason == "unheld_score_rank"),
+            "unheld_review_scope_count": sum(
+                1 for reason in review_scope_reasons.values() if reason in {"symbol_news", "unheld_score_rank"}
+            ),
             "hold_symbol_count": len(scored_symbol_ids - set(review_scope_reasons)),
             "symbols": rows,
         }

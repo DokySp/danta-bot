@@ -1022,12 +1022,14 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
         # "not selected" can be reconstructed.
         has_judge_scope_metadata = isinstance(judge_spec.get("review_scope_reasons"), dict)
         judge_scope_resolved = set(final_by_symbol)
-        # held_position/active_order/unheld_score_rank distinguish WHY a symbol entered Judge scope;
+        # held_position/active_order/symbol_news/unheld_score_rank distinguish WHY a symbol entered Judge scope;
         # not_selected (scored but never in scope) and in-scope-unresolved (in scope but Judge
         # never returned a valid result) are separate categories from either of those.
         judge_held_count = sum(1 for reason in judge_scope_reasons.values() if reason == "held_position")
         judge_active_order_count = sum(1 for reason in judge_scope_reasons.values() if reason == "active_order")
-        judge_unheld_count = sum(1 for reason in judge_scope_reasons.values() if reason == "unheld_score_rank")
+        judge_unheld_count = sum(
+            1 for reason in judge_scope_reasons.values() if reason in {"symbol_news", "unheld_score_rank"}
+        )
         judge_scope_unresolved_count = sum(
             1
             for symbol_id in judge_scope_reasons
@@ -1352,7 +1354,7 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
             f'<span class="badge info">Analyst {len(analyst_symbols)} · Judge {len(final_by_symbol)}</span>'
             f'<span class="badge info" title="judge-review-spec.json 기준">Judge 심사범위: 보유 {judge_held_count}'
             f'{f" · 활성주문 {judge_active_order_count}" if judge_active_order_count else ""}'
-            f' · 비보유 상위선정 {judge_unheld_count}'
+            f' · 비보유 심사대상 {judge_unheld_count}'
             f' · 미선정 {judge_not_selected_count} · 미해결 {judge_scope_unresolved_count}</span></div>'
             f'<div class="run-activity">{"".join(activity_cards)}</div>'
             f'<h3>전체 Analyst 대상 종목</h3><div class="trade-symbol-selector">{"".join(symbol_buttons)}</div>'

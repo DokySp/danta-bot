@@ -23,6 +23,7 @@ from unittest.mock import patch
 from ..cli import (
     QuotedString,
     canonical_cache,
+    filter_rows,
     load_symbols,
     merge_cache,
     normalize_date,
@@ -76,6 +77,17 @@ def check_row_date_and_text_extraction() -> None:
         raise AssertionError(f"unexpected row_date: {row_date(SAMPLE_ITEM)}")
     if row_text(SAMPLE_ITEM) != "삼성전자 수주 증가":
         raise AssertionError(f"unexpected row_text: {row_text(SAMPLE_ITEM)}")
+
+
+def check_filter_rows_requires_symbol_match() -> None:
+    unrelated = {
+        **SAMPLE_ITEM,
+        "iscd1": "000660",
+        "kor_isnm1": "SK하이닉스",
+        "hts_titl_cntt": "시장 강세",
+    }
+    if filter_rows([unrelated], "005930", "삼성전자", SAMPLE_DATE_HYPHEN):
+        raise AssertionError("filter_rows kept an unrelated same-date article")
 
 
 def scenario_fresh_merge() -> dict:
@@ -182,6 +194,7 @@ def command_self_test() -> int:
     check_normalize_date_converts_to_hyphenated_form()
     check_cache_path_uses_hyphenated_date()
     check_row_date_and_text_extraction()
+    check_filter_rows_requires_symbol_match()
 
     fresh_cache = scenario_fresh_merge()
     check_fresh_merge_symbol_shape(fresh_cache)
@@ -213,6 +226,7 @@ class SymbolNewsCliSelfTest(unittest.TestCase):
             "check_normalize_date_converts_to_hyphenated_form",
             "check_cache_path_uses_hyphenated_date",
             "check_row_date_and_text_extraction",
+            "check_filter_rows_requires_symbol_match",
             "scenario_fresh_merge",
             "check_fresh_merge_symbol_shape",
             "check_fresh_merge_omits_legacy_fields",
@@ -246,6 +260,9 @@ class NormalizeDateAndCachePathTest(unittest.TestCase):
 
     def test_row_date_and_text_extraction(self) -> None:
         check_row_date_and_text_extraction()
+
+    def test_filter_rows_requires_symbol_match(self) -> None:
+        check_filter_rows_requires_symbol_match()
 
 
 class FreshMergeTest(unittest.TestCase):

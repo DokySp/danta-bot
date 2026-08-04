@@ -1534,9 +1534,13 @@ def has_usable_symbol_news_summary(symbol: dict[str, Any]) -> bool:
     return isinstance(symbol_news_summary, list) and any(isinstance(item, dict) for item in symbol_news_summary)
 
 
-def mark_news_flow_excluded_without_symbol_news(score_item: dict[str, Any], brief_symbol: dict[str, Any]) -> dict[str, Any]:
-    if str(score_item.get("agent_role") or "") != "analyst-news-flow" or has_usable_symbol_news_summary(brief_symbol):
+def mark_news_flow_exclusions(score_item: dict[str, Any], brief_symbol: dict[str, Any]) -> dict[str, Any]:
+    if str(score_item.get("agent_role") or "") != "analyst-news-flow":
         return score_item
+    if has_usable_symbol_news_summary(brief_symbol):
+        normalized = dict(score_item)
+        normalized["excluded_from_aggregation"] = review_score_value(score_item.get("score")) == 5
+        return normalized
     normalized = dict(score_item)
     normalized["score"] = 5
     normalized["reason_code"] = "no_news_excluded"
@@ -1577,7 +1581,7 @@ def mark_quality_value_excluded_without_financial(score_item: dict[str, Any], br
 
 
 def mark_optional_view_exclusions(score_item: dict[str, Any], brief_symbol: dict[str, Any]) -> dict[str, Any]:
-    score_item = mark_news_flow_excluded_without_symbol_news(score_item, brief_symbol)
+    score_item = mark_news_flow_exclusions(score_item, brief_symbol)
     return mark_quality_value_excluded_without_financial(score_item, brief_symbol)
 
 
@@ -1721,6 +1725,12 @@ def build_second_spec(args: argparse.Namespace) -> dict[str, Any]:
         review_scope_reasons[symbol_id] = "held_position"
     for symbol_id in sorted(active_order_set - holding_set):
         review_scope_reasons[symbol_id] = "active_order"
+    for symbol_id in sorted(
+        symbol_id
+        for symbol_id, item in brief_by_symbol.items()
+        if symbol_id in eligible and has_usable_symbol_news_summary(item) and symbol_id not in review_scope_reasons
+    ):
+        review_scope_reasons[symbol_id] = "symbol_news"
 
     unheld_ranked = sorted(
         (symbol_id for symbol_id in scores_by_symbol if symbol_id not in review_scope_reasons),
