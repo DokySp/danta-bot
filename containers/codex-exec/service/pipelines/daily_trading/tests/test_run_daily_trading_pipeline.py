@@ -1268,7 +1268,7 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
             failures.append(f"HTML report was not written: {html_report_path}")
         else:
             html_text = html_report_path.read_text(encoding="utf-8")
-            for required_text in ("당일 누적 거래·판단 리포트", "계좌·시장 통합 추이", "시간대별 거래·전체 종목 판단"):
+            for required_text in ("당일 누적 거래·판단 리포트", "계좌·시장 통합 추이", "회차별 거래·전체 종목 판단"):
                 if required_text not in html_text:
                     failures.append(f"HTML report omitted {required_text}: {html_report_path}")
         report_path = Path(str(summary.get("report_path") or ""))

@@ -350,15 +350,15 @@ REQUIRED_CUMULATIVE_REPORT_STRINGS = [
     "재고 정상화 이후 신규 성장 사이클 진입",
     "demand-collapse",
     "투자 논지 (Thesis)",
-    'class="mini-badge thesis-bad">Thesis 훼손</b>',
     "외부종목",
     "계좌 전체 일별 체결 조회",
     "주문·체결 통합 원장",
     'class="time-wheel"',
-    'role="listbox"',
-    "scroll-snap-type:y mandatory",
-    "selector.addEventListener('scroll'",
-    "event.key === 'ArrowUp'",
+    'role="group" aria-label="실행 회차"',
+    "1회차 · 09:00",
+    "2회차 · 09:00",
+    "3회차 · 10:00",
+    'class="symbol-button-meta"',
     "신규 수주 공시",
     "원가 부담 확대",
     "KOSPI 3210.50 (+1.25%)",
@@ -406,6 +406,10 @@ FORBIDDEN_CUMULATIVE_REPORT_STRINGS = [
     "sentiment negative",
     "score-low",
     "score-high",
+    "scroll-snap-type:y mandatory",
+    "selector.addEventListener('scroll'",
+    "event.key === 'ArrowUp'",
+    "시간 휠",
 ]
 
 
@@ -523,6 +527,11 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
         self.addCleanup(temp_dir.cleanup)
         missing = check_cumulative_report_contains_required_strings(rendered)
         self.assertEqual(missing, [])
+
+    def test_cumulative_report_shows_run_activity_before_the_day_ledger(self) -> None:
+        rendered, _runs_root, temp_dir = scenario_build_cumulative_report()
+        self.addCleanup(temp_dir.cleanup)
+        self.assertLess(rendered.index('id="trade-symbol-analysis"'), rendered.index('id="trades"'))
 
     def test_cumulative_report_promotes_thesis_before_its_final_judge_card(self) -> None:
         rendered, _runs_root, temp_dir = scenario_build_cumulative_report()
@@ -982,7 +991,7 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
         self.assertIn("최종 보유수량 5주", rendered)
         self.assertNotIn("최종(포지션 변화) 5주", rendered)
 
-    def test_inspector_shows_current_holding_status_on_symbol_choices_and_detail(self) -> None:
+    def test_inspector_keeps_holding_status_in_detail_without_expanding_symbol_choices(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             run_dir = Path(temporary)
             write_json(
@@ -1016,9 +1025,9 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
                 [],
             )
 
-        self.assertEqual(rendered.count('class="mini-badge held">보유 3주</b>'), 1)
-        self.assertEqual(rendered.count('class="mini-badge unheld">비보유</b>'), 1)
-        self.assertEqual(rendered.count('class="mini-badge unknown">보유 미기록</b>'), 1)
+        self.assertNotIn('class="mini-badge held"', rendered)
+        self.assertNotIn('class="mini-badge unheld"', rendered)
+        self.assertNotIn('class="mini-badge unknown"', rendered)
         self.assertIn('<span class="badge ok">보유 3주</span>', rendered)
         self.assertIn('<span class="badge muted">비보유</span>', rendered)
         self.assertIn('<span class="badge muted">보유 미기록</span>', rendered)

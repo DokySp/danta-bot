@@ -679,7 +679,7 @@ class PolicyMentionTest(unittest.TestCase):
         self.assertNotIn("<b>주요 종목 결정</b>", rendered)
         self.assertNotIn("유지(기준유지) 최종 15주 · 증가 5주", rendered)
 
-    def test_material_decision_line_shows_expected_to_final_baseline(self) -> None:
+    def test_material_decision_line_is_compact(self) -> None:
         payload = dict(self.BASE_PAYLOAD)
         payload["review_summary"] = {
             "final_sell_count": 1,
@@ -700,8 +700,63 @@ class PolicyMentionTest(unittest.TestCase):
             ],
         }
         rendered = render(payload)
-        self.assertIn("대기반영 12주→최종 8주", rendered)
-        self.assertIn("대기반영 기준 감소 4주", rendered)
+        self.assertIn("- <code>005930</code> 삼성전자: 축소 · 최종 8주", rendered)
+        self.assertNotIn("대기반영 12주", rendered)
+        self.assertNotIn("대기반영 기준 감소", rendered)
+
+    def test_lists_every_order_unresolved_scope_and_material_decision(self) -> None:
+        payload = dict(self.BASE_PAYLOAD)
+        payload["execution"] = {
+            "request_type": "real-submit",
+            "status": "partial",
+            "orders": [
+                {
+                    "symbol_id": f"10000{index}",
+                    "symbol_name": f"주문종목{index}",
+                    "direction": "buy",
+                    "quantity": 1,
+                    "result": "submitted",
+                    "reason": "accepted",
+                }
+                for index in range(1, 5)
+            ],
+        }
+        payload["review_summary"] = {
+            "final_sell_count": 0,
+            "final_buy_count": 4,
+            "final_hold_count": 0,
+            "unresolved_review_scope_count": 4,
+            "unresolved_review_scope": [
+                {
+                    "symbol_id": f"20000{index}",
+                    "symbol_name": f"미해결종목{index}",
+                    "scope_reason": "active_order",
+                }
+                for index in range(1, 5)
+            ],
+            "symbols": [
+                {
+                    "symbol_id": f"30000{index}",
+                    "symbol_name": f"결정종목{index}",
+                    "expected_holding_quantity": 0,
+                    "final_holding_quantity": 1,
+                    "requested_action": "increase",
+                    "canonical_action": "increase",
+                    "one_line_reason": "텔레그램 선택 영역에는 표시하지 않는 매우 긴 상세 판단 근거입니다.",
+                }
+                for index in range(1, 5)
+            ],
+        }
+
+        rendered = render(payload)
+
+        for index in range(1, 5):
+            self.assertIn(f"주문종목{index}", rendered)
+            self.assertIn(f"미해결종목{index}", rendered)
+            self.assertIn(f"결정종목{index}", rendered)
+        self.assertNotIn("- 외 ", rendered)
+        self.assertNotIn("…", rendered)
+        self.assertNotIn("매우 긴 상세 판단 근거", rendered)
 
     def test_unresolved_judge_error_reuses_localized_reason_label(self) -> None:
         payload = dict(self.BASE_PAYLOAD)

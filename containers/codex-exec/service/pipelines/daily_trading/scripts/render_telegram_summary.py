@@ -82,12 +82,6 @@ LIFECYCLE_CANCEL_REASONS = {"active_order_cancel_submitted"}
 LIFECYCLE_CORRECTION_REASONS = {"active_order_correction_submitted", "active_order_cancel_and_replacement_submitted"}
 # canonical_action/requested_action (derive_action) are increase|hold|reduce|exit, never buy/sell.
 CANONICAL_ACTION_LABELS = {"increase": "확대", "reduce": "축소", "exit": "청산", "hold": "유지"}
-BASIS_LABELS = {
-    "none": "기준유지",
-    "thesis": "논지",
-    "profit_protection": "이익보호",
-    "concentration_rebalance": "집중도조정",
-}
 GUARD_STATUS_LABELS = {"allowed": "허용", "blocked": "차단", "no_change": "변경없음 처리"}
 SCOPE_REASON_LABELS = {
     "held_position": "보유 심사대상",
@@ -286,36 +280,18 @@ def material_symbol_reason(row: dict[str, Any]) -> str:
         requested_label = CANONICAL_ACTION_LABELS.get(requested, requested)
         canonical_label = CANONICAL_ACTION_LABELS.get(canonical, canonical)
         return f"{requested_label}→{canonical_label} 조정"
-    expected_quantity = row.get("expected_holding_quantity")
-    delta = (
-        as_int(row.get("final_holding_quantity")) - as_int(expected_quantity)
-        if expected_quantity is not None
-        else as_int(row.get("delta_quantity"))
-    )
-    if delta != 0:
-        baseline = "대기반영 기준 " if expected_quantity is not None else "현재보유 기준 "
-        return f"{baseline}{'증가' if delta > 0 else '감소'} {abs(delta)}주"
     return ""
 
 
 def symbol_decision_line(row: dict[str, Any]) -> str:
-    basis_raw = text(row.get("decision_basis")) or "none"
-    basis = BASIS_LABELS.get(basis_raw, basis_raw)
     action_raw = text(row.get("canonical_action")) or "hold"
     action = CANONICAL_ACTION_LABELS.get(action_raw, action_raw)
     final_qty = as_int(row.get("final_holding_quantity"))
-    expected_quantity = row.get("expected_holding_quantity")
-    quantity_text = (
-        f"대기반영 {as_int(expected_quantity)}주→최종 {final_qty}주"
-        if expected_quantity is not None
-        else f"최종 {final_qty}주"
-    )
-    material_reason = material_symbol_reason(row)
-    one_line_reason = text(row.get("one_line_reason"))
-    if len(one_line_reason) > 40:
-        one_line_reason = one_line_reason[:40] + "…"
-    reason_suffix = f" · {esc(one_line_reason)}" if one_line_reason else ""
-    return f"- {symbol_html(row)}: {action}({basis}) {quantity_text}{(' · ' + material_reason) if material_reason else ''}{reason_suffix}"
+    adjustment = material_symbol_reason(row) if (
+        guard_intervened(row)
+        or text(row.get("requested_action") or "hold") != action_raw
+    ) else ""
+    return f"- {symbol_html(row)}: {action} · 최종 {final_qty}주{(' · ' + adjustment) if adjustment else ''}"
 
 
 def render(summary: dict[str, Any]) -> str:
@@ -437,10 +413,8 @@ def render(summary: dict[str, Any]) -> str:
         )
     if execution.get("requires_main_agent_order_execution"):
         lines.append("- 주문 제출 단계가 아직 완료되지 않았습니다.")
-    for item in submitted_or_blocked[:3]:
+    for item in submitted_or_blocked:
         lines.append(order_line(item))
-    if len(submitted_or_blocked) > 3:
-        lines.append(f"- 외 {len(submitted_or_blocked) - 3}건")
     if any(key in review for key in ("final_sell_count", "final_buy_count", "final_hold_count")):
         final_line = (
             f"- 포지션 변화(보유수량 기준): 매도 {as_int(review.get('final_sell_count'))}"
@@ -505,12 +479,12 @@ def render(summary: dict[str, Any]) -> str:
             f" · 미선정 {as_int(review.get('hold_symbol_count'))}"
         )
     # In-scope-but-unresolved (missing/duplicate/invalid Judge result) is never the same as
-    # "not shortlisted" — show up to 3 concrete names/reasons instead of collapsing into a count.
+    # "not shortlisted" — show concrete names/reasons instead of collapsing into a count.
     unresolved_rows = [item for item in review.get("unresolved_review_scope", []) if isinstance(item, dict)]
     if unresolved_rows:
         lines.append("")
         lines.append("<b>Judge 미해결 종목</b>(심사대상이었으나 결과 없음/오류)")
-        for row in unresolved_rows[:3]:
+        for row in unresolved_rows:
             scope_reason_raw = text(row.get("scope_reason"))
             scope_reason_label = SCOPE_REASON_LABELS.get(scope_reason_raw, scope_reason_raw or "-")
             error_code_raw = text(row.get("judge_error_code"))
@@ -518,8 +492,6 @@ def render(summary: dict[str, Any]) -> str:
                 f" · {JUDGE_ERROR_LABELS.get(error_code_raw, reason_label(error_code_raw))}" if error_code_raw else ""
             )
             lines.append(f"- {symbol_html(row)}: {scope_reason_label}{error_suffix}")
-        if len(unresolved_rows) > 3:
-            lines.append(f"- 외 {len(unresolved_rows) - 3}건")
     review_symbols = [item for item in review.get("symbols", []) if isinstance(item, dict)]
     material_rows = sorted(
         (row for row in review_symbols if is_material_symbol_decision(row)),
@@ -528,10 +500,8 @@ def render(summary: dict[str, Any]) -> str:
     if material_rows:
         lines.append("")
         lines.append("<b>주요 종목 결정</b>")
-        for row in material_rows[:3]:
+        for row in material_rows:
             lines.append(symbol_decision_line(row))
-        if len(material_rows) > 3:
-            lines.append(f"- 외 {len(material_rows) - 3}건")
     def domain_issue_text(label: str, payload: dict[str, Any]) -> str:
         usable_items = payload.get("usable_item_count")
         if usable_items is not None:
