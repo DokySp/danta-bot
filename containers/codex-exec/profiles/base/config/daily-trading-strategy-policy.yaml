@@ -16,7 +16,7 @@ advisory_labels:
   neutral: "판단 참고값이며 주문 허용/차단 규칙이 아님. 기존 evidence 중심으로 중립 검토한다."
   discourage: "판단 참고값이며 주문 차단 규칙이 아님. 반대 evidence가 강하지 않으면 목표 노출 확대나 투매를 낮게 본다."
   observe_first: "판단 참고값이며 주문 차단 규칙이 아님. 신규 노출 확대보다 관망과 보유 재평가를 우선 검토한다."
-  strong_review_required: "판단 참고값이며 주문 허용 규칙이 아님. 손실 포지션 추가매수는 thesis, 집중도, 손실 확대 위험을 더 엄격히 검토한다."
+  strong_review_required: "판단 참고값이며 주문 허용 규칙이 아님. 손실 포지션 추가매수는 thesis와 손실 확대 위험을 더 엄격히 검토한다."
 
 regime_bias:
   insufficient_market_data:
@@ -47,7 +47,3 @@ regime_bias:
 
 downside_add_review:
   target: all_current_holdings
-
-concentration_levels:
-  low_lte_pct: 5.0
-  moderate_lte_pct: 15.0

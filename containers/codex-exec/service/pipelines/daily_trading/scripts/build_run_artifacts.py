@@ -52,10 +52,9 @@ CHART_RECENT_ROW_LIMITS = {
     "monthly": 4,
     "intraday": 5,
 }
-# Bumped when the judge-review contract changes shape. Version 3 removes the
-# standalone debate input and requires a bounded opposing_view in Judge output,
-# so cached version-2 specs cannot masquerade as the current contract.
-REVIEW_CONTRACT_VERSION = 3
+# Bumped when review input/output semantics change. Version 4 isolates Analyst
+# inputs from account context and removes Judge concentration/portfolio snapshots.
+REVIEW_CONTRACT_VERSION = 4
 STRATEGY_POLICY_CONFIG_ENV = "DAILY_TRADING_STRATEGY_POLICY_CONFIG"
 STRATEGY_POLICY_CONFIG_FILENAME = "daily-trading-strategy-policy.yaml"
 STRATEGY_ADVISORY_LABELS = {
@@ -208,12 +207,6 @@ def validate_strategy_policy_config(payload: Any, source: Path) -> dict[str, Any
     if downside_target != "all_current_holdings":
         raise ValueError(f"strategy policy downside_add_review.target must be all_current_holdings: {source}")
 
-    concentration = payload.get("concentration_levels") if isinstance(payload.get("concentration_levels"), dict) else {}
-    low = finite_float_value(concentration.get("low_lte_pct"))
-    moderate = finite_float_value(concentration.get("moderate_lte_pct"))
-    if low is None or moderate is None or low < 0 or moderate < low:
-        raise ValueError(f"strategy policy concentration_levels are invalid: {source}")
-
     top_k = payload.get("unheld_review_top_k")
     if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 0:
         raise ValueError(f"strategy policy unheld_review_top_k must be a non-negative integer: {source}")
@@ -225,10 +218,6 @@ def validate_strategy_policy_config(payload: Any, source: Path) -> dict[str, Any
         "advisory_labels": normalized_labels,
         "regime_bias": normalized_bias,
         "downside_add_review": {"target": downside_target},
-        "concentration_levels": {
-            "low_lte_pct": low,
-            "moderate_lte_pct": moderate,
-        },
         "unheld_review_top_k": top_k,
     }
 
@@ -413,15 +402,7 @@ def account_summary(account: dict[str, Any]) -> dict[str, Any]:
     summary = account.get("account_summary")
     if not isinstance(summary, dict):
         return {}
-    keys = (
-        "cash_amount",
-        "securities_valuation_amount",
-        "today_buy_amount",
-        "today_sell_amount",
-        "total_evaluation_amount",
-        "total_pnl_amount",
-    )
-    return {key: summary.get(key) for key in keys}
+    return {"orderable_cash_amount": summary.get("orderable_cash_amount")}
 
 
 def compact_market_index_snapshot(path: str | None) -> dict[str, Any]:
@@ -591,35 +572,10 @@ def build_strategy_context(
     }
 
 
-def concentration_context(
-    valuation_amount: Any,
-    total_evaluation_amount: Any,
-    policy: dict[str, Any],
-) -> dict[str, Any]:
-    valuation = finite_float_value(valuation_amount)
-    total = finite_float_value(total_evaluation_amount)
-    if valuation is None or total is None or total <= 0:
-        return {}
-    pct = (valuation / total) * 100
-    levels = policy.get("concentration_levels") if isinstance(policy.get("concentration_levels"), dict) else {}
-    low = finite_float_value(levels.get("low_lte_pct"))
-    moderate = finite_float_value(levels.get("moderate_lte_pct"))
-    if low is None or moderate is None:
-        return {"concentration_pct": round_float(pct)}
-    if pct <= low:
-        level = "low"
-    elif pct <= moderate:
-        level = "moderate"
-    else:
-        level = "high"
-    return {"concentration_pct": round_float(pct), "concentration_level": level}
-
-
 def build_symbol_strategy_context(
     policy: dict[str, Any],
     strategy_context: dict[str, Any],
     account_exposure: dict[str, Any],
-    account_exposure_summary: dict[str, Any],
 ) -> dict[str, Any]:
     holding_quantity = as_int(account_exposure.get("current_live_holding_quantity"))
     current_holding = holding_quantity > 0
@@ -636,13 +592,6 @@ def build_symbol_strategy_context(
     if pnl_rate is not None:
         context["pnl_rate"] = round_float(pnl_rate)
         context["loss_position"] = pnl_rate < 0
-    context.update(
-        concentration_context(
-            account_exposure.get("valuation_amount"),
-            account_exposure_summary.get("total_evaluation_amount"),
-            policy,
-        )
-    )
     return context
 
 
@@ -1299,7 +1248,6 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
                 strategy_policy,
                 strategy_context,
                 account_exposure,
-                account_exposure_summary,
             ),
             "today_trade_price_context": {key: value for key, value in same_day_context.items() if key != "fills"},
             "today_trade_timeline_context": same_day_context,
@@ -1363,6 +1311,7 @@ def build_first_specs(args: argparse.Namespace) -> dict[str, Any]:
             "run_id": run_id,
             "started_at": started_at,
             "stage": "analyst-review",
+            "review_contract_version": REVIEW_CONTRACT_VERSION,
             "agent_role": role,
             "task_name": f"first-{role}",
             "workspace_dir": workspace_dir,
@@ -1741,21 +1690,6 @@ def build_second_spec(args: argparse.Namespace) -> dict[str, Any]:
 
     selected = sorted(review_scope_reasons)
 
-    portfolio_snapshot: list[dict[str, Any]] = []
-    for symbol_id in sorted(holding_set):
-        brief_item = brief_by_symbol.get(symbol_id, {})
-        exposure = brief_item.get("account_exposure") if isinstance(brief_item.get("account_exposure"), dict) else {}
-        portfolio_snapshot.append(
-            {
-                "symbol_id": symbol_id,
-                "symbol_name": brief_item.get("symbol_name") or symbol_id,
-                "final_first_score": scores_by_symbol.get(symbol_id),
-                "current_live_holding_quantity": as_int(exposure.get("current_live_holding_quantity")),
-                "valuation_amount": as_int(exposure.get("valuation_amount")),
-                "pnl_rate": as_number(exposure.get("pnl_rate")),
-            }
-        )
-
     (output_dir / "judge-review-symbols.txt").write_text("\n".join(selected) + ("\n" if selected else ""), encoding="utf-8")
 
     daily_pipeline_dir = Path(args.pipeline_dir).resolve()
@@ -1781,7 +1715,6 @@ def build_second_spec(args: argparse.Namespace) -> dict[str, Any]:
         },
         "symbol_ids": selected,
         "review_scope_reasons": review_scope_reasons,
-        "portfolio_snapshot": portfolio_snapshot,
     }
     if extra_instructions:
         payload["extra_instructions"] = extra_instructions
@@ -1837,9 +1770,7 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
             "request_type": args.request_type,
             "requires_main_agent_order_execution": False,
             "required_main_agent_actions": [],
-            "latest_available_cash": None
-            if account.get("order_available_lookup_performed") is not True
-            else (account.get("account_summary") or {}).get("cash_amount"),
+            "latest_available_cash": None,
             "order_adjustments": [],
             "orders": [],
         }

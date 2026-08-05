@@ -1655,7 +1655,7 @@ class Pipeline:
         target_value = Decimal(requested_qty) * price
 
         decision_basis = str(item.get("decision_basis") or "none").strip().lower()
-        if decision_basis not in {"none", "thesis", "profit_protection", "concentration_rebalance"}:
+        if decision_basis not in {"none", "thesis", "profit_protection"}:
             decision_basis = "none"
 
         additional_buy_reason = str(item.get("additional_buy_reason") or "").strip()

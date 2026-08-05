@@ -228,6 +228,8 @@ def step_decision_brief_evidence_and_strategy_context_checks(tmp: Path, run_dir:
         if not str((strategy.get("policy_source") or {}).get("sha256") or ""):
             failures.append(f"strategy context should include policy source hash: {strategy}")
         strategy_policy, strategy_policy_path = load_strategy_policy_config("")
+        if "concentration_levels" in strategy_policy:
+            failures.append(f"strategy policy kept removed concentration levels: {strategy_policy}")
         panic_context = build_strategy_context(
             strategy_policy,
             strategy_policy_path,
@@ -253,13 +255,14 @@ def step_decision_brief_evidence_and_strategy_context_checks(tmp: Path, run_dir:
         symbol_strategy = by_symbol["005930"].get("symbol_strategy_context", {})
         if symbol_strategy.get("current_holding") is not True or symbol_strategy.get("loss_position") is not True:
             failures.append(f"holding loss symbol should include strategy context: {symbol_strategy}")
-        if symbol_strategy.get("concentration_level") != "low":
-            failures.append(f"symbol concentration should be calculated: {symbol_strategy}")
+        if any(key.startswith("concentration_") for key in symbol_strategy):
+            failures.append(f"symbol strategy context kept concentration fields: {symbol_strategy}")
+        if brief.get("account_exposure_summary") != {"orderable_cash_amount": 900000}:
+            failures.append(f"decision brief should expose only Judge orderable cash budget: {brief.get('account_exposure_summary')}")
         panic_symbol_strategy = build_symbol_strategy_context(
             strategy_policy,
             panic_context,
             by_symbol["005930"].get("account_exposure", {}),
-            brief.get("account_exposure_summary", {}),
         )
         if panic_symbol_strategy.get("downside_add_review_target") is not True:
             failures.append(f"panic current holding should be downside add review target: {panic_symbol_strategy}")
@@ -436,6 +439,8 @@ def step_first_specs_and_analyst_review_checks(tmp: Path, run_dir: Path) -> list
         )
         if len(first_specs["specs"]) != 2 or not Path(first_specs["specs"][0]["artifact_paths"]["persona"]).is_absolute():
             failures.append(f"unexpected first specs: {first_specs}")
+        if any(spec.get("review_contract_version") != 4 for spec in first_specs["specs"]):
+            failures.append(f"analyst specs must use review contract version 4: {first_specs}")
         subagent_dir = run_dir / "subagents"
         for role in ANALYST_REVIEW_SPEC_ROLES:
             parsed_symbols = [
@@ -804,17 +809,16 @@ def step_second_spec_checks(tmp: Path, run_dir: Path) -> list[str]:
             )
 
         second_spec = build_second_spec(second_spec_args(str(run_dir / "analyst-review.json"), "judge-review-spec.json"))
-        if second_spec.get("review_contract_version") != 3:
-            failures.append(f"judge spec must use review contract version 3: {second_spec}")
+        if second_spec.get("review_contract_version") != 4:
+            failures.append(f"judge spec must use review contract version 4: {second_spec}")
         if second_spec["symbol_ids"] != ["000660", "005930"]:
             failures.append(f"unexpected second spec symbols: {second_spec}")
         if second_spec.get("review_scope_reasons") != {"005930": "held_position", "000660": "symbol_news"}:
             failures.append(f"review_scope_reasons missing held/unheld provenance: {second_spec}")
         if "candidate_directions" in second_spec or "score_band_thresholds" in second_spec:
             failures.append(f"removed score-band/candidate-direction fields must not reappear: {second_spec}")
-        snapshot = second_spec.get("portfolio_snapshot") or []
-        if len(snapshot) != 1 or snapshot[0].get("symbol_id") != "005930" or snapshot[0].get("final_first_score") != 7.0 or "candidate_direction" in snapshot[0]:
-            failures.append(f"portfolio snapshot should describe every holding without a candidate_direction: {second_spec}")
+        if "portfolio_snapshot" in second_spec:
+            failures.append(f"judge spec kept removed portfolio snapshot: {second_spec}")
         if str(second_spec.get("artifact_paths", {}).get("review_format", "")).rsplit("/", 1)[-1] != "judge-review-format.md":
             failures.append(f"judge spec should reference judge-review-format.md: {second_spec}")
         if any(key.startswith("debate") for key in second_spec.get("artifact_paths", {})):
@@ -996,6 +1000,8 @@ def step_execution_plan_and_token_summary_checks(tmp: Path, run_dir: Path) -> li
         )
         if ready_execution["orders"][0]["result"] != "skipped" or ready_execution["orders"][0]["reason"] != "ready_for_main_agent_submission":
             failures.append(f"gate-ready execution plan was not marked ready: {ready_execution}")
+        if ready_execution.get("latest_available_cash") is not None:
+            failures.append(f"execution plan must not copy ledger cash into latest_available_cash: {ready_execution}")
         account_default_brief = load_json(run_dir / "account-before-order-ready.json")
         account_default_brief["symbols"][0]["current_price"] = None
         write_json(run_dir / "account-before-order-default-brief.json", account_default_brief)
@@ -1129,7 +1135,11 @@ def build_shared_fixtures(tmp: Path, run_dir: Path) -> None:
             "started_at": "2026-06-18 09:00:00 KST",
             "active_order_lookup_performed": False,
             "order_available_lookup_performed": False,
-            "account_summary": {"cash_amount": 1000000, "total_evaluation_amount": 1500000},
+            "account_summary": {
+                "cash_amount": 1000000,
+                "orderable_cash_amount": 900000,
+                "total_evaluation_amount": 1500000,
+            },
             "active_orders": [],
             "symbols": [
                 {

@@ -424,6 +424,15 @@ def write_sample_review_inputs(tmp: Path) -> None:
         {
             "schema_version": "1",
             "brief_type": "decision-brief",
+            "portfolio": {
+                "recommanded": [],
+                "specified": ["005930", "000660"],
+                "holding": ["005930"],
+                "universe": ["005930", "000660"],
+            },
+            "account_exposure_summary": {
+                "orderable_cash_amount": 800000,
+            },
             "market_index_snapshot": {
                 "status": "success",
                 "indexes": [
@@ -611,7 +620,7 @@ def assert_compact_review_prompt(tmp: Path) -> None:
         "review_format: prompts/analyst-review-format.md",
         "symbol_ids: 005930,000660",
         "Return each symbol with a views object keyed by analyst-quality-value, analyst-risk-allocation",
-        "Use today_trade_price_context to avoid same-day churn:",
+        "Evaluate each symbol only from that symbol's supplied evidence and explicitly linked market or sector context",
         "Every score must be a JSON integer from 0 to 10",
         "Missing optional-domain coverage alone must not pull an included view toward 5",
         "Return JSON only",
@@ -633,13 +642,14 @@ def assert_compact_review_prompt(tmp: Path) -> None:
         "For judge-review, use the selected-symbol analyst-review slice from analyst_review; agent_scores excluded from aggregation are intentionally omitted from this judgment input.",
         "The supplied symbols are every eligible held symbol (review_scope_reasons=held_position, regardless of score or missing score), every eligible symbol with an active order (review_scope_reasons=active_order), every eligible symbol with directly linked symbol news (review_scope_reasons=symbol_news), plus the top-ranked remaining unheld symbols by score (review_scope_reasons=unheld_score_rank).",
         "Return no separate action. Return target_position_value_krw, reason_code, and one_line_reason.",
-        "decision_basis (none|thesis|profit_protection|concentration_rebalance) is optional audit metadata.",
+        "decision_basis (none|thesis|profit_protection) is optional audit metadata.",
         "Conflict alone is not a hold rule.",
         "final_first_score is the simple mean of the included analyst view scores",
         "For a held symbol with a low score, treat thesis integrity as one input, not a reduction gate",
         "Use strategy_context and symbol_strategy_context as advisory inputs for target_position_value_krw, not as order allow/block rules.",
         "Use position_cost_context (average_purchase_price, purchase_amount, current_review_price, pct_distance_from_average_price) as reference information for profit/loss, risk, and position adjustments.",
-        "Determine final direction and target exposure by considering thesis, market evidence, and portfolio risk together.",
+        "Determine final direction and target exposure from thesis, market evidence, symbol-specific risk, and relative attractiveness",
+        "Use account_exposure_summary.orderable_cash_amount only as the aggregate incremental-buy budget.",
         "For every supplied symbol, first build a compact opposing_view: the single strongest exposure-increase/maintain case (increase_case) and the single strongest exposure-reduce/avoid case (reduce_case)",
         "Return opposing_view: {increase_case: {summary, evidence_refs}, reduce_case: {summary, evidence_refs}}.",
         "Optional evidence marked missing, failed, empty, unavailable, or excluded_from_aggregation is non-directional",
@@ -668,8 +678,8 @@ def assert_compact_review_prompt(tmp: Path) -> None:
         raise AssertionError(f"review_scope_reasons missing from judge prompt: {scoped_prompt}")
     if "candidate_directions" in scoped_prompt or "score_band" in scoped_prompt:
         raise AssertionError(f"removed candidate-direction/score-band language leaked into judge prompt: {scoped_prompt}")
-    if "portfolio_snapshot: " not in scoped_prompt or '"final_first_score":3.5' not in scoped_prompt.replace(" ", ""):
-        raise AssertionError(f"portfolio snapshot missing from judge prompt: {scoped_prompt}")
+    if "portfolio_snapshot" in scoped_prompt or '"final_first_score":3.5' in scoped_prompt.replace(" ", ""):
+        raise AssertionError(f"removed portfolio snapshot leaked into judge prompt: {scoped_prompt}")
 
 
 def assert_review_input_slices(tmp: Path) -> None:
@@ -688,12 +698,12 @@ def assert_review_input_slices(tmp: Path) -> None:
         raise AssertionError(f"momentum-news slice dropped market_index_snapshot: {first_core}")
     if first_core.get("market_news_context", {}).get("items", [{}])[0].get("title") != "Global semiconductor policy update":
         raise AssertionError(f"momentum-news slice dropped market_news_context: {first_core}")
-    if first_symbol.get("today_trade_price_context", {}).get("last_fill_price") != 70100:
-        raise AssertionError(f"momentum-news slice dropped same-day trade price context: {first_symbol}")
-    if "today_trade_timeline_context" in first_symbol:
-        raise AssertionError(f"analyst-review slice kept full same-day timeline: {first_symbol}")
+    if "today_trade_price_context" in first_symbol or "today_trade_timeline_context" in first_symbol:
+        raise AssertionError(f"analyst-review slice kept same-day trade context: {first_symbol}")
     if "financial_summary" in first_symbol or "account_exposure" in first_symbol or "custom_detail" in first_symbol:
         raise AssertionError(f"momentum-news slice kept unrelated fields: {first_symbol}")
+    if "portfolio" in first_core or "account_exposure_summary" in first_core:
+        raise AssertionError(f"analyst-review slice kept portfolio/account context: {first_core}")
     if "position_cost_context" in first_symbol:
         raise AssertionError(f"analyst-review slice must not receive position_cost_context: {first_symbol}")
     quality_payload = compact_spec(tmp, stage="analyst-review", agent_role="analyst-quality-risk", task_name="slice-quality")
@@ -703,12 +713,18 @@ def assert_review_input_slices(tmp: Path) -> None:
         raise AssertionError(f"quality-risk slice dropped market_index_snapshot: {quality_core}")
     if (quality_core.get("symbols") or [{}])[0].get("product_type") != "stock":
         raise AssertionError(f"quality-risk slice dropped product_type needed for financial/ETF policy: {quality_core}")
+    if (quality_core.get("symbols") or [{}])[0].get("chart_context", {}).get("daily", [{}])[0].get("close") != 70000:
+        raise AssertionError(f"quality-risk slice dropped symbol-intrinsic chart risk context: {quality_core}")
     if "strategy_context" in quality_core:
         raise AssertionError(f"analyst-review slice kept strategy_context: {quality_core}")
     if "market_news_context" in quality_core:
         raise AssertionError(f"quality-risk slice kept market_news_context: {quality_core}")
     if "symbol_news_summary" in (quality_core.get("symbols") or [{}])[0]:
         raise AssertionError(f"quality-risk slice kept symbol_news_summary: {quality_core}")
+    if "account_exposure" in (quality_core.get("symbols") or [{}])[0] or "today_trade_price_context" in (quality_core.get("symbols") or [{}])[0]:
+        raise AssertionError(f"quality-risk slice kept account/trade context: {quality_core}")
+    if "portfolio" in quality_core or "account_exposure_summary" in quality_core:
+        raise AssertionError(f"quality-risk slice kept portfolio/account context: {quality_core}")
     if "symbol_strategy_context" in (quality_core.get("symbols") or [{}])[0]:
         raise AssertionError(f"analyst-review slice kept symbol_strategy_context: {quality_core}")
     if "position_cost_context" in (quality_core.get("symbols") or [{}])[0]:
@@ -736,6 +752,8 @@ def assert_review_input_slices(tmp: Path) -> None:
                 raise AssertionError(f"judge-review slice dropped strategy_context: {slice_payload}")
             if slice_payload.get("market_news_context", {}).get("selected_count") != 1:
                 raise AssertionError(f"judge-review slice dropped market_news_context: {slice_payload}")
+            if slice_payload.get("account_exposure_summary") != {"orderable_cash_amount": 800000}:
+                raise AssertionError(f"judge-review slice dropped or widened orderable cash context: {slice_payload}")
             error_codes = [item.get("code") for item in slice_payload.get("errors", []) if isinstance(item, dict)]
             if error_codes != ["keep_symbol_error", "keep_run_error"]:
                 raise AssertionError(f"review-core did not filter symbol-scoped errors: {slice_payload}")
@@ -790,6 +808,9 @@ def assert_review_input_slices(tmp: Path) -> None:
                 raise AssertionError(f"judge-review review-core computed wrong pct distance: {first_symbol}")
             if "buy" in position_cost_context.get("advisory_semantics", "").lower() and "not" not in position_cost_context.get("advisory_semantics", "").lower():
                 raise AssertionError(f"position_cost_context advisory_semantics missing non-directional guard: {first_symbol}")
+            advisory_semantics = position_cost_context.get("advisory_semantics", "").lower()
+            if "portfolio risk" in advisory_semantics or "symbol-specific risk" not in advisory_semantics:
+                raise AssertionError(f"position_cost_context advisory_semantics kept portfolio-risk sizing: {first_symbol}")
             second_symbol = slice_payload["symbols"][1]
             second_cost_context = second_symbol.get("position_cost_context", {})
             if second_cost_context.get("status") != "not_held" or second_cost_context.get("held") is not False:
@@ -1058,7 +1079,7 @@ def assert_optional_evidence_policy() -> None:
         raise AssertionError("judge.md missing non-directional optional-evidence policy")
     if (
         "position_cost_context`는 손익·리스크·포지션 조정의 참고 정보로 활용한다" not in judge_text
-        or "최종 방향과 목표 노출은 thesis, 시장 근거, 포트폴리오 위험을 함께 고려한다" not in judge_text
+        or "최종 방향과 목표 노출은 thesis, 시장 근거와 종목 고유 위험을 함께 고려한다" not in judge_text
     ):
         raise AssertionError("judge.md missing position_cost_context judgment guidance")
     format_text = (prompt_dir / "judge-review-format.md").read_text(encoding="utf-8")
@@ -1310,6 +1331,29 @@ def step_invalid_spec_and_compact_schema_checks(tmp: Path) -> list[str]:
         )
         if target_value_errors:
             raise AssertionError(f"target_position_value_krw judge-review schema was rejected: {target_value_errors}")
+        removed_basis_errors = compact_review_payload_errors(
+            {
+                "stage": "judge-review",
+                "symbols": [
+                    {
+                        "symbol_id": "005930",
+                        "symbol_name": "삼성전자",
+                        "reason_code": "trim",
+                        "one_line_reason": "removed basis probe",
+                        "target_position_value_krw": 490000,
+                        "relative_attractiveness_rank": 1,
+                        "decision_basis": "concentration_rebalance",
+                        "opposing_view": {
+                            "increase_case": {"summary": "increase case", "evidence_refs": []},
+                            "reduce_case": {"summary": "reduce case", "evidence_refs": []},
+                        },
+                    }
+                ],
+            },
+            "judge-review",
+        )
+        if not any("decision_basis must be one of none, thesis, profit_protection" in str(error.get("message")) for error in removed_basis_errors):
+            raise AssertionError(f"removed concentration decision basis was accepted: {removed_basis_errors}")
         missing_symbol_errors = compact_review_payload_errors(
             {
                 "stage": "judge-review",

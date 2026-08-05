@@ -66,14 +66,13 @@ COMBINED_ANALYST_REVIEW_ROLE_OUTPUTS = {
 ANALYST_REVIEW_VIEW_INPUT_FIELDS = {
     "analyst-quality-value": {
         "price",
-        "today_trade_price_context",
         "financial_summary",
         "etf_summary",
     },
     "analyst-risk-allocation": {
         "price",
-        "today_trade_price_context",
-        "account_exposure",
+        "price_chart_signals",
+        "chart_context",
         "orderbook_summary",
         "trade_flow_summary",
         "investor_flow_summary",
@@ -81,7 +80,6 @@ ANALYST_REVIEW_VIEW_INPUT_FIELDS = {
     },
     "analyst-momentum-cycle": {
         "price",
-        "today_trade_price_context",
         "price_chart_signals",
         "chart_context",
         "orderbook_summary",
@@ -90,7 +88,6 @@ ANALYST_REVIEW_VIEW_INPUT_FIELDS = {
     },
     "analyst-news-flow": {
         "price",
-        "today_trade_price_context",
         "symbol_news_summary",
     },
 }
@@ -767,7 +764,8 @@ def build_review_core_payload(payload: Any, symbol_ids: list[str], agent_role: s
     if agent_role and safe_name(agent_role).lower() not in MARKET_NEWS_CONTEXT_AGENT_ROLES:
         core.pop("market_news_context", None)
     if agent_role and safe_name(agent_role).lower() != "judge":
-        core.pop("strategy_context", None)
+        for key in ("account_exposure_summary", "portfolio", "strategy_context"):
+            core.pop(key, None)
     core["slice_type"] = "review-core"
     core["source_brief_type"] = filtered.get("brief_type") or "decision-brief"
     return core
@@ -1439,8 +1437,8 @@ def add_judge_review_holding_context(payload: Any, output_dir: Path | None = Non
 
 POSITION_COST_CONTEXT_ADVISORY = (
     "Use position_cost_context as reference information for profit/loss, risk, and position adjustments. "
-    "Determine final direction and target exposure by considering thesis, market evidence, and portfolio risk "
-    "together."
+    "Determine final direction and target exposure from thesis, market evidence, symbol-specific risk, and "
+    "relative attractiveness."
 )
 
 
@@ -1732,7 +1730,7 @@ def compact_review_prompt(spec: dict[str, Any]) -> str | None:
                 f"For this combined analyst-review task, return two independent view results for every symbol: {', '.join(output_roles)}.",
                 "Use a separate pass for each view and evaluate that view only from its own rubric and supplied evidence.",
                 "Do not let either view's score, reason_code, or one_line_reason depend on the other view's conclusion.",
-                "Use today_trade_price_context to avoid same-day churn: compare last fill price/direction with current_or_last price before strengthening buy/sell opinions.",
+                "Evaluate each symbol only from that symbol's supplied evidence and explicitly linked market or sector context; never use another supplied symbol as evidence or a comparison anchor.",
                 "Every score must be a JSON integer from 0 to 10; malformed, fractional, boolean, string, or out-of-range values invalidate the output.",
                 "Carry the directional strength of supplied usable evidence in the score itself: keep scores close to neutral 5 only when that evidence is genuinely weakly directional, stale, or conflicting. Missing optional-domain coverage alone must not pull an included view toward 5. There is no confidence field.",
                 f"Return each symbol with a views object keyed by {', '.join(output_roles)}; each view must contain score, reason_code, one_line_reason, and missing_data.",
@@ -1740,7 +1738,6 @@ def compact_review_prompt(spec: dict[str, Any]) -> str | None:
         )
     if stage == "judge-review":
         review_scope_reasons = spec.get("review_scope_reasons") if isinstance(spec.get("review_scope_reasons"), dict) else {}
-        portfolio_snapshot = spec.get("portfolio_snapshot") if isinstance(spec.get("portfolio_snapshot"), list) else []
         lines.extend(
             [
                 "",
@@ -1750,30 +1747,24 @@ def compact_review_prompt(spec: dict[str, Any]) -> str | None:
                 "Do not use optional-domain coverage counts or completeness to decide evidence sufficiency; judge only the directional strength and conflict of supplied usable evidence.",
                 "The supplied symbols are every eligible held symbol (review_scope_reasons=held_position, regardless of score or missing score), every eligible symbol with an active order (review_scope_reasons=active_order), every eligible symbol with directly linked symbol news (review_scope_reasons=symbol_news), plus the top-ranked remaining unheld symbols by score (review_scope_reasons=unheld_score_rank). There is no score band and no assigned buy/sell candidate direction: you may propose an increase or a decrease for any supplied symbol.",
                 "For every supplied symbol, first build a compact opposing_view: the single strongest exposure-increase/maintain case (increase_case) and the single strongest exposure-reduce/avoid case (reduce_case), each with a short summary and its own evidence_refs drawn only from supplied usable evidence. Then resolve the comparison yourself into one target_position_value_krw. Return opposing_view: {increase_case: {summary, evidence_refs}, reduce_case: {summary, evidence_refs}}. Keep both cases short and auditable; do not return long prose, a transcript, or hidden chain-of-thought.",
-                "Conflict alone is not a hold rule. Compare the cases by materiality, freshness, source quality, and portfolio impact, then set the target change magnitude in proportion to the supported net advantage. Hold only when neither case has enough supported net advantage to justify a change.",
-                "Return no separate action. Return target_position_value_krw, reason_code, and one_line_reason. decision_basis (none|thesis|profit_protection|concentration_rebalance) is optional audit metadata.",
+                "Conflict alone is not a hold rule. Compare the cases by materiality, freshness, source quality, and symbol-specific investment impact, then set the target change magnitude in proportion to the supported net advantage. Hold only when neither case has enough supported net advantage to justify a change.",
+                "Return no separate action. Return target_position_value_krw, reason_code, and one_line_reason. decision_basis (none|thesis|profit_protection) is optional audit metadata.",
                 "final_first_score is the simple mean of the included analyst view scores; per-analyst scores in agent_scores carry the evidence behind it. It is advisory/ranking/reporting context only, never an order precondition.",
                 "Return target_position_value_krw for every supplied symbol as the target KRW position value after this decision.",
                 "The pipeline derives final_holding_quantity from target_position_value_krw / price.current_or_last with Decimal ROUND_HALF_UP; judge-supplied final_holding_quantity is optional and ignored for sizing.",
                 "No additional buy, no extra exposure, or 추가 확대 없음 means target_position_value_krw must stay at the baseline (holding_quantity_context.expected_holding_quantity * price.current_or_last), not 0.",
-                "When increasing after a same-day buy, additional_buy_reason may record new evidence or materially changed price/portfolio context; it is optional audit text and never an authorization gate.",
+                "Use account_exposure_summary.orderable_cash_amount only as the aggregate incremental-buy budget. Do not infer a target cash ratio, reward residual cash, or use cash as evidence for any symbol.",
+                "When increasing after a same-day buy, additional_buy_reason may record new evidence or materially changed price/market context; it is optional audit text and never an authorization gate.",
                 "Read prior_decision_context and analyst_history_context first; past Analyst assessments are interpretation history, not fresh evidence, votes, averages, or gates. Treat the previous target as an ongoing plan over its thesis/rationale horizon and change it only when new evidence supports enough expected portfolio improvement after transaction and opportunity costs, while urgent material risk may override it immediately. For a change or reversal, put the new evidence, horizon, and net benefit or urgency in one_line_reason; never judge from realized P&L or hindsight alone. This is a Judge objective, not a code gate.",
-                "For a held symbol with a low score, treat thesis integrity as one input, not a reduction gate. Thesis damage can support reduction, but relative attractiveness, concentration, profit/loss risk, opportunity cost, or a stronger alternative may independently support reducing or exiting even when the thesis remains intact.",
+                "For a held symbol with a low score, treat thesis integrity as one input, not a reduction gate. Thesis damage can support reduction, but relative attractiveness, profit/loss risk, opportunity cost, or a stronger alternative may independently support reducing or exiting even when the thesis remains intact.",
                 "Use strategy_context and symbol_strategy_context as advisory inputs for target_position_value_krw, not as order allow/block rules.",
-                "Use position_cost_context (average_purchase_price, purchase_amount, current_review_price, pct_distance_from_average_price) as reference information for profit/loss, risk, and position adjustments. Determine final direction and target exposure by considering thesis, market evidence, and portfolio risk together.",
+                "Use position_cost_context (average_purchase_price, purchase_amount, current_review_price, pct_distance_from_average_price) as reference information for profit/loss, risk, and position adjustments. Determine final direction and target exposure from thesis, market evidence, symbol-specific risk, and relative attractiveness without current-weight, concentration, duplicate-exposure, or sector-cap constraints.",
                 "prior_decision_context may carry the latest valid historical thesis_definition even when it came from an older decision. Use it as context, not as a mechanical authorization condition.",
                 "When the historical thesis materially affects the target, you may return thesis_assessment: {status: intact|damaged|uncertain, matched_invalidation_condition_ids: [...]} and/or a new thesis_definition for future context. These are audit fields; missing or malformed values do not block the target. previous_session.realized_pnl is a symbol-session KIS fact when available; unavailable outcome fields are non-directional and must not be estimated.",
             ]
         )
         if review_scope_reasons:
             lines.append("review_scope_reasons: " + ",".join(f"{symbol}={reason}" for symbol, reason in sorted(review_scope_reasons.items())))
-        if portfolio_snapshot:
-            lines.extend(
-                [
-                    "Read-only portfolio snapshot of every held symbol (score/quantity/valuation/pnl_rate); use it for portfolio-level sizing context only and never return decisions for snapshot-only symbols:",
-                    "portfolio_snapshot: " + json.dumps(portfolio_snapshot, ensure_ascii=False, separators=(",", ":")),
-                ]
-            )
 
     lines.extend(
         [
@@ -2060,11 +2051,11 @@ def compact_review_payload_errors(
                             "message": f"symbols[{index}] missing {field}",
                         }
                     )
-            if "decision_basis" in symbol and symbol.get("decision_basis") not in {"none", "thesis", "profit_protection", "concentration_rebalance"}:
+            if "decision_basis" in symbol and symbol.get("decision_basis") not in {"none", "thesis", "profit_protection"}:
                 errors.append(
                     {
                         "code": "invalid_compact_review_schema",
-                        "message": f"symbols[{index}].decision_basis must be one of none, thesis, profit_protection, concentration_rebalance",
+                        "message": f"symbols[{index}].decision_basis must be one of none, thesis, profit_protection",
                     }
                 )
             if "opposing_view" in symbol:
@@ -2210,7 +2201,6 @@ def spec_fingerprint(spec: dict[str, Any]) -> str:
             "symbols",
             "review_contract_version",
             "review_scope_reasons",
-            "portfolio_snapshot",
             "extra_instructions",
         )
     }

@@ -33,7 +33,7 @@ Main-generated `analyst-review` sidecar content:
 
 The sidecar is never machine input. JSON captured by the launcher is authoritative. Missing, malformed, or inconsistent sidecars are warnings only.
 
-`decision-brief.json` is the canonical review input. It should contain compact price/chart, optional top-level `market_index_snapshot` and `market_news_context`, optional per-symbol financial and `symbol_news_summary` evidence, account exposure, eligibility, evidence mode, and errors. Absence of optional market index/news or financial/symbol-news data is context only; it must not lower score, exclude a symbol, or block orders by itself. Missing optional-domain coverage does not make the supplied usable evidence thin, stale, mixed, or conflicting.
+`decision-brief.json` is the canonical review input. It may contain compact price/chart, optional top-level `market_index_snapshot` and `market_news_context`, optional per-symbol financial and `symbol_news_summary` evidence, Judge-only account context, eligibility, evidence mode, and errors. Analyst role-scoped slices exclude portfolio, account, holding, cash, and same-day trade context. Absence of optional market index/news or financial/symbol-news data is context only; it must not lower score, exclude a symbol, or block orders by itself. Missing optional-domain coverage does not make the supplied usable evidence thin, stale, mixed, or conflicting.
 
 Review sub-agents receive launcher-created `review-inputs/` slices containing only the listed `symbol_ids`. `analyst-review` reads a role-scoped `review-core` slice derived from `decision-brief.json` and filtered to the execution agent's output view input profiles. Raw prompt fallback is forbidden for review stages. Review sub-agents may use read-only local shell commands such as `cat` and `jq` only for explicitly listed artifact/persona/rule files. Do not load unrelated symbols, raw memory caches, optional source files, secrets, or unlisted paths.
 
@@ -43,7 +43,7 @@ Selected analyst-review execution personas produce four canonical independent sc
 
 - `analyst-quality-value` covers financial stability, earnings growth, valuation, and quality/value factors. For stocks, if no usable `financial_summary` is supplied, and for ETF/ETN assets, if no usable `etf_summary` is supplied, it must return `score=5` and `reason_code="no_financial_excluded"` for audit; Main helper excludes that row from analyst-review aggregation. Current price, daily change, sector name, or ETF volume alone is not usable quality/value evidence.
 - `analyst-momentum-cycle` covers price trend, supply/demand, sector cycle, macro sensitivity, theme/event momentum, and earnings momentum. It may use usable top-level `market_news_context` only when an item has an explicit sector, geographic revenue, supply-chain, rate, currency, commodity, or policy linkage to that symbol. Broad news is a full-review signal, never an automatic individual-symbol order or score direction.
-- `analyst-risk-allocation` covers volatility, liquidity, stop-loss room, duplicate ETF/index exposure, concentration, and portfolio fit.
+- `analyst-risk-allocation` covers only symbol-intrinsic volatility, liquidity, drawdown, stop-loss room, trading-risk flags, and ETF/ETN tracking risk. It must not use holdings, cash, current weight, concentration, duplicate exposure, portfolio fit, or another supplied symbol as evidence.
 - `analyst-news-flow` covers supplied per-symbol KIS `symbol_news_summary` direction, materiality, freshness, and mixed-news risk. It must not treat top-level `market_news_context` as symbol news. Only non-empty news/disclosure entries whose article date matches the cache date are usable. If no usable news/disclosure summary is supplied, it must return `score=5` and `reason_code="no_news_excluded"` for audit. If supplied news is low-materiality, mixed, or directionless, it must also return `score=5`. Main helper excludes either kind of `score=5` news row from analyst-review aggregation while preserving the raw symbol news for Judge.
 
 When `agent_role` is `analyst-quality-risk` or `analyst-momentum-news`, return each symbol with a `views` object instead of a top-level `score`:
@@ -122,7 +122,7 @@ Rules:
 - `score` is an integer from `0` to `10`.
 - `reason_code` is a short snake_case label. `one_line_reason` is one concise Korean sentence citing only supplied evidence when useful.
 - Do not return long `evidence`, `risks`, `rationale`, or prose arrays.
-- One symbol's data cannot support another symbol.
+- One symbol's data cannot support or anchor another symbol's score; only explicitly linked market or sector context may be shared.
 - Agents cannot see other review outputs.
 - `human_markdown_path` is informational.
 

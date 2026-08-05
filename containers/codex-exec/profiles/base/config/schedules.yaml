@@ -68,7 +68,7 @@ schedules:
 
   - id: daily-21
     enabled: true
-    cron: "0 12,13,14 * * 1-5"
+    cron: "0,30 12,13,14 * * 1-5"
     daily_trading:
       env: acct
       request_type: real-submit
