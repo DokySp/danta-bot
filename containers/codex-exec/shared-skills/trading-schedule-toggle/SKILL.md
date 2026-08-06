@@ -12,6 +12,7 @@ Enable or disable codex-exec daily trading schedules whose IDs match `daily-{num
 ## Rules
 
 - Only modify schedules with IDs matching `^daily-[0-9]+$`.
+- Leave any schedule with `toggle_managed: false` unchanged.
 - Do not modify `pre-open`, `trading-toggle`, or any other non-daily schedule.
 - Prefer the schedule file path in `SCHEDULE_FILE`.
 - If `SCHEDULE_FILE` is unset, use `/app/config/schedules.yaml`.

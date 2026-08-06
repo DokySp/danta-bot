@@ -8,6 +8,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -44,6 +45,51 @@ class FakeKis:
 
     def headers(self, tr_id: str, payload: dict[str, Any]) -> dict[str, str]:
         return {"tr_id": tr_id}
+
+
+class ExchangeRoutingTest(unittest.TestCase):
+    def test_exchange_market_session_and_active_order_compatibility(self) -> None:
+        at = datetime.fromisoformat
+
+        self.assertEqual(execute_orders_module.market_code("NXT"), "NX")
+        self.assertEqual(execute_orders_module.market_code("SOR"), "UN")
+        self.assertTrue(execute_orders_module.cash_order_session_open("NXT", at("2026-08-07T08:05:00+09:00")))
+        self.assertFalse(execute_orders_module.cash_order_session_open("NXT", at("2026-08-07T08:55:00+09:00")))
+        self.assertTrue(execute_orders_module.cash_order_session_open("NXT", at("2026-08-07T09:00:30+09:00")))
+        self.assertTrue(execute_orders_module.cash_order_session_open("SOR", at("2026-08-07T18:00:00+09:00")))
+        self.assertFalse(execute_orders_module.cash_order_session_open("SOR", at("2026-08-07T20:00:00+09:00")))
+        self.assertTrue(execute_orders_module.exchange_matches({"excg_id_dvsn_cd": "NXT"}, "SOR"))
+        self.assertFalse(execute_orders_module.exchange_matches({"excg_id_dvsn_cd": "KRX"}, "NXT"))
+
+    def test_cash_submit_and_status_lookup_use_requested_exchange(self) -> None:
+        order = {
+            "symbol_id": "005930",
+            "direction": "buy",
+            "validated_order_quantity": 1,
+            "order_price": 70000,
+            "excg_id_dvsn_cd": "SOR",
+        }
+        with patch.object(execute_orders_module, "cash_order_session_open", return_value=True), patch.object(
+            execute_orders_module,
+            "retry_json",
+            return_value=({"output": {"ODNO": "order-1"}}, {}),
+        ) as request_mock:
+            order_id = execute_orders_module.submit_cash(FakeKis(), order)
+
+        self.assertEqual(order_id, "order-1")
+        self.assertEqual(request_mock.call_args.kwargs["payload"]["EXCG_ID_DVSN_CD"], "SOR")
+
+        class StatusKis:
+            cano = "12345678"
+            product = "01"
+
+            def call(self, name: str, *, params: dict[str, str]) -> dict[str, Any]:
+                self.params = params
+                return {"output1": []}
+
+        status_kis = StatusKis()
+        execute_orders_module.fetch_cash_order_status_rows(status_kis, "20260807")
+        self.assertEqual(status_kis.params["EXCG_ID_DVSN_CD"], "ALL")
 
 
 def step_dry_run_gate_and_portfolio_except_checks(root: Path) -> list[str]:

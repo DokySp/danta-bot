@@ -132,6 +132,7 @@ def write_sample_execution(run_dir: Path) -> None:
         run_dir / "execution.json",
         {
             "execution_environment": "real",
+            "exchange": "SOR",
             "orders": [
                 {"direction": "sell", "result": "submitted", "symbol_id": "005930"},
                 {
@@ -177,6 +178,8 @@ def check_enqueued_artifact_quantities_and_price(created: list) -> dict:
         raise AssertionError(f"unexpected slippage_bps: {artifact}")
     if artifact["max_acceptable_price"] != 10030:
         raise AssertionError(f"unexpected max_acceptable_price: {artifact}")
+    if artifact["excg_id_dvsn_cd"] != "SOR":
+        raise AssertionError(f"deferred retry lost exchange routing: {artifact}")
     return artifact
 
 

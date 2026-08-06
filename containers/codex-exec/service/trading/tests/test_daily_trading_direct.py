@@ -150,6 +150,22 @@ class DailyTradingDirectRunnerTest(unittest.TestCase):
 
         run_mock.assert_not_called()
 
+    def test_exchange_is_normalized_and_forwarded(self) -> None:
+        def fake_subprocess_run(cmd, **kwargs):
+            output_dir = output_dir_from_cmd(cmd)
+            (output_dir / "telegram-summary.txt").write_text("요약")
+            return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+        with patch("service.trading.daily_trading_direct.subprocess.run", side_effect=fake_subprocess_run) as run_mock:
+            self.runner.run(self.raw_config(exchange="sor"))
+
+        command = run_mock.call_args.args[0]
+        self.assertEqual(command[command.index("--exchange") + 1], "SOR")
+        with patch("service.trading.daily_trading_direct.subprocess.run") as invalid_run:
+            with self.assertRaises(ValueError):
+                self.runner.run(self.raw_config(exchange="UNKNOWN"))
+        invalid_run.assert_not_called()
+
     def test_enabled_retry_config_enqueues_deferred_buy_and_appends_output_suffix(self) -> None:
         self.config.deferred_buy_retry_config_file.write_text(
             "deferred_buy_retry:\n"

@@ -227,6 +227,9 @@ def enqueue_deferred_buy_retries(
             "max_acceptable_price": max_acceptable_price(price, slippage_bps),
             "slippage_bps": slippage_bps,
             "execution_environment": env,
+            "excg_id_dvsn_cd": execute_orders.exchange_code(
+                order.get("excg_id_dvsn_cd") or execution.get("exchange")
+            ),
             "chat_id": chat_id or "",
             "route": route or "",
             "attempt_count": 0,
@@ -292,11 +295,11 @@ def current_holding_quantity(kis: execute_orders.Kis, symbol: str) -> tuple[int,
     return 0, {"symbol_id": symbol, "current_live_holding_quantity": 0, "observed_at": observed_at}
 
 
-def current_price(kis: execute_orders.Kis, symbol: str) -> int:
+def current_price(kis: execute_orders.Kis, symbol: str, exchange: str) -> int:
     body, _headers = evidence.call_endpoint(
         "inquire_price",
         {
-            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_COND_MRKT_DIV_CODE": execute_orders.market_code(exchange),
             "FID_INPUT_ISCD": symbol,
         },
         kis.app_key,
@@ -341,6 +344,7 @@ def process_artifact(path: Path, config: Config) -> dict[str, Any]:
     target = execute_orders.as_int(payload.get("target_holding_quantity"))
     requested_qty = execute_orders.as_int(payload.get("retry_quantity"))
     env = execute_orders.env_dv(str(payload.get("execution_environment") or config.mcp_trading_env))
+    exchange = execute_orders.exchange_code(payload.get("excg_id_dvsn_cd"))
     kis = execute_orders.Kis(env, retries=2)
 
     current_qty, holding = current_holding_quantity(kis, symbol)
@@ -363,7 +367,7 @@ def process_artifact(path: Path, config: Config) -> dict[str, Any]:
             extra={"refreshed_holding": holding, "refreshed_expected_holding_quantity": current_qty},
         )
 
-    price = current_price(kis, symbol)
+    price = current_price(kis, symbol, exchange)
     max_price = execute_orders.as_price(payload.get("max_acceptable_price"))
     if price <= 0:
         return mark_terminal(path, payload, state="dropped", reason="current_price_unavailable")
@@ -405,6 +409,7 @@ def process_artifact(path: Path, config: Config) -> dict[str, Any]:
         "order_price": order_price,
         "order_path": "immediate",
         "order_api": "order_cash",
+        "excg_id_dvsn_cd": exchange,
     }
     order_id = execute_orders.submit_order(kis, order)
     return mark_terminal(

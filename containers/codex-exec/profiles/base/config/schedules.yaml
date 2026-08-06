@@ -15,14 +15,15 @@ schedules:
 
   - id: trading-toggle
     enabled: true
-    cron: "0 8 * * 1-5"
+    cron: "30 7 * * 1-5"
     model: gpt-5.6-luna
     model_reasoning_effort: low
     message: |
       $check-holiday 스킬을 통해서 휴장일인지 확인하고, $trading-schedule-toggle 을 통해 휴장일이 아닌 경우 daily 스케줄을 활성화, 휴장일인 경우 daily 스케줄을 비활성화해줘.
 
   - id: daily-00
-    enabled: true
+    enabled: false
+    toggle_managed: false
     cron: "0 7 * * 1-5"
     daily_trading:
       env: acct
@@ -42,6 +43,26 @@ schedules:
     # 예약 거래 판단에서는 회사 재무 정보, 신규 뉴스·공시·이벤트성 재료와 다음 장 갭 리스크의 비중을 상대적으로 높여 목표수량을 판단해.
     # 단, financial-information 혹은 news-information가 없다는 이유만으로 점수·확신도·목표수량을 낮추거나 주문을 차단하지 마.
 
+  - id: daily-01
+    enabled: true
+    cron: "5 8 * * 1-5"
+    daily_trading:
+      env: acct
+      request_type: real-submit
+      submit_orders: true
+      order_path: immediate
+      exchange: NXT
+
+  - id: daily-02
+    enabled: true
+    cron: "35 8 * * 1-5"
+    daily_trading:
+      env: acct
+      request_type: real-submit
+      submit_orders: true
+      order_path: immediate
+      exchange: SOR
+
   - id: daily-10
     enabled: true
     cron: "5,20,40 9 * * 1-5"
@@ -50,6 +71,7 @@ schedules:
       request_type: real-submit
       submit_orders: true
       order_path: immediate
+      exchange: SOR
     # 이전 Main Codex message:
     # $check-portfolio로 recommended, specified, holding, universe JSON을 확인하고, check-portfolio의 universe를 $daily-trading 대상으로 사용해줘.
     # 예약 거래 내역을 확인하고 $daily-trading 스킬로 실전(acct) 거래를 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
@@ -62,6 +84,7 @@ schedules:
       request_type: real-submit
       submit_orders: true
       order_path: immediate
+      exchange: SOR
     # 이전 Main Codex message:
     # $check-portfolio로 recommended, specified, holding, universe JSON을 확인하고, check-portfolio의 universe를 $daily-trading 대상으로 사용해줘.
     # $daily-trading 스킬로 실전(acct) 거래를 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
@@ -74,6 +97,7 @@ schedules:
       request_type: real-submit
       submit_orders: true
       order_path: immediate
+      exchange: SOR
     # 이전 Main Codex message:
     # $check-portfolio로 recommended, specified, holding, universe JSON을 확인하고, check-portfolio의 universe를 $daily-trading 대상으로 사용해줘.
     # $daily-trading 스킬로 실전(acct) 거래를 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
@@ -87,12 +111,43 @@ schedules:
       request_type: real-submit
       submit_orders: true
       order_path: immediate
+      exchange: SOR
       review_extra_instructions:
         judge_review:
-          - "이번 거래가 오늘의 마지막 거래임을 참고하여 불필요한 신규 리스크 확대를 피하고 보유/현금 균형을 점검한다."
+          - "이번 거래가 정규장 마감 전 마지막 거래임을 참고하여 불필요한 신규 리스크 확대를 피하고 보유/현금 균형을 점검한다."
     # 이전 Main Codex message:
     # $check-portfolio로 recommended, specified, holding, universe JSON을 확인하고, check-portfolio의 universe를 $daily-trading 대상으로 사용해줘.
-    # 이번 거래가 오늘의 마지막 거래임을 참고하여 $daily-trading 스킬로 실전(acct) 거래를 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
+    # 이번 거래가 정규장 마감 전 마지막 거래임을 참고하여 $daily-trading 스킬로 실전(acct) 거래를 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
+
+  - id: daily-31
+    enabled: true
+    cron: "0 16 * * 1-5"
+    daily_trading:
+      env: acct
+      request_type: real-submit
+      submit_orders: true
+      order_path: immediate
+      exchange: NXT
+
+  - id: daily-32
+    enabled: true
+    cron: "0 18 * * 1-5"
+    daily_trading:
+      env: acct
+      request_type: real-submit
+      submit_orders: true
+      order_path: immediate
+      exchange: SOR
+
+  - id: daily-33
+    enabled: true
+    cron: "45 19 * * 1-5"
+    daily_trading:
+      env: acct
+      request_type: real-submit
+      submit_orders: true
+      order_path: immediate
+      exchange: NXT
 
   - id: weekend-01
     enabled: true

@@ -26,6 +26,7 @@ from zoneinfo import ZoneInfo
 
 KST = ZoneInfo("Asia/Seoul")
 KIS_BASE_URL = "https://openapi.koreainvestment.com:9443"
+EXCHANGE_MARKET_CODES = {"KRX": "J", "NXT": "NX", "SOR": "UN"}
 
 ENDPOINTS = {
     "inquire_price": ("/uapi/domestic-stock/v1/quotations/inquire-price", "GET", "FHKST01010100", "FHKST01010100"),
@@ -64,6 +65,41 @@ def default_reservation_orgno() -> str:
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def exchange_code(value: Any, *, default: str = "KRX") -> str:
+    exchange = str(value or default).strip().upper()
+    if exchange not in EXCHANGE_MARKET_CODES:
+        raise ValueError(f"unsupported exchange: {exchange}")
+    return exchange
+
+
+def market_code(exchange: Any) -> str:
+    return EXCHANGE_MARKET_CODES[exchange_code(exchange)]
+
+
+def exchange_matches(active: dict[str, Any], desired_exchange: Any) -> bool:
+    active_exchange = exchange_code(active.get("excg_id_dvsn_cd"))
+    desired = exchange_code(desired_exchange)
+    return active_exchange == desired or (desired == "SOR" and active_exchange in {"KRX", "NXT"})
+
+
+def cash_order_session_open(exchange: Any, at: datetime | None = None) -> bool:
+    observed = at or datetime.now(KST)
+    observed = observed.replace(tzinfo=KST) if observed.tzinfo is None else observed.astimezone(KST)
+    if observed.weekday() >= 5:
+        return False
+    second = observed.hour * 3600 + observed.minute * 60 + observed.second
+    selected = exchange_code(exchange)
+    if selected == "KRX":
+        return 9 * 3600 <= second < 15 * 3600 + 30 * 60
+    if selected == "SOR":
+        return 8 * 3600 <= second < 20 * 3600
+    return (
+        8 * 3600 <= second < 8 * 3600 + 50 * 60
+        or 9 * 3600 + 30 <= second < 15 * 3600 + 20 * 60
+        or 15 * 3600 + 30 * 60 <= second < 20 * 3600
+    )
 
 
 def load_json(path: Path) -> Any:
@@ -365,8 +401,11 @@ class Kis:
         body, _ = self.call_with_headers(name, params=params, payload=payload)
         return body
 
-    def current_price(self, symbol: str) -> int | None:
-        body = self.call("inquire_price", params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": symbol})
+    def current_price(self, symbol: str, exchange: str = "KRX") -> int | None:
+        body = self.call(
+            "inquire_price",
+            params={"FID_COND_MRKT_DIV_CODE": market_code(exchange), "FID_INPUT_ISCD": symbol},
+        )
         output = body.get("output") if isinstance(body.get("output"), dict) else {}
         price = as_int(output.get("stck_prpr"), 0)
         return price if price > 0 else None
@@ -481,6 +520,7 @@ def normalize_reservation(row: dict[str, Any]) -> dict[str, Any]:
         "execution_environment": "",
         "observed_at": now_iso(),
         "active_status": "inactive" if inactive or remaining <= 0 else "active",
+        "excg_id_dvsn_cd": "KRX",
         "rsvn_ord_seq": reservation_id,
         "rsvn_ord_orgno": (orgno or default_reservation_orgno()) if order_id else "",
         "rsvn_ord_ord_dt": str(first(row, ("rsvn_ord_ord_dt", "ord_dt", "RSVN_ORD_ORD_DT", "ORD_DT")) or "").strip(),
@@ -510,7 +550,9 @@ def normalize_pending_order(row: dict[str, Any]) -> dict[str, Any]:
         "krx_fwdg_ord_orgno": str(first(row, ("krx_fwdg_ord_orgno", "KRX_FWDG_ORD_ORGNO", "ord_gno_brno", "ORD_GNO_BRNO")) or "").strip(),
         "orgn_odno": order_id,
         "ord_dvsn": str(first(row, ("ord_dvsn", "ORD_DVSN")) or "00").strip() or "00",
-        "excg_id_dvsn_cd": str(first(row, ("excg_id_dvsn_cd", "EXCG_ID_DVSN_CD")) or "KRX").strip() or "KRX",
+        "excg_id_dvsn_cd": exchange_code(
+            first(row, ("excg_id_dvsn_cd", "excg_id_dvsn_Cd", "EXCG_ID_DVSN_CD"))
+        ),
     }
 
 
@@ -687,6 +729,7 @@ def fetch_cash_order_status_rows(kis: Kis, day: str, order_id: str = "") -> list
             "INQR_DVSN_1": "",
             "CTX_AREA_FK100": "",
             "CTX_AREA_NK100": "",
+            "EXCG_ID_DVSN_CD": "ALL",
         },
     )
     return [row for row in rows(body) if broker_order_id(row)]
@@ -887,6 +930,7 @@ def previous_submitted_cash_orders(output_dir: Path, day: str) -> list[dict[str,
                     "row_id": str(row_index),
                     "order_path": "immediate",
                     "order_api": "order_cash",
+                    "excg_id_dvsn_cd": exchange_code(order.get("excg_id_dvsn_cd") or execution.get("exchange")),
                 }
             )
 
@@ -925,6 +969,7 @@ def previous_submitted_cash_orders(output_dir: Path, day: str) -> list[dict[str,
                 "row_id": path.name,
                 "order_path": "immediate",
                 "order_api": "order_cash",
+                "excg_id_dvsn_cd": exchange_code(retry.get("excg_id_dvsn_cd")),
             }
         )
     return result
@@ -1268,6 +1313,9 @@ def cash_order_tr_id(env: str, side: str) -> str:
 
 
 def submit_cash(kis: Kis, order: dict[str, Any]) -> str:
+    exchange = exchange_code(order.get("excg_id_dvsn_cd"))
+    if not cash_order_session_open(exchange):
+        raise RuntimeError(f"cash order session is closed for exchange={exchange}")
     side = str(order.get("direction") or "")
     payload = {
         "CANO": kis.cano,
@@ -1276,7 +1324,7 @@ def submit_cash(kis: Kis, order: dict[str, Any]) -> str:
         "ORD_DVSN": str(order.get("ord_dvsn") or "00"),
         "ORD_QTY": str(as_int(order.get("validated_order_quantity"))),
         "ORD_UNPR": str(as_price(order.get("order_price"))),
-        "EXCG_ID_DVSN_CD": str(order.get("excg_id_dvsn_cd") or "KRX"),
+        "EXCG_ID_DVSN_CD": exchange,
         "SLL_TYPE": "01" if side == "sell" else "",
         "CNDT_PRIC": str(order.get("cndt_pric") or ""),
     }
@@ -1330,7 +1378,7 @@ def adjust_cash_order(kis: Kis, active: dict[str, Any], desired: dict[str, Any] 
         "ORD_QTY": str(as_int((desired or active).get("validated_order_quantity") or active.get("remaining_quantity"))),
         "ORD_UNPR": str(as_price((desired or active).get("order_price"))),
         "QTY_ALL_ORD_YN": "N" if desired else "Y",
-        "EXCG_ID_DVSN_CD": str((desired or active).get("excg_id_dvsn_cd") or active.get("excg_id_dvsn_cd") or "KRX"),
+        "EXCG_ID_DVSN_CD": exchange_code(active.get("excg_id_dvsn_cd") or (desired or {}).get("excg_id_dvsn_cd")),
     }
     missing = [key for key in ("KRX_FWDG_ORD_ORGNO", "ORGN_ODNO") if not payload.get(key)]
     if missing:
@@ -1622,6 +1670,7 @@ def adjustment_row(active: dict[str, Any], *, action: str, reason: str, result: 
         "existing_order_price": order_price,
         "existing_order_api": order_api,
         "existing_order_path": order_path,
+        "existing_exchange": exchange_code(active.get("excg_id_dvsn_cd")),
         "existing_active_status": active_status,
         "direction": direction_value,
         "remaining_quantity": remaining_quantity,
@@ -1643,10 +1692,13 @@ def adjustment_row(active: dict[str, Any], *, action: str, reason: str, result: 
     }
 
 
-def mismatched_active_orders(active_orders: list[dict[str, Any]], side: str, qty: int, price: int, order_path: str, order_api: str) -> list[dict[str, Any]]:
+def mismatched_active_orders(active_orders: list[dict[str, Any]], side: str, qty: int, price: int, order_path: str, order_api: str, exchange: str) -> list[dict[str, Any]]:
     mismatches: list[dict[str, Any]] = []
     for item in active_orders:
         if item.get("order_path") != order_path or item.get("order_api") != order_api:
+            mismatches.append(item)
+            continue
+        if not exchange_matches(item, exchange):
             mismatches.append(item)
             continue
         if item.get("direction") != side:
@@ -1661,13 +1713,13 @@ def mismatched_active_orders(active_orders: list[dict[str, Any]], side: str, qty
     return mismatches
 
 
-def matching_single_order(active_orders: list[dict[str, Any]], side: str, qty: int, price: int, order_path: str, order_api: str) -> dict[str, Any] | None:
+def matching_single_order(active_orders: list[dict[str, Any]], side: str, qty: int, price: int, order_path: str, order_api: str, exchange: str) -> dict[str, Any] | None:
     if len(active_orders) != 1:
         return None
     item = active_orders[0]
     if active_order_missing_fields(item):
         return None
-    if mismatched_active_orders([item], side, qty, price, order_path, order_api):
+    if mismatched_active_orders([item], side, qty, price, order_path, order_api, exchange):
         return None
     return item
 
@@ -1695,10 +1747,15 @@ def active_order_missing_fields(active: dict[str, Any]) -> list[str]:
     return sorted(set(missing))
 
 
-def can_correct(active: dict[str, Any], side: str, order_path: str, order_api: str) -> bool:
+def can_correct(active: dict[str, Any], side: str, order_path: str, order_api: str, exchange: str) -> bool:
     if active_order_missing_fields(active):
         return False
-    return active.get("direction") == side and active.get("order_path") == order_path and active.get("order_api") == order_api
+    return (
+        active.get("direction") == side
+        and active.get("order_path") == order_path
+        and active.get("order_api") == order_api
+        and exchange_matches(active, exchange)
+    )
 
 
 def adjust_active_order(kis: Kis | None, active: dict[str, Any], desired: dict[str, Any] | None) -> tuple[str, str, str]:
@@ -1906,8 +1963,12 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
         qty = as_int(order.get("validated_order_quantity"))
         order_path = str(order.get("order_path") or "reservation")
         order_path, order_api = order_path_api(order_path)
+        exchange = exchange_code(order.get("excg_id_dvsn_cd") or execution.get("exchange"))
+        if order_path == "reservation":
+            exchange = "KRX"
         order["order_path"] = order_path
         order["order_api"] = order_api
+        order["excg_id_dvsn_cd"] = exchange
         desired_delta = final_quantity - current
         desired_side = "buy" if desired_delta > 0 else "sell" if desired_delta < 0 else ""
         desired_qty = abs(desired_delta)
@@ -1940,7 +2001,7 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
                 blocked += 1
                 continue
 
-            kept = matching_single_order(matching_active, desired_side, desired_qty, price, order_path, order_api) if desired_side else None
+            kept = matching_single_order(matching_active, desired_side, desired_qty, price, order_path, order_api, exchange) if desired_side else None
             if kept:
                 order["result"] = "skipped"
                 order["reason"] = "existing_matching_reservation_kept" if order_path == "reservation" else "existing_matching_order_kept"
@@ -1962,7 +2023,7 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
                 continue
 
             conflict_remaining = as_int(conflict.get("remaining_quantity"))
-            active_matches_desired_sell = desired_side == "sell" and can_correct(conflict, desired_side, order_path, order_api)
+            active_matches_desired_sell = desired_side == "sell" and can_correct(conflict, desired_side, order_path, order_api, exchange)
             corrected_active_order_id = ""
             active_adjustment_recorded = False
 
@@ -2054,6 +2115,7 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
                 and conflict.get("direction") == side
                 and conflict.get("order_path") == order_path
                 and conflict.get("order_api") == order_api
+                and exchange_matches(conflict, exchange)
             ):
                 if qty <= 0 or price <= 0:
                     order["result"] = "blocked"
@@ -2132,7 +2194,7 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
                 desired_order["direction"] = desired_side
                 desired_order["validated_order_quantity"] = desired_qty
                 desired_order["additional_required_quantity"] = desired_delta
-                correctable = can_correct(conflict, desired_side, order_path, order_api)
+                correctable = can_correct(conflict, desired_side, order_path, order_api, exchange)
                 if correctable:
                     # The active order can genuinely be corrected in place this run, so it is
                     # about to be submitted -- gate its quantity/cash now. An uncorrectable
@@ -2193,7 +2255,7 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
                     desired_delta = desired_qty if desired_side == "buy" else -desired_qty
                     desired_order["validated_order_quantity"] = desired_qty
                     desired_order["additional_required_quantity"] = desired_delta
-                    reduced_kept = matching_single_order([conflict], desired_side, desired_qty, price, order_path, order_api)
+                    reduced_kept = matching_single_order([conflict], desired_side, desired_qty, price, order_path, order_api, exchange)
                     if reduced_kept:
                         order["result"] = "skipped"
                         order["reason"] = "existing_matching_reservation_kept" if order_path == "reservation" else "existing_matching_order_kept"

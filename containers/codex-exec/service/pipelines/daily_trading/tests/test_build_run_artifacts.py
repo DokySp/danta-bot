@@ -1002,6 +1002,29 @@ def step_execution_plan_and_token_summary_checks(tmp: Path, run_dir: Path) -> li
             failures.append(f"gate-ready execution plan was not marked ready: {ready_execution}")
         if ready_execution.get("latest_available_cash") is not None:
             failures.append(f"execution plan must not copy ledger cash into latest_available_cash: {ready_execution}")
+        sor_brief = load_json(run_dir / "decision-brief.json")
+        sor_brief["symbols"][0]["price"]["current_or_last"] = 71000
+        write_json(run_dir / "decision-brief-sor.json", sor_brief)
+        sor_execution = build_execution_plan(
+            argparse.Namespace(
+                output_dir=run_dir,
+                output=run_dir / "execution-sor.json",
+                judge_review=str(run_dir / "judge-review.json"),
+                account_before_order=str(run_dir / "account-before-order-ready.json"),
+                decision_brief=str(run_dir / "decision-brief-sor.json"),
+                run_id=None,
+                started_at=None,
+                request_type="real-submit",
+                order_path="immediate",
+                exchange="SOR",
+            )
+        )
+        if (
+            sor_execution.get("exchange") != "SOR"
+            or sor_execution["orders"][0].get("excg_id_dvsn_cd") != "SOR"
+            or sor_execution["orders"][0].get("order_price") != 71000
+        ):
+            failures.append(f"execution plan did not preserve SOR routing: {sor_execution}")
         account_default_brief = load_json(run_dir / "account-before-order-ready.json")
         account_default_brief["symbols"][0]["current_price"] = None
         write_json(run_dir / "account-before-order-default-brief.json", account_default_brief)

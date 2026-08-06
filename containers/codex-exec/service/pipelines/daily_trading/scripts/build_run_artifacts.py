@@ -1757,6 +1757,11 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
     order_path = str(getattr(args, "order_path", "reservation") or "reservation")
     if order_path not in {"reservation", "immediate"}:
         raise ValueError(f"unsupported order_path: {order_path}")
+    exchange = str(getattr(args, "exchange", "KRX") or "KRX").upper()
+    if exchange not in {"KRX", "NXT", "SOR"}:
+        raise ValueError(f"unsupported exchange: {exchange}")
+    if order_path == "reservation" and exchange != "KRX":
+        raise ValueError("reservation orders require exchange=KRX")
     order_api = "order_cash" if order_path == "immediate" else "order_resv"
 
     run_id = args.run_id or judge_review.get("run_id") or account.get("run_id") or output_dir.name
@@ -1768,6 +1773,7 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
             # strategy-authorization guard; broker/order checks still run later.
             "schema_version": "3",
             "request_type": args.request_type,
+            "exchange": exchange,
             "requires_main_agent_order_execution": False,
             "required_main_agent_actions": [],
             "latest_available_cash": None,
@@ -1830,11 +1836,9 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
             invalid_final_quantity = True
             continue
         delta = final_qty - expected_qty
-        order_price = (
-            as_number(account_item.get("current_price"))
-            or as_number((brief_item.get("price") or {}).get("current_or_last"))
-            or 0
-        )
+        account_price = as_number(account_item.get("current_price"))
+        market_price = as_number((brief_item.get("price") or {}).get("current_or_last"))
+        order_price = (market_price or account_price or 0) if exchange != "KRX" else (account_price or market_price or 0)
         if delta > 0:
             direction = "buy"
         elif delta < 0:
@@ -1907,6 +1911,7 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
                 "order_price": order_price,
                 "order_path": order_path,
                 "order_api": order_api,
+                "excg_id_dvsn_cd": exchange,
                 "active_order_reconciliation_required": active_order_reconciliation_required,
                 "active_cancel_only": active_cancel_only,
                 "reconciliation_only": reconciliation_only,
@@ -1940,6 +1945,12 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
         )
         active_path = str(next((row.get("order_path") for row in active_rows if row.get("order_path")), order_path))
         active_api = str(next((row.get("order_api") for row in active_rows if row.get("order_api")), order_api))
+        active_exchange = str(
+            next(
+                (row.get("excg_id_dvsn_cd") for row in active_rows if row.get("excg_id_dvsn_cd")),
+                "KRX" if active_path == "reservation" else exchange,
+            )
+        ).upper()
         artifact["orders"].append(
             {
                 "symbol_id": symbol_id,
@@ -1965,6 +1976,7 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
                 "order_price": order_price,
                 "order_path": active_path,
                 "order_api": active_api,
+                "excg_id_dvsn_cd": active_exchange,
                 "active_order_reconciliation_required": True,
                 "active_cancel_only": True,
                 "reconciliation_only": True,
@@ -2160,6 +2172,7 @@ def build_parser() -> argparse.ArgumentParser:
     execution.add_argument("--analyst-review", help="Path to analyst-review.json. Defaults to <output-dir>/analyst-review.json.")
     execution.add_argument("--request-type", choices=["analysis", "prepare", "demo-submit", "real-submit"], default="analysis")
     execution.add_argument("--order-path", choices=["reservation", "immediate"], default="reservation")
+    execution.add_argument("--exchange", choices=["KRX", "NXT", "SOR"], default="KRX")
     execution.add_argument("--run-id")
     execution.add_argument("--started-at")
     execution.add_argument("--output", type=Path, default=None)

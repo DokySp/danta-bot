@@ -11,6 +11,7 @@ import yaml
 ALLOWED_ENVS = {"acct", "paper"}
 ALLOWED_REQUEST_TYPES = {"analysis", "prepare", "demo-submit", "real-submit"}
 ALLOWED_ORDER_PATHS = {"auto", "reservation", "immediate"}
+ALLOWED_EXCHANGES = {"KRX", "NXT", "SOR"}
 ALLOWED_REVIEW_INSTRUCTION_STAGES = {"analyst_review", "judge_review"}
 MAX_EXTRA_INSTRUCTION_COUNT = 10
 MAX_EXTRA_INSTRUCTION_CHARS = 500
@@ -22,6 +23,7 @@ class DailyTradingScheduleConfig:
     request_type: str
     submit_orders: bool
     order_path: str
+    exchange: str
     review_extra_instructions: dict[str, list[str]]
 
 
@@ -45,6 +47,7 @@ def validate_daily_trading_config(raw: Any) -> DailyTradingScheduleConfig:
     request_type = str(raw.get("request_type") or "real-submit").strip()
     submit_orders = bool_value(raw.get("submit_orders"), default=request_type in {"demo-submit", "real-submit"})
     order_path = str(raw.get("order_path") or "auto").strip().lower()
+    exchange = str(raw.get("exchange") or "KRX").strip().upper()
     if env not in ALLOWED_ENVS:
         raise ValueError(f"daily_trading.env must be one of: {', '.join(sorted(ALLOWED_ENVS))}")
     if request_type not in ALLOWED_REQUEST_TYPES:
@@ -53,6 +56,8 @@ def validate_daily_trading_config(raw: Any) -> DailyTradingScheduleConfig:
         )
     if order_path not in ALLOWED_ORDER_PATHS:
         raise ValueError(f"daily_trading.order_path must be one of: {', '.join(sorted(ALLOWED_ORDER_PATHS))}")
+    if exchange not in ALLOWED_EXCHANGES:
+        raise ValueError(f"daily_trading.exchange must be one of: {', '.join(sorted(ALLOWED_EXCHANGES))}")
     if request_type == "real-submit" and env != "acct":
         raise ValueError("daily_trading request_type=real-submit requires env=acct")
     if request_type == "demo-submit" and env != "paper":
@@ -65,6 +70,7 @@ def validate_daily_trading_config(raw: Any) -> DailyTradingScheduleConfig:
         request_type=request_type,
         submit_orders=submit_orders,
         order_path=order_path,
+        exchange=exchange,
         review_extra_instructions=extra,
     )
 
@@ -124,6 +130,8 @@ def build_daily_trading_command(
         schedule_config.request_type,
         "--order-path",
         schedule_config.order_path,
+        "--exchange",
+        schedule_config.exchange,
     ]
     if schedule_config.submit_orders:
         cmd.append("--submit-orders")

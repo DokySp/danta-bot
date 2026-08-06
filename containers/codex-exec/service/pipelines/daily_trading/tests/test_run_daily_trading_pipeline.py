@@ -1049,6 +1049,7 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
                 started_at="2026-06-18T09:00:00+09:00",
                 env="acct",
                 request_type="real-submit",
+                exchange="SOR",
                 portfolio_json=str(portfolio_path),
                 financial_cache_path="",
                 symbol_news_cache_path="",
@@ -1084,6 +1085,8 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
         if (
             run_config.get("strategy_policy_config_path") != str(override_policy.resolve())
             or run_config.get("strategy_policy_config_sha256") != file_sha256(override_policy)
+            or run_config.get("exchange") != "SOR"
+            or run_config.get("market") != "UN"
         ):
             failures.append(f"run config did not record strategy policy path/hash: {run_config}")
         order_path_selection = (summary.get("execution") or {}).get("order_path_selection") if isinstance(summary.get("execution"), dict) else {}
@@ -1129,7 +1132,11 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
         ]
         if not execution_commands or "--decision-brief" in execution_commands[-1]:
             failures.append(f"execution-plan command should rely on the default decision-brief path: {execution_commands}")
+        elif execution_commands[-1][-2:] != ["--exchange", "SOR"]:
+            failures.append(f"execution-plan command did not preserve SOR routing: {execution_commands}")
         execution_payload = load_json(run_dir / "execution.json")
+        if execution_payload.get("exchange") != "SOR":
+            failures.append(f"execution artifact did not preserve SOR routing: {execution_payload}")
         execution_by_symbol = {
             symbol_key(item): item for item in execution_payload.get("orders", []) if isinstance(item, dict)
         }

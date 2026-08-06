@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import runpy
 import unittest
 from contextlib import nullcontext
 from pathlib import Path
@@ -113,6 +114,43 @@ class SchedulerDailyTradingFailureClassificationTest(unittest.TestCase):
         self.assertEqual(market_job.get("cron"), "*/15 * * * *")
         self.assertEqual(market_job.get("market_news"), {})
         self.assertFalse(str(market_job.get("message") or "").strip())
+
+    def test_base_schedule_declares_exchange_routed_trading_runs(self) -> None:
+        codex_exec_root = Path(__file__).resolve().parents[3]
+        schedules = parse_yaml_schedule(codex_exec_root / "profiles" / "base" / "config" / "schedules.yaml")
+        by_id = {item.get("id"): item for item in schedules}
+
+        self.assertFalse(by_id["daily-00"]["enabled"])
+        self.assertFalse(by_id["daily-00"]["toggle_managed"])
+        self.assertEqual(by_id["trading-toggle"]["cron"], "30 7 * * 1-5")
+        expected = {
+            "daily-01": ("5 8 * * 1-5", "NXT"),
+            "daily-02": ("35 8 * * 1-5", "SOR"),
+            "daily-31": ("0 16 * * 1-5", "NXT"),
+            "daily-32": ("0 18 * * 1-5", "SOR"),
+            "daily-33": ("45 19 * * 1-5", "NXT"),
+        }
+        for schedule_id, (cron, exchange) in expected.items():
+            self.assertEqual(by_id[schedule_id]["cron"], cron)
+            self.assertEqual(by_id[schedule_id]["daily_trading"]["exchange"], exchange)
+        for schedule_id in ("daily-10", "daily-20", "daily-21", "daily-30"):
+            self.assertEqual(by_id[schedule_id]["daily_trading"]["exchange"], "SOR")
+
+    def test_schedule_toggle_never_reenables_unmanaged_daily_run(self) -> None:
+        codex_exec_root = Path(__file__).resolve().parents[3]
+        schedule_path = codex_exec_root / "profiles" / "base" / "config" / "schedules.yaml"
+        script_path = codex_exec_root / "shared-skills" / "trading-schedule-toggle" / "scripts" / "toggle_daily_schedules.py"
+        module = runpy.run_path(str(script_path))
+        toggle = module["toggle"]
+        lines = schedule_path.read_text(encoding="utf-8").splitlines(keepends=True)
+
+        toggle(lines, False, None)
+        enabled_result = toggle(lines, True, None)
+        daily_00 = next(block for block in module["find_blocks"](lines) if block.schedule_id == "daily-00")
+
+        self.assertFalse(module["current_enabled"](lines, daily_00)[1])
+        self.assertIn("daily-00", enabled_result["unchanged"])
+        self.assertIn("daily-01", enabled_result["changed"])
 
 
 if __name__ == "__main__":

@@ -355,6 +355,7 @@ def render(summary: dict[str, Any]) -> str:
     new_order_count = submitted_count - cancellation_count - correction_count
     blocked_failed_count = len([item for item in orders if item.get("result") in {"blocked", "failed"}])
     skipped_count = len([item for item in orders if item.get("result") == "skipped"])
+    exchange_text = f" · 거래소 {esc(execution.get('exchange'))}" if execution.get("exchange") else ""
     started_at = text(summary.get("started_at"))
     time_suffix = f" · {esc(clock(started_at))}" if clock(started_at) else ""
     lines = [
@@ -381,7 +382,7 @@ def render(summary: dict[str, Any]) -> str:
             "",
             f"<b>당일 누계</b>(이번 run 주문 전 기준) 매수 {money(today_buy)} · 매도 {money(today_sell)} · 체결 {fill_count_text}",
             "",
-            f"<b>이번 run</b> {esc(execution.get('request_type') or '-')} · 신규주문 {new_order_count} · 정정 {correction_count} · 취소 {cancellation_count} · 차단·실패 {blocked_failed_count} · 스킵 {skipped_count}",
+            f"<b>이번 run</b> {esc(execution.get('request_type') or '-')}{exchange_text} · 신규주문 {new_order_count} · 정정 {correction_count} · 취소 {cancellation_count} · 차단·실패 {blocked_failed_count} · 스킵 {skipped_count}",
         ]
     )
     if as_int(broker_summary.get("submitted_cash_order_count")) > 0:

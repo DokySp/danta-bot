@@ -15,6 +15,7 @@ from pathlib import Path
 DAILY_ID_RE = re.compile(r"^daily-[0-9]+$")
 SCHEDULE_ID_RE = re.compile(r"^(\s*)-\s+id:\s*['\"]?([A-Za-z0-9_.-]+)['\"]?\s*$")
 ENABLED_RE = re.compile(r"^(\s*)enabled:\s*(true|false|True|False|yes|no|on|off|1|0)\s*(#.*)?$")
+TOGGLE_MANAGED_FALSE_RE = re.compile(r"^\s*toggle_managed:\s*(false|no|off|0)\s*(?:#.*)?$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -86,6 +87,13 @@ def current_enabled(lines: list[str], block: ScheduleBlock) -> tuple[int | None,
     return None, None
 
 
+def toggle_managed(lines: list[str], block: ScheduleBlock) -> bool:
+    return not any(
+        TOGGLE_MANAGED_FALSE_RE.match(lines[index].rstrip("\n"))
+        for index in range(block.start + 1, block.end)
+    )
+
+
 def enabled_line(indent: str, enabled: bool, comment: str = "") -> str:
     child_indent = indent + "  "
     value = "true" if enabled else "false"
@@ -105,6 +113,9 @@ def toggle(lines: list[str], wanted: bool, selected_ids: set[str] | None) -> dic
     offset = 0
     for block in blocks:
         shifted = ScheduleBlock(block.schedule_id, block.start + offset, block.end + offset, block.indent)
+        if not toggle_managed(lines, shifted):
+            unchanged.append(block.schedule_id)
+            continue
         enabled_index, previous = current_enabled(lines, shifted)
         if previous == wanted:
             unchanged.append(block.schedule_id)

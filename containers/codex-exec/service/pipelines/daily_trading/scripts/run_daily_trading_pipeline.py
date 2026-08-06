@@ -35,6 +35,7 @@ ANALYST_REVIEW_ROLES = (
 )
 COMMAND_OUTPUT_LIMIT = 2000
 ORDER_PATH_AUTO = "auto"
+EXCHANGE_MARKET_CODES = {"KRX": "J", "NXT": "NX", "SOR": "UN"}
 REGULAR_ORDER_START_MINUTE = 9 * 60
 REGULAR_ORDER_END_MINUTE = 15 * 60 + 30
 RESERVATION_ORDER_START_MINUTE = 15 * 60 + 40
@@ -641,6 +642,8 @@ class Pipeline:
             str(getattr(args, "strategy_policy_config", "") or ""),
         )
         self.order_path_requested = str(getattr(args, "order_path", ORDER_PATH_AUTO) or ORDER_PATH_AUTO)
+        self.exchange = str(getattr(args, "exchange", "KRX") or "KRX").upper()
+        self.market = EXCHANGE_MARKET_CODES[self.exchange]
         try:
             self.order_path, self.order_path_reason = resolve_order_path(self.order_path_requested, self.started_at)
         except ValueError:
@@ -650,6 +653,8 @@ class Pipeline:
                 self.order_path, self.order_path_reason = "reservation", "auto_unresolved_non_submit"
             else:
                 raise
+        if self.order_path == "reservation" and self.exchange != "KRX":
+            raise ValueError("reservation orders require exchange=KRX")
         self.logs: list[dict[str, Any]] = []
         self.stages: list[dict[str, Any]] = []
 
@@ -660,7 +665,7 @@ class Pipeline:
         return resolve_workspace_path(self.workspace_dir, text)
 
     def daily_trading_config_summary(self) -> dict[str, Any]:
-        summary: dict[str, Any] = {}
+        summary: dict[str, Any] = {"exchange": self.exchange, "market": self.market}
         if self.review_extra_instructions_path is not None:
             summary["review_extra_instructions_path"] = str(self.review_extra_instructions_path)
             if self.review_extra_instructions_path.exists():
@@ -1025,6 +1030,8 @@ class Pipeline:
             self.args.env,
             "--request-type",
             self.args.request_type,
+            "--market",
+            self.market,
         ]
         if self.args.skip_account:
             cmd.append("--skip-account")
@@ -2874,6 +2881,7 @@ class Pipeline:
             "execution": {
                 "status": execution.get("status"),
                 "request_type": execution.get("request_type"),
+                "exchange": execution.get("exchange") or self.exchange,
                 "order_path_selection": {
                     "requested": self.order_path_requested,
                     "resolved": self.order_path,
@@ -3079,6 +3087,8 @@ class Pipeline:
                 self.args.request_type,
                 "--order-path",
                 self.order_path,
+                "--exchange",
+                self.exchange,
             ],
         )
         execution_status = str((execution or {}).get("status") or "success")
@@ -3143,6 +3153,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=ORDER_PATH_AUTO,
         help="Order API path. auto uses KST order-session time: order_cash for weekday 09:00 <= t < 15:30, order_resv for 15:40 <= t or t < 07:30 and weekends.",
     )
+    run.add_argument("--exchange", choices=sorted(EXCHANGE_MARKET_CODES), default="KRX")
     run.add_argument("--date", default="")
     run.add_argument("--reuse-existing-artifacts", action="store_true")
     run.add_argument("--skip-account", action="store_true")
@@ -3155,6 +3166,7 @@ def build_parser() -> argparse.ArgumentParser:
     summarize.add_argument("--env", default=os.environ.get("CODEX_MCP_TRADING_ENV", "acct"), choices=["acct", "real", "paper", "demo"])
     summarize.add_argument("--request-type", default="analysis", choices=["analysis", "prepare", "demo-submit", "real-submit"])
     summarize.add_argument("--order-path", choices=[ORDER_PATH_AUTO, "reservation", "immediate"], default=ORDER_PATH_AUTO)
+    summarize.add_argument("--exchange", choices=sorted(EXCHANGE_MARKET_CODES), default="KRX")
     summarize.add_argument("--portfolio-json", default="")
     summarize.add_argument("--review-extra-instructions-file", default="")
     summarize.add_argument("--strategy-policy-config", default="")
