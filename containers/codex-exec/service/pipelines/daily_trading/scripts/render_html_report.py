@@ -1655,8 +1655,10 @@ def render_chart_periods(
     runs_root: Path,
     target_started_at: str,
     intraday_runs: list[dict[str, Any]],
+    history_runs: list[dict[str, Any]] | None = None,
 ) -> str:
-    history_runs = find_daily_history(runs_root, target_started_at, calendar_days=30)
+    if history_runs is None:
+        history_runs = find_daily_history(runs_root, target_started_at, calendar_days=30)
     try:
         target_date = date.fromisoformat(target_started_at[:10])
     except ValueError:
@@ -2212,6 +2214,468 @@ def render_debate_symbol(item: dict[str, Any], side: str, run_index: int) -> str
     """
 
 
+def collect_symbol_snapshots(runs: list[dict[str, Any]], *, daily: bool) -> dict[str, list[dict[str, Any]]]:
+    snapshots: dict[str, list[dict[str, Any]]] = {}
+    for run in runs:
+        started_at = str(run["summary"].get("started_at") or "")
+        decision_symbols = {
+            str(item.get("symbol_id") or ""): item
+            for item in run["decision"].get("symbols", [])
+            if isinstance(item, dict) and item.get("symbol_id")
+        }
+        account = load_json(run["path"] / "account-before-order.json")
+        account_symbols = {
+            str(item.get("symbol_id") or ""): item
+            for item in account.get("symbols", [])
+            if isinstance(item, dict) and item.get("symbol_id")
+        }
+        for symbol_id in decision_symbols.keys() | account_symbols.keys():
+            decision_item = decision_symbols.get(symbol_id) or {}
+            account_item = account_symbols.get(symbol_id) or {}
+            price = (decision_item.get("price") or {}).get("current_or_last")
+            if price is None:
+                price = account_item.get("current_price")
+            quantity = account_item.get("current_live_holding_quantity")
+            if quantity is None:
+                quantity = (decision_item.get("account_exposure") or {}).get("current_live_holding_quantity")
+            try:
+                price_value = float(price) if price is not None else None
+            except (TypeError, ValueError):
+                price_value = None
+            try:
+                quantity_value = float(quantity) if quantity is not None else None
+            except (TypeError, ValueError):
+                quantity_value = None
+            if price_value is None and quantity_value is None:
+                continue
+            snapshots.setdefault(symbol_id, []).append(
+                {
+                    "label": started_at[5:10] if daily else time_text(started_at),
+                    "price": price_value,
+                    "quantity": quantity_value,
+                }
+            )
+    return snapshots
+
+
+def render_symbol_history_chart(points: list[dict[str, Any]], period: str) -> str:
+    period_labels = {"intraday": "당일", "week": "1주", "month": "1개월"}
+    period_label = period_labels[period]
+    price_indexes = [index for index, point in enumerate(points) if point.get("price") is not None]
+    quantity_indexes = [index for index, point in enumerate(points) if point.get("quantity") is not None]
+    if not price_indexes and not quantity_indexes:
+        return f'<div class="empty-state">{esc(period_label)} 가격·보유수량 스냅샷이 없습니다.</div>'
+
+    width, height = 1000, 310
+    left, right, top, bottom = 54, 30, 28, 54
+    plot_width = width - left - right
+    plot_height = height - top - bottom
+    xs = [left + plot_width * index / max(1, len(points) - 1) for index in range(len(points))]
+    price_values = [float(points[index]["price"]) for index in price_indexes]
+    quantity_values = [float(points[index]["quantity"]) for index in quantity_indexes]
+    price_ys = normalized_positions(price_values, top, plot_height)
+    quantity_ys = normalized_positions(quantity_values, top, plot_height)
+    price_y_by_index = dict(zip(price_indexes, price_ys))
+    quantity_y_by_index = dict(zip(quantity_indexes, quantity_ys))
+    price_line = " ".join(f"{xs[index]:.2f},{price_y_by_index[index]:.2f}" for index in price_indexes)
+
+    quantity_line_parts: list[str] = []
+    for position, index in enumerate(quantity_indexes):
+        x = xs[index]
+        y = quantity_y_by_index[index]
+        if position:
+            quantity_line_parts.append(f"{x:.2f},{quantity_y_by_index[quantity_indexes[position - 1]]:.2f}")
+        quantity_line_parts.append(f"{x:.2f},{y:.2f}")
+    quantity_line = " ".join(quantity_line_parts)
+    grid = "".join(
+        f'<line x1="{left}" y1="{top + plot_height * step / 4:.2f}" x2="{left + plot_width}" '
+        f'y2="{top + plot_height * step / 4:.2f}" class="chart-grid"/>'
+        for step in range(5)
+    )
+    label_step = max(1, math.ceil(len(points) / 6))
+    x_labels = "".join(
+        f'<text x="{xs[index]:.2f}" y="{height - 23}" text-anchor="middle" class="chart-x">{esc(point.get("label"))}</text>'
+        for index, point in enumerate(points)
+        if index % label_step == 0 or index == len(points) - 1
+    )
+    price_points = "".join(
+        f'<circle class="symbol-price-point" cx="{xs[index]:.2f}" cy="{price_y_by_index[index]:.2f}" r="4">'
+        f'<title>{esc(points[index].get("label"))} 가격 {number(points[index].get("price"))}원</title></circle>'
+        for index in price_indexes
+    )
+    quantity_points = "".join(
+        f'<circle class="symbol-quantity-point" cx="{xs[index]:.2f}" cy="{quantity_y_by_index[index]:.2f}" r="4">'
+        f'<title>{esc(points[index].get("label"))} 보유 {number(points[index].get("quantity"))}주</title></circle>'
+        for index in quantity_indexes
+    )
+    price_range = (
+        f"가격 {number(min(price_values))}~{number(max(price_values))}원" if price_values else "가격 미관측"
+    )
+    quantity_range = (
+        f"보유 {number(min(quantity_values))}~{number(max(quantity_values))}주"
+        if quantity_values
+        else "보유수량 미관측"
+    )
+    return f"""
+    <section class="symbol-history-chart">
+      <div class="symbol-chart-legend"><span><i class="price-key"></i>가격</span><span><i class="quantity-key"></i>보유수량</span><small>각 선은 서로 다른 축으로 정규화</small></div>
+      <svg viewBox="0 0 {width} {height}" role="img" aria-label="{esc(period_label)} 가격과 보유수량 추이">
+        {grid}
+        {f'<polyline points="{price_line}" class="symbol-price-line"/>' if price_line else ''}
+        {f'<polyline points="{quantity_line}" class="symbol-quantity-line"/>' if quantity_line else ''}
+        {price_points}{quantity_points}{x_labels}
+      </svg>
+      <div class="chart-range"><span>{price_range}</span><span>{quantity_range}</span><span>관측 {len(points)}회</span></div>
+    </section>
+    """
+
+
+def render_symbol_detail_tab(
+    target_dir: Path,
+    target_started_at: str,
+    runs: list[dict[str, Any]],
+    fills: list[dict[str, Any]],
+    fill_status: str,
+    fill_scope: str,
+    history_runs: list[dict[str, Any]],
+) -> str:
+    decision = load_json(target_dir / "decision-brief.json")
+    account = load_json(target_dir / "account-before-order.json")
+    analyst = load_json(target_dir / "analyst-review.json")
+    final = load_json(target_dir / "judge-review.json")
+    decision_by_symbol = {
+        str(item.get("symbol_id") or ""): item
+        for item in decision.get("symbols", [])
+        if isinstance(item, dict) and item.get("symbol_id")
+    }
+    account_by_symbol = {
+        str(item.get("symbol_id") or ""): item
+        for item in account.get("symbols", [])
+        if isinstance(item, dict) and item.get("symbol_id")
+    }
+    analyst_by_symbol = {
+        str(item.get("symbol_id") or ""): item
+        for item in analyst.get("symbols", [])
+        if isinstance(item, dict) and item.get("symbol_id")
+    }
+    final_by_symbol = {
+        str(item.get("symbol_id") or ""): item
+        for item in final.get("symbols", [])
+        if isinstance(item, dict) and item.get("symbol_id")
+    }
+
+    symbol_names: dict[str, str] = {}
+
+    def remember(items: Any) -> None:
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            symbol_id = str(item.get("symbol_id") or "").strip()
+            if not symbol_id:
+                continue
+            symbol_name = str(item.get("symbol_name") or symbol_id).strip() or symbol_id
+            if symbol_id not in symbol_names or symbol_names[symbol_id] == symbol_id:
+                symbol_names[symbol_id] = symbol_name
+
+    remember(decision.get("symbols"))
+    remember(account.get("symbols"))
+    remember(analyst.get("symbols"))
+    remember(final.get("symbols"))
+    remember(fills)
+    for run in runs:
+        remember(run["execution"].get("orders"))
+
+    trade_symbol_ids = {
+        str(item.get("symbol_id") or "") for item in fills if isinstance(item, dict) and item.get("symbol_id")
+    }
+    for run in runs:
+        trade_symbol_ids.update(
+            str(item.get("symbol_id") or "")
+            for item in run["execution"].get("orders", [])
+            if isinstance(item, dict)
+            and item.get("symbol_id")
+            and item.get("result") in {"submitted", "blocked", "failed"}
+        )
+    held_symbol_ids = {
+        symbol_id
+        for symbol_id, item in account_by_symbol.items()
+        if int(item.get("current_live_holding_quantity") or 0) > 0
+    }
+    symbol_ids = sorted(
+        symbol_names,
+        key=lambda symbol_id: (
+            0 if symbol_id in trade_symbol_ids else 1 if symbol_id in held_symbol_ids else 2,
+            symbol_names[symbol_id],
+            symbol_id,
+        ),
+    )
+    if not symbol_ids:
+        return '<section class="panel"><div class="empty-state">표시할 종목 데이터가 없습니다.</div></section>'
+
+    intraday_snapshots = collect_symbol_snapshots(runs, daily=False)
+    month_snapshots = collect_symbol_snapshots(history_runs, daily=True)
+    try:
+        week_start = date.fromisoformat(target_started_at[:10]) - timedelta(days=6)
+    except ValueError:
+        week_start = None
+    week_runs = [
+        run
+        for run in history_runs
+        if week_start is not None
+        and date.fromisoformat(str(run["summary"].get("started_at") or "")[:10]) >= week_start
+    ]
+    week_snapshots = collect_symbol_snapshots(week_runs, daily=True)
+
+    fill_by_order = {
+        str(item.get("order_id") or ""): item
+        for item in fills
+        if isinstance(item, dict) and item.get("order_id")
+    }
+    trade_rows_by_symbol: dict[str, list[tuple[str, str]]] = {}
+    linked_fill_ids: set[str] = set()
+    for run in runs:
+        started_at = str(run["summary"].get("started_at") or "")
+        for order in run["execution"].get("orders", []):
+            if not isinstance(order, dict):
+                continue
+            symbol_id = str(order.get("symbol_id") or "")
+            if not symbol_id:
+                continue
+            result = str(order.get("result") or "-")
+            if result not in {"submitted", "blocked", "failed"}:
+                continue
+            fill = resolve_fill(order, fill_by_order)
+            if fill is not None:
+                linked_fill_ids.add(str(fill.get("order_id") or ""))
+            adverse_broker_status = str(broker_reconciliation(order).get("status") or "") in ADVERSE_TERMINAL_BROKER_STATUSES
+            status_css = (
+                "bad"
+                if result in {"blocked", "failed"} or adverse_broker_status
+                else "ok"
+                if fill_is_complete(order, fill)
+                else "info"
+            )
+            requested = requested_order_quantity(order) or attempted_order_quantity(order)
+            fill_text = (
+                f"{number(fill.get('filled_quantity'))}주 · {number(fill.get('filled_price'))}원"
+                if fill is not None
+                else "-"
+            )
+            if result in {"blocked", "failed"}:
+                detail = f"{'차단' if result == 'blocked' else '실패'} · {order_reason_label(order)}"
+            else:
+                detail = order_status_text(order, fill)
+            order_id = str(order.get("order_or_reservation_id") or "-")
+            trade_rows_by_symbol.setdefault(symbol_id, []).append(
+                (
+                    started_at,
+                    f"<tr><td>{esc(full_time_text(started_at))}</td><td>{'봇 주문' if result == 'submitted' else '봇 시도'}</td>"
+                    f"<td>{esc(order_direction_label(order))}</td><td>{number(requested)}주 · {number(order.get('order_price'))}원</td>"
+                    f"<td>{fill_text}</td><td><span class=\"badge {status_css}\">{esc(detail)}</span></td><td><code>{esc(order_id)}</code></td></tr>",
+                )
+            )
+    for fill in fills:
+        if not isinstance(fill, dict) or str(fill.get("order_id") or "") in linked_fill_ids:
+            continue
+        symbol_id = str(fill.get("symbol_id") or "")
+        if not symbol_id:
+            continue
+        actor = "사용자 직접 체결" if fill.get("source_actor") == "non_bot_user" else "연결 주문 없는 체결"
+        direction = "매수" if fill.get("direction") == "buy" else "매도"
+        filled_at = str(fill.get("filled_at") or "")
+        trade_rows_by_symbol.setdefault(symbol_id, []).append(
+            (
+                filled_at,
+                f"<tr><td>{esc(full_time_text(filled_at))}</td><td>{esc(actor)}</td><td>{direction}</td><td>-</td>"
+                f"<td>{number(fill.get('filled_quantity'))}주 · {number(fill.get('filled_price'))}원</td>"
+                f"<td><span class=\"badge ok\">체결</span></td><td><code>{esc(fill.get('order_id'))}</code></td></tr>",
+            )
+        )
+
+    signal_labels = {
+        "day_change_pct": "당일 등락률",
+        "volume": "거래량",
+        "trading_value": "거래대금",
+        "sector": "업종",
+        "per": "PER",
+        "pbr": "PBR",
+        "pct_from_52w_high": "52주 고점 대비",
+        "pct_from_52w_low": "52주 저점 대비",
+        "pct_from_250d_high": "250일 고점 대비",
+        "pct_from_250d_low": "250일 저점 대비",
+        "daily_change_pct": "일봉 변화율",
+        "daily_pct_vs_ma20": "일봉 MA20 대비",
+    }
+    percent_signals = {name for name in signal_labels if name.endswith("pct") or "pct_" in name}
+
+    def signal_value(name: str, value: Any) -> str:
+        if name in percent_signals:
+            return f"{decimal(value)}%"
+        if name == "trading_value":
+            return f"{number(value)}원"
+        if name == "volume":
+            return number(value)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return decimal(value)
+        return str(value if value is not None else "-")
+
+    def issue_label(value: Any) -> str:
+        if isinstance(value, dict):
+            return str(value.get("code") or value.get("message") or value.get("stage") or "상세 미기록")
+        return str(value)
+
+    options = []
+    panels = []
+    for index, symbol_id in enumerate(symbol_ids):
+        active = index == 0
+        symbol_name = symbol_names[symbol_id]
+        decision_item = decision_by_symbol.get(symbol_id) or {}
+        account_item = account_by_symbol.get(symbol_id) or {}
+        exposure = decision_item.get("account_exposure") if isinstance(decision_item.get("account_exposure"), dict) else {}
+        price = (decision_item.get("price") or {}).get("current_or_last")
+        if price is None:
+            price = account_item.get("current_price")
+        quantity = account_item.get("current_live_holding_quantity")
+        if quantity is None:
+            quantity = exposure.get("current_live_holding_quantity")
+        valuation = account_item.get("valuation_amount", exposure.get("valuation_amount"))
+        pnl = account_item.get("pnl_amount", exposure.get("pnl_amount"))
+        pnl_rate = account_item.get("pnl_rate", exposure.get("pnl_rate"))
+        pending_buy = account_item.get("pending_and_reserved_buy_quantity", exposure.get("pending_and_reserved_buy_quantity"))
+        pending_sell = account_item.get("pending_and_reserved_sell_quantity", exposure.get("pending_and_reserved_sell_quantity"))
+        options.append(
+            f'<option value="{esc(symbol_id)}"{" selected" if active else ""}>{esc(symbol_name)} ({esc(symbol_id)})</option>'
+        )
+
+        period_specs = [
+            ("intraday", "당일", intraday_snapshots.get(symbol_id, [])),
+            ("week", "1주", week_snapshots.get(symbol_id, [])),
+            ("month", "1개월", month_snapshots.get(symbol_id, [])),
+        ]
+        period_buttons = []
+        period_panels = []
+        for period_index, (period, label, points) in enumerate(period_specs):
+            period_active = period_index == 0
+            period_buttons.append(
+                f'<button type="button" class="chart-period-button{" active" if period_active else ""}" '
+                f'data-chart-period-target="{period}" role="tab" aria-selected="{str(period_active).lower()}">{label}</button>'
+            )
+            period_panels.append(
+                f'<div class="chart-period-panel{" active" if period_active else ""}" data-chart-period-panel="{period}" role="tabpanel">'
+                f'{render_symbol_history_chart(points, period)}</div>'
+            )
+
+        trade_rows = "".join(row for _, row in sorted(trade_rows_by_symbol.get(symbol_id, []), key=lambda item: item[0]))
+        complete_fill_scope = fill_status == "success" and fill_scope == "account"
+        trade_table = trade_rows or (
+            '<tr><td colspan="7">당일 주문·체결 없음</td></tr>'
+            if complete_fill_scope
+            else '<tr><td colspan="7">확인된 당일 주문·체결 없음</td></tr>'
+        )
+        trade_notice = (
+            "계좌 전체 당일 체결 조회를 기준으로 표시합니다."
+            if complete_fill_scope
+            else f"체결 수집 상태 {fill_status}, 범위 {fill_scope}이므로 확인된 주문·체결만 표시합니다."
+        )
+        financial = decision_item.get("financial_summary") if isinstance(decision_item.get("financial_summary"), dict) else {}
+        etf = decision_item.get("etf_summary") if isinstance(decision_item.get("etf_summary"), dict) else {}
+        evidence = financial if financial.get("items") else etf
+        evidence_items = evidence.get("items") if isinstance(evidence.get("items"), list) else []
+        financial_html = "".join(f"<li>{esc(item)}</li>" for item in evidence_items) or "<li>사용 가능한 재무·상품 정보 없음</li>"
+        news = decision_item.get("symbol_news_summary") if isinstance(decision_item.get("symbol_news_summary"), list) else []
+        news_html = "".join(
+            f'<article class="news-item"><time>{esc(item.get("article_date"))}</time><p>{esc(item.get("content"))}</p></article>'
+            for item in news
+            if isinstance(item, dict)
+        ) or '<div class="empty-state">수집된 종목뉴스 없음</div>'
+
+        chart_context = decision_item.get("chart_context") if isinstance(decision_item.get("chart_context"), dict) else {}
+        chart_rows = []
+        for key, label in (("daily_summary", "일봉"), ("weekly_summary", "주봉"), ("monthly_summary", "월봉")):
+            row = chart_context.get(key) if isinstance(chart_context.get(key), dict) else {}
+            if not row:
+                continue
+            chart_rows.append(
+                f"<tr><td>{label}</td><td>{esc(row.get('latest_date'))}</td><td>{number(row.get('latest_close'))}원</td>"
+                f"<td>{signed_decimal(row.get('change_1_period_pct'))}%</td><td>{signed_decimal(row.get('change_5_period_pct'))}%</td>"
+                f"<td>{signed_decimal(row.get('distance_ma20_pct'))}%</td><td>{number(row.get('latest_volume'))}</td></tr>"
+            )
+        signals = decision_item.get("price_chart_signals") if isinstance(decision_item.get("price_chart_signals"), list) else []
+        signal_html = "".join(
+            f'<span><small>{esc(signal_labels.get(str(item.get("name")), item.get("name")))}</small><strong>'
+            f'{esc(signal_value(str(item.get("name")), item.get("value")))}</strong></span>'
+            for item in signals
+            if isinstance(item, dict)
+        ) or '<div class="empty-state">가격 신호 없음</div>'
+
+        flow = decision_item.get("investor_flow_summary") if isinstance(decision_item.get("investor_flow_summary"), dict) else {}
+        book = decision_item.get("orderbook_summary") if isinstance(decision_item.get("orderbook_summary"), dict) else {}
+        trade_flow = decision_item.get("trade_flow_summary") if isinstance(decision_item.get("trade_flow_summary"), dict) else {}
+        collection_issues = [
+            *[issue_label(value) for value in decision_item.get("required_missing", []) if value],
+            *[issue_label(value) for value in decision_item.get("warnings", []) if value],
+            *[issue_label(value) for value in decision_item.get("errors", []) if value],
+        ]
+        issues_html = " · ".join(esc(value) for value in collection_issues) or "없음"
+
+        analyst_item = analyst_by_symbol.get(symbol_id) or {}
+        score_rows = "".join(
+            f"<tr><td>{esc(ROLE_LABELS.get(str(score.get('agent_role')), score.get('agent_role')))}</td>"
+            f"<td>{decimal(score.get('score'), 1)}</td><td>{esc(score.get('reason_code'))}</td><td>{esc(score.get('one_line_reason'))}</td></tr>"
+            for score in analyst_item.get("agent_scores", [])
+            if isinstance(score, dict)
+        ) or '<tr><td colspan="4">Analyst 결과 없음</td></tr>'
+        final_item = final_by_symbol.get(symbol_id)
+        if final_item:
+            judge_html = (
+                f'<div class="symbol-judge-summary"><span>행동 <strong>{esc(judge_field_display(final_item, "canonical_action", CANONICAL_ACTION_LABELS))}</strong></span>'
+                f'<span>최종 보유 <strong>{number(final_item.get("final_holding_quantity"))}주</strong></span>'
+                f'<span>목표금액 <strong>{number(final_item.get("target_position_value_krw"))}원</strong></span></div>'
+                f'<p><code>{esc(final_item.get("reason_code"))}</code> {esc(final_item.get("one_line_reason"))}</p>'
+                f'{render_thesis_section(final_item)}'
+            )
+        else:
+            judge_html = '<div class="empty-state">이 run의 Judge 결과 없음</div>'
+
+        panels.append(
+            f'<article class="symbol-detail-panel{" active" if active else ""}" data-symbol-detail="{esc(symbol_id)}">'
+            f'<section class="panel symbol-hero"><div class="section-head"><div><p class="kicker">SYMBOL DETAIL</p>'
+            f'<h1>{esc(symbol_name)} <code>{esc(symbol_id)}</code></h1><p>{esc((decision_item.get("price") or {}).get("observed_at") or target_started_at)} 기준 수집 정보</p></div>'
+            f'<span class="badge info">evidence {esc(decision_item.get("evidence_mode") or "-")}</span></div>'
+            f'<div class="symbol-metrics"><article><span>현재/최근가</span><strong>{number(price)}원</strong><small>run 가격 스냅샷</small></article>'
+            f'<article><span>주문 전 보유</span><strong>{number(quantity)}주</strong><small>대기 매수 {number(pending_buy)} · 매도 {number(pending_sell)}주</small></article>'
+            f'<article><span>평가액</span><strong>{number(valuation)}원</strong><small>평가손익 {number(pnl)}원 ({decimal(pnl_rate)}%)</small></article>'
+            f'<article><span>평균매입가</span><strong>{number(account_item.get("average_purchase_price"))}원</strong><small>계좌 스냅샷 기준</small></article></div></section>'
+            f'<section class="panel"><div class="section-head"><div><p class="kicker">PRICE &amp; POSITION</p><h2>가격·보유수량 추이</h2></div>'
+            f'<span class="badge info">run 스냅샷</span></div><p class="section-note">당일은 회차별, 1주·1개월은 거래일별 마지막 유효 run의 현재/최근가와 주문 제출 전 보유수량입니다.</p>'
+            f'<section class="chart-period-switcher"><div class="chart-period-tabs" role="tablist" aria-label="종목 가격·보유수량 그래프 기간">{"".join(period_buttons)}</div>{"".join(period_panels)}</section></section>'
+            f'<section class="panel"><div class="section-head"><div><p class="kicker">TRADING</p><h2>당일 주문·체결</h2></div>'
+            f'<span class="badge info">{len(trade_rows_by_symbol.get(symbol_id, []))}건</span></div><div class="notice">{esc(trade_notice)}</div>'
+            f'<div class="table-wrap"><table><thead><tr><th>시각</th><th>구분</th><th>방향</th><th>주문</th><th>체결</th><th>상태</th><th>주문번호</th></tr></thead><tbody>{trade_table}</tbody></table></div></section>'
+            f'<section class="panel"><div class="section-head"><div><p class="kicker">COLLECTED EVIDENCE</p><h2>현재 수집 정보</h2></div>'
+            f'<span class="badge {"warn" if collection_issues else "ok"}">누락·경고 {len(collection_issues)}건</span></div>'
+            f'<div class="symbol-data-grid"><article><h3>투자자 수급</h3><p>외국인 {number(flow.get("foreign_net_buy_quantity"))}주</p><p>기관 {number(flow.get("institution_net_buy_quantity"))}주</p><p>합계 {number(flow.get("combined_net_buy_quantity"))}주</p></article>'
+            f'<article><h3>호가</h3><p>매도 {number(book.get("best_ask"))}원 / 매수 {number(book.get("best_bid"))}원</p><p>스프레드 {decimal(book.get("spread_pct"))}%</p><p>잔량 불균형 {decimal(book.get("depth_imbalance"), 4)}</p></article>'
+            f'<article><h3>최근 체결 흐름</h3><p>{number(trade_flow.get("oldest_price"))}원 → {number(trade_flow.get("latest_price"))}원</p><p>변화 {signed_decimal(trade_flow.get("recent_price_change_pct"))}%</p><p>표본 {number(trade_flow.get("tick_count"))}건</p></article>'
+            f'<article><h3>수집 상태</h3><p>상품 {esc(decision_item.get("product_type") or "-")}</p><p>review 적격 {esc(decision_item.get("eligible_for_review"))}</p><p>누락·경고 {issues_html}</p></article></div>'
+            f'<h3>가격·기술 신호</h3><div class="signal-grid">{signal_html}</div>'
+            f'<h3>차트 요약</h3><div class="table-wrap"><table><thead><tr><th>주기</th><th>기준일</th><th>종가</th><th>1구간</th><th>5구간</th><th>MA20 대비</th><th>거래량</th></tr></thead><tbody>{"".join(chart_rows) or "<tr><td colspan=\"7\">차트 요약 없음</td></tr>"}</tbody></table></div>'
+            f'<div class="symbol-evidence-grid"><article><h3>재무·상품 정보</h3><ul>{financial_html}</ul><p class="source-note">cache {esc(evidence.get("cache_status") or "-")}</p></article>'
+            f'<article><h3>종목뉴스</h3>{news_html}</article></div></section>'
+            f'<section class="panel"><div class="section-head"><div><p class="kicker">LATEST REVIEW</p><h2>최신 Analyst·Judge 판단</h2></div>'
+            f'<span class="badge info">Analyst {decimal(analyst_item.get("final_first_score"), 1)}</span></div>'
+            f'<div class="table-wrap"><table><thead><tr><th>Analyst 역할</th><th>점수</th><th>코드</th><th>근거</th></tr></thead><tbody>{score_rows}</tbody></table></div>'
+            f'<h3>Final Judge</h3>{judge_html}</section></article>'
+        )
+
+    return (
+        '<section class="panel symbol-picker"><div><label for="symbol-detail-select">조회 종목</label>'
+        f'<select id="symbol-detail-select" class="symbol-detail-select">{"".join(options)}</select></div>'
+        '<p>종목을 선택하면 당일 거래, 기간별 가격·보유수량, 최신 수집 근거와 판단을 한 화면에 표시합니다.</p></section>'
+        f'<div class="symbol-detail-content">{"".join(panels)}</div>'
+    )
+
+
 def build_html(runs_root: Path, target_run: str) -> str:
     target_dir = runs_root / target_run
     summary = load_json(target_dir / "pipeline-summary.json")
@@ -2225,10 +2689,21 @@ def build_html(runs_root: Path, target_run: str) -> str:
         raise ValueError(f"no daily-trading runs found through {target_started_at}")
     fills, fill_status, fill_scope = cumulative_today_fills(runs)
     trade_html, submitted_orders = render_trade_ledger(runs, fills, fill_status, fill_scope)
+    history_runs = find_daily_history(runs_root, target_started_at, calendar_days=30)
     overview = render_header(summary, len(runs), fills, submitted_orders) + render_chart_periods(
         runs_root,
         target_started_at,
         runs,
+        history_runs,
+    )
+    symbol_detail = render_symbol_detail_tab(
+        target_dir,
+        target_started_at,
+        runs,
+        fills,
+        fill_status,
+        fill_scope,
+        history_runs,
     )
     trades = render_time_symbol_inspector(runs, fills) + trade_html
     evidence = render_news_timeline(runs) + render_market_news_timeline(runs) + render_financial_details(target_dir)
@@ -2241,12 +2716,14 @@ def build_html(runs_root: Path, target_run: str) -> str:
 
     tab_buttons = [
         '<button type="button" class="tab-button active" data-tab="overview" role="tab" aria-selected="true">개요</button>',
+        '<button type="button" class="tab-button" data-tab="symbol-detail" role="tab" aria-selected="false">종목 상세</button>',
         '<button type="button" class="tab-button" data-tab="trading" role="tab" aria-selected="false">거래·종목판단</button>',
         '<button type="button" class="tab-button" data-tab="evidence" role="tab" aria-selected="false">재무·뉴스</button>',
         '<button type="button" class="tab-button" data-tab="operations" role="tab" aria-selected="false">실행 기록</button>',
     ]
     tab_pages = [
         f'<section class="tab-page active" id="overview" role="tabpanel">{overview}</section>',
+        f'<section class="tab-page" id="symbol-detail" role="tabpanel">{symbol_detail}</section>',
         f'<section class="tab-page" id="trading" role="tabpanel">{trades}</section>',
         f'<section class="tab-page" id="evidence" role="tabpanel">{evidence}</section>',
         f'<section class="tab-page" id="operations" role="tabpanel">{operations}</section>',
@@ -2294,6 +2771,7 @@ def build_html(runs_root: Path, target_run: str) -> str:
     .warning-list {{ display:grid; gap:9px; margin-top:18px; }} .warning {{ padding:14px; border-left:4px solid var(--warn); border-radius:10px; background:var(--warn-bg); }} .warning.bad-border {{ border-left-color:var(--bad); background:var(--bad-bg); }} .warning p {{ margin:4px 0 0; font-size:13px; }}
     .chart-period-tabs {{ display:flex; width:max-content; gap:5px; padding:5px; margin:16px 0 -6px auto; border:1px solid var(--line); border-radius:12px; background:var(--surface); }} .chart-period-button {{ padding:7px 13px; border:0; border-radius:8px; background:transparent; color:var(--muted); cursor:pointer; font-size:12px; font-weight:800; }} .chart-period-button.active {{ background:var(--accent); color:#fff; }} .chart-period-panel {{ display:none; }} .chart-period-panel.active {{ display:block; animation:page-in .18s ease; }}
     .combined-chart-card {{ padding:24px; margin-top:16px; border:1px solid var(--line); border-radius:22px; background:var(--surface); box-shadow:var(--shadow); }} .chart-legend {{ display:flex; flex-wrap:wrap; gap:14px; margin:13px 0 4px; color:var(--muted); font-size:12px; }} .chart-legend span {{ display:flex; align-items:center; gap:6px; }} .chart-legend i {{ width:22px; height:4px; border-radius:999px; background:var(--legend); }} .interactive-chart {{ position:relative; }} .interactive-line-chart {{ display:block; width:100%; height:auto; overflow:visible; }} .series-line {{ fill:none; stroke-width:4; stroke-linecap:round; stroke-linejoin:round; }} .total-line {{ stroke:#4f6df5; }} .pnl-line {{ stroke:#e14c68; stroke-dasharray:11 7; }} .asset-line {{ stroke:#8b5cf6; stroke-dasharray:4 5; }} .kospi-line {{ stroke:#0b9a86; }} .chart-zero {{ stroke:#9ca7b8; stroke-width:1.5; }} .chart-cursor {{ stroke:#617089; stroke-width:1.5; stroke-dasharray:5 5; opacity:0; }} .chart-marker {{ stroke:#fff; stroke-width:3; opacity:0; }} .total-marker {{ fill:#4f6df5; }} .pnl-marker {{ fill:#e14c68; }} .asset-marker {{ fill:#8b5cf6; }} .kospi-marker {{ fill:#0b9a86; }} .series-point {{ stroke:#fff; stroke-width:1.5; opacity:.85; pointer-events:none; }} .total-point {{ fill:#4f6df5; }} .pnl-point {{ fill:#e14c68; }} .asset-point {{ fill:#8b5cf6; }} .kospi-point {{ fill:#0b9a86; }} .chart-hit-area {{ fill:transparent; cursor:crosshair; pointer-events:all; touch-action:none; }} .chart-tooltip {{ position:absolute; z-index:5; min-width:190px; padding:11px 13px; border:1px solid rgba(220,228,239,.9); border-radius:12px; background:rgba(20,29,52,.94); color:#fff; box-shadow:0 12px 32px rgba(18,27,50,.25); opacity:0; pointer-events:none; transform:translate(-50%,-112%); transition:opacity .12s ease; font-size:12px; }} .chart-tooltip.visible {{ opacity:1; }} .chart-tooltip strong,.chart-tooltip span {{ display:block; }} .chart-tooltip strong {{ margin-bottom:5px; }} .chart-tooltip span {{ color:#d8e0f3; }} .chart-scrubber {{ padding:8px 5px 0; }} .chart-scrubber-label,.chart-scrubber-ends {{ display:flex; align-items:center; justify-content:space-between; gap:12px; }} .chart-scrubber-label {{ margin-bottom:3px; color:var(--muted); font-size:12px; font-weight:800; }} .chart-scrubber-time {{ color:var(--accent); font-weight:900; }} .chart-range-slider {{ width:100%; accent-color:var(--accent); cursor:ew-resize; touch-action:pan-x; }} .chart-scrubber-ends {{ color:var(--muted); font-size:10px; }} .series-ranges {{ display:flex; justify-content:flex-end; flex-wrap:wrap; gap:13px; color:var(--muted); font-size:11px; }}
+    .symbol-picker {{ display:flex; align-items:end; justify-content:space-between; gap:20px; }} .symbol-picker>div {{ min-width:min(100%,420px); }} .symbol-picker label {{ display:block; margin-bottom:6px; color:var(--muted); font-size:12px; font-weight:800; }} .symbol-detail-select {{ width:100%; padding:11px 38px 11px 12px; border:1px solid var(--line); border-radius:11px; background:var(--surface); color:var(--text); font:inherit; font-weight:800; }} .symbol-picker p {{ max-width:620px; margin:0; color:var(--muted); }} .symbol-detail-panel {{ display:none; }} .symbol-detail-panel.active {{ display:block; animation:page-in .18s ease; }} .symbol-hero h1 {{ margin-bottom:4px; }} .symbol-metrics {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; }} .symbol-metrics article {{ padding:15px; border:1px solid var(--line); border-radius:13px; background:#fff; }} .symbol-metrics span,.symbol-metrics small {{ display:block; color:var(--muted); font-size:11px; }} .symbol-metrics strong {{ display:block; margin:3px 0; font-size:19px; }} .symbol-history-chart {{ padding:14px; border:1px solid var(--line); border-radius:14px; background:var(--subtle); }} .symbol-history-chart svg {{ display:block; width:100%; height:auto; }} .symbol-price-line,.symbol-quantity-line {{ fill:none; stroke-width:4; stroke-linecap:round; stroke-linejoin:round; }} .symbol-price-line {{ stroke:#4f6df5; }} .symbol-quantity-line {{ stroke:#0b9a86; stroke-dasharray:9 5; }} .symbol-price-point,.symbol-quantity-point {{ stroke:#fff; stroke-width:2; }} .symbol-price-point {{ fill:#4f6df5; }} .symbol-quantity-point {{ fill:#0b9a86; }} .symbol-chart-legend {{ display:flex; align-items:center; flex-wrap:wrap; gap:13px; color:var(--muted); font-size:12px; }} .symbol-chart-legend span {{ display:flex; align-items:center; gap:6px; }} .symbol-chart-legend i {{ width:22px; height:4px; border-radius:999px; }} .symbol-chart-legend .price-key {{ background:#4f6df5; }} .symbol-chart-legend .quantity-key {{ background:#0b9a86; }} .symbol-chart-legend small {{ margin-left:auto; }} .symbol-data-grid,.symbol-evidence-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }} .symbol-data-grid article,.symbol-evidence-grid article {{ padding:15px; border:1px solid var(--line); border-radius:12px; background:var(--subtle); }} .symbol-data-grid h3,.symbol-evidence-grid h3 {{ margin-top:0; }} .symbol-data-grid p {{ margin:4px 0; }} .signal-grid {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(135px,1fr)); gap:7px; margin-bottom:16px; }} .signal-grid>span {{ padding:10px; border:1px solid var(--line); border-radius:10px; background:#fff; }} .signal-grid small,.signal-grid strong {{ display:block; }} .signal-grid small {{ color:var(--muted); }} .symbol-evidence-grid {{ margin-top:16px; }} .symbol-evidence-grid ul {{ margin:0; padding-left:20px; }} .symbol-judge-summary {{ display:flex; flex-wrap:wrap; gap:8px; }} .symbol-judge-summary span {{ padding:8px 10px; border-radius:9px; background:var(--accent-bg); font-size:12px; }}
     .portfolio-chart-layout {{ display:grid; grid-template-columns:minmax(300px,.85fr) minmax(320px,1.15fr); align-items:center; gap:28px; padding:20px; margin-bottom:12px; border:1px solid var(--line); border-radius:16px; background:var(--subtle); }} .portfolio-pie {{ position:relative; width:min(100%,430px); margin:auto; }} .portfolio-pie-svg {{ display:block; width:100%; height:auto; filter:drop-shadow(0 12px 22px rgba(24,36,64,.12)); }} .pie-slice {{ stroke:#fff; stroke-width:2; cursor:pointer; outline:none; transition:opacity .15s ease,stroke-width .15s ease; }} .pie-slice:hover,.pie-slice.active,.pie-slice:focus {{ opacity:.8; stroke-width:5; }} .pie-tooltip {{ position:absolute; z-index:6; min-width:205px; padding:11px 13px; border-radius:12px; background:rgba(20,29,52,.95); color:#fff; box-shadow:0 12px 32px rgba(18,27,50,.25); opacity:0; pointer-events:none; transform:translate(-50%,-112%); transition:opacity .1s ease; font-size:12px; }} .pie-tooltip.visible {{ opacity:1; }} .pie-tooltip strong,.pie-tooltip span {{ display:block; }} .pie-tooltip strong {{ margin-bottom:4px; }} .pie-tooltip span {{ color:#d8e0f3; }} .sector-legend {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; }} .sector-legend>div:first-child {{ grid-column:1/-1; }} .sector-legend h3 {{ margin:0; }} .sector-legend>div:first-child p:last-child {{ margin:3px 0 5px; color:var(--muted); font-size:12px; }} .sector-legend-item {{ display:flex; align-items:center; gap:9px; padding:10px; border:1px solid var(--line); border-radius:11px; background:#fff; }} .sector-legend-item i {{ width:13px; height:34px; flex:0 0 13px; border-radius:999px; background:var(--sector-color); }} .sector-legend-item strong,.sector-legend-item small {{ display:block; }} .sector-legend-item small {{ color:var(--muted); font-size:10px; }} .holdings-table {{ margin-top:14px; }}
     .chart-grid-wrap {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; margin-top:16px; }} .chart-card {{ padding:20px; overflow:hidden; border:1px solid var(--line); border-radius:20px; background:var(--surface); box-shadow:var(--shadow); }} .chart-head {{ display:flex; justify-content:space-between; gap:12px; }} .chart-head h3 {{ margin:0; font-size:19px; }} .chart-head p {{ margin:5px 0 0; color:var(--muted); font-size:12px; }} .chart-stat {{ min-width:100px; text-align:right; }} .chart-stat span,.chart-stat strong {{ display:block; }} .chart-stat span {{ color:var(--muted); font-size:11px; }} .line-chart {{ display:block; width:100%; height:auto; margin-top:5px; overflow:visible; }} .chart-grid {{ stroke:#e5eaf2; stroke-width:1; }} .chart-y,.chart-x {{ fill:#738096; font-size:15px; }} .chart-point {{ stroke:#fff; stroke-width:3; }} .chart-range {{ display:flex; justify-content:flex-end; flex-wrap:wrap; gap:14px; color:var(--muted); font-size:11px; }} .chart-range strong {{ color:var(--text); }}
     .financial-list {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }} .financial-card {{ padding:17px; border:1px solid var(--line); border-radius:15px; background:var(--subtle); }} .financial-body {{ padding:13px; border-radius:11px; background:#fff; }} .financial-body ul {{ margin:0; padding-left:20px; }} .evidence-title {{ display:flex; gap:10px; align-items:flex-start; margin-bottom:12px; }} .evidence-title h3 {{ margin:0; }} .evidence-title p {{ margin:4px 0 0; color:var(--muted); font-size:12px; }} .source-note {{ margin:12px 0 0; color:var(--muted); font-size:11px; }}
@@ -2311,8 +2789,8 @@ def build_html(runs_root: Path, target_run: str) -> str:
     .decision-evidence {{ margin-top:12px; padding-top:12px; border-top:1px dashed var(--line); }} .decision-evidence h4 {{ margin:0 0 6px; font-size:12px; color:var(--muted); }} .decision-evidence ul {{ display:grid; gap:6px; margin:0; padding:0; list-style:none; }} .decision-evidence-item {{ padding:8px 10px; border-radius:9px; background:#fff; border-left:4px solid var(--bull); }} .decision-evidence-item.bear {{ border-left-color:var(--bear); }} .decision-evidence-item a {{ color:var(--accent); font-weight:700; text-decoration:none; }} .decision-evidence-item a:hover {{ text-decoration:underline; }} .decision-evidence-item p {{ margin:4px 0 0; font-size:12px; }}
     .thesis-card {{ padding:18px; margin-top:12px; border:1px solid var(--line); border-left:5px solid var(--accent); border-radius:14px; background:linear-gradient(145deg,#fff,var(--accent-bg)); box-shadow:0 10px 25px rgba(31,47,77,.07); }} .thesis-card.thesis-ok {{ border-left-color:var(--ok); }} .thesis-card.thesis-warn {{ border-left-color:var(--warn); }} .thesis-card.thesis-bad {{ border-left-color:var(--bad); }} .thesis-card-head {{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }} .thesis-card-head h3 {{ margin:2px 0 0; font-size:18px; }} .thesis-block {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; margin-top:14px; }} .thesis-block>div {{ padding:12px; border:1px solid var(--line); border-radius:10px; background:rgba(255,255,255,.9); }} .thesis-block h4 {{ margin:0 0 5px; font-size:12px; color:var(--muted); }} .thesis-block p {{ margin:0; font-size:12px; }} .thesis-source {{ color:var(--muted); }} .thesis-conditions {{ display:grid; gap:4px; margin:5px 0 0; padding-left:16px; font-size:12px; }} .thesis-condition.matched {{ font-weight:700; }}
     footer {{ padding:24px 4px 0; color:var(--muted); font-size:12px; text-align:center; }}
-    @media(max-width:900px) {{ .chart-grid-wrap,.financial-list,.portfolio-chart-layout {{ grid-template-columns:1fr; }} .run-activity {{ grid-template-columns:repeat(2,minmax(0,1fr)); }} }}
-    @media(max-width:800px) {{ main {{ width:min(100% - 16px,720px); margin-top:8px; }} .app-header {{ padding-inline:4px; }} .hero,.panel,.decision-hero,.combined-chart-card {{ padding:19px; border-radius:17px; }} .metrics,.coverage {{ grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }} .section-head,.symbol-focus-head,.time-panel-head {{ display:block; }} .section-head>.badge,.symbol-focus-head>.badge,.time-panel-head>.badge {{ margin-top:8px; }} .focus-badges {{ justify-content:flex-start; margin-top:8px; }} .debate-meta,.final-grid,.decision-orders,.thesis-block {{ grid-template-columns:1fr; }} .news-run-head {{ display:block; }} .news-run-head>div+div {{ margin-top:7px; }} }}
+    @media(max-width:900px) {{ .chart-grid-wrap,.financial-list,.portfolio-chart-layout {{ grid-template-columns:1fr; }} .run-activity {{ grid-template-columns:repeat(2,minmax(0,1fr)); }} .symbol-metrics {{ grid-template-columns:repeat(2,minmax(0,1fr)); }} }}
+    @media(max-width:800px) {{ main {{ width:min(100% - 16px,720px); margin-top:8px; }} .app-header {{ padding-inline:4px; }} .hero,.panel,.decision-hero,.combined-chart-card {{ padding:19px; border-radius:17px; }} .metrics,.coverage {{ grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }} .section-head,.symbol-focus-head,.time-panel-head,.symbol-picker {{ display:block; }} .section-head>.badge,.symbol-focus-head>.badge,.time-panel-head>.badge {{ margin-top:8px; }} .symbol-picker p {{ margin-top:10px; }} .focus-badges {{ justify-content:flex-start; margin-top:8px; }} .debate-meta,.final-grid,.decision-orders,.thesis-block,.symbol-data-grid,.symbol-evidence-grid {{ grid-template-columns:1fr; }} .news-run-head {{ display:block; }} .news-run-head>div+div {{ margin-top:7px; }} }}
     @media(max-width:480px) {{ .metrics strong,.coverage strong {{ font-size:16px; }} .phase-title {{ display:block; }} .phase-title small {{ display:block; margin-top:4px; }} .run-activity,.sector-legend {{ grid-template-columns:repeat(2,minmax(0,1fr)); }} .portfolio-chart-layout {{ padding:12px; }} }}
     @media print {{ body {{ background:#fff; }} main {{ width:100%; margin:0; }} .app-header,.tab-bar {{ display:none; }} .tab-page {{ display:block !important; }} .hero,.panel,.metrics article,.chart-card {{ box-shadow:none; break-inside:avoid; }} .table-wrap {{ overflow:visible; }} }}
   </style>
@@ -2342,6 +2820,17 @@ def build_html(runs_root: Path, target_run: str) -> str:
       window.scrollTo({{ top: 0, behavior: 'smooth' }});
     }};
     buttons.forEach((button) => button.addEventListener('click', () => activate(button.dataset.tab)));
+
+    document.querySelectorAll('.symbol-detail-select').forEach((selector) => {{
+      const panels = [...document.querySelectorAll('.symbol-detail-panel')];
+      const selectSymbol = () => panels.forEach((panel) => {{
+        const active = panel.dataset.symbolDetail === selector.value;
+        panel.classList.toggle('active', active);
+        panel.hidden = !active;
+      }});
+      selector.addEventListener('change', selectSymbol);
+      selectSymbol();
+    }});
 
     document.querySelectorAll('.time-selector').forEach((selector) => {{
       const timeButtons = [...selector.querySelectorAll('.time-button')];

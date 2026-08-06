@@ -42,6 +42,7 @@ from ..scripts.render_html_report import (
     render_chart_periods,
     render_header,
     render_market_and_quality,
+    render_symbol_history_chart,
     render_thesis_section,
     render_time_symbol_inspector,
     render_trade_ledger,
@@ -113,13 +114,48 @@ def make_run(runs_root: Path, run_id: str, started_at: str, *, target: bool) -> 
                 "result": "submitted",
             }
         )
+        orders.append(
+            {
+                "symbol_id": "000002",
+                "symbol_name": "베타소재",
+                "direction": "buy",
+                "quantity": 0,
+                "order_price": 50_000,
+                "order_or_reservation_id": "skipped-order-must-not-render",
+                "result": "skipped",
+                "reason": "final_equals_expected_holding_quantity",
+            }
+        )
     decision_symbols = [
         {
             "symbol_id": "000001",
             "symbol_name": "알파전자",
             "evidence_mode": "full",
-            "price": {"current_or_last": 100_000},
+            "eligible_for_review": True,
+            "product_type": "stock",
+            "price": {"current_or_last": 100_000, "observed_at": started_at},
             "account_exposure": {"current_live_holding_quantity": 2},
+            "price_chart_signals": [{"name": "day_change_pct", "value": 1.25}],
+            "chart_context": {
+                "daily_summary": {
+                    "latest_date": "20260715",
+                    "latest_close": 100_000,
+                    "change_1_period_pct": 1.25,
+                    "change_5_period_pct": 3.5,
+                    "distance_ma20_pct": 2.1,
+                    "latest_volume": 12_345,
+                }
+            },
+            "investor_flow_summary": {
+                "foreign_net_buy_quantity": 120,
+                "institution_net_buy_quantity": -20,
+                "combined_net_buy_quantity": 100,
+            },
+            "orderbook_summary": {"best_ask": 100_100, "best_bid": 100_000, "spread_pct": 0.1, "depth_imbalance": 0.25},
+            "trade_flow_summary": {"oldest_price": 99_900, "latest_price": 100_000, "recent_price_change_pct": 0.1, "tick_count": 10},
+            "required_missing": [],
+            "warnings": [],
+            "errors": [],
             "financial_summary": {
                 "cache_status": "hit",
                 "quality_value_usable": True,
@@ -245,6 +281,7 @@ def make_run(runs_root: Path, run_id: str, started_at: str, *, target: bool) -> 
         "relative_attractiveness_rank": 1,
         "reason_code": "buy",
         "one_line_reason": "상대 매력도 우위",
+        "canonical_action": "increase",
     }
     if target:
         judge_review_symbol.update(
@@ -282,7 +319,7 @@ def make_run(runs_root: Path, run_id: str, started_at: str, *, target: bool) -> 
         run_dir / "account-before-order.json",
         {
             "symbols": [
-                {"symbol_id": "000001", "symbol_name": "알파전자", "current_live_holding_quantity": 2, "current_price": 100_000, "valuation_amount": 200_000, "pnl_amount": 20_000, "pnl_rate": 11.1},
+                {"symbol_id": "000001", "symbol_name": "알파전자", "current_live_holding_quantity": 2, "current_price": 100_000, "average_purchase_price": 90_000, "valuation_amount": 200_000, "pnl_amount": 20_000, "pnl_rate": 11.1},
                 {"symbol_id": "000002", "symbol_name": "베타소재", "current_live_holding_quantity": 1, "current_price": 50_000, "valuation_amount": 50_000, "pnl_amount": -5_000, "pnl_rate": -9.1},
             ]
         },
@@ -324,6 +361,23 @@ def make_run(runs_root: Path, run_id: str, started_at: str, *, target: bool) -> 
 
 
 REQUIRED_CUMULATIVE_REPORT_STRINGS = [
+    'data-tab="symbol-detail"',
+    'id="symbol-detail"',
+    'class="symbol-detail-select"',
+    'data-symbol-detail="000001"',
+    "가격·보유수량 추이",
+    'aria-label="종목 가격·보유수량 그래프 기간"',
+    'class="symbol-price-line"',
+    'class="symbol-quantity-line"',
+    "당일 주문·체결",
+    "계좌 전체 당일 체결 조회를 기준으로 표시합니다.",
+    "현재 수집 정보",
+    "외국인 120주",
+    "당일 등락률",
+    "최신 Analyst·Judge 판단",
+    "행동 <strong>확대</strong>",
+    'class="badge bad">KIS 거절 1주</span>',
+    "selector.addEventListener('change', selectSymbol)",
     "10:00까지의 당일 전체 거래",
     "data-time-target=\"run-0-0900\"",
     "data-time-target=\"run-1-0900\"",
@@ -410,6 +464,7 @@ FORBIDDEN_CUMULATIVE_REPORT_STRINGS = [
     "selector.addEventListener('scroll'",
     "event.key === 'ArrowUp'",
     "시간 휠",
+    "skipped-order-must-not-render",
 ]
 
 
@@ -557,6 +612,41 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
     def test_combined_chart_falls_back_when_kospi_and_asset_missing(self) -> None:
         no_kospi_chart = scenario_render_combined_chart_without_kospi()
         self.assertTrue(check_combined_chart_falls_back_when_kospi_and_asset_missing(no_kospi_chart))
+
+    def test_symbol_history_chart_renders_price_and_step_holding_series(self) -> None:
+        rendered = render_symbol_history_chart(
+            [
+                {"label": "09:00", "price": 100_000, "quantity": 2},
+                {"label": "10:00", "price": 105_000, "quantity": 3},
+            ],
+            "intraday",
+        )
+
+        self.assertIn('aria-label="당일 가격과 보유수량 추이"', rendered)
+        self.assertIn('class="symbol-price-line"', rendered)
+        self.assertIn('class="symbol-quantity-line"', rendered)
+        self.assertIn("가격 100,000~105,000원", rendered)
+        self.assertIn("보유 2~3주", rendered)
+        self.assertIn("09:00 가격 100,000원", rendered)
+        self.assertIn("10:00 보유 3주", rendered)
+
+    def test_symbol_detail_does_not_claim_no_trades_when_fill_scope_is_incomplete(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runs_root = Path(temporary) / "runs"
+            run_dir = make_run(runs_root, "run-1000", "2026-07-15T10:00:00+09:00", target=True)
+            write_json(run_dir / "execution.json", {"status": "success", "request_type": "real-submit", "orders": []})
+            write_json(
+                run_dir / "today-fills.json",
+                {"status": "unavailable", "skipped": False, "fill_scope": "universe", "fills": []},
+            )
+
+            rendered = build_html(runs_root, "run-1000")
+
+        self.assertIn(
+            "체결 수집 상태 unavailable, 범위 universe이므로 확인된 주문·체결만 표시합니다.",
+            rendered,
+        )
+        self.assertIn('<td colspan="7">확인된 당일 주문·체결 없음</td>', rendered)
 
     def test_render_header_prefers_reporting_view_over_conflicting_legacy_fields(self) -> None:
         rendered = render_header(
