@@ -35,6 +35,7 @@ from ..scripts.collect_main_evidence import (
     collect_account_asset_snapshot,
     collect_extended_market_evidence,
     collect_today_fills_artifact,
+    exchange_preflight,
     latest_investor_flow_row,
     merge_duplicate_fills,
     normalize_fill,
@@ -66,17 +67,19 @@ def check_trading_env_and_parsing_helpers() -> None:
 
 def check_summarize_orderbook_expected_price_and_volume() -> None:
     orderbook = summarize_orderbook(
-        {"askp1": "1010", "bidp1": "1000", "total_askp_rsqn": "20", "total_bidp_rsqn": "30"},
+        {"askp1": "1010", "bidp1": "1000", "total_askp_rsqn": "20", "total_bidp_rsqn": "30", "new_mkop_cls_code": "20"},
         {"antc_cnpr": "1005", "antc_vol": "12", "vi_cls_code": "N"},
     )
     if orderbook["expected_price"] != 1005:
         raise AssertionError(f"unexpected expected_price: {orderbook}")
     if orderbook["expected_volume"] != 12:
         raise AssertionError(f"unexpected expected_volume: {orderbook}")
+    if orderbook["market_operation_code"] != "20":
+        raise AssertionError(f"unexpected market_operation_code: {orderbook}")
 
 
 def scenario_build_etf_price_row() -> dict:
-    info = {"prdt_abrv_name": "ACE GOLD ETF", "scty_grp_id_cd": "EF", "etf_dvsn_cd": "02"}
+    info = {"prdt_abrv_name": "ACE GOLD ETF", "scty_grp_id_cd": "EF", "etf_dvsn_cd": "02", "tr_stop_yn": "N"}
     price = {"stck_prpr": "18590", "prdy_ctrt": "1.23", "acml_vol": "1000"}
     return build_price_row(
         "411060",
@@ -665,6 +668,76 @@ class BuildPriceRowTest(unittest.TestCase):
 
     def test_price_row_local_signals_and_summaries(self) -> None:
         check_price_row_local_signals_and_summaries(self.row)
+
+    def test_exchange_preflight_uses_live_kis_flags(self) -> None:
+        open_orderbook = {"market_operation_code": "20"}
+        self.assertEqual(
+            exchange_preflight(
+                {"cptt_trad_tr_psbl_yn": "Y", "nxt_tr_stop_yn": "N"},
+                open_orderbook,
+                market="UN",
+                order_path="immediate",
+            )["status"],
+            "eligible",
+        )
+        self.assertEqual(
+            exchange_preflight(
+                {"cptt_trad_tr_psbl_yn": "N", "nxt_tr_stop_yn": "N"},
+                open_orderbook,
+                market="UN",
+                order_path="immediate",
+            )["reasons"],
+            ["exchange.nxt_not_tradable"],
+        )
+        self.assertEqual(
+            exchange_preflight(
+                {"cptt_trad_tr_psbl_yn": "Y", "nxt_tr_stop_yn": "N"},
+                {"market_operation_code": "30"},
+                market="NX",
+                order_path="immediate",
+            )["reasons"],
+            ["exchange.session_not_open"],
+        )
+        self.assertEqual(
+            exchange_preflight(
+                {"tr_stop_yn": "N"},
+                {},
+                market="J",
+                order_path="reservation",
+            )["status"],
+            "eligible",
+        )
+        self.assertEqual(
+            exchange_preflight(
+                {},
+                open_orderbook,
+                market="J",
+                order_path="immediate",
+            )["reasons"],
+            ["exchange.krx_trade_status_unknown"],
+        )
+        self.assertEqual(
+            exchange_preflight(
+                {"cptt_trad_tr_psbl_yn": "Y"},
+                open_orderbook,
+                market="NX",
+                order_path="immediate",
+            )["reasons"],
+            ["exchange.nxt_trade_status_unknown"],
+        )
+        blocked_row = build_price_row(
+            "411060",
+            {"prdt_abrv_name": "ACE KRX Gold", "cptt_trad_tr_psbl_yn": "N"},
+            {"stck_prpr": "18590"},
+            observed_at="2026-08-07T09:05:00+09:00",
+            env_dv="real",
+            market="UN",
+            errors=[],
+            orderbook=open_orderbook,
+            order_path="immediate",
+        )
+        self.assertFalse(blocked_row["eligible_for_review"])
+        self.assertIn("exchange.nxt_not_tradable", blocked_row["required_missing"])
 
 
 class NormalizeHoldingTest(unittest.TestCase):

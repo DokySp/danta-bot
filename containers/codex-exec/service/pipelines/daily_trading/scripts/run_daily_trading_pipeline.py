@@ -1010,7 +1010,10 @@ class Pipeline:
     def collect_main_evidence(self, symbols: list[str]) -> None:
         price_path = self.output_dir / "price-chart.json"
         account_path = self.output_dir / "account-before-order.json"
-        if self.args.reuse_existing_artifacts and price_path.exists() and account_path.exists():
+        reusable = self.args.reuse_existing_artifacts and not (
+            getattr(self.args, "submit_orders", False) and self.args.request_type in {"demo-submit", "real-submit"}
+        )
+        if reusable and price_path.exists() and account_path.exists():
             self.add_stage("main-evidence", "success", detail="reused existing price/account artifacts", path=self.output_dir)
             return
 
@@ -1032,6 +1035,8 @@ class Pipeline:
             self.args.request_type,
             "--market",
             self.market,
+            "--order-path",
+            self.order_path,
         ]
         if self.args.skip_account:
             cmd.append("--skip-account")

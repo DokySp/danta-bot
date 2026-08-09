@@ -1425,6 +1425,9 @@ print(json.dumps(execution, ensure_ascii=False))
             def order_execution_script(self) -> str:
                 return str(fake_execute_orders)
 
+            def collect_main_evidence(self, symbols: list[str]) -> None:
+                self.add_stage("main-evidence", "success", detail="loaded self-test fixtures", path=self.output_dir)
+
         submit_run_dir = workspace / "reports" / "runs" / "submit-orders-probe"
         write_self_test_fixtures(workspace, submit_run_dir)
         submit_pipeline = SubmitOrdersProbePipeline(
@@ -1734,6 +1737,38 @@ class RunDailyTradingPipelineSelfTest(unittest.TestCase):
             result = run_self_test()
 
         self.assertEqual(result, 1)
+
+    def test_submit_run_refreshes_main_evidence_when_reuse_is_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            run_dir = workspace / "reports" / "runs" / "live-preflight-probe"
+            write_self_test_fixtures(workspace, run_dir)
+            pipeline = Pipeline(
+                argparse.Namespace(
+                    command="run",
+                    workspace_dir=str(workspace),
+                    output_dir=str(run_dir),
+                    run_id="live-preflight-probe",
+                    started_at="2026-06-18T09:00:00+09:00",
+                    env="acct",
+                    request_type="real-submit",
+                    order_path="immediate",
+                    exchange="SOR",
+                    reuse_existing_artifacts=True,
+                    submit_orders=True,
+                    skip_account=False,
+                )
+            )
+            with mock.patch.object(
+                pipeline,
+                "run_cmd",
+                return_value=subprocess.CompletedProcess([], 0, "", ""),
+            ) as run_cmd:
+                pipeline.collect_main_evidence(["005930", "000660"])
+
+            run_cmd.assert_called_once()
+            self.assertIn("--order-path", run_cmd.call_args.args[1])
+            self.assertIn("--market", run_cmd.call_args.args[1])
 
     def test_build_reporting_view_ignores_nonzero_raw_history_rows_without_lifecycle_confirmation(self) -> None:
         # This is the original bug: a raw active_orders history/reservation list with several

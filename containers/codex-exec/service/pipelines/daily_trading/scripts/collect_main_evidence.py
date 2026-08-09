@@ -440,6 +440,51 @@ def summarize_orderbook(row: dict[str, Any], expected_row: dict[str, Any] | None
         "expected_price": parse_int(first_present(expected_row, ("antc_cnpr", "stck_prpr")) or first_present(row, ("antc_cnpr", "stck_prpr"))),
         "expected_volume": parse_int(first_present(expected_row, ("antc_vol",)) or first_present(row, ("antc_vol",))),
         "vi_status": text_first(expected_row, ("vi_cls_code", "vi_stnd_prc")) or text_first(row, ("vi_cls_code", "vi_stnd_prc")),
+        "market_operation_code": text_first(row, ("new_mkop_cls_code", "NEW_MKOP_CLS_CODE")),
+    }
+
+
+def exchange_preflight(
+    info: dict[str, Any],
+    orderbook: dict[str, Any],
+    *,
+    market: str,
+    order_path: str = "",
+) -> dict[str, Any]:
+    exchange = {"J": "KRX", "NX": "NXT", "UN": "SOR"}.get(str(market or "").upper(), "")
+    nxt_tradable = text_first(info, ("cptt_trad_tr_psbl_yn", "CPTT_TRAD_TR_PSBL_YN")).upper()
+    krx_trade_stopped = text_first(info, ("tr_stop_yn", "TR_STOP_YN")).upper()
+    nxt_trade_stopped = text_first(info, ("nxt_tr_stop_yn", "NXT_TR_STOP_YN")).upper()
+    market_operation_code = str(orderbook.get("market_operation_code") or "").strip()
+    reasons: list[str] = []
+
+    if exchange in {"NXT", "SOR"}:
+        if nxt_tradable not in {"Y", "N"}:
+            reasons.append("exchange.nxt_tradability_unknown")
+        elif nxt_tradable != "Y":
+            reasons.append("exchange.nxt_not_tradable")
+        elif nxt_trade_stopped not in {"Y", "N"}:
+            reasons.append("exchange.nxt_trade_status_unknown")
+        elif nxt_trade_stopped == "Y":
+            reasons.append("exchange.nxt_trade_stopped")
+    elif exchange == "KRX":
+        if krx_trade_stopped not in {"Y", "N"}:
+            reasons.append("exchange.krx_trade_status_unknown")
+        elif krx_trade_stopped == "Y":
+            reasons.append("exchange.krx_trade_stopped")
+
+    if order_path == "immediate" and not market_operation_code.startswith("2"):
+        reasons.append("exchange.session_not_open")
+
+    return {
+        "status": "blocked" if reasons else "eligible",
+        "exchange": exchange,
+        "market": market,
+        "nxt_tradable": nxt_tradable,
+        "krx_trade_stopped": krx_trade_stopped,
+        "nxt_trade_stopped": nxt_trade_stopped,
+        "market_operation_code": market_operation_code,
+        "reasons": reasons,
     }
 
 
@@ -502,6 +547,7 @@ def build_price_row(
     orderbook: dict[str, Any] | None = None,
     trade_flow: dict[str, Any] | None = None,
     investor_flow: dict[str, Any] | None = None,
+    order_path: str = "",
 ) -> dict[str, Any]:
     symbol_name = text_first(info, ("prdt_abrv_name", "prdt_name", "prdt_name120")) or text_first(price, ("hts_kor_isnm", "bstp_kor_isnm")) or symbol
     current_price = parse_int(first_present(price, ("stck_prpr", "thdt_clpr", "stck_prdy_clpr")))
@@ -515,6 +561,9 @@ def build_price_row(
 
     charts = charts or {"daily": [], "weekly": [], "monthly": []}
     intraday = intraday or []
+    orderbook = orderbook or {}
+    preflight = exchange_preflight(info, orderbook, market=market, order_path=order_path)
+    required_missing.extend(preflight["reasons"])
     signals = [
         price_signal("day_change_pct", parse_float(price.get("prdy_ctrt"))),
         price_signal("volume", parse_int(price.get("acml_vol"))),
@@ -565,7 +614,8 @@ def build_price_row(
         "local_signals": [signal for signal in signals if signal is not None],
         "charts": charts,
         "intraday": intraday,
-        "orderbook_summary": orderbook or {},
+        "orderbook_summary": orderbook,
+        "exchange_preflight": preflight,
         "trade_flow_summary": trade_flow or {},
         "investor_flow_summary": investor_flow or {},
         "sources": sources,
@@ -777,7 +827,7 @@ def collect_extended_market_evidence(
     return charts, intraday, orderbook, trade_flow, investor_flow, errors
 
 
-def collect_price_chart(symbols: list[str], *, run_id: str, started_at: str, env_dv: str, market: str, app_key: str, app_secret: str, token: str, retries: int, include_extended: bool = True) -> dict[str, Any]:
+def collect_price_chart(symbols: list[str], *, run_id: str, started_at: str, env_dv: str, market: str, app_key: str, app_secret: str, token: str, retries: int, include_extended: bool = True, order_path: str = "") -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     artifact_errors: list[dict[str, Any]] = []
     for symbol in symbols:
@@ -841,6 +891,7 @@ def collect_price_chart(symbols: list[str], *, run_id: str, started_at: str, env
             orderbook=orderbook,
             trade_flow=trade_flow,
             investor_flow=investor_flow,
+            order_path=order_path,
         )
         rows.append(row)
         artifact_errors.extend(symbol_errors)
@@ -1877,6 +1928,7 @@ def command_collect(args: argparse.Namespace) -> int:
         token=token,
         retries=args.retries,
         include_extended=not args.skip_extended_market_evidence,
+        order_path=args.order_path,
     )
     price_path = output_dir / "price-chart.json"
     write_json(price_path, price_artifact)
@@ -2012,6 +2064,7 @@ def build_parser() -> argparse.ArgumentParser:
     collect_parser.add_argument("--output-dir", required=True)
     collect_parser.add_argument("--env", default="", help="acct/real or paper/demo. Defaults to CODEX_MCP_TRADING_ENV/acct.")
     collect_parser.add_argument("--market", default="J")
+    collect_parser.add_argument("--order-path", default="")
     collect_parser.add_argument("--request-type", default="analysis", choices=["analysis", "prepare", "demo-submit", "real-submit"])
     collect_parser.add_argument("--skip-account", action="store_true")
     collect_parser.add_argument("--skip-extended-market-evidence", action="store_true", help="Collect only identity/current price/account artifacts.")

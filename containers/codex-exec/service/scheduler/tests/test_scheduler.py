@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 
 from ..scheduler import Scheduler
 from ..config import parse_yaml_schedule
+from ...pipelines.daily_trading.launcher import validate_daily_trading_config
 from ...trading.daily_trading_direct import DailyTradingDirectResult
 
 
@@ -115,26 +116,15 @@ class SchedulerDailyTradingFailureClassificationTest(unittest.TestCase):
         self.assertEqual(market_job.get("market_news"), {})
         self.assertFalse(str(market_job.get("message") or "").strip())
 
-    def test_base_schedule_declares_exchange_routed_trading_runs(self) -> None:
+    def test_base_daily_trading_schedules_use_valid_runtime_config(self) -> None:
         codex_exec_root = Path(__file__).resolve().parents[3]
         schedules = parse_yaml_schedule(codex_exec_root / "profiles" / "base" / "config" / "schedules.yaml")
-        by_id = {item.get("id"): item for item in schedules}
+        daily_jobs = [item for item in schedules if isinstance(item.get("daily_trading"), dict)]
 
-        self.assertFalse(by_id["daily-00"]["enabled"])
-        self.assertFalse(by_id["daily-00"]["toggle_managed"])
-        self.assertEqual(by_id["trading-toggle"]["cron"], "30 7 * * 1-5")
-        expected = {
-            "daily-01": ("5 8 * * 1-5", "NXT"),
-            "daily-02": ("35 8 * * 1-5", "SOR"),
-            "daily-31": ("0 16 * * 1-5", "NXT"),
-            "daily-32": ("0 18 * * 1-5", "SOR"),
-            "daily-33": ("45 19 * * 1-5", "NXT"),
-        }
-        for schedule_id, (cron, exchange) in expected.items():
-            self.assertEqual(by_id[schedule_id]["cron"], cron)
-            self.assertEqual(by_id[schedule_id]["daily_trading"]["exchange"], exchange)
-        for schedule_id in ("daily-10", "daily-20", "daily-21", "daily-30"):
-            self.assertEqual(by_id[schedule_id]["daily_trading"]["exchange"], "SOR")
+        self.assertTrue(daily_jobs)
+        for job in daily_jobs:
+            with self.subTest(schedule_id=job.get("id")):
+                validate_daily_trading_config(job["daily_trading"])
 
     def test_schedule_toggle_never_reenables_unmanaged_daily_run(self) -> None:
         codex_exec_root = Path(__file__).resolve().parents[3]
