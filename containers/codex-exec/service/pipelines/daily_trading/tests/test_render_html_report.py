@@ -315,6 +315,11 @@ def make_run(runs_root: Path, run_id: str, started_at: str, *, target: bool) -> 
         run_dir / "judge-review.json",
         {"symbols": [judge_review_symbol]},
     )
+    if target:
+        write_json(
+            run_dir / "judge-review-spec.json",
+            {"schema_version": "2", "review_scope_reasons": {"000001": "held_position", "000002": "held_position"}},
+        )
     write_json(
         run_dir / "account-before-order.json",
         {
@@ -384,7 +389,6 @@ REQUIRED_CUMULATIVE_REPORT_STRINGS = [
     "data-time-target=\"run-2-1000\"",
     "알파전자",
     "베타소재",
-    "Judge 상태 확인불가(구버전)",
     "Final Judge",
     "추세가 유지됩니다.",
     "수주 모멘텀",
@@ -601,6 +605,28 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
         self.assertIn('<div class="ledger-hours">', rendered[ledger_start:evidence_start])
         self.assertIn("09시대", rendered[ledger_start:evidence_start])
         self.assertIn("10시대", rendered[ledger_start:evidence_start])
+
+    def test_cumulative_report_prominently_shows_judge_route_and_score_per_symbol(self) -> None:
+        rendered, _runs_root, temp_dir = scenario_build_cumulative_report()
+        self.addCleanup(temp_dir.cleanup)
+        symbol_detail_start = rendered.index('<section class="tab-page" id="symbol-detail"')
+        trading_start = rendered.index('<section class="tab-page" id="trading"')
+        ledger_start = rendered.index('<section class="tab-page" id="day-ledger"')
+
+        for page in (rendered[symbol_detail_start:trading_start], rendered[trading_start:ledger_start]):
+            self.assertIn('class="judge-route-summary"', page)
+            self.assertIn("Analyst 집계점수", page)
+            self.assertIn("7.5 / 10", page)
+            self.assertIn("Judge 진입 사유", page)
+            self.assertIn("보유 종목", page)
+            self.assertIn("<code>held_position</code>", page)
+        self.assertIn('mini-badge analyst">Analyst 7.5', rendered[trading_start:ledger_start])
+        symbol_page = rendered[symbol_detail_start:trading_start]
+        external_start = symbol_page.index('data-symbol-detail="999999"')
+        external_end = symbol_page.find('<article class="symbol-detail-panel"', external_start + 1)
+        external_panel = symbol_page[external_start : external_end if external_end >= 0 else len(symbol_page)]
+        self.assertIn("Analyst 결과 없음", external_panel)
+        self.assertNotIn("Judge 진입 사유", external_panel)
 
     def test_cumulative_report_promotes_thesis_before_its_final_judge_card(self) -> None:
         rendered, _runs_root, temp_dir = scenario_build_cumulative_report()
@@ -1021,6 +1047,7 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
             )
 
         self.assertIn("Judge 상태 확인불가(구버전)", rendered)
+        self.assertIn("사유 미기록(구버전)", rendered)
         self.assertNotIn(">Judge 미선정<", rendered)
 
     def test_inspector_not_selected_count_uses_only_valid_analyst_scores(self) -> None:
@@ -1104,6 +1131,11 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
 
         self.assertIn("현재 3주 → 대기반영 5주", rendered)
         self.assertIn("최종 보유수량 5주", rendered)
+        self.assertIn("Analyst 집계점수", rendered)
+        self.assertIn("5.0 / 10", rendered)
+        self.assertIn("Judge 진입 사유", rendered)
+        self.assertIn("보유 종목", rendered)
+        self.assertIn("<code>held_position</code>", rendered)
         self.assertNotIn("최종(포지션 변화) 5주", rendered)
 
     def test_inspector_keeps_holding_status_in_detail_without_expanding_symbol_choices(self) -> None:

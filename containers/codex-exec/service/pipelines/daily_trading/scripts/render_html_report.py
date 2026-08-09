@@ -53,6 +53,12 @@ JUDGE_SCOPE_STATUS_LABELS = {
     "not_selected": "Judge 미선정",
     "legacy_unknown": "Judge 상태 확인불가(구버전)",
 }
+JUDGE_SCOPE_REASON_LABELS = {
+    "held_position": "보유 종목",
+    "active_order": "활성 주문 종목",
+    "symbol_news": "종목뉴스 연결",
+    "unheld_score_rank": "비보유 종목 점수 상위",
+}
 
 
 def judge_symbol_scope_status(
@@ -179,6 +185,40 @@ def decimal(value: Any, digits: int = 2) -> str:
         return f"{float(value):.{digits}f}"
     except (TypeError, ValueError):
         return "-"
+
+
+def render_judge_route_summary(
+    symbol_id: str,
+    analyst_item: dict[str, Any],
+    final_item: dict[str, Any] | None,
+    judge_scope_reasons: dict[str, Any],
+    has_judge_scope_metadata: bool,
+) -> tuple[str, str]:
+    status = judge_symbol_scope_status(
+        symbol_id,
+        final_item,
+        judge_scope_reasons,
+        has_judge_scope_metadata,
+    )
+    raw_reason = str(judge_scope_reasons.get(symbol_id) or "")
+    if raw_reason:
+        reason_label = JUDGE_SCOPE_REASON_LABELS.get(raw_reason, raw_reason)
+        reason_code = raw_reason
+    elif not has_judge_scope_metadata:
+        reason_label, reason_code = "사유 미기록(구버전)", "legacy_unknown"
+    elif status == "not_selected":
+        reason_label, reason_code = "심사대상 미선정", "not_selected"
+    else:
+        reason_label, reason_code = "심사 사유 미기록", NOT_RECORDED
+    route_css = "ok" if status == "resolved" else "warn" if status == "unresolved_in_scope" else "muted"
+    return status, (
+        '<div class="judge-route-summary">'
+        '<article><span>Analyst 집계점수 <em>advisory</em></span>'
+        f'<strong>{decimal(analyst_item.get("final_first_score"), 1)} / 10</strong>'
+        '<small>Judge 방향을 정하는 하드 룰 아님</small></article>'
+        f'<article class="route-{route_css}"><span>Judge 진입 사유</span><strong>{esc(reason_label)}</strong>'
+        f'<small>{esc(JUDGE_SCOPE_STATUS_LABELS[status])} · <code>{esc(reason_code)}</code></small></article></div>'
+    )
 
 
 def valid_analyst_score(value: Any) -> bool:
@@ -1206,7 +1246,13 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
             has_lifecycle = bool(related_lifecycle_orders)
             has_attempt = bool(related_blocked)
             has_guard_intervention = judge_guard_intervened(final_item)
-            judge_scope_status = judge_symbol_scope_status(symbol_id, final_item, judge_scope_reasons, has_judge_scope_metadata)
+            judge_scope_status, judge_route_html = render_judge_route_summary(
+                symbol_id,
+                analyst_item,
+                final_item,
+                judge_scope_reasons,
+                has_judge_scope_metadata,
+            )
             judge_label = JUDGE_SCOPE_STATUS_LABELS[judge_scope_status]
             holding_label, holding_badge_class = holding_status_display(decision_by_symbol.get(symbol_id))
             thesis_display = thesis_status_display(final_item)
@@ -1237,7 +1283,7 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
             symbol_buttons.append(
                 f'<button type="button" class="trade-symbol-button{group_class}{" active" if is_active_symbol else ""}" data-symbol-target="{esc(composite_key)}">'
                 f'<strong title="{esc(symbol_name)}">{esc(symbol_name)}</strong><code>{esc(symbol_id)}</code>'
-                f'<span class="symbol-button-meta">{esc(selector_decision)}{attempt_badge}</span></button>'
+                f'<span class="symbol-button-meta">{esc(selector_decision)}<b class="mini-badge analyst">Analyst {decimal(analyst_item.get("final_first_score"), 1)}</b>{attempt_badge}</span></button>'
             )
 
             score_rows = []
@@ -1378,10 +1424,10 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
             symbol_panels.append(
                 f"<section class=\"symbol-analysis-panel{' active' if is_active_symbol else ''}\" data-symbol-panel=\"{esc(composite_key)}\">"
                 f"<div class=\"symbol-focus-head\"><div><p class=\"kicker\">RUN {esc(run_time)} · SYMBOL ANALYSIS</p><h2>{esc(symbol_name)} <code>{esc(symbol_id)}</code></h2>"
-                f"<p>{esc(trade_note)}</p></div><div class=\"focus-badges\"><span class=\"badge info\" title=\"참고용 advisory 점수이며 매수/매도 판단이 아닙니다\">Analyst 참고점수(advisory) {decimal(analyst_item.get('final_first_score'))}</span>"
+                f"<p>{esc(trade_note)}</p></div><div class=\"focus-badges\">"
                 f"<span class=\"badge {'ok' if holding_badge_class == 'held' else 'muted'}\">{esc(holding_label)}</span>"
                 f"{thesis_focus_badge}"
-                f"<span class=\"badge {'ok' if final_item else 'muted'}\">{esc(judge_label)}</span></div></div>"
+                f"<span class=\"badge {'ok' if final_item else 'muted'}\">{esc(judge_label)}</span></div></div>{judge_route_html}"
                 f"<section class=\"inline-analysis\"><h3>Analyst 상세 점수</h3><div class=\"table-wrap\"><table><thead><tr><th>역할</th><th>점수</th><th>집계</th><th>코드</th><th>상세 근거</th><th>누락 데이터</th></tr></thead><tbody>{''.join(score_rows)}</tbody></table></div></section>"
                 f"<section class=\"inline-judge\"><h3>Judge 단계별 판단</h3>{judge_html}</section></section>"
             )
@@ -2386,6 +2432,9 @@ def render_symbol_detail_tab(
     account = load_json(target_dir / "account-before-order.json")
     analyst = load_json(target_dir / "analyst-review.json")
     final = load_json(target_dir / "judge-review.json")
+    judge_spec = load_json(target_dir / "judge-review-spec.json")
+    judge_scope_reasons = judge_spec.get("review_scope_reasons") if isinstance(judge_spec.get("review_scope_reasons"), dict) else {}
+    has_judge_scope_metadata = isinstance(judge_spec.get("review_scope_reasons"), dict)
     decision_by_symbol = {
         str(item.get("symbol_id") or ""): item
         for item in decision.get("symbols", [])
@@ -2669,6 +2718,15 @@ def render_symbol_detail_tab(
             if isinstance(score, dict)
         ) or '<tr><td colspan="4">Analyst 결과 없음</td></tr>'
         final_item = final_by_symbol.get(symbol_id)
+        judge_route_html = ""
+        if analyst_item or final_item or symbol_id in judge_scope_reasons:
+            _judge_scope_status, judge_route_html = render_judge_route_summary(
+                symbol_id,
+                analyst_item,
+                final_item,
+                judge_scope_reasons,
+                has_judge_scope_metadata,
+            )
         if final_item:
             judge_html = (
                 f'<div class="symbol-judge-summary"><span>행동 <strong>{esc(judge_field_display(final_item, "canonical_action", CANONICAL_ACTION_LABELS))}</strong></span>'
@@ -2707,6 +2765,7 @@ def render_symbol_detail_tab(
             f'<article><h3>종목뉴스</h3>{news_html}</article></div></section>'
             f'<section class="panel"><div class="section-head"><div><p class="kicker">LATEST REVIEW</p><h2>최신 Analyst·Judge 판단</h2></div>'
             f'<span class="badge info">Analyst {decimal(analyst_item.get("final_first_score"), 1)}</span></div>'
+            f'{judge_route_html}'
             f'<div class="table-wrap"><table><thead><tr><th>Analyst 역할</th><th>점수</th><th>코드</th><th>근거</th></tr></thead><tbody>{score_rows}</tbody></table></div>'
             f'<h3>Final Judge</h3>{judge_html}</section></article>'
         )
@@ -2822,6 +2881,7 @@ def build_html(runs_root: Path, target_run: str) -> str:
     .financial-list {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }} .financial-card {{ padding:17px; border:1px solid var(--line); border-radius:15px; background:var(--subtle); }} .financial-body {{ padding:13px; border-radius:11px; background:#fff; }} .financial-body ul {{ margin:0; padding-left:20px; }} .evidence-title {{ display:flex; gap:10px; align-items:flex-start; margin-bottom:12px; }} .evidence-title h3 {{ margin:0; }} .evidence-title p {{ margin:4px 0 0; color:var(--muted); font-size:12px; }} .source-note {{ margin:12px 0 0; color:var(--muted); font-size:11px; }}
     .news-timeline {{ position:relative; display:grid; gap:12px; padding-left:22px; }} .news-timeline::before {{ content:""; position:absolute; left:7px; top:9px; bottom:9px; width:2px; background:linear-gradient(var(--accent),var(--accent-2)); }} .news-run {{ position:relative; padding:16px; border:1px solid var(--line); border-radius:15px; background:var(--subtle); }} .news-run::before {{ content:""; position:absolute; left:-22px; top:22px; width:11px; height:11px; border:3px solid var(--bg); border-radius:50%; background:var(--accent); }} .news-run-head {{ display:flex; justify-content:space-between; gap:10px; margin-bottom:9px; }} .news-run-head>div {{ display:flex; align-items:center; flex-wrap:wrap; gap:8px; }} .news-time {{ display:grid; width:50px; height:28px; place-items:center; border-radius:8px; background:var(--accent); color:#fff; font-size:12px; font-weight:900; }} .news-run-head span:not(.news-time):not(.badge) {{ color:var(--muted); font-size:11px; }} .news-run-body {{ padding:4px 12px; border-radius:11px; background:#fff; }} .news-item {{ padding:10px 0; border-bottom:1px solid var(--line); }} .news-item:last-child {{ border-bottom:0; }} .news-item time {{ margin-left:8px; color:var(--muted); font-size:11px; }} .news-item p {{ margin:5px 0 0; }} .empty-state {{ padding:12px; border-radius:9px; background:var(--subtle); color:var(--muted); font-size:12px; }}
     .time-wheel {{ margin:14px 0 20px; }} .time-wheel-caption {{ display:block; margin-bottom:6px; color:var(--muted); font-size:11px; font-weight:800; }} .time-selector {{ display:flex; flex-wrap:wrap; gap:7px; }} .time-button {{ display:flex; min-width:170px; flex:1 1 190px; max-width:270px; padding:9px 11px; border:1px solid var(--line); border-radius:11px; background:var(--subtle); color:var(--text); cursor:pointer; flex-direction:column; gap:3px; align-items:flex-start; text-align:left; transition:.16s ease; }} .time-button:hover {{ border-color:#aab4ff; color:var(--accent); }} .time-button.active {{ border-color:var(--accent); background:var(--accent-bg); color:var(--accent); box-shadow:0 6px 16px rgba(78,92,232,.1); }} .time-button strong {{ font-size:14px; }} .time-button small {{ color:inherit; font-size:10px; }} .time-analysis-panel {{ display:none; }} .time-analysis-panel.active {{ display:block; animation:page-in .18s ease; }} .time-panel-head {{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; padding-top:4px; }} .time-panel-head p {{ color:var(--muted); }} .run-activity {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:9px; margin:12px 0 19px; }} .activity-card {{ padding:13px; border:1px solid var(--line); border-radius:12px; background:#fff; }} .activity-card.order {{ border-left:4px solid var(--accent); }} .activity-card.filled {{ border-left:4px solid var(--ok); background:linear-gradient(145deg,#fff,var(--ok-bg)); }} .activity-card.fill {{ border-left:4px solid var(--accent-2); }} .activity-card.blocked {{ border-left:4px solid var(--bad); background:linear-gradient(145deg,#fff,var(--bad-bg)); }} .activity-card span,.activity-card strong,.activity-card small {{ display:block; }} .activity-card span,.activity-card small {{ color:var(--muted); font-size:11px; }}
+    .judge-route-summary {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; margin:14px 0 18px; }} .judge-route-summary article {{ padding:13px 15px; border:1px solid var(--line); border-left:4px solid var(--accent); border-radius:12px; background:#fff; }} .judge-route-summary article.route-ok {{ border-left-color:var(--ok); background:linear-gradient(145deg,#fff,var(--ok-bg)); }} .judge-route-summary article.route-warn {{ border-left-color:var(--warn); background:linear-gradient(145deg,#fff,var(--warn-bg)); }} .judge-route-summary article.route-muted {{ border-left-color:var(--muted); }} .judge-route-summary span,.judge-route-summary strong,.judge-route-summary small {{ display:block; }} .judge-route-summary span,.judge-route-summary small {{ color:var(--muted); font-size:11px; }} .judge-route-summary span em {{ color:var(--accent); font-style:normal; font-weight:800; }} .judge-route-summary strong {{ margin:3px 0; font-size:20px; }}
     .ledger-hours {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; margin:10px 0 24px; }} .ledger-hour {{ padding:15px; border:1px solid var(--line); border-radius:15px; background:var(--subtle); }} .ledger-hour-head {{ display:flex; align-items:center; justify-content:space-between; gap:10px; }} .ledger-hour-head strong {{ font-size:18px; }} .ledger-hour-head span {{ color:var(--muted); font-size:11px; font-weight:800; }} .ledger-hour ol {{ margin:12px 0 0 5px; padding:0 0 0 17px; border-left:2px solid var(--line); list-style:none; }} .ledger-event {{ position:relative; display:grid; grid-template-columns:42px 1fr; gap:3px 8px; padding:0 0 14px; }} .ledger-event:last-child {{ padding-bottom:0; }} .ledger-event::before {{ position:absolute; width:10px; height:10px; left:-23px; top:4px; border:3px solid #fff; border-radius:50%; background:var(--accent); box-shadow:0 0 0 1px var(--line); content:""; }} .ledger-event.fill::before {{ background:var(--ok); }} .ledger-event.blocked::before {{ background:var(--bad); }} .ledger-event time {{ color:var(--muted); font-size:11px; font-weight:800; }} .ledger-event strong,.ledger-event small {{ display:block; }} .ledger-event small {{ grid-column:2; color:var(--muted); font-size:10px; }}
     .trade-symbol-selector {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(130px,1fr)); gap:6px; margin-bottom:16px; }} .trade-symbol-button {{ display:grid; min-width:0; padding:8px 9px; border:1px solid var(--line); border-radius:10px; background:var(--subtle); color:var(--text); text-align:left; cursor:pointer; grid-template-columns:minmax(0,1fr) auto; gap:3px 6px; transition:.16s ease; }} .trade-symbol-button.group-trade {{ border-color:#a9ddcc; background:var(--ok-bg); }} .trade-symbol-button.group-guard {{ border-color:#f3bbc2; background:var(--bad-bg); }} .trade-symbol-button:hover {{ border-color:#aab4ff; transform:translateY(-1px); }} .trade-symbol-button.active {{ border-color:var(--accent); box-shadow:0 6px 16px rgba(78,92,232,.1); }} .trade-symbol-button.group-trade.active {{ background:linear-gradient(145deg,var(--ok-bg),#eefaf7); }} .trade-symbol-button.group-guard.active {{ background:linear-gradient(145deg,var(--bad-bg),#fff4f5); }} .trade-symbol-button>strong {{ overflow:hidden; font-size:12px; text-overflow:ellipsis; white-space:nowrap; }} .trade-symbol-button>code {{ color:var(--muted); font-size:9px; }} .symbol-button-meta {{ display:flex; min-width:0; grid-column:1/-1; gap:4px; align-items:center; color:var(--muted); font-size:10px; }} .mini-badge {{ padding:2px 5px; border-radius:999px; font-size:9px; }} .mini-badge.trade {{ color:var(--accent); background:var(--accent-bg); }} .mini-badge.analyst {{ color:var(--muted); background:#e9eef5; }} .mini-badge.attempt {{ color:var(--bad); background:var(--bad-bg); }} .symbol-analysis-panel {{ display:none; padding:20px; border:1px solid var(--line); border-radius:16px; background:linear-gradient(145deg,#fff,var(--subtle)); }} .symbol-analysis-panel.active {{ display:block; animation:page-in .18s ease; }} .symbol-focus-head {{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }} .symbol-focus-head h2 {{ margin-bottom:5px; }} .symbol-focus-head p {{ color:var(--muted); }} .focus-badges {{ display:flex; flex-wrap:wrap; justify-content:flex-end; gap:6px; }} .inline-analysis,.inline-judge {{ margin-top:20px; }} .compact-phase {{ margin-top:18px; padding-top:15px; }} .final-card.full {{ margin-top:12px; }}
     .decision-hero {{ background:linear-gradient(145deg,#fff,#f4f6ff); }} .decision-hero>div:first-child p:last-child {{ color:var(--muted); }} .decision-meta {{ display:flex; flex-wrap:wrap; gap:8px; }} .decision-meta>span {{ padding:7px 9px; border:1px solid var(--line); border-radius:9px; background:#fff; font-size:12px; }} .decision-orders {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin-top:14px; }} .decision-orders article {{ padding:13px; border-radius:12px; background:linear-gradient(135deg,var(--accent-bg),#eefaf7); }} .decision-orders span,.decision-orders strong,.decision-orders small {{ display:block; }} .decision-orders span,.decision-orders small {{ color:var(--muted); font-size:11px; }}
@@ -2836,7 +2896,7 @@ def build_html(runs_root: Path, target_run: str) -> str:
     .thesis-card {{ padding:18px; margin-top:12px; border:1px solid var(--line); border-left:5px solid var(--accent); border-radius:14px; background:linear-gradient(145deg,#fff,var(--accent-bg)); box-shadow:0 10px 25px rgba(31,47,77,.07); }} .thesis-card.thesis-ok {{ border-left-color:var(--ok); }} .thesis-card.thesis-warn {{ border-left-color:var(--warn); }} .thesis-card.thesis-bad {{ border-left-color:var(--bad); }} .thesis-card-head {{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }} .thesis-card-head h3 {{ margin:2px 0 0; font-size:18px; }} .thesis-block {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; margin-top:14px; }} .thesis-block>div {{ padding:12px; border:1px solid var(--line); border-radius:10px; background:rgba(255,255,255,.9); }} .thesis-block h4 {{ margin:0 0 5px; font-size:12px; color:var(--muted); }} .thesis-block p {{ margin:0; font-size:12px; }} .thesis-source {{ color:var(--muted); }} .thesis-conditions {{ display:grid; gap:4px; margin:5px 0 0; padding-left:16px; font-size:12px; }} .thesis-condition.matched {{ font-weight:700; }}
     footer {{ padding:24px 4px 0; color:var(--muted); font-size:12px; text-align:center; }}
     @media(max-width:900px) {{ .chart-grid-wrap,.financial-list,.portfolio-chart-layout {{ grid-template-columns:1fr; }} .run-activity {{ grid-template-columns:repeat(2,minmax(0,1fr)); }} .symbol-metrics {{ grid-template-columns:repeat(2,minmax(0,1fr)); }} }}
-    @media(max-width:800px) {{ main {{ width:min(100% - 16px,720px); margin-top:8px; }} .app-header {{ padding-inline:4px; }} .hero,.panel,.decision-hero,.combined-chart-card {{ padding:19px; border-radius:17px; }} .metrics,.coverage {{ grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }} .section-head,.symbol-focus-head,.time-panel-head,.symbol-picker {{ display:block; }} .section-head>.badge,.symbol-focus-head>.badge,.time-panel-head>.badge {{ margin-top:8px; }} .symbol-picker p {{ margin-top:10px; }} .focus-badges {{ justify-content:flex-start; margin-top:8px; }} .debate-meta,.final-grid,.decision-orders,.thesis-block,.symbol-data-grid,.symbol-evidence-grid {{ grid-template-columns:1fr; }} .news-run-head {{ display:block; }} .news-run-head>div+div {{ margin-top:7px; }} }}
+    @media(max-width:800px) {{ main {{ width:min(100% - 16px,720px); margin-top:8px; }} .app-header {{ padding-inline:4px; }} .hero,.panel,.decision-hero,.combined-chart-card {{ padding:19px; border-radius:17px; }} .metrics,.coverage {{ grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }} .section-head,.symbol-focus-head,.time-panel-head,.symbol-picker {{ display:block; }} .section-head>.badge,.symbol-focus-head>.badge,.time-panel-head>.badge {{ margin-top:8px; }} .symbol-picker p {{ margin-top:10px; }} .focus-badges {{ justify-content:flex-start; margin-top:8px; }} .debate-meta,.final-grid,.decision-orders,.thesis-block,.symbol-data-grid,.symbol-evidence-grid,.judge-route-summary {{ grid-template-columns:1fr; }} .news-run-head {{ display:block; }} .news-run-head>div+div {{ margin-top:7px; }} }}
     @media(max-width:480px) {{ .metrics strong,.coverage strong {{ font-size:16px; }} .phase-title {{ display:block; }} .phase-title small {{ display:block; margin-top:4px; }} .run-activity,.sector-legend {{ grid-template-columns:repeat(2,minmax(0,1fr)); }} .portfolio-chart-layout {{ padding:12px; }} }}
     @media print {{ body {{ background:#fff; }} main {{ width:100%; margin:0; }} .app-header,.tab-bar {{ display:none; }} .tab-page {{ display:block !important; }} .hero,.panel,.metrics article,.chart-card {{ box-shadow:none; break-inside:avoid; }} .table-wrap {{ overflow:visible; }} }}
   </style>
