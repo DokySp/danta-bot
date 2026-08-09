@@ -3,7 +3,6 @@ FROM python:3.12-slim
 ARG CODEX_EXEC_PROFILE=base
 ARG IMAGE_TITLE=codex-exec
 ARG CODEX_VERSION=latest
-ARG TARGETARCH
 
 LABEL org.opencontainers.image.title="${IMAGE_TITLE}"
 LABEL org.opencontainers.image.description="Codex exec HTTP and scheduler worker"
@@ -33,21 +32,12 @@ RUN apt-get update \
 RUN pip install --no-cache-dir Pillow==12.1.1 PyYAML==6.0.2
 
 RUN set -eux; \
-  case "${TARGETARCH:-amd64}" in \
-    amd64) codex_arch="x86_64" ;; \
-    arm64) codex_arch="aarch64" ;; \
-    *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
-  esac; \
-  if [ "${CODEX_VERSION}" = "latest" ]; then \
-    codex_url="https://github.com/openai/codex/releases/latest/download/codex-${codex_arch}-unknown-linux-musl.tar.gz"; \
-  else \
-    codex_url="https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-${codex_arch}-unknown-linux-musl.tar.gz"; \
-  fi; \
-  curl -fsSL -o /tmp/codex.tar.gz "${codex_url}"; \
-  tar -xzf /tmp/codex.tar.gz -C /usr/local/bin; \
-  mv "/usr/local/bin/codex-${codex_arch}-unknown-linux-musl" /usr/local/bin/codex; \
-  chmod +x /usr/local/bin/codex; \
-  rm /tmp/codex.tar.gz; \
+  npm install -g --cache /tmp/codex-npm-cache "@openai/codex@${CODEX_VERSION}"; \
+  codex_root="$(npm root -g)/@openai/codex"; \
+  helper_path="$(find "${codex_root}" -type f -name codex-code-mode-host -perm -111 -print -quit)"; \
+  test -n "${helper_path}"; \
+  "${helper_path}" --help >/dev/null; \
+  rm -rf /tmp/codex-npm-cache; \
   mkdir -p /codex-home; \
   codex --version
 
