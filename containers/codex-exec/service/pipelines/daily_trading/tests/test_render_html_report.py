@@ -627,6 +627,17 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
         no_kospi_chart = scenario_render_combined_chart_without_kospi()
         self.assertTrue(check_combined_chart_falls_back_when_kospi_and_asset_missing(no_kospi_chart))
 
+    def test_cumulative_report_hides_touch_overlays_and_styles_the_scrubber(self) -> None:
+        rendered, _runs_root, temp_dir = scenario_build_cumulative_report()
+        self.addCleanup(temp_dir.cleanup)
+
+        self.assertIn('class="chart-scrubber-copy"', rendered)
+        self.assertIn(".chart-range-slider::-webkit-slider-thumb", rendered)
+        self.assertIn("if (event.pointerType !== 'mouse') hidePoint();", rendered)
+        self.assertIn("slider.addEventListener('pointerup', hidePoint);", rendered)
+        self.assertIn("if (event.pointerType !== 'mouse') hideSlice();", rendered)
+        self.assertIn("if (slice.matches(':focus-visible')) showSlice(slice);", rendered)
+
     def test_symbol_history_chart_renders_price_and_step_holding_series(self) -> None:
         rendered = render_symbol_history_chart(
             [
