@@ -632,6 +632,8 @@ def assert_compact_review_prompt(tmp: Path) -> None:
         raise AssertionError(f"judge-only optional-evidence policy leaked into analyst-review prompt: {prompt}")
     if "position_cost_context" in prompt:
         raise AssertionError(f"judge-only position_cost_context guard leaked into analyst-review prompt: {prompt}")
+    if "same-session target change or direction reversal" in prompt:
+        raise AssertionError(f"judge-only reversal policy leaked into analyst-review prompt: {prompt}")
 
     second_prompt = build_prompt(
         compact_spec(tmp, stage="judge-review", agent_role="judge", task_name="second")
@@ -659,7 +661,13 @@ def assert_compact_review_prompt(tmp: Path) -> None:
         "No additional buy",
         "additional_buy_reason may record new evidence",
         "Read prior_decision_context and analyst_history_context first",
+        "Analyst score or reason_code changes, restatements of previously considered arguments, and headlines that merely repeat the same driver are interpretations, not new investment facts.",
         "Treat the previous target as an ongoing plan over its thesis/rationale horizon",
+        "Without supplied numeric fee, tax, or break-even evidence, do not claim that expected benefit exceeds transaction costs as a calculated fact.",
+        "For a same-session target change or direction reversal, compare prior_decision_context.latest_decision.opposing_view and prior_decision_context.latest_decision.one_line_reason when available",
+        "what concrete new investment fact overwhelms it.",
+        "If that rationale remains valid, do not count multiple chart metrics derived from the same live price as independent confirmation for an immediate reversal.",
+        "If additional_buy_reason mentions the prior decision time, use latest_decision.decided_at",
         "This is a Judge objective, not a code gate.",
     ]
     missing = [part for part in second_required_parts if part not in second_prompt]
@@ -1082,6 +1090,15 @@ def assert_optional_evidence_policy() -> None:
         or "최종 방향과 목표 노출은 thesis, 시장 근거와 종목 고유 위험을 함께 고려한다" not in judge_text
     ):
         raise AssertionError("judge.md missing position_cost_context judgment guidance")
+    if (
+        "Analyst 점수·`reason_code` 변화, 이미 검토된 논거의 재서술" not in judge_text
+        or "수수료·세금·손익분기 수치가 공급되지 않으면" not in judge_text
+        or "prior_decision_context.latest_decision.opposing_view" not in judge_text
+        or "구체적인 새 투자 사실이 이를 압도했는지" not in judge_text
+        or "단일 실시간 가격에서 함께 파생된 여러 차트 지표를 독립된 확인으로 세어" not in judge_text
+        or "latest_decision.decided_at" not in judge_text
+    ):
+        raise AssertionError("judge.md missing same-session reversal policy")
     format_text = (prompt_dir / "judge-review-format.md").read_text(encoding="utf-8")
     if "unavailable news is neutral rather than favorable or adverse" not in format_text:
         raise AssertionError("judge-review-format.md missing unavailable-news neutrality policy")
@@ -1091,6 +1108,15 @@ def assert_optional_evidence_policy() -> None:
         or "previous_session.realized_pnl.scope=symbol_session" not in format_text
     ):
         raise AssertionError("judge-review-format.md missing prior-decision continuity policy")
+    if (
+        "Analyst score or `reason_code` changes, restatements of previously considered arguments" not in format_text
+        or "Without supplied numeric fee, tax, or break-even evidence" not in format_text
+        or "`prior_decision_context.latest_decision.opposing_view`" not in format_text
+        or "what concrete new investment fact overwhelms it" not in format_text
+        or "do not count multiple chart metrics derived from the same live price as independent confirmation" not in format_text
+        or "`latest_decision.decided_at`" not in format_text
+    ):
+        raise AssertionError("judge-review-format.md missing same-session reversal policy")
     analyst_format_text = (prompt_dir / "analyst-review-format.md").read_text(encoding="utf-8")
     quality_text = (prompt_dir / "analyst-quality-risk.md").read_text(encoding="utf-8")
     if "no_financial_excluded" not in analyst_format_text or "no_financial_excluded" not in quality_text:
@@ -2029,6 +2055,10 @@ class RunSubagentSelfTest(unittest.TestCase):
                 "core_rationale": "quality moat",
                 "invalidation_conditions": [{"condition_id": "cond-a", "description": "description a"}],
             }
+            opposing_view = {
+                "increase_case": {"summary": "volume-backed breakout", "evidence_refs": ["chart_context"]},
+                "reduce_case": {"summary": "valuation and spread risk", "evidence_refs": ["financial_context"]},
+            }
             write_json(
                 previous_open / "judge-review.json",
                 {
@@ -2051,6 +2081,7 @@ class RunSubagentSelfTest(unittest.TestCase):
                             "final_holding_quantity": 7,
                             "reason_code": "increase_target",
                             "one_line_reason": "목표 비중 확대",
+                            "opposing_view": opposing_view,
                             "thesis_definition": thesis,
                         }
                     ],
@@ -2174,6 +2205,7 @@ class RunSubagentSelfTest(unittest.TestCase):
             latest = context["latest_decision"]
             self.assertEqual(latest["source_run_id"], "previous")
             self.assertEqual(latest["final_holding_quantity"], 7)
+            self.assertEqual(latest["opposing_view"], opposing_view)
             self.assertEqual(latest["order_outcomes"][0]["broker_status"], "rejected")
             self.assertEqual(latest["subsequent_fill_summary"]["coverage_status"], "complete")
             self.assertEqual(latest["subsequent_fill_summary"]["sell_quantity"], 2)
