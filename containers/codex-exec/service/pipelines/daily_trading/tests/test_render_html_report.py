@@ -659,6 +659,7 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
 
         self.assertIn('class="chart-scrubber-copy"', rendered)
         self.assertIn(".chart-range-slider::-webkit-slider-thumb", rendered)
+        self.assertIn("if (!points.length || !svg || !hitArea || !tooltip || !cursor) return;", rendered)
         self.assertIn("if (event.pointerType !== 'mouse') hidePoint();", rendered)
         self.assertIn("slider.addEventListener('pointerup', hidePoint);", rendered)
         self.assertIn("if (event.pointerType !== 'mouse') hideSlice();", rendered)

@@ -2994,6 +2994,7 @@ def build_html(runs_root: Path, target_run: str) -> str:
       const cursor = card.querySelector('.chart-cursor');
       const slider = card.querySelector('.chart-range-slider');
       const sliderValue = card.querySelector('.chart-scrubber-time');
+      if (!points.length || !svg || !hitArea || !tooltip || !cursor) return;
       const markers = {{
         total: card.querySelector('.total-marker'),
         pnl: card.querySelector('.pnl-marker'),
