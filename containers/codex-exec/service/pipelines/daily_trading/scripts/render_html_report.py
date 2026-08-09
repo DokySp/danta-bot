@@ -731,6 +731,7 @@ def render_trade_ledger(
                 blocked_orders.append(row)
 
     ledger_rows: list[tuple[str, str]] = []
+    ledger_events: list[tuple[str, str, str]] = []
     linked_order_ids: set[str] = set()
     for item in submitted_orders:
         fill = item.get("fill") if isinstance(item.get("fill"), dict) else None
@@ -765,6 +766,21 @@ def render_trade_ledger(
                 f"<td>{fill_cell}</td><td><code>{order_id_cell}</code></td><td>{submitted_result_cell}</td></tr>",
             )
         )
+        ledger_events.append(
+            (
+                str(item.get("run_started_at") or ""),
+                "order",
+                f"<strong>{esc(item.get('symbol_name'))}</strong><small>{direction} 주문 · {number(item.get('validated_order_quantity') or item.get('quantity'))}주</small>",
+            )
+        )
+        if fill is not None:
+            ledger_events.append(
+                (
+                    str(fill.get("filled_at") or ""),
+                    "fill",
+                    f"<strong>{esc(fill.get('symbol_name'))}</strong><small>{direction} 체결 · {number(fill.get('filled_quantity'))}주 · {number(fill.get('filled_amount'))}원</small>",
+                )
+            )
 
     for item in fills:
         order_id = str(item.get("order_id") or "")
@@ -780,6 +796,13 @@ def render_trade_ledger(
                 f"<td>{direction}</td><td>-</td>"
                 f"<td>{number(item.get('filled_quantity'))}주<br><small>{number(item.get('filled_price'))}원 · {number(item.get('filled_amount'))}원</small></td>"
                 f"<td><code>{esc(order_id)}</code></td><td><span class=\"badge ok\">체결 확인</span></td></tr>",
+            )
+        )
+        ledger_events.append(
+            (
+                str(item.get("filled_at") or ""),
+                "fill",
+                f"<strong>{esc(item.get('symbol_name'))}</strong><small>{direction} 체결 · {number(item.get('filled_quantity'))}주 · {number(item.get('filled_amount'))}원</small>",
             )
         )
 
@@ -803,7 +826,25 @@ def render_trade_ledger(
                 f"<td><span class=\"badge bad\">{esc(result_text)}</span><br><small>{esc(reason_text)}</small>{detail_html}{audit_html}</td></tr>",
             )
         )
+        ledger_events.append(
+            (
+                str(item.get("run_started_at") or ""),
+                "blocked",
+                f"<strong>{esc(item.get('symbol_name'))}</strong><small>{direction} {esc(result_text)} · {esc(reason_text)}</small>",
+            )
+        )
     ledger_html = "".join(row for _, row in sorted(ledger_rows, key=lambda item: item[0]))
+    hourly_events: dict[str, list[str]] = {}
+    for timestamp, kind, event_html in sorted(ledger_events, key=lambda item: item[0]):
+        event_time = time_text(timestamp)
+        hour = event_time[:2] if event_time != "-" else "미상"
+        hourly_events.setdefault(hour, []).append(
+            f'<li class="ledger-event {kind}"><time>{esc(event_time)}</time>{event_html}</li>'
+        )
+    hourly_html = "".join(
+        f'<article class="ledger-hour"><div class="ledger-hour-head"><strong>{esc(hour)}시대</strong><span>{len(events)}건</span></div><ol>{"".join(events)}</ol></article>'
+        for hour, events in hourly_events.items()
+    )
     ledger_new_count, ledger_correction_count, ledger_cancellation_count = lifecycle_split_counts(submitted_orders)
 
     cut_off = time_text(runs[-1]["summary"].get("started_at")) if runs else "-"
@@ -818,6 +859,8 @@ def render_trade_ledger(
     <section class="panel" id="trades">
       <div class="section-head"><div><p class="kicker">DAY LEDGER</p><h2>{esc(cut_off)}까지의 당일 전체 거래</h2></div><span class="badge info">체결 {len(fills)} · 봇 신규주문 {ledger_new_count} · 정정·취소 {ledger_correction_count + ledger_cancellation_count} · 시도 차단/실패 {len(blocked_orders)}</span></div>
       <div class="notice">{esc(fill_notice)}</div>
+      <h3>시간대별 활동</h3>
+      <div class="ledger-hours">{hourly_html or '<div class="empty-state">확인된 주문·체결 활동 없음</div>'}</div>
       <h3>주문·체결 통합 원장</h3>
       <div class="table-wrap"><table><thead><tr><th>시각</th><th>주체</th><th>종목</th><th>방향</th><th>주문</th><th>체결</th><th>주문번호</th><th>{esc(cut_off)} 기준 상태</th></tr></thead><tbody>{ledger_html or '<tr><td colspan="8">확인된 주문·체결 없음</td></tr>'}</tbody></table></div>
     </section>
@@ -2705,7 +2748,7 @@ def build_html(runs_root: Path, target_run: str) -> str:
         fill_scope,
         history_runs,
     )
-    trades = render_time_symbol_inspector(runs, fills) + trade_html
+    trades = render_time_symbol_inspector(runs, fills)
     evidence = render_news_timeline(runs) + render_market_news_timeline(runs) + render_financial_details(target_dir)
     operations = (
         render_run_timeline(runs)
@@ -2718,6 +2761,7 @@ def build_html(runs_root: Path, target_run: str) -> str:
         '<button type="button" class="tab-button active" data-tab="overview" role="tab" aria-selected="true">개요</button>',
         '<button type="button" class="tab-button" data-tab="symbol-detail" role="tab" aria-selected="false">종목 상세</button>',
         '<button type="button" class="tab-button" data-tab="trading" role="tab" aria-selected="false">거래·종목판단</button>',
+        '<button type="button" class="tab-button" data-tab="day-ledger" role="tab" aria-selected="false">당일 장부</button>',
         '<button type="button" class="tab-button" data-tab="evidence" role="tab" aria-selected="false">재무·뉴스</button>',
         '<button type="button" class="tab-button" data-tab="operations" role="tab" aria-selected="false">실행 기록</button>',
     ]
@@ -2725,6 +2769,7 @@ def build_html(runs_root: Path, target_run: str) -> str:
         f'<section class="tab-page active" id="overview" role="tabpanel">{overview}</section>',
         f'<section class="tab-page" id="symbol-detail" role="tabpanel">{symbol_detail}</section>',
         f'<section class="tab-page" id="trading" role="tabpanel">{trades}</section>',
+        f'<section class="tab-page" id="day-ledger" role="tabpanel">{trade_html}</section>',
         f'<section class="tab-page" id="evidence" role="tabpanel">{evidence}</section>',
         f'<section class="tab-page" id="operations" role="tabpanel">{operations}</section>',
     ]
@@ -2777,6 +2822,7 @@ def build_html(runs_root: Path, target_run: str) -> str:
     .financial-list {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }} .financial-card {{ padding:17px; border:1px solid var(--line); border-radius:15px; background:var(--subtle); }} .financial-body {{ padding:13px; border-radius:11px; background:#fff; }} .financial-body ul {{ margin:0; padding-left:20px; }} .evidence-title {{ display:flex; gap:10px; align-items:flex-start; margin-bottom:12px; }} .evidence-title h3 {{ margin:0; }} .evidence-title p {{ margin:4px 0 0; color:var(--muted); font-size:12px; }} .source-note {{ margin:12px 0 0; color:var(--muted); font-size:11px; }}
     .news-timeline {{ position:relative; display:grid; gap:12px; padding-left:22px; }} .news-timeline::before {{ content:""; position:absolute; left:7px; top:9px; bottom:9px; width:2px; background:linear-gradient(var(--accent),var(--accent-2)); }} .news-run {{ position:relative; padding:16px; border:1px solid var(--line); border-radius:15px; background:var(--subtle); }} .news-run::before {{ content:""; position:absolute; left:-22px; top:22px; width:11px; height:11px; border:3px solid var(--bg); border-radius:50%; background:var(--accent); }} .news-run-head {{ display:flex; justify-content:space-between; gap:10px; margin-bottom:9px; }} .news-run-head>div {{ display:flex; align-items:center; flex-wrap:wrap; gap:8px; }} .news-time {{ display:grid; width:50px; height:28px; place-items:center; border-radius:8px; background:var(--accent); color:#fff; font-size:12px; font-weight:900; }} .news-run-head span:not(.news-time):not(.badge) {{ color:var(--muted); font-size:11px; }} .news-run-body {{ padding:4px 12px; border-radius:11px; background:#fff; }} .news-item {{ padding:10px 0; border-bottom:1px solid var(--line); }} .news-item:last-child {{ border-bottom:0; }} .news-item time {{ margin-left:8px; color:var(--muted); font-size:11px; }} .news-item p {{ margin:5px 0 0; }} .empty-state {{ padding:12px; border-radius:9px; background:var(--subtle); color:var(--muted); font-size:12px; }}
     .time-wheel {{ margin:14px 0 20px; }} .time-wheel-caption {{ display:block; margin-bottom:6px; color:var(--muted); font-size:11px; font-weight:800; }} .time-selector {{ display:flex; flex-wrap:wrap; gap:7px; }} .time-button {{ display:flex; min-width:170px; flex:1 1 190px; max-width:270px; padding:9px 11px; border:1px solid var(--line); border-radius:11px; background:var(--subtle); color:var(--text); cursor:pointer; flex-direction:column; gap:3px; align-items:flex-start; text-align:left; transition:.16s ease; }} .time-button:hover {{ border-color:#aab4ff; color:var(--accent); }} .time-button.active {{ border-color:var(--accent); background:var(--accent-bg); color:var(--accent); box-shadow:0 6px 16px rgba(78,92,232,.1); }} .time-button strong {{ font-size:14px; }} .time-button small {{ color:inherit; font-size:10px; }} .time-analysis-panel {{ display:none; }} .time-analysis-panel.active {{ display:block; animation:page-in .18s ease; }} .time-panel-head {{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; padding-top:4px; }} .time-panel-head p {{ color:var(--muted); }} .run-activity {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:9px; margin:12px 0 19px; }} .activity-card {{ padding:13px; border:1px solid var(--line); border-radius:12px; background:#fff; }} .activity-card.order {{ border-left:4px solid var(--accent); }} .activity-card.filled {{ border-left:4px solid var(--ok); background:linear-gradient(145deg,#fff,var(--ok-bg)); }} .activity-card.fill {{ border-left:4px solid var(--accent-2); }} .activity-card.blocked {{ border-left:4px solid var(--bad); background:linear-gradient(145deg,#fff,var(--bad-bg)); }} .activity-card span,.activity-card strong,.activity-card small {{ display:block; }} .activity-card span,.activity-card small {{ color:var(--muted); font-size:11px; }}
+    .ledger-hours {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; margin:10px 0 24px; }} .ledger-hour {{ padding:15px; border:1px solid var(--line); border-radius:15px; background:var(--subtle); }} .ledger-hour-head {{ display:flex; align-items:center; justify-content:space-between; gap:10px; }} .ledger-hour-head strong {{ font-size:18px; }} .ledger-hour-head span {{ color:var(--muted); font-size:11px; font-weight:800; }} .ledger-hour ol {{ margin:12px 0 0 5px; padding:0 0 0 17px; border-left:2px solid var(--line); list-style:none; }} .ledger-event {{ position:relative; display:grid; grid-template-columns:42px 1fr; gap:3px 8px; padding:0 0 14px; }} .ledger-event:last-child {{ padding-bottom:0; }} .ledger-event::before {{ position:absolute; width:10px; height:10px; left:-23px; top:4px; border:3px solid #fff; border-radius:50%; background:var(--accent); box-shadow:0 0 0 1px var(--line); content:""; }} .ledger-event.fill::before {{ background:var(--ok); }} .ledger-event.blocked::before {{ background:var(--bad); }} .ledger-event time {{ color:var(--muted); font-size:11px; font-weight:800; }} .ledger-event strong,.ledger-event small {{ display:block; }} .ledger-event small {{ grid-column:2; color:var(--muted); font-size:10px; }}
     .trade-symbol-selector {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(130px,1fr)); gap:6px; margin-bottom:16px; }} .trade-symbol-button {{ display:grid; min-width:0; padding:8px 9px; border:1px solid var(--line); border-radius:10px; background:var(--subtle); color:var(--text); text-align:left; cursor:pointer; grid-template-columns:minmax(0,1fr) auto; gap:3px 6px; transition:.16s ease; }} .trade-symbol-button.group-trade {{ border-color:#a9ddcc; background:var(--ok-bg); }} .trade-symbol-button.group-guard {{ border-color:#f3bbc2; background:var(--bad-bg); }} .trade-symbol-button:hover {{ border-color:#aab4ff; transform:translateY(-1px); }} .trade-symbol-button.active {{ border-color:var(--accent); box-shadow:0 6px 16px rgba(78,92,232,.1); }} .trade-symbol-button.group-trade.active {{ background:linear-gradient(145deg,var(--ok-bg),#eefaf7); }} .trade-symbol-button.group-guard.active {{ background:linear-gradient(145deg,var(--bad-bg),#fff4f5); }} .trade-symbol-button>strong {{ overflow:hidden; font-size:12px; text-overflow:ellipsis; white-space:nowrap; }} .trade-symbol-button>code {{ color:var(--muted); font-size:9px; }} .symbol-button-meta {{ display:flex; min-width:0; grid-column:1/-1; gap:4px; align-items:center; color:var(--muted); font-size:10px; }} .mini-badge {{ padding:2px 5px; border-radius:999px; font-size:9px; }} .mini-badge.trade {{ color:var(--accent); background:var(--accent-bg); }} .mini-badge.analyst {{ color:var(--muted); background:#e9eef5; }} .mini-badge.attempt {{ color:var(--bad); background:var(--bad-bg); }} .symbol-analysis-panel {{ display:none; padding:20px; border:1px solid var(--line); border-radius:16px; background:linear-gradient(145deg,#fff,var(--subtle)); }} .symbol-analysis-panel.active {{ display:block; animation:page-in .18s ease; }} .symbol-focus-head {{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }} .symbol-focus-head h2 {{ margin-bottom:5px; }} .symbol-focus-head p {{ color:var(--muted); }} .focus-badges {{ display:flex; flex-wrap:wrap; justify-content:flex-end; gap:6px; }} .inline-analysis,.inline-judge {{ margin-top:20px; }} .compact-phase {{ margin-top:18px; padding-top:15px; }} .final-card.full {{ margin-top:12px; }}
     .decision-hero {{ background:linear-gradient(145deg,#fff,#f4f6ff); }} .decision-hero>div:first-child p:last-child {{ color:var(--muted); }} .decision-meta {{ display:flex; flex-wrap:wrap; gap:8px; }} .decision-meta>span {{ padding:7px 9px; border:1px solid var(--line); border-radius:9px; background:#fff; font-size:12px; }} .decision-orders {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin-top:14px; }} .decision-orders article {{ padding:13px; border-radius:12px; background:linear-gradient(135deg,var(--accent-bg),#eefaf7); }} .decision-orders span,.decision-orders strong,.decision-orders small {{ display:block; }} .decision-orders span,.decision-orders small {{ color:var(--muted); font-size:11px; }}
     .analyst-list {{ display:grid; gap:14px; }} .analyst-card {{ padding:17px; border:1px solid var(--line); border-radius:14px; background:var(--subtle); }} .card-title {{ display:flex; align-items:flex-start; gap:10px; margin-bottom:12px; }} .card-title h3,.card-title h4 {{ margin:0; }} .card-title p {{ margin:3px 0 0; color:var(--muted); font-size:13px; }} .index {{ display:grid; flex:0 0 30px; height:30px; place-items:center; border-radius:9px; background:var(--accent-bg); color:var(--accent); font-weight:900; }}

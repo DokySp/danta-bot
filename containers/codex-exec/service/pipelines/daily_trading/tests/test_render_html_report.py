@@ -588,6 +588,20 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
         self.addCleanup(temp_dir.cleanup)
         self.assertLess(rendered.index('id="trade-symbol-analysis"'), rendered.index('id="trades"'))
 
+    def test_cumulative_report_puts_day_ledger_in_a_time_grouped_tab(self) -> None:
+        rendered, _runs_root, temp_dir = scenario_build_cumulative_report()
+        self.addCleanup(temp_dir.cleanup)
+        trading_start = rendered.index('<section class="tab-page" id="trading"')
+        ledger_start = rendered.index('<section class="tab-page" id="day-ledger"')
+        evidence_start = rendered.index('<section class="tab-page" id="evidence"')
+
+        self.assertIn('data-tab="day-ledger"', rendered)
+        self.assertNotIn("DAY LEDGER", rendered[trading_start:ledger_start])
+        self.assertIn("DAY LEDGER", rendered[ledger_start:evidence_start])
+        self.assertIn('<div class="ledger-hours">', rendered[ledger_start:evidence_start])
+        self.assertIn("09시대", rendered[ledger_start:evidence_start])
+        self.assertIn("10시대", rendered[ledger_start:evidence_start])
+
     def test_cumulative_report_promotes_thesis_before_its_final_judge_card(self) -> None:
         rendered, _runs_root, temp_dir = scenario_build_cumulative_report()
         self.addCleanup(temp_dir.cleanup)
