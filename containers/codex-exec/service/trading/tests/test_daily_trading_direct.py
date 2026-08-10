@@ -161,6 +161,10 @@ class DailyTradingDirectRunnerTest(unittest.TestCase):
 
         command = run_mock.call_args.args[0]
         self.assertEqual(command[command.index("--exchange") + 1], "SOR")
+        with patch("service.trading.daily_trading_direct.subprocess.run", side_effect=fake_subprocess_run) as auto_run:
+            self.runner.run(self.raw_config(exchange="auto"))
+        auto_command = auto_run.call_args.args[0]
+        self.assertEqual(auto_command[auto_command.index("--exchange") + 1], "AUTO")
         with patch("service.trading.daily_trading_direct.subprocess.run") as invalid_run:
             with self.assertRaises(ValueError):
                 self.runner.run(self.raw_config(exchange="UNKNOWN"))

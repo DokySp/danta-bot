@@ -21,15 +21,22 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
-from zoneinfo import ZoneInfo
+try:
+    from .collect_main_evidence import exchange_preflight, resolve_order_market
+    from .order_session import KST, cash_order_session_open, reservation_order_session_open
+except ImportError:  # direct script execution
+    from collect_main_evidence import exchange_preflight, resolve_order_market
+    from order_session import KST, cash_order_session_open, reservation_order_session_open
 
 
-KST = ZoneInfo("Asia/Seoul")
 KIS_BASE_URL = "https://openapi.koreainvestment.com:9443"
 EXCHANGE_MARKET_CODES = {"KRX": "J", "NXT": "NX", "SOR": "UN"}
+MARKET_EXCHANGE_CODES = {market: exchange for exchange, market in EXCHANGE_MARKET_CODES.items()}
 
 ENDPOINTS = {
+    "search_stock_info": ("/uapi/domestic-stock/v1/quotations/search-stock-info", "GET", "CTPF1002R", "CTPF1002R"),
     "inquire_price": ("/uapi/domestic-stock/v1/quotations/inquire-price", "GET", "FHKST01010100", "FHKST01010100"),
+    "inquire_asking_price_exp_ccn": ("/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn", "GET", "FHKST01010200", "FHKST01010200"),
     "inquire_psbl_order": ("/uapi/domestic-stock/v1/trading/inquire-psbl-order", "GET", "TTTC8908R", "VTTC8908R"),
     "inquire_psbl_sell": ("/uapi/domestic-stock/v1/trading/inquire-psbl-sell", "GET", "TTTC8408R", "VTTC8408R"),
     "inquire_psbl_rvsecncl": ("/uapi/domestic-stock/v1/trading/inquire-psbl-rvsecncl", "GET", "TTTC0084R", "VTTC0084R"),
@@ -82,24 +89,6 @@ def exchange_matches(active: dict[str, Any], desired_exchange: Any) -> bool:
     active_exchange = exchange_code(active.get("excg_id_dvsn_cd"))
     desired = exchange_code(desired_exchange)
     return active_exchange == desired or (desired == "SOR" and active_exchange in {"KRX", "NXT"})
-
-
-def cash_order_session_open(exchange: Any, at: datetime | None = None) -> bool:
-    observed = at or datetime.now(KST)
-    observed = observed.replace(tzinfo=KST) if observed.tzinfo is None else observed.astimezone(KST)
-    if observed.weekday() >= 5:
-        return False
-    second = observed.hour * 3600 + observed.minute * 60 + observed.second
-    selected = exchange_code(exchange)
-    if selected == "KRX":
-        return 9 * 3600 <= second < 15 * 3600 + 30 * 60
-    if selected == "SOR":
-        return 8 * 3600 <= second < 20 * 3600
-    return (
-        8 * 3600 <= second < 8 * 3600 + 50 * 60
-        or 9 * 3600 + 30 <= second < 15 * 3600 + 20 * 60
-        or 15 * 3600 + 30 * 60 <= second < 20 * 3600
-    )
 
 
 def load_json(path: Path) -> Any:
@@ -420,6 +409,67 @@ def rows(body: dict[str, Any]) -> list[dict[str, Any]]:
         elif isinstance(value, list):
             result.extend(item for item in value if isinstance(item, dict))
     return result
+
+
+def live_order_exchange_preflight(
+    kis: Kis,
+    order: dict[str, Any],
+    *,
+    requested_exchange: str = "",
+    active_exchange: str = "",
+) -> dict[str, Any]:
+    symbol = symbol_key(order)
+    order_path = str(order.get("order_path") or "reservation")
+    info_rows = rows(
+        kis.call(
+            "search_stock_info",
+            params={"PRDT_TYPE_CD": "300", "PDNO": symbol},
+        )
+    )
+    info = info_rows[0] if info_rows else {}
+    exchange = "KRX" if order_path == "reservation" else exchange_code(order.get("excg_id_dvsn_cd"))
+    requested = str(requested_exchange or exchange).strip().upper()
+    routing_reasons: list[str] = []
+    if requested == "AUTO" and order_path == "immediate":
+        selected_market, routing_reasons = resolve_order_market(
+            info,
+            requested_market="AUTO",
+            order_path=order_path,
+        )
+        exchange = exchange_code(active_exchange) if active_exchange else MARKET_EXCHANGE_CODES[selected_market]
+        order["excg_id_dvsn_cd"] = exchange
+    market = market_code(exchange)
+    orderbook: dict[str, Any] = {}
+    if order_path == "immediate":
+        orderbook_rows = rows(
+            kis.call(
+                "inquire_asking_price_exp_ccn",
+                params={"FID_COND_MRKT_DIV_CODE": market, "FID_INPUT_ISCD": symbol},
+            )
+        )
+        orderbook_row = orderbook_rows[0] if orderbook_rows else {}
+        orderbook["market_operation_code"] = str(
+            first(orderbook_row, ("new_mkop_cls_code", "NEW_MKOP_CLS_CODE")) or ""
+        ).strip()
+
+    preflight = exchange_preflight(
+        info,
+        orderbook,
+        market=market,
+        order_path=order_path,
+        requested_market="AUTO" if requested == "AUTO" else market,
+        routing_reasons=routing_reasons,
+    )
+    reasons = list(preflight.get("reasons") or [])
+    if order_path == "immediate" and not cash_order_session_open(exchange):
+        if "exchange.session_not_open" not in reasons:
+            reasons.append("exchange.session_not_open")
+    elif order_path == "reservation" and not reservation_order_session_open():
+        reasons.append("order_path.reservation_session_not_open")
+    preflight["status"] = "blocked" if reasons else "eligible"
+    preflight["reasons"] = reasons
+    preflight["observed_at"] = now_iso()
+    return preflight
 
 
 def direction(value: Any) -> str:
@@ -1784,11 +1834,11 @@ def refresh_gates(args: argparse.Namespace, account: dict[str, Any], execution: 
     if not start_date or not end_date:
         start_date, end_date = default_date_range()
     active = fetch_reservations(kis, start_date, end_date) + fetch_pending_orders(kis)
-    active_symbols_with_orders = {
-        symbol_key(item)
-        for item in active
-        if isinstance(item, dict) and item.get("active_status") == "active"
-    }
+    active_orders_by_symbol: dict[str, list[dict[str, Any]]] = {}
+    for active_order in active:
+        if isinstance(active_order, dict) and active_order.get("active_status") == "active":
+            active_orders_by_symbol.setdefault(symbol_key(active_order), []).append(active_order)
+    active_symbols_with_orders = set(active_orders_by_symbol)
     account_by_symbol = {symbol_key(item): item for item in account.get("symbols", []) if isinstance(item, dict)}
     capacities: dict[str, dict[str, int]] = {}
     sell_capacities: dict[str, dict[str, int]] = {}
@@ -1800,6 +1850,32 @@ def refresh_gates(args: argparse.Namespace, account: dict[str, Any], execution: 
         if not symbol:
             continue
         if item.get("active_cancel_only") is True or item.get("reconciliation_only") is True:
+            continue
+        try:
+            symbol_active_orders = active_orders_by_symbol.get(symbol, [])
+            active_exchange = ""
+            if (
+                str(execution.get("exchange") or "").upper() == "AUTO"
+                and str(item.get("order_path") or "") == "immediate"
+                and len(symbol_active_orders) == 1
+                and symbol_active_orders[0].get("order_path") == "immediate"
+            ):
+                active_exchange = str(symbol_active_orders[0].get("excg_id_dvsn_cd") or "")
+            preflight = live_order_exchange_preflight(
+                kis,
+                item,
+                requested_exchange=str(execution.get("exchange") or ""),
+                active_exchange=active_exchange,
+            )
+        except Exception as exc:  # noqa: BLE001 - real-order route checks fail closed
+            item["eligible_for_order"] = False
+            item["order_block_reasons"] = ["exchange.preflight_refresh_failed"]
+            errors.append(error("exchange_preflight_refresh_failed", f"{symbol}: {redact(exc)}"))
+            continue
+        item["live_exchange_preflight"] = preflight
+        item["eligible_for_order"] = preflight.get("status") == "eligible"
+        item["order_block_reasons"] = list(preflight.get("reasons") or [])
+        if item["eligible_for_order"] is False:
             continue
         account_item = account_by_symbol.get(symbol, {})
         current = as_int(account_item.get("current_live_holding_quantity"), as_int(item.get("current_live_holding_quantity")))
@@ -1969,6 +2045,8 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
         order["order_path"] = order_path
         order["order_api"] = order_api
         order["excg_id_dvsn_cd"] = exchange
+        route_eligible = order.get("eligible_for_order") is not False
+        route_reasons = list(order.get("order_block_reasons") or [])
         desired_delta = final_quantity - current
         desired_side = "buy" if desired_delta > 0 else "sell" if desired_delta < 0 else ""
         desired_qty = abs(desired_delta)
@@ -2010,6 +2088,57 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
                 order["validated_order_quantity"] = 0
                 order["order_or_reservation_id"] = kept.get("order_id", "")
                 order_adjustments.append(adjustment_row(kept, action="keep", reason="matches_final_delta", result="skipped"))
+                continue
+
+            if (
+                str(execution.get("exchange") or "").upper() == "AUTO"
+                and desired_side
+                and not order.get("active_cancel_only")
+                and not exchange_matches(matching_active[0], exchange)
+            ):
+                order["result"] = "blocked"
+                order["reason"] = "exchange_auto_route_changed_with_active_order"
+                order["order_or_reservation_id"] = matching_active[0].get("order_id", "")
+                order["attempts"].append(
+                    attempt(
+                        "active_order_reconcile",
+                        "blocked",
+                        "AUTO route changed while an active order remains; active order kept",
+                        "exchange_auto_route_changed_with_active_order",
+                    )
+                )
+                order_adjustments.append(
+                    adjustment_row(
+                        matching_active[0],
+                        action="keep",
+                        reason="exchange_auto_route_changed_with_active_order",
+                        result="blocked",
+                    )
+                )
+                blocked += 1
+                continue
+
+            if not route_eligible and desired_side and not order.get("active_cancel_only"):
+                order["result"] = "blocked"
+                order["reason"] = "exchange_preflight_blocked"
+                order["order_or_reservation_id"] = matching_active[0].get("order_id", "")
+                order["attempts"].append(
+                    attempt(
+                        "exchange_preflight",
+                        "blocked",
+                        ",".join(route_reasons) or "selected exchange is not eligible",
+                        "exchange_preflight_blocked",
+                    )
+                )
+                order_adjustments.append(
+                    adjustment_row(
+                        matching_active[0],
+                        action="keep",
+                        reason="exchange_preflight_blocked",
+                        result="blocked",
+                    )
+                )
+                blocked += 1
                 continue
 
             conflict = matching_active[0]
@@ -2330,6 +2459,20 @@ def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[d
             order["validated_order_quantity"] = desired_qty
             order["order_or_reservation_id"] = request_id
             row["replacement_required"] = True
+            blocked += 1
+            continue
+
+        if side != "none" and not route_eligible:
+            order["result"] = "blocked"
+            order["reason"] = "exchange_preflight_blocked"
+            order["attempts"].append(
+                attempt(
+                    "exchange_preflight",
+                    "blocked",
+                    ",".join(route_reasons) or "selected exchange is not eligible",
+                    "exchange_preflight_blocked",
+                )
+            )
             blocked += 1
             continue
 

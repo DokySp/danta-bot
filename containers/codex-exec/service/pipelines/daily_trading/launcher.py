@@ -11,7 +11,7 @@ import yaml
 ALLOWED_ENVS = {"acct", "paper"}
 ALLOWED_REQUEST_TYPES = {"analysis", "prepare", "demo-submit", "real-submit"}
 ALLOWED_ORDER_PATHS = {"auto", "reservation", "immediate"}
-ALLOWED_EXCHANGES = {"KRX", "NXT", "SOR"}
+ALLOWED_EXCHANGES = {"AUTO", "KRX", "NXT", "SOR"}
 ALLOWED_REVIEW_INSTRUCTION_STAGES = {"analyst_review", "judge_review"}
 MAX_EXTRA_INSTRUCTION_COUNT = 10
 MAX_EXTRA_INSTRUCTION_CHARS = 500

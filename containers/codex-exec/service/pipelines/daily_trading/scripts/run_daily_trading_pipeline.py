@@ -21,6 +21,11 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+try:
+    from .order_session import cash_order_session_open, reservation_order_session_open
+except ImportError:  # direct script execution
+    from order_session import cash_order_session_open, reservation_order_session_open
+
 KST = ZoneInfo("Asia/Seoul")
 TOKEN_USAGE_FIELDS = (
     "input_tokens",
@@ -35,11 +40,9 @@ ANALYST_REVIEW_ROLES = (
 )
 COMMAND_OUTPUT_LIMIT = 2000
 ORDER_PATH_AUTO = "auto"
+EXCHANGE_AUTO = "AUTO"
 EXCHANGE_MARKET_CODES = {"KRX": "J", "NXT": "NX", "SOR": "UN"}
-REGULAR_ORDER_START_MINUTE = 9 * 60
-REGULAR_ORDER_END_MINUTE = 15 * 60 + 30
-RESERVATION_ORDER_START_MINUTE = 15 * 60 + 40
-RESERVATION_ORDER_END_MINUTE = 7 * 60 + 30
+ALLOWED_EXCHANGES = {*EXCHANGE_MARKET_CODES, EXCHANGE_AUTO}
 STRATEGY_POLICY_CONFIG_ENV = "DAILY_TRADING_STRATEGY_POLICY_CONFIG"
 STRATEGY_POLICY_CONFIG_FILENAME = "daily-trading-strategy-policy.yaml"
 LIFECYCLE_ONLY_ORDER_REASONS = {
@@ -77,15 +80,15 @@ def resolve_order_path(order_path: str, started_at: str) -> tuple[str, str]:
     started = parse_kst_datetime(started_at)
     if started.weekday() >= 5:
         return "reservation", "auto_closed_weekend"
-    minute = started.hour * 60 + started.minute
-    if REGULAR_ORDER_START_MINUTE <= minute < REGULAR_ORDER_END_MINUTE:
-        return "immediate", "auto_regular_session"
-    if minute >= RESERVATION_ORDER_START_MINUTE or minute < RESERVATION_ORDER_END_MINUTE:
+    if cash_order_session_open("SOR", started):
+        reason = "auto_regular_session" if cash_order_session_open("KRX", started) else "auto_extended_session"
+        return "immediate", reason
+    if reservation_order_session_open(started):
         return "reservation", "auto_reservation_session"
     raise ValueError(
         "auto order path cannot select a supported KIS order API for "
-        f"{started.isoformat(timespec='minutes')}; regular order_cash window is "
-        "09:00-15:30 KST and order_resv window is 15:40-07:30 KST"
+        f"{started.isoformat(timespec='minutes')}; SOR order_cash window is "
+        "08:00-20:00 KST and order_resv window is 15:40-07:30 KST"
     )
 
 
@@ -643,7 +646,9 @@ class Pipeline:
         )
         self.order_path_requested = str(getattr(args, "order_path", ORDER_PATH_AUTO) or ORDER_PATH_AUTO)
         self.exchange = str(getattr(args, "exchange", "KRX") or "KRX").upper()
-        self.market = EXCHANGE_MARKET_CODES[self.exchange]
+        if self.exchange not in ALLOWED_EXCHANGES:
+            raise ValueError(f"unsupported exchange: {self.exchange}")
+        self.market = EXCHANGE_MARKET_CODES.get(self.exchange, EXCHANGE_AUTO)
         try:
             self.order_path, self.order_path_reason = resolve_order_path(self.order_path_requested, self.started_at)
         except ValueError:
@@ -653,7 +658,7 @@ class Pipeline:
                 self.order_path, self.order_path_reason = "reservation", "auto_unresolved_non_submit"
             else:
                 raise
-        if self.order_path == "reservation" and self.exchange != "KRX":
+        if self.order_path == "reservation" and self.exchange not in {"KRX", EXCHANGE_AUTO}:
             raise ValueError("reservation orders require exchange=KRX")
         self.logs: list[dict[str, Any]] = []
         self.stages: list[dict[str, Any]] = []
@@ -2942,7 +2947,7 @@ class Pipeline:
             "main_agent_read_policy": (
                 "Read pipeline-summary.json first. For explicit demo-submit or real-submit runs, pass --submit-orders so execute_orders.py refreshes "
                 "read-only account/order gates, reconciles active pending/reserved orders, and submits, adjusts, or blocks immediate/reservation orders before summary generation. "
-                "When --order-path auto is used, the pipeline resolves weekday 09:00 <= t < 15:30 KST runs to immediate/order_cash, and 15:40 <= t or t < 07:30 plus weekends to reservation/order_resv before execution-plan. "
+                "When --order-path auto is used, the pipeline resolves an open SOR cash session to immediate/order_cash, and otherwise uses reservation/order_resv during its supported window or on weekends. "
                 "For explicit limit requests, treat execution-plan order_price values as the default limit price candidates unless a current API gate rejects them. "
                 "Open command_log_path or other intermediate artifacts only when a stage failed and the summary is insufficient."
             ),
@@ -3156,9 +3161,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--order-path",
         choices=[ORDER_PATH_AUTO, "reservation", "immediate"],
         default=ORDER_PATH_AUTO,
-        help="Order API path. auto uses KST order-session time: order_cash for weekday 09:00 <= t < 15:30, order_resv for 15:40 <= t or t < 07:30 and weekends.",
+        help="Order API path. auto prefers an open SOR cash session, otherwise uses the KIS reservation window or weekends.",
     )
-    run.add_argument("--exchange", choices=sorted(EXCHANGE_MARKET_CODES), default="KRX")
+    run.add_argument("--exchange", choices=sorted(ALLOWED_EXCHANGES), default="KRX")
     run.add_argument("--date", default="")
     run.add_argument("--reuse-existing-artifacts", action="store_true")
     run.add_argument("--skip-account", action="store_true")
@@ -3171,7 +3176,7 @@ def build_parser() -> argparse.ArgumentParser:
     summarize.add_argument("--env", default=os.environ.get("CODEX_MCP_TRADING_ENV", "acct"), choices=["acct", "real", "paper", "demo"])
     summarize.add_argument("--request-type", default="analysis", choices=["analysis", "prepare", "demo-submit", "real-submit"])
     summarize.add_argument("--order-path", choices=[ORDER_PATH_AUTO, "reservation", "immediate"], default=ORDER_PATH_AUTO)
-    summarize.add_argument("--exchange", choices=sorted(EXCHANGE_MARKET_CODES), default="KRX")
+    summarize.add_argument("--exchange", choices=sorted(ALLOWED_EXCHANGES), default="KRX")
     summarize.add_argument("--portfolio-json", default="")
     summarize.add_argument("--review-extra-instructions-file", default="")
     summarize.add_argument("--strategy-policy-config", default="")

@@ -23,6 +23,9 @@ from zoneinfo import ZoneInfo
 
 KST = ZoneInfo("Asia/Seoul")
 KIS_BASE_URL = "https://openapi.koreainvestment.com:9443"
+EXCHANGE_MARKET_CODES = {"KRX": "J", "NXT": "NX", "SOR": "UN"}
+MARKET_EXCHANGE_CODES = {market: exchange for exchange, market in EXCHANGE_MARKET_CODES.items()}
+AUTO_MARKET = "AUTO"
 ACCOUNT_ASSET_HISTORY_RELATIVE_PATH = Path("memory") / "account-assets" / "account-assets.jsonl"
 ACCOUNT_ASSET_ALLOWLIST = (
     "tot_asst_amt",
@@ -444,19 +447,47 @@ def summarize_orderbook(row: dict[str, Any], expected_row: dict[str, Any] | None
     }
 
 
+def resolve_order_market(
+    info: dict[str, Any],
+    *,
+    requested_market: str,
+    order_path: str,
+) -> tuple[str, list[str]]:
+    requested = str(requested_market or "J").strip().upper()
+    if requested not in {*MARKET_EXCHANGE_CODES, AUTO_MARKET}:
+        raise ValueError(f"unsupported market: {requested}")
+    if order_path == "reservation":
+        if requested not in {"J", AUTO_MARKET}:
+            return "J", ["exchange.reservation_requires_krx"]
+        return "J", []
+    if requested != AUTO_MARKET:
+        return requested, []
+
+    nxt_tradable = text_first(info, ("cptt_trad_tr_psbl_yn", "CPTT_TRAD_TR_PSBL_YN")).upper()
+    if nxt_tradable == "Y":
+        return "UN", []
+    if nxt_tradable == "N":
+        return "J", []
+    return "J", ["exchange.nxt_tradability_unknown"]
+
+
 def exchange_preflight(
     info: dict[str, Any],
     orderbook: dict[str, Any],
     *,
     market: str,
     order_path: str = "",
+    requested_market: str = "",
+    routing_reasons: list[str] | None = None,
 ) -> dict[str, Any]:
-    exchange = {"J": "KRX", "NX": "NXT", "UN": "SOR"}.get(str(market or "").upper(), "")
+    exchange = MARKET_EXCHANGE_CODES.get(str(market or "").upper(), "")
+    requested = str(requested_market or market or "").upper()
+    requested_exchange = "AUTO" if requested == AUTO_MARKET else MARKET_EXCHANGE_CODES.get(requested, "")
     nxt_tradable = text_first(info, ("cptt_trad_tr_psbl_yn", "CPTT_TRAD_TR_PSBL_YN")).upper()
     krx_trade_stopped = text_first(info, ("tr_stop_yn", "TR_STOP_YN")).upper()
     nxt_trade_stopped = text_first(info, ("nxt_tr_stop_yn", "NXT_TR_STOP_YN")).upper()
     market_operation_code = str(orderbook.get("market_operation_code") or "").strip()
-    reasons: list[str] = []
+    reasons = list(routing_reasons or [])
 
     if exchange in {"NXT", "SOR"}:
         if nxt_tradable not in {"Y", "N"}:
@@ -478,6 +509,7 @@ def exchange_preflight(
 
     return {
         "status": "blocked" if reasons else "eligible",
+        "requested_exchange": requested_exchange,
         "exchange": exchange,
         "market": market,
         "nxt_tradable": nxt_tradable,
@@ -548,6 +580,8 @@ def build_price_row(
     trade_flow: dict[str, Any] | None = None,
     investor_flow: dict[str, Any] | None = None,
     order_path: str = "",
+    requested_market: str = "",
+    routing_reasons: list[str] | None = None,
 ) -> dict[str, Any]:
     symbol_name = text_first(info, ("prdt_abrv_name", "prdt_name", "prdt_name120")) or text_first(price, ("hts_kor_isnm", "bstp_kor_isnm")) or symbol
     current_price = parse_int(first_present(price, ("stck_prpr", "thdt_clpr", "stck_prdy_clpr")))
@@ -562,8 +596,14 @@ def build_price_row(
     charts = charts or {"daily": [], "weekly": [], "monthly": []}
     intraday = intraday or []
     orderbook = orderbook or {}
-    preflight = exchange_preflight(info, orderbook, market=market, order_path=order_path)
-    required_missing.extend(preflight["reasons"])
+    preflight = exchange_preflight(
+        info,
+        orderbook,
+        market=market,
+        order_path=order_path,
+        requested_market=requested_market,
+        routing_reasons=routing_reasons,
+    )
     signals = [
         price_signal("day_change_pct", parse_float(price.get("prdy_ctrt"))),
         price_signal("volume", parse_int(price.get("acml_vol"))),
@@ -599,6 +639,7 @@ def build_price_row(
         sources.append({"api": "direct_kis.inquire_ccnl", "env_dv": env_dv, "market": market})
     if investor_flow:
         sources.append({"api": "direct_kis.investor_trend_estimate", "env_dv": env_dv, "market": market})
+    eligible_for_review = not required_missing and not any(error.get("required") for error in errors)
     return {
         "schema_version": "1",
         "symbol_id": symbol,
@@ -609,8 +650,10 @@ def build_price_row(
             "observed_at": observed_at,
             "snapshot_mode": "live",
         },
-        "eligible_for_review": not required_missing and not any(error.get("required") for error in errors),
+        "eligible_for_review": eligible_for_review,
+        "eligible_for_order": eligible_for_review and preflight["status"] == "eligible",
         "required_missing": required_missing,
+        "order_block_reasons": list(preflight["reasons"]),
         "local_signals": [signal for signal in signals if signal is not None],
         "charts": charts,
         "intraday": intraday,
@@ -833,6 +876,8 @@ def collect_price_chart(symbols: list[str], *, run_id: str, started_at: str, env
     for symbol in symbols:
         symbol_errors: list[dict[str, Any]] = []
         info: dict[str, Any] = {}
+        selected_market = market
+        routing_reasons: list[str] = []
         price: dict[str, Any] = {}
         charts: dict[str, list[dict[str, Any]]] = {"daily": [], "weekly": [], "monthly": []}
         intraday: list[dict[str, Any]] = []
@@ -853,10 +898,15 @@ def collect_price_chart(symbols: list[str], *, run_id: str, started_at: str, env
             info = output_first(body, "output")
         except Exception as exc:  # noqa: BLE001 - preserve partial symbol evidence
             symbol_errors.append(safe_error(exc, code="search_stock_info_failed", stage="price-chart", symbol_id=symbol, source="direct_kis.search_stock_info", required=False))
+        selected_market, routing_reasons = resolve_order_market(
+            info,
+            requested_market=market,
+            order_path=order_path,
+        )
         try:
             body, _headers = call_endpoint(
                 "inquire_price",
-                {"FID_COND_MRKT_DIV_CODE": market, "FID_INPUT_ISCD": symbol},
+                {"FID_COND_MRKT_DIV_CODE": selected_market, "FID_INPUT_ISCD": symbol},
                 app_key,
                 app_secret,
                 token,
@@ -870,7 +920,7 @@ def collect_price_chart(symbols: list[str], *, run_id: str, started_at: str, env
         if include_extended:
             charts, intraday, orderbook, trade_flow, investor_flow, extended_errors = collect_extended_market_evidence(
                 symbol,
-                market=market,
+                market=selected_market,
                 app_key=app_key,
                 app_secret=app_secret,
                 token=token,
@@ -884,7 +934,7 @@ def collect_price_chart(symbols: list[str], *, run_id: str, started_at: str, env
             price,
             observed_at=observed_at,
             env_dv=env_dv,
-            market=market,
+            market=selected_market,
             errors=symbol_errors,
             charts=charts,
             intraday=intraday,
@@ -892,6 +942,8 @@ def collect_price_chart(symbols: list[str], *, run_id: str, started_at: str, env
             trade_flow=trade_flow,
             investor_flow=investor_flow,
             order_path=order_path,
+            requested_market=market,
+            routing_reasons=routing_reasons,
         )
         rows.append(row)
         artifact_errors.extend(symbol_errors)
@@ -927,7 +979,9 @@ def failed_price_artifact(symbols: list[str], *, run_id: str, started_at: str, e
                 "product_type": "unresolved",
                 "price": {"current_or_last": None, "observed_at": "", "snapshot_mode": ""},
                 "eligible_for_review": False,
+                "eligible_for_order": False,
                 "required_missing": ["symbol_name", "price.current_or_last", "price.observed_at"],
+                "order_block_reasons": ["exchange.preflight_unavailable"],
                 "local_signals": [],
                 "sources": [],
                 "errors": [symbol_error],

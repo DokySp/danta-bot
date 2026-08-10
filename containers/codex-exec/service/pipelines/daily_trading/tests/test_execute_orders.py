@@ -91,6 +91,179 @@ class ExchangeRoutingTest(unittest.TestCase):
         execute_orders_module.fetch_cash_order_status_rows(status_kis, "20260807")
         self.assertEqual(status_kis.params["EXCG_ID_DVSN_CD"], "ALL")
 
+    def test_ineligible_auto_route_is_blocked_before_submission(self) -> None:
+        account = {
+            "symbols": [
+                {
+                    "symbol_id": "411060",
+                    "symbol_name": "ACE KRX금현물",
+                    "current_live_holding_quantity": 0,
+                }
+            ]
+        }
+        execution = {
+            "exchange": "AUTO",
+            "orders": [
+                {
+                    "symbol_id": "411060",
+                    "symbol_name": "ACE KRX금현물",
+                    "final_holding_quantity": 1,
+                    "order_price": 18590,
+                    "order_path": "immediate",
+                    "excg_id_dvsn_cd": "KRX",
+                    "eligible_for_order": False,
+                    "order_block_reasons": ["exchange.session_not_open"],
+                }
+            ],
+        }
+
+        with patch.dict(os.environ, {PORTFOLIO_EXCEPT_ENV_VAR: "/no/such/file"}):
+            reconcile(account, execution, [], {}, {}, submit=True, kis=None)
+
+        order = execution["orders"][0]
+        self.assertEqual(order["result"], "blocked")
+        self.assertEqual(order["reason"], "exchange_preflight_blocked")
+
+    def test_gate_refresh_replaces_stale_collection_preflight(self) -> None:
+        class LiveKis:
+            def __init__(self, nxt_tradable: str) -> None:
+                self.nxt_tradable = nxt_tradable
+
+            def call(self, name: str, *, params: dict[str, str]) -> dict[str, Any]:
+                if name == "search_stock_info":
+                    return {
+                        "output": {
+                            "cptt_trad_tr_psbl_yn": self.nxt_tradable,
+                            "tr_stop_yn": "N",
+                            "nxt_tr_stop_yn": "N",
+                        }
+                    }
+                if name == "inquire_asking_price_exp_ccn":
+                    return {"output1": {"new_mkop_cls_code": "20"}}
+                raise AssertionError(name)
+
+        args = argparse.Namespace(
+            offline=False,
+            env="real",
+            retries=0,
+            reservation_start_date="20260810",
+            reservation_end_date="20260810",
+        )
+        for nxt_tradable, stale_exchange, expected_exchange, expected_eligible in (
+            ("Y", "KRX", "SOR", True),
+            ("N", "SOR", "KRX", True),
+            ("", "SOR", "KRX", False),
+        ):
+            with self.subTest(nxt_tradable=nxt_tradable):
+                order = {
+                    "symbol_id": "005930",
+                    "final_holding_quantity": 0,
+                    "order_path": "immediate",
+                    "excg_id_dvsn_cd": stale_exchange,
+                    "eligible_for_order": False,
+                    "order_block_reasons": ["exchange.session_not_open"],
+                }
+                with patch.object(execute_orders_module, "Kis", return_value=LiveKis(nxt_tradable)), patch.object(
+                    execute_orders_module, "fetch_reservations", return_value=[]
+                ), patch.object(execute_orders_module, "fetch_pending_orders", return_value=[]), patch.object(
+                    execute_orders_module, "cash_order_session_open", return_value=True
+                ):
+                    refresh_gates(
+                        args,
+                        {"execution_environment": "real", "symbols": [{"symbol_id": "005930", "current_live_holding_quantity": 0}]},
+                        {"exchange": "AUTO", "orders": [order]},
+                    )
+
+                self.assertEqual(order["excg_id_dvsn_cd"], expected_exchange)
+                self.assertIs(order["eligible_for_order"], expected_eligible)
+                self.assertEqual(order["live_exchange_preflight"]["status"], "eligible" if expected_eligible else "blocked")
+
+    def test_gate_refresh_preserves_active_exchange_for_auto(self) -> None:
+        class LiveKis:
+            def call(self, name: str, *, params: dict[str, str]) -> dict[str, Any]:
+                if name == "search_stock_info":
+                    return {"output": {"cptt_trad_tr_psbl_yn": "Y", "tr_stop_yn": "N", "nxt_tr_stop_yn": "N"}}
+                if name == "inquire_asking_price_exp_ccn":
+                    return {"output1": {"new_mkop_cls_code": "20"}}
+                raise AssertionError(name)
+
+        order = {
+            "symbol_id": "005930",
+            "final_holding_quantity": 0,
+            "order_path": "immediate",
+            "excg_id_dvsn_cd": "KRX",
+        }
+        active = {
+            "symbol_id": "005930",
+            "active_status": "active",
+            "order_path": "immediate",
+            "excg_id_dvsn_cd": "NXT",
+        }
+        args = argparse.Namespace(offline=False, env="real", retries=0, reservation_start_date="", reservation_end_date="")
+        with patch.object(execute_orders_module, "Kis", return_value=LiveKis()), patch.object(
+            execute_orders_module, "fetch_reservations", return_value=[]
+        ), patch.object(execute_orders_module, "fetch_pending_orders", return_value=[active]), patch.object(
+            execute_orders_module, "cash_order_session_open", return_value=True
+        ):
+            refresh_gates(
+                args,
+                {"execution_environment": "real", "symbols": [{"symbol_id": "005930", "current_live_holding_quantity": 0}]},
+                {"exchange": "AUTO", "orders": [order]},
+            )
+
+        self.assertEqual(order["excg_id_dvsn_cd"], "NXT")
+        self.assertTrue(order["eligible_for_order"])
+
+    def test_auto_route_change_keeps_active_order(self) -> None:
+        account = {
+            "symbols": [
+                {
+                    "symbol_id": "005930",
+                    "symbol_name": "삼성전자",
+                    "current_live_holding_quantity": 0,
+                }
+            ]
+        }
+        active = [
+            {
+                "symbol_id": "005930",
+                "symbol_name": "삼성전자",
+                "order_id": "0015300400",
+                "order_kind": "pending",
+                "direction": "buy",
+                "remaining_quantity": 1,
+                "order_price": 70_000,
+                "order_api": "order_cash",
+                "order_path": "immediate",
+                "excg_id_dvsn_cd": "NXT",
+                "execution_environment": "real",
+                "active_status": "active",
+                "observed_at": now_iso(),
+            }
+        ]
+        execution = {
+            "exchange": "AUTO",
+            "orders": [
+                {
+                    "symbol_id": "005930",
+                    "symbol_name": "삼성전자",
+                    "final_holding_quantity": 2,
+                    "order_price": 70_000,
+                    "order_path": "immediate",
+                    "excg_id_dvsn_cd": "KRX",
+                    "eligible_for_order": True,
+                }
+            ],
+        }
+
+        with patch.dict(os.environ, {PORTFOLIO_EXCEPT_ENV_VAR: "/no/such/file"}):
+            reconcile(account, execution, active, {}, {}, submit=True, kis=FakeKis())
+
+        order = execution["orders"][0]
+        self.assertEqual(order["result"], "blocked")
+        self.assertEqual(order["reason"], "exchange_auto_route_changed_with_active_order")
+        self.assertEqual(execution["order_adjustments"][0]["action"], "keep")
+
 
 def step_dry_run_gate_and_portfolio_except_checks(root: Path) -> list[str]:
     """Dry-run gate refresh, invalid final-holding-quantity blocking, and portfolio-except exclusion."""
@@ -1372,6 +1545,7 @@ def step_refresh_gates_active_buy_capacity_prefetch_checks(root: Path) -> list[s
     original_fetch_reservations = execute_orders_module.fetch_reservations
     original_fetch_pending_orders = execute_orders_module.fetch_pending_orders
     original_buy_capacity = execute_orders_module.buy_capacity
+    original_live_preflight = execute_orders_module.live_order_exchange_preflight
     capacity_calls: list[tuple[str, int]] = []
 
     class FakeRefreshKis:
@@ -1410,6 +1584,7 @@ def step_refresh_gates_active_buy_capacity_prefetch_checks(root: Path) -> list[s
         execute_orders_module.fetch_reservations = fake_fetch_reservations
         execute_orders_module.fetch_pending_orders = fake_fetch_pending_orders
         execute_orders_module.buy_capacity = fake_buy_capacity
+        execute_orders_module.live_order_exchange_preflight = lambda *args, **kwargs: {"status": "eligible", "reasons": []}
         active, capacities, sell_capacities, errors, kis = refresh_gates(
             argparse.Namespace(env="real", retries=0, offline=False, reservation_start_date="20260701", reservation_end_date="20260731"),
             {"account_summary": {"cash_amount": 10_000_000}, "symbols": [{"symbol_id": "078930", "symbol_name": "GS", "current_live_holding_quantity": 11}]},
@@ -1431,6 +1606,7 @@ def step_refresh_gates_active_buy_capacity_prefetch_checks(root: Path) -> list[s
         execute_orders_module.fetch_reservations = original_fetch_reservations
         execute_orders_module.fetch_pending_orders = original_fetch_pending_orders
         execute_orders_module.buy_capacity = original_buy_capacity
+        execute_orders_module.live_order_exchange_preflight = original_live_preflight
 
     if "078930" not in capacities:
         failures.append(f"refresh_gates did not prefetch buy capacity for a symbol with an active pending buy: {capacities}")
@@ -1453,6 +1629,7 @@ def step_refresh_gates_active_buy_capacity_prefetch_checks(root: Path) -> list[s
         execute_orders_module.fetch_reservations = fake_fetch_reservations
         execute_orders_module.fetch_pending_orders = fake_fetch_pending_orders
         execute_orders_module.buy_capacity = fake_failing_buy_capacity
+        execute_orders_module.live_order_exchange_preflight = lambda *args, **kwargs: {"status": "eligible", "reasons": []}
         _, failed_prefetch_capacities, _, failed_prefetch_errors, _ = refresh_gates(
             argparse.Namespace(env="real", retries=0, offline=False, reservation_start_date="20260701", reservation_end_date="20260731"),
             {"account_summary": {"cash_amount": 10_000_000}, "symbols": [{"symbol_id": "078930", "symbol_name": "GS", "current_live_holding_quantity": 11}]},
@@ -1474,6 +1651,7 @@ def step_refresh_gates_active_buy_capacity_prefetch_checks(root: Path) -> list[s
         execute_orders_module.fetch_reservations = original_fetch_reservations
         execute_orders_module.fetch_pending_orders = original_fetch_pending_orders
         execute_orders_module.buy_capacity = original_buy_capacity
+        execute_orders_module.live_order_exchange_preflight = original_live_preflight
 
     if failed_prefetch_errors:
         failures.append(f"opportunistic active-buy capacity prefetch failure should not be a required gate error: {failed_prefetch_errors}")
@@ -1511,6 +1689,7 @@ def _run_refresh_gates_case(
     original_fetch_pending_orders = execute_orders_module.fetch_pending_orders
     original_buy_capacity = execute_orders_module.buy_capacity
     original_sell_capacity = execute_orders_module.sell_capacity
+    original_live_preflight = execute_orders_module.live_order_exchange_preflight
 
     class FakeRefreshKis:
         env = "real"
@@ -1536,6 +1715,7 @@ def _run_refresh_gates_case(
         execute_orders_module.fetch_pending_orders = fake_fetch_pending_orders
         execute_orders_module.buy_capacity = buy_capacity_impl or default_buy_capacity
         execute_orders_module.sell_capacity = sell_capacity_impl or default_sell_capacity
+        execute_orders_module.live_order_exchange_preflight = lambda *args, **kwargs: {"status": "eligible", "reasons": []}
         active, capacities, sell_capacities, errors, _kis = refresh_gates(
             argparse.Namespace(env="real", retries=0, offline=False, reservation_start_date="20260701", reservation_end_date="20260731"),
             {"account_summary": {"cash_amount": 10_000_000}, "symbols": [{"symbol_id": "078930", "symbol_name": "GS", "current_live_holding_quantity": current_holding}]},
@@ -1547,6 +1727,7 @@ def _run_refresh_gates_case(
         execute_orders_module.fetch_pending_orders = original_fetch_pending_orders
         execute_orders_module.buy_capacity = original_buy_capacity
         execute_orders_module.sell_capacity = original_sell_capacity
+        execute_orders_module.live_order_exchange_preflight = original_live_preflight
     return active, capacities, sell_capacities, errors
 
 

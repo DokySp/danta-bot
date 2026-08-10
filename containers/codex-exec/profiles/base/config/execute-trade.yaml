@@ -5,6 +5,7 @@
 # - request_type: analysis | prepare | demo-submit | real-submit
 # - submit_orders: true | false
 # - order_path: auto | reservation | immediate
+# - exchange: AUTO | KRX | NXT | SOR
 # - review_extra_instructions:
 #     analyst_review:
 #       - "optional supplemental instruction for first review agents"
@@ -25,3 +26,4 @@ daily_trading:
   request_type: real-submit
   submit_orders: true
   order_path: auto
+  exchange: AUTO

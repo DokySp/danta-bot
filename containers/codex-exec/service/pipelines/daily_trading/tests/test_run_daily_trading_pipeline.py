@@ -354,6 +354,10 @@ def step_cache_coverage_and_evidence_checks(workspace: Path, run_dir: Path) -> l
         failures.append(f"matching-date news cache should satisfy coverage: covered={covered}, missing={missing}")
     if resolve_order_path(ORDER_PATH_AUTO, "2026-06-18T09:00:00+09:00") != ("immediate", "auto_regular_session"):
         failures.append("auto order path did not select immediate during regular KST session")
+    if resolve_order_path(ORDER_PATH_AUTO, "2026-06-18T08:48:00+09:00") != ("immediate", "auto_extended_session"):
+        failures.append("auto order path did not select immediate during extended SOR session")
+    if resolve_order_path(ORDER_PATH_AUTO, "2026-06-18T18:00:00+09:00") != ("immediate", "auto_extended_session"):
+        failures.append("auto order path did not prefer immediate during the overlapping reservation window")
     if resolve_order_path(ORDER_PATH_AUTO, "2026-06-18T07:00:00+09:00") != ("reservation", "auto_reservation_session"):
         failures.append("auto order path did not select reservation during KIS reservation session")
     if resolve_order_path(ORDER_PATH_AUTO, "2026-06-20T10:00:00+09:00") != ("reservation", "auto_closed_weekend"):
@@ -363,7 +367,7 @@ def step_cache_coverage_and_evidence_checks(workspace: Path, run_dir: Path) -> l
     if resolve_order_path("immediate", "2026-06-18T07:00:00+09:00") != ("immediate", "explicit"):
         failures.append("explicit immediate order path was not preserved")
     try:
-        resolve_order_path(ORDER_PATH_AUTO, "2026-06-18T08:00:00+09:00")
+        resolve_order_path(ORDER_PATH_AUTO, "2026-06-18T07:45:00+09:00")
         failures.append("auto order path should reject unsupported KIS order window")
     except ValueError:
         pass

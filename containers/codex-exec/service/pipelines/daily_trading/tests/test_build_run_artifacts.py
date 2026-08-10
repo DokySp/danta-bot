@@ -1548,6 +1548,85 @@ class BuildRunArtifactsSelfTest(unittest.TestCase):
                 "unverified_holding_requires_active_order_cancellation",
             )
 
+    def test_execution_plan_routes_auto_exchange_per_symbol(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            run_dir = Path(tmp_name)
+            symbols = [
+                ("005930", "삼성전자", 70000, True, "SOR", []),
+                ("411060", "ACE KRX금현물", 18590, True, "KRX", []),
+                ("000660", "SK하이닉스", 200000, False, "KRX", ["exchange.nxt_tradability_unknown"]),
+            ]
+            write_json(
+                run_dir / "account-before-order.json",
+                {
+                    "run_id": "auto-route",
+                    "started_at": "2026-08-10T09:05:00+09:00",
+                    "active_order_lookup_performed": True,
+                    "order_available_lookup_performed": True,
+                    "active_orders": [],
+                    "symbols": [
+                        {
+                            "symbol_id": symbol_id,
+                            "symbol_name": symbol_name,
+                            "current_live_holding_quantity": 0,
+                            "current_price": price,
+                        }
+                        for symbol_id, symbol_name, price, *_rest in symbols
+                    ],
+                },
+            )
+            write_json(
+                run_dir / "judge-review.json",
+                {
+                    "run_id": "auto-route",
+                    "started_at": "2026-08-10T09:05:00+09:00",
+                    "symbols": [
+                        {
+                            "symbol_id": symbol_id,
+                            "symbol_name": symbol_name,
+                            "final_holding_quantity": 1,
+                        }
+                        for symbol_id, symbol_name, *_rest in symbols
+                    ],
+                },
+            )
+            write_json(
+                run_dir / "decision-brief.json",
+                {
+                    "symbols": [
+                        {
+                            "symbol_id": symbol_id,
+                            "price": {"current_or_last": price},
+                            "eligible_for_order": eligible,
+                            "order_block_reasons": reasons,
+                            "exchange_preflight": {"exchange": exchange, "reasons": reasons},
+                        }
+                        for symbol_id, _symbol_name, price, eligible, exchange, reasons in symbols
+                    ]
+                },
+            )
+
+            execution = build_execution_plan(
+                argparse.Namespace(
+                    output_dir=run_dir,
+                    output=run_dir / "execution.json",
+                    judge_review="",
+                    account_before_order="",
+                    decision_brief="",
+                    analyst_review="",
+                    run_id=None,
+                    started_at=None,
+                    request_type="real-submit",
+                    order_path="immediate",
+                    exchange="AUTO",
+                )
+            )
+
+            by_symbol = {item["symbol_id"]: item for item in execution["orders"]}
+            self.assertEqual(by_symbol["005930"]["excg_id_dvsn_cd"], "SOR")
+            self.assertEqual(by_symbol["411060"]["excg_id_dvsn_cd"], "KRX")
+            self.assertEqual(by_symbol["000660"]["reason"], "exchange_preflight_blocked")
+
     def test_financial_summary_omits_stale_quote_and_uses_fresh_price_for_target_gap(self) -> None:
         cache = {
             "symbols": {

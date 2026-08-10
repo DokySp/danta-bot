@@ -51,7 +51,7 @@ schedules:
       request_type: real-submit
       submit_orders: true
       order_path: immediate
-      exchange: NXT
+      exchange: AUTO
 
   - id: daily-02
     enabled: true
@@ -61,7 +61,7 @@ schedules:
       request_type: real-submit
       submit_orders: true
       order_path: immediate
-      exchange: SOR
+      exchange: AUTO
 
   - id: daily-10
     enabled: true
@@ -71,7 +71,7 @@ schedules:
       request_type: real-submit
       submit_orders: true
       order_path: immediate
-      exchange: SOR
+      exchange: AUTO
     # 이전 Main Codex message:
     # $check-portfolio로 recommended, specified, holding, universe JSON을 확인하고, check-portfolio의 universe를 $daily-trading 대상으로 사용해줘.
     # 예약 거래 내역을 확인하고 $daily-trading 스킬로 실전(acct) 거래를 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
@@ -84,7 +84,7 @@ schedules:
       request_type: real-submit
       submit_orders: true
       order_path: immediate
-      exchange: SOR
+      exchange: AUTO
     # 이전 Main Codex message:
     # $check-portfolio로 recommended, specified, holding, universe JSON을 확인하고, check-portfolio의 universe를 $daily-trading 대상으로 사용해줘.
     # $daily-trading 스킬로 실전(acct) 거래를 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
@@ -97,7 +97,7 @@ schedules:
       request_type: real-submit
       submit_orders: true
       order_path: immediate
-      exchange: SOR
+      exchange: AUTO
     # 이전 Main Codex message:
     # $check-portfolio로 recommended, specified, holding, universe JSON을 확인하고, check-portfolio의 universe를 $daily-trading 대상으로 사용해줘.
     # $daily-trading 스킬로 실전(acct) 거래를 진행하고 거래 내역, 계좌 상태, 수익 상태를 요약해서 알려줘.
@@ -111,7 +111,7 @@ schedules:
       request_type: real-submit
       submit_orders: true
       order_path: immediate
-      exchange: SOR
+      exchange: AUTO
       review_extra_instructions:
         judge_review:
           - "이번 거래가 정규장 마감 전 마지막 거래임을 참고하여 불필요한 신규 리스크 확대를 피하고 보유/현금 균형을 점검한다."
@@ -127,7 +127,7 @@ schedules:
       request_type: real-submit
       submit_orders: true
       order_path: immediate
-      exchange: NXT
+      exchange: AUTO
 
   - id: daily-42
     enabled: true
@@ -137,7 +137,7 @@ schedules:
       request_type: real-submit
       submit_orders: true
       order_path: immediate
-      exchange: SOR
+      exchange: AUTO
 
   - id: daily-43
     enabled: true
@@ -147,7 +147,7 @@ schedules:
       request_type: real-submit
       submit_orders: true
       order_path: immediate
-      exchange: NXT
+      exchange: AUTO
 
   - id: weekend-01
     enabled: true

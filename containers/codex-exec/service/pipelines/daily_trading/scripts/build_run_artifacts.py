@@ -1228,8 +1228,11 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
             "symbol_name": item.get("symbol_name") or (account_item or {}).get("symbol_name") or symbol_id,
             "product_type": product_type,
             "eligible_for_review": eligible,
+            "eligible_for_order": eligible and bool(item.get("eligible_for_order", True)),
             "evidence_mode": "full" if compact_summary_is_usable(quality_value_summary) else "price_only",
             "exclusion_reasons": [] if eligible else required_missing,
+            "order_block_reasons": list(item.get("order_block_reasons") or []),
+            "exchange_preflight": compact_optional_dict(item, "exchange_preflight"),
             "price": {
                 "current_or_last": price.get("current_or_last"),
                 "observed_at": price.get("observed_at") or "",
@@ -1758,9 +1761,9 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
     if order_path not in {"reservation", "immediate"}:
         raise ValueError(f"unsupported order_path: {order_path}")
     exchange = str(getattr(args, "exchange", "KRX") or "KRX").upper()
-    if exchange not in {"KRX", "NXT", "SOR"}:
+    if exchange not in {"AUTO", "KRX", "NXT", "SOR"}:
         raise ValueError(f"unsupported exchange: {exchange}")
-    if order_path == "reservation" and exchange != "KRX":
+    if order_path == "reservation" and exchange not in {"AUTO", "KRX"}:
         raise ValueError("reservation orders require exchange=KRX")
     order_api = "order_cash" if order_path == "immediate" else "order_resv"
 
@@ -1817,6 +1820,17 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
         judge_symbol_ids.add(symbol_id)
         account_item = account_by_symbol.get(symbol_id, {})
         brief_item = brief_by_symbol.get(symbol_id, {})
+        preflight = brief_item.get("exchange_preflight") if isinstance(brief_item.get("exchange_preflight"), dict) else {}
+        route_reasons = list(brief_item.get("order_block_reasons") or preflight.get("reasons") or [])
+        selected_exchange = "KRX" if order_path == "reservation" else exchange
+        route_eligible = bool(brief_item.get("eligible_for_order", True))
+        if exchange == "AUTO" and order_path == "immediate":
+            selected_exchange = str(preflight.get("exchange") or "").upper()
+            if selected_exchange not in {"KRX", "NXT", "SOR"}:
+                selected_exchange = "KRX"
+                route_eligible = False
+                if "exchange.auto_route_unavailable" not in route_reasons:
+                    route_reasons.append("exchange.auto_route_unavailable")
         active_item = active.get(symbol_id, {"buy": 0, "sell": 0})
         current_qty = as_int(account_item.get("current_live_holding_quantity"))
         buy_qty = active_item.get("buy", 0)
@@ -1838,7 +1852,7 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
         delta = final_qty - expected_qty
         account_price = as_number(account_item.get("current_price"))
         market_price = as_number((brief_item.get("price") or {}).get("current_or_last"))
-        order_price = (market_price or account_price or 0) if exchange != "KRX" else (account_price or market_price or 0)
+        order_price = (market_price or account_price or 0) if selected_exchange != "KRX" else (account_price or market_price or 0)
         if delta > 0:
             direction = "buy"
         elif delta < 0:
@@ -1871,7 +1885,11 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
             row_gate_missing = account.get("active_order_lookup_performed") is not True or (
                 account.get("order_available_lookup_performed") is not True and not active_cancel_only
             )
-            if args.request_type in {"demo-submit", "real-submit", "prepare"} and row_gate_missing:
+            if not route_eligible and not active_cancel_only:
+                result = "blocked"
+                reason = "exchange_preflight_blocked"
+                blocked_any = True
+            elif args.request_type in {"demo-submit", "real-submit", "prepare"} and row_gate_missing:
                 result = "blocked"
                 reason = "active_order_or_order_available_gate_missing"
                 blocked_any = True
@@ -1911,7 +1929,9 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
                 "order_price": order_price,
                 "order_path": order_path,
                 "order_api": order_api,
-                "excg_id_dvsn_cd": exchange,
+                "excg_id_dvsn_cd": selected_exchange,
+                "eligible_for_order": route_eligible,
+                "order_block_reasons": route_reasons,
                 "active_order_reconciliation_required": active_order_reconciliation_required,
                 "active_cancel_only": active_cancel_only,
                 "reconciliation_only": reconciliation_only,
@@ -1948,7 +1968,7 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
         active_exchange = str(
             next(
                 (row.get("excg_id_dvsn_cd") for row in active_rows if row.get("excg_id_dvsn_cd")),
-                "KRX" if active_path == "reservation" else exchange,
+                "KRX" if active_path == "reservation" or exchange == "AUTO" else exchange,
             )
         ).upper()
         artifact["orders"].append(
@@ -2172,7 +2192,7 @@ def build_parser() -> argparse.ArgumentParser:
     execution.add_argument("--analyst-review", help="Path to analyst-review.json. Defaults to <output-dir>/analyst-review.json.")
     execution.add_argument("--request-type", choices=["analysis", "prepare", "demo-submit", "real-submit"], default="analysis")
     execution.add_argument("--order-path", choices=["reservation", "immediate"], default="reservation")
-    execution.add_argument("--exchange", choices=["KRX", "NXT", "SOR"], default="KRX")
+    execution.add_argument("--exchange", choices=["AUTO", "KRX", "NXT", "SOR"], default="KRX")
     execution.add_argument("--run-id")
     execution.add_argument("--started-at")
     execution.add_argument("--output", type=Path, default=None)

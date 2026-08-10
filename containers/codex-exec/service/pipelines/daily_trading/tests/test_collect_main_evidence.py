@@ -45,6 +45,7 @@ from ..scripts.collect_main_evidence import (
     parse_int,
     parse_symbols,
     previous_market_session_day,
+    resolve_order_market,
     safe_error,
     skipped_account_asset_snapshot,
     summarize_investor_flow,
@@ -736,8 +737,40 @@ class BuildPriceRowTest(unittest.TestCase):
             orderbook=open_orderbook,
             order_path="immediate",
         )
-        self.assertFalse(blocked_row["eligible_for_review"])
-        self.assertIn("exchange.nxt_not_tradable", blocked_row["required_missing"])
+        self.assertTrue(blocked_row["eligible_for_review"])
+        self.assertFalse(blocked_row["eligible_for_order"])
+        self.assertNotIn("exchange.nxt_not_tradable", blocked_row["required_missing"])
+        self.assertIn("exchange.nxt_not_tradable", blocked_row["order_block_reasons"])
+
+    def test_auto_market_uses_live_nxt_eligibility_without_symbol_rules(self) -> None:
+        self.assertEqual(
+            resolve_order_market(
+                {"cptt_trad_tr_psbl_yn": "Y"},
+                requested_market="AUTO",
+                order_path="immediate",
+            ),
+            ("UN", []),
+        )
+        self.assertEqual(
+            resolve_order_market(
+                {"cptt_trad_tr_psbl_yn": "N"},
+                requested_market="AUTO",
+                order_path="immediate",
+            ),
+            ("J", []),
+        )
+        self.assertEqual(
+            resolve_order_market({}, requested_market="AUTO", order_path="immediate"),
+            ("J", ["exchange.nxt_tradability_unknown"]),
+        )
+        self.assertEqual(
+            resolve_order_market(
+                {"cptt_trad_tr_psbl_yn": "Y"},
+                requested_market="AUTO",
+                order_path="reservation",
+            ),
+            ("J", []),
+        )
 
 
 class NormalizeHoldingTest(unittest.TestCase):
