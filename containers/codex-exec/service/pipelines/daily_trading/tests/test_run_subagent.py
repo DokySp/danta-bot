@@ -289,7 +289,7 @@ def compact_spec(tmp: Path, *, stage: str, agent_role: str, task_name: str) -> d
         "decision_brief": str(tmp / "reports" / "runs" / "self-test" / "decision-brief.json"),
         "analyst_review": str(tmp / "reports" / "runs" / "self-test" / "analyst-review.json"),
         "persona": f"prompts/{agent_role}.md",
-        "review_format": "prompts/analyst-review-format.md",
+        "review_format": f"prompts/{'judge' if stage == 'judge-review' else 'analyst'}-review-format.md",
     }
     payload["symbol_ids"] = ["005930", {"symbol_id": "000660"}, "005930"]
     return payload
@@ -615,6 +615,7 @@ def assert_compact_review_prompt(tmp: Path) -> None:
         "Do not call KIS, MCP, web, network, account/order APIs, or external data sources.",
         "Do not write files, create Markdown, emit diffs, or wrap output in code fences.",
         "Read only the listed symbol_ids from artifact files; do not load unrelated symbols, raw cache files, secrets, or unlisted paths.",
+        "Read the listed persona and review_format before evaluating artifact evidence.",
         "decision_brief:",
         "persona: prompts/analyst-quality-risk.md",
         "review_format: prompts/analyst-review-format.md",
@@ -623,7 +624,7 @@ def assert_compact_review_prompt(tmp: Path) -> None:
         "Evaluate each symbol only from that symbol's supplied evidence and explicitly linked market or sector context",
         "Every score must be a JSON integer from 0 to 10",
         "Missing optional-domain coverage alone must not pull an included view toward 5",
-        "Return JSON only",
+        "Return JSON only according to the listed review_format.",
     ]
     missing = [part for part in required_parts if part not in prompt]
     if missing:
@@ -632,7 +633,7 @@ def assert_compact_review_prompt(tmp: Path) -> None:
         raise AssertionError(f"judge-only optional-evidence policy leaked into analyst-review prompt: {prompt}")
     if "position_cost_context" in prompt:
         raise AssertionError(f"judge-only position_cost_context guard leaked into analyst-review prompt: {prompt}")
-    if "same-session target change or direction reversal" in prompt:
+    if "reversing a same-session submitted or filled order direction" in prompt:
         raise AssertionError(f"judge-only reversal policy leaked into analyst-review prompt: {prompt}")
 
     second_prompt = build_prompt(
@@ -641,38 +642,29 @@ def assert_compact_review_prompt(tmp: Path) -> None:
     second_required_parts = [
         "stage: judge-review",
         "analyst_review:",
-        "For judge-review, use the selected-symbol analyst-review slice from analyst_review; agent_scores excluded from aggregation are intentionally omitted from this judgment input.",
-        "The supplied symbols are every eligible held symbol (review_scope_reasons=held_position, regardless of score or missing score), every eligible symbol with an active order (review_scope_reasons=active_order), every eligible symbol with directly linked symbol news (review_scope_reasons=symbol_news), plus the top-ranked remaining unheld symbols by score (review_scope_reasons=unheld_score_rank).",
-        "Return no separate action. Return target_position_value_krw, reason_code, and one_line_reason.",
-        "decision_basis (none|thesis|profit_protection) is optional audit metadata.",
-        "Conflict alone is not a hold rule.",
-        "final_first_score is the simple mean of the included analyst view scores",
-        "For a held symbol with a low score, treat thesis integrity as one input, not a reduction gate",
-        "Use strategy_context and symbol_strategy_context as advisory inputs for target_position_value_krw, not as order allow/block rules.",
-        "Use position_cost_context (average_purchase_price, purchase_amount, current_review_price, pct_distance_from_average_price) as reference information for profit/loss, risk, and position adjustments.",
-        "Determine final direction and target exposure from thesis, market evidence, symbol-specific risk, and relative attractiveness",
-        "Use account_exposure_summary.orderable_cash_amount only as the aggregate incremental-buy budget.",
-        "For every supplied symbol, first build a compact opposing_view: the single strongest exposure-increase/maintain case (increase_case) and the single strongest exposure-reduce/avoid case (reduce_case)",
-        "Return opposing_view: {increase_case: {summary, evidence_refs}, reduce_case: {summary, evidence_refs}}.",
-        "Optional evidence marked missing, failed, empty, unavailable, or excluded_from_aggregation is non-directional",
-        "Do not infer safety, risk, favorable news, thesis integrity, or thesis damage from the absence of optional evidence.",
-        "Do not use optional-domain coverage counts or completeness to decide evidence sufficiency",
-        "target_position_value_krw",
-        "No additional buy",
-        "additional_buy_reason may record new evidence",
-        "Read prior_decision_context and analyst_history_context first",
-        "Analyst score or reason_code changes, restatements of previously considered arguments, and headlines that merely repeat the same driver are interpretations, not new investment facts.",
-        "Treat the previous target as an ongoing plan over its thesis/rationale horizon",
-        "Without supplied numeric fee, tax, or break-even evidence, do not claim that expected benefit exceeds transaction costs as a calculated fact.",
-        "For a same-session target change or direction reversal, compare prior_decision_context.latest_decision.opposing_view and prior_decision_context.latest_decision.one_line_reason when available",
-        "what concrete new investment fact overwhelms it.",
-        "If that rationale remains valid, do not count multiple chart metrics derived from the same live price as independent confirmation for an immediate reversal.",
-        "If additional_buy_reason mentions the prior decision time, use latest_decision.decided_at",
-        "This is a Judge objective, not a code gate.",
+        "persona: prompts/judge.md",
+        "review_format: prompts/judge-review-format.md",
+        "Read the listed persona and review_format before evaluating artifact evidence.",
+        "Return JSON only according to the listed review_format.",
     ]
     missing = [part for part in second_required_parts if part not in second_prompt]
     if missing:
         raise AssertionError(f"compact judge-review prompt missing {missing}: {second_prompt}")
+    judge_policy_parts = [
+        "target_position_value_krw",
+        "opposing_view",
+        "prior_decision_context",
+        "final_first_score",
+        "position_cost_context",
+        "No additional buy",
+        "Conflict alone is not a hold rule",
+        "Treat the previous target as an ongoing plan",
+        "which prior rationale was resolved or invalidated",
+        "what concrete new investment fact overwhelms it",
+    ]
+    leaked = [part for part in judge_policy_parts if part in second_prompt]
+    if leaked:
+        raise AssertionError(f"compact judge-review prompt duplicates persona policy {leaked}: {second_prompt}")
     if "spawn the bull/bear" in second_prompt or "hard stop after two rounds" in second_prompt or "debate_artifact" in second_prompt:
         raise AssertionError(f"judge prompt still owns debate orchestration: {second_prompt}")
 
@@ -1088,35 +1080,59 @@ def assert_optional_evidence_policy() -> None:
     if (
         "position_cost_context`는 손익·리스크·포지션 조정의 참고 정보로 활용한다" not in judge_text
         or "최종 방향과 목표 노출은 thesis, 시장 근거와 종목 고유 위험을 함께 고려한다" not in judge_text
+        or '"추가 확대 없음", "no additional buy", "no extra exposure"는 기준 노출 유지 의미' not in judge_text
+        or "final_first_score`와 구성 Analyst 점수는 ranking·reporting 참고 정보" not in judge_text
+        or "strategy_context`와 `symbol_strategy_context`는 목표금액의 참고 입력" not in judge_text
+        or "가격 손실, 지수·regime 공포, 낮은 점수, optional evidence 부재만으로 `damaged`로 판단하지 않는다" not in judge_text
+        or "고정 투자비율이나 목표 현금비율을 만들거나" not in judge_text
     ):
-        raise AssertionError("judge.md missing position_cost_context judgment guidance")
+        raise AssertionError("judge.md missing owned judgment policy")
     if (
-        "Analyst 점수·`reason_code` 변화, 이미 검토된 논거의 재서술" not in judge_text
+        "이전 목표를 유지해야 하는 기본값이나 제약이 아니다" not in judge_text
+        or "독립된 현재 usable evidence가 함께 뒷받침하면 정상적으로 평가한다" not in judge_text
         or "수수료·세금·손익분기 수치가 공급되지 않으면" not in judge_text
         or "prior_decision_context.latest_decision.opposing_view" not in judge_text
-        or "구체적인 새 투자 사실이 이를 압도했는지" not in judge_text
-        or "단일 실시간 가격에서 함께 파생된 여러 차트 지표를 독립된 확인으로 세어" not in judge_text
+        or "어떤 중요한 현재 근거가 판단의 균형을 바꿨는지" not in judge_text
+        or "같은 방향의 수량 조절이나 일반적인 목표 재평가에는" not in judge_text
+        or "단일 실시간 가격에서 함께 파생된 여러 차트 지표를 독립된 확인으로 세지 않는다" not in judge_text
+        or "직전 근거 상태에 대한 메타 설명 없이" not in judge_text
         or "latest_decision.decided_at" not in judge_text
     ):
         raise AssertionError("judge.md missing same-session reversal policy")
+    if any(part in judge_text for part in ("진행 중인 계획", "해소·무효화", "이를 압도")):
+        raise AssertionError("judge.md retains stale continuity guidance")
     format_text = (prompt_dir / "judge-review-format.md").read_text(encoding="utf-8")
-    if "unavailable news is neutral rather than favorable or adverse" not in format_text:
-        raise AssertionError("judge-review-format.md missing unavailable-news neutrality policy")
     if (
         "prior_decision_context" not in format_text
         or "analyst_history_context" not in format_text
         or "previous_session.realized_pnl.scope=symbol_session" not in format_text
+        or "agent_scores` excluded from aggregation are intentionally omitted" not in format_text
+        or "final_first_score` is the simple mean of the included Analyst view scores" not in format_text
     ):
-        raise AssertionError("judge-review-format.md missing prior-decision continuity policy")
+        raise AssertionError("judge-review-format.md missing input contract")
     if (
-        "Analyst score or `reason_code` changes, restatements of previously considered arguments" not in format_text
-        or "Without supplied numeric fee, tax, or break-even evidence" not in format_text
-        or "`prior_decision_context.latest_decision.opposing_view`" not in format_text
-        or "what concrete new investment fact overwhelms it" not in format_text
-        or "do not count multiple chart metrics derived from the same live price as independent confirmation" not in format_text
-        or "`latest_decision.decided_at`" not in format_text
+        'Return `stage="judge-review"` and exactly one `symbols[]` entry for every supplied symbol' not in format_text
+        or "`target_position_value_krw` is required, numeric, and non-negative" not in format_text
+        or "`opposing_view` is required" not in format_text
+        or "`additional_buy_reason` is optional audit text" not in format_text
+        or "`thesis_assessment` is optional with `status`" not in format_text
     ):
-        raise AssertionError("judge-review-format.md missing same-session reversal policy")
+        raise AssertionError("judge-review-format.md missing field contract")
+    duplicated_policy = (
+        "not as a default hold or constraint",
+        "Conflict alone is not a hold rule",
+        "Do not use optional-domain coverage counts",
+        "Propose an increase when",
+        "Do not count multiple chart metrics",
+        "No additional buy",
+        "ongoing plan",
+        "resolved or invalidated",
+        "overwhelms",
+    )
+    if any(part in format_text for part in duplicated_policy):
+        raise AssertionError("judge-review-format.md duplicates persona judgment policy")
+    if "Main-generated" in format_text or "Validation by Main agent" in format_text:
+        raise AssertionError("judge-review-format.md retains Main-only documentation")
     analyst_format_text = (prompt_dir / "analyst-review-format.md").read_text(encoding="utf-8")
     quality_text = (prompt_dir / "analyst-quality-risk.md").read_text(encoding="utf-8")
     if "no_financial_excluded" not in analyst_format_text or "no_financial_excluded" not in quality_text:

@@ -1700,6 +1700,7 @@ def compact_review_prompt(spec: dict[str, Any]) -> str | None:
         "Do not call KIS, MCP, web, network, account/order APIs, or external data sources.",
         "Do not write files, create Markdown, emit diffs, or wrap output in code fences.",
         "Read only the listed symbol_ids from artifact files; do not load unrelated symbols, raw cache files, secrets, or unlisted paths.",
+        "Read the listed persona and review_format before evaluating artifact evidence.",
     ]
     if decision_brief:
         lines.append(f"decision_brief: {decision_brief}")
@@ -1741,40 +1742,13 @@ def compact_review_prompt(spec: dict[str, Any]) -> str | None:
         )
     if stage == "judge-review":
         review_scope_reasons = spec.get("review_scope_reasons") if isinstance(spec.get("review_scope_reasons"), dict) else {}
-        lines.extend(
-            [
-                "",
-                "For judge-review, use the selected-symbol analyst-review slice from analyst_review; agent_scores excluded from aggregation are intentionally omitted from this judgment input.",
-                "Optional evidence marked missing, failed, empty, unavailable, or excluded_from_aggregation is non-directional: its absence must not affect opposing_view cases, reason_code, one_line_reason, or target_position_value_krw.",
-                "Do not infer safety, risk, favorable news, thesis integrity, or thesis damage from the absence of optional evidence.",
-                "Do not use optional-domain coverage counts or completeness to decide evidence sufficiency; judge only the directional strength and conflict of supplied usable evidence.",
-                "The supplied symbols are every eligible held symbol (review_scope_reasons=held_position, regardless of score or missing score), every eligible symbol with an active order (review_scope_reasons=active_order), every eligible symbol with directly linked symbol news (review_scope_reasons=symbol_news), plus the top-ranked remaining unheld symbols by score (review_scope_reasons=unheld_score_rank). There is no score band and no assigned buy/sell candidate direction: you may propose an increase or a decrease for any supplied symbol.",
-                "For every supplied symbol, first build a compact opposing_view: the single strongest exposure-increase/maintain case (increase_case) and the single strongest exposure-reduce/avoid case (reduce_case), each with a short summary and its own evidence_refs drawn only from supplied usable evidence. Then resolve the comparison yourself into one target_position_value_krw. Return opposing_view: {increase_case: {summary, evidence_refs}, reduce_case: {summary, evidence_refs}}. Keep both cases short and auditable; do not return long prose, a transcript, or hidden chain-of-thought.",
-                "Conflict alone is not a hold rule. Compare the cases by materiality, freshness, source quality, and symbol-specific investment impact, then set the target change magnitude in proportion to the supported net advantage. Hold only when neither case has enough supported net advantage to justify a change.",
-                "Return no separate action. Return target_position_value_krw, reason_code, and one_line_reason. decision_basis (none|thesis|profit_protection) is optional audit metadata.",
-                "final_first_score is the simple mean of the included analyst view scores; per-analyst scores in agent_scores carry the evidence behind it. It is advisory/ranking/reporting context only, never an order precondition.",
-                "Return target_position_value_krw for every supplied symbol as the target KRW position value after this decision.",
-                "The pipeline derives final_holding_quantity from target_position_value_krw / price.current_or_last with Decimal ROUND_HALF_UP; judge-supplied final_holding_quantity is optional and ignored for sizing.",
-                "No additional buy, no extra exposure, or 추가 확대 없음 means target_position_value_krw must stay at the baseline (holding_quantity_context.expected_holding_quantity * price.current_or_last), not 0.",
-                "Use account_exposure_summary.orderable_cash_amount only as the aggregate incremental-buy budget. Do not infer a target cash ratio, reward residual cash, or use cash as evidence for any symbol.",
-                "When increasing after a same-day buy, additional_buy_reason may record new evidence or materially changed price/market context; it is optional audit text and never an authorization gate.",
-                "Read prior_decision_context and analyst_history_context first; past Analyst assessments are interpretation history, not fresh evidence, votes, averages, or gates. Analyst score or reason_code changes, restatements of previously considered arguments, and headlines that merely repeat the same driver are interpretations, not new investment facts. Treat the previous target as an ongoing plan over its thesis/rationale horizon and change it only when new evidence supports enough expected portfolio improvement after transaction and opportunity costs, while urgent material risk may override it immediately. For a change or reversal, put the concrete new investment fact, horizon, and net benefit or urgency in one_line_reason; never judge from realized P&L or hindsight alone. Without supplied numeric fee, tax, or break-even evidence, do not claim that expected benefit exceeds transaction costs as a calculated fact. This is a Judge objective, not a code gate.",
-                "For a same-session target change or direction reversal, compare prior_decision_context.latest_decision.opposing_view and prior_decision_context.latest_decision.one_line_reason when available, then state in the current opposing_view and one_line_reason which prior rationale was resolved or invalidated, or what concrete new investment fact overwhelms it. If that rationale remains valid, do not count multiple chart metrics derived from the same live price as independent confirmation for an immediate reversal. If additional_buy_reason mentions the prior decision time, use latest_decision.decided_at rather than inferring it from fill or run times. This is judgment guidance, not a cooldown or code gate.",
-                "For a held symbol with a low score, treat thesis integrity as one input, not a reduction gate. Thesis damage can support reduction, but relative attractiveness, profit/loss risk, opportunity cost, or a stronger alternative may independently support reducing or exiting even when the thesis remains intact.",
-                "Use strategy_context and symbol_strategy_context as advisory inputs for target_position_value_krw, not as order allow/block rules.",
-                "Use position_cost_context (average_purchase_price, purchase_amount, current_review_price, pct_distance_from_average_price) as reference information for profit/loss, risk, and position adjustments. Determine final direction and target exposure from thesis, market evidence, symbol-specific risk, and relative attractiveness without current-weight, concentration, duplicate-exposure, or sector-cap constraints.",
-                "prior_decision_context may carry the latest valid historical thesis_definition even when it came from an older decision. Use it as context, not as a mechanical authorization condition.",
-                "When the historical thesis materially affects the target, you may return thesis_assessment: {status: intact|damaged|uncertain, matched_invalidation_condition_ids: [...]} and/or a new thesis_definition for future context. These are audit fields; missing or malformed values do not block the target. previous_session.realized_pnl is a symbol-session KIS fact when available; unavailable outcome fields are non-directional and must not be estimated.",
-            ]
-        )
         if review_scope_reasons:
             lines.append("review_scope_reasons: " + ",".join(f"{symbol}={reason}" for symbol, reason in sorted(review_scope_reasons.items())))
 
     lines.extend(
         [
             "",
-            "Return JSON only in the required compact review format. human_markdown_path is informational; the Main agent creates that sidecar from JSON.",
-            "Use short reason_code and one_line_reason fields instead of long rationale, risk, evidence, or prose arrays.",
+            "Return JSON only according to the listed review_format.",
         ]
     )
     return compact_prompt("\n".join(lines))
