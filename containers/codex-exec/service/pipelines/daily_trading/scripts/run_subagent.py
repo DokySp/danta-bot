@@ -764,7 +764,7 @@ def build_review_core_payload(payload: Any, symbol_ids: list[str], agent_role: s
     if agent_role and safe_name(agent_role).lower() not in MARKET_NEWS_CONTEXT_AGENT_ROLES:
         core.pop("market_news_context", None)
     if agent_role and safe_name(agent_role).lower() != "judge":
-        for key in ("account_exposure_summary", "portfolio", "strategy_context"):
+        for key in ("account_exposure_summary", "account_performance_context", "portfolio", "strategy_context"):
             core.pop(key, None)
     core["slice_type"] = "review-core"
     core["source_brief_type"] = filtered.get("brief_type") or "decision-brief"
@@ -947,6 +947,11 @@ def read_json_cached(path: Path, cache: RunArtifactJsonCache | None) -> Any | No
 
 
 DAILY_TRADING_TIMEZONE = ZoneInfo("Asia/Seoul")
+UNRESOLVED_BUY_CASH_GATE_REASONS = {
+    "buy_cash_gate_reduced_reverse_rank",
+    "buy_cash_limit_missing",
+    "buy_quantity_exceeds_order_available_quantity",
+}
 
 
 def parse_iso_datetime(value: Any) -> datetime | None:
@@ -1368,6 +1373,41 @@ def prior_decision_context(
         },
         "current_session_target_path": target_path(current_day),
     }
+    cash_blocked = [
+        item
+        for item in outcomes
+        if item.get("direction") == "buy"
+        and item.get("result") == "blocked"
+        and item.get("reason") in UNRESOLVED_BUY_CASH_GATE_REASONS
+    ]
+    any_buy_submitted = any(
+        item.get("direction") == "buy"
+        and (
+            int_or_zero(item.get("submitted_quantity")) > 0
+            or bool(str(item.get("order_id") or "").strip())
+            or str(item.get("result") or "").lower().startswith("submitted")
+        )
+        for item in outcomes
+    )
+    if (
+        decision_day(decisions[-1]) == current_day
+        and (non_negative_number_value(decision.get("target_position_value_krw")) or 0) > 0
+        and cash_blocked
+        and not any_buy_submitted
+        and fill_summary["coverage_status"] == "complete"
+        and fill_summary["buy_quantity"] == 0
+    ):
+        result["unresolved_buy_intent"] = {
+            "status": "active",
+            "source_run_id": source_run_id,
+            "decided_at": decided_at.isoformat(),
+            "target_position_value_krw": non_negative_number_value(decision.get("target_position_value_krw")),
+            "final_holding_quantity": non_negative_int_value(decision.get("final_holding_quantity")),
+            "reason_code": str(decision.get("reason_code") or ""),
+            "one_line_reason": str(decision.get("one_line_reason") or "")[:240],
+            "cash_gate_reasons": sorted({str(item.get("reason") or "") for item in cash_blocked}),
+            "semantics": "same-day default target baseline; current material evidence may invalidate it",
+        }
     previous_opposing_view = decision.get("opposing_view")
     if isinstance(previous_opposing_view, dict):
         result["latest_decision"]["opposing_view"] = previous_opposing_view

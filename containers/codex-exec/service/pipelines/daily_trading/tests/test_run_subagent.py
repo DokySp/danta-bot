@@ -469,6 +469,10 @@ def write_sample_review_inputs(tmp: Path) -> None:
                 "index_drop_sell_review_bias": "discourage",
                 "advisory_semantics": "advisory only",
             },
+            "account_performance_context": {
+                "scope": "domestic_trading_account",
+                "periods": {"primary": {"account_return_pct": 1.2}},
+            },
             "errors": [
                 {"symbol_id": "005930", "code": "keep_symbol_error"},
                 {"symbol_id": "035420", "code": "drop_symbol_error"},
@@ -702,7 +706,7 @@ def assert_review_input_slices(tmp: Path) -> None:
         raise AssertionError(f"analyst-review slice kept same-day trade context: {first_symbol}")
     if "financial_summary" in first_symbol or "account_exposure" in first_symbol or "custom_detail" in first_symbol:
         raise AssertionError(f"momentum-news slice kept unrelated fields: {first_symbol}")
-    if "portfolio" in first_core or "account_exposure_summary" in first_core:
+    if "portfolio" in first_core or "account_exposure_summary" in first_core or "account_performance_context" in first_core:
         raise AssertionError(f"analyst-review slice kept portfolio/account context: {first_core}")
     if "position_cost_context" in first_symbol:
         raise AssertionError(f"analyst-review slice must not receive position_cost_context: {first_symbol}")
@@ -723,7 +727,7 @@ def assert_review_input_slices(tmp: Path) -> None:
         raise AssertionError(f"quality-risk slice kept symbol_news_summary: {quality_core}")
     if "account_exposure" in (quality_core.get("symbols") or [{}])[0] or "today_trade_price_context" in (quality_core.get("symbols") or [{}])[0]:
         raise AssertionError(f"quality-risk slice kept account/trade context: {quality_core}")
-    if "portfolio" in quality_core or "account_exposure_summary" in quality_core:
+    if "portfolio" in quality_core or "account_exposure_summary" in quality_core or "account_performance_context" in quality_core:
         raise AssertionError(f"quality-risk slice kept portfolio/account context: {quality_core}")
     if "symbol_strategy_context" in (quality_core.get("symbols") or [{}])[0]:
         raise AssertionError(f"analyst-review slice kept symbol_strategy_context: {quality_core}")
@@ -750,6 +754,8 @@ def assert_review_input_slices(tmp: Path) -> None:
                 raise AssertionError(f"judge-review slice dropped market_index_snapshot: {slice_payload}")
             if slice_payload.get("strategy_context", {}).get("regime") != "weak_downside":
                 raise AssertionError(f"judge-review slice dropped strategy_context: {slice_payload}")
+            if slice_payload.get("account_performance_context", {}).get("scope") != "domestic_trading_account":
+                raise AssertionError(f"judge-review slice dropped account performance context: {slice_payload}")
             if slice_payload.get("market_news_context", {}).get("selected_count") != 1:
                 raise AssertionError(f"judge-review slice dropped market_news_context: {slice_payload}")
             if slice_payload.get("account_exposure_summary") != {"orderable_cash_amount": 800000}:
@@ -1082,13 +1088,16 @@ def assert_optional_evidence_policy() -> None:
         or "최종 방향과 목표 노출은 thesis, 시장 근거와 종목 고유 위험을 함께 고려한다" not in judge_text
         or '"추가 확대 없음", "no additional buy", "no extra exposure"는 기준 노출 유지 의미' not in judge_text
         or "final_first_score`와 구성 Analyst 점수는 ranking·reporting 참고 정보" not in judge_text
-        or "strategy_context`와 `symbol_strategy_context`는 목표금액의 참고 입력" not in judge_text
+        or "strategy_context`와 `symbol_strategy_context`, `account_performance_context`는 목표금액 크기의 참고 입력" not in judge_text
         or "가격 손실, 지수·regime 공포, 낮은 점수, optional evidence 부재만으로 `damaged`로 판단하지 않는다" not in judge_text
         or "고정 투자비율이나 목표 현금비율을 만들거나" not in judge_text
     ):
         raise AssertionError("judge.md missing owned judgment policy")
     if (
-        "이전 목표를 유지해야 하는 기본값이나 제약이 아니다" not in judge_text
+        "unresolved_buy_intent.status=active" not in judge_text
+        or "같은 거래일의 직전 매수 목표를 이번 판단의 기본 목표금액으로 사용한다" not in judge_text
+        or "무엇이 바뀌어 직전 근거를 무효화했는지" not in judge_text
+        or "그 외 이전 목표는 유지 기본값이나 제약이 아니다" not in judge_text
         or "독립된 현재 usable evidence가 함께 뒷받침하면 정상적으로 평가한다" not in judge_text
         or "수수료·세금·손익분기 수치가 공급되지 않으면" not in judge_text
         or "prior_decision_context.latest_decision.opposing_view" not in judge_text
@@ -1104,6 +1113,7 @@ def assert_optional_evidence_policy() -> None:
     format_text = (prompt_dir / "judge-review-format.md").read_text(encoding="utf-8")
     if (
         "prior_decision_context" not in format_text
+        or "active `unresolved_buy_intent`" not in format_text
         or "analyst_history_context" not in format_text
         or "previous_session.realized_pnl.scope=symbol_session" not in format_text
         or "agent_scores` excluded from aggregation are intentionally omitted" not in format_text
@@ -2236,6 +2246,79 @@ class RunSubagentSelfTest(unittest.TestCase):
             self.assertEqual(
                 prior_decision_context(current, "999999", "2026-07-15T15:00:00+09:00")["status"],
                 "no_prior_decision",
+            )
+
+    def test_prior_decision_context_marks_only_same_day_unfilled_cash_block_as_unresolved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            runs_dir = Path(tmp_name) / "runs"
+            previous = runs_dir / "previous"
+            current = runs_dir / "current"
+            previous.mkdir(parents=True)
+            current.mkdir(parents=True)
+            write_json(
+                previous / "judge-review.json",
+                {
+                    "run_id": "previous",
+                    "started_at": "2026-07-15T10:00:00+09:00",
+                    "status": "success",
+                    "symbols": [
+                        {
+                            "symbol_id": "005930",
+                            "target_position_value_krw": 700000,
+                            "final_holding_quantity": 10,
+                            "reason_code": "increase_target",
+                            "one_line_reason": "추세와 가치 근거로 확대",
+                        }
+                    ],
+                },
+            )
+            write_json(
+                previous / "execution.json",
+                {
+                    "started_at": "2026-07-15T10:00:00+09:00",
+                    "orders": [
+                        {
+                            "symbol_id": "005930",
+                            "direction": "buy",
+                            "result": "blocked",
+                            "reason": "buy_quantity_exceeds_order_available_quantity",
+                        }
+                    ],
+                },
+            )
+            write_json(current / "today-fills.json", {"status": "success", "fills": []})
+
+            context = prior_decision_context(
+                current,
+                "005930",
+                "2026-07-15T11:00:00+09:00",
+                {"collection_status": "complete", "fill_count": 0, "fills": []},
+            )
+
+            unresolved = context["unresolved_buy_intent"]
+            self.assertEqual(unresolved["status"], "active")
+            self.assertEqual(unresolved["target_position_value_krw"], 700000)
+            self.assertEqual(
+                unresolved["cash_gate_reasons"],
+                ["buy_quantity_exceeds_order_available_quantity"],
+            )
+            self.assertNotIn(
+                "unresolved_buy_intent",
+                prior_decision_context(
+                    current,
+                    "005930",
+                    "2026-07-16T11:00:00+09:00",
+                    {"collection_status": "complete", "fill_count": 0, "fills": []},
+                ),
+            )
+            self.assertNotIn(
+                "unresolved_buy_intent",
+                prior_decision_context(
+                    current,
+                    "005930",
+                    "2026-07-15T11:00:00+09:00",
+                    {"collection_status": "partial", "fill_count": 0, "fills": []},
+                ),
             )
 
     def test_analyst_history_keeps_previous_close_and_intraday_stance_changes(self) -> None:

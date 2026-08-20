@@ -1891,7 +1891,7 @@ class RunDailyTradingPipelineSelfTest(unittest.TestCase):
             # 402340 is in review scope but its judge decision is invalid, so it must stay unresolved.
             write_json(
                 run_dir / "judge-review-spec.json",
-                {"review_scope_reasons": {"005930": "unheld_score_rank", "000660": "held_position", "402340": "active_order"}},
+                {"review_scope_reasons": {"005930": "unresolved_buy_intent", "000660": "held_position", "402340": "active_order"}},
             )
             write_json(
                 run_dir / "judge-review.json",

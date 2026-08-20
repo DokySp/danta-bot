@@ -18,6 +18,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+try:
+    from .account_performance import build_account_performance_context
+    from .run_subagent import RunArtifactJsonCache, prior_decision_context
+except ImportError:  # direct script execution
+    from account_performance import build_account_performance_context
+    from run_subagent import RunArtifactJsonCache, prior_decision_context
+
 
 ANALYST_REVIEW_ROLES = (
     "analyst-quality-value",
@@ -52,9 +59,9 @@ CHART_RECENT_ROW_LIMITS = {
     "monthly": 4,
     "intraday": 5,
 }
-# Bumped when review input/output semantics change. Version 4 isolates Analyst
-# inputs from account context and removes Judge concentration/portfolio snapshots.
-REVIEW_CONTRACT_VERSION = 4
+# Bumped when review input/output semantics change. Version 5 adds advisory
+# account performance and same-day unresolved-buy continuity to Judge context.
+REVIEW_CONTRACT_VERSION = 5
 STRATEGY_POLICY_CONFIG_ENV = "DAILY_TRADING_STRATEGY_POLICY_CONFIG"
 STRATEGY_POLICY_CONFIG_FILENAME = "daily-trading-strategy-policy.yaml"
 STRATEGY_ADVISORY_LABELS = {
@@ -75,6 +82,13 @@ STRATEGY_BIAS_FIELDS = (
     "new_exposure_review_bias",
     "downside_add_review_bias",
     "index_drop_sell_review_bias",
+)
+PERFORMANCE_REVIEW_NUMBER_FIELDS = (
+    "primary_return_target_pct",
+    "primary_excess_return_target_pct",
+    "max_drawdown_pct",
+    "max_symbol_weight_pct",
+    "max_daily_gross_turnover_pct",
 )
 KST = timezone(timedelta(hours=9))
 
@@ -211,6 +225,25 @@ def validate_strategy_policy_config(payload: Any, source: Path) -> dict[str, Any
     if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 0:
         raise ValueError(f"strategy policy unheld_review_top_k must be a non-negative integer: {source}")
 
+    performance = payload.get("performance_review")
+    if not isinstance(performance, dict):
+        raise ValueError(f"strategy policy performance_review must be an object: {source}")
+    normalized_performance: dict[str, Any] = {}
+    for key in ("primary_window_trading_days", "auxiliary_window_trading_days"):
+        value = performance.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"strategy policy performance_review.{key} must be a positive integer: {source}")
+        normalized_performance[key] = value
+    benchmark = str(performance.get("benchmark_index") or "").strip().upper()
+    if benchmark not in {str(item).strip().upper() for item in tracked}:
+        raise ValueError(f"strategy policy performance_review.benchmark_index must be tracked: {source}")
+    normalized_performance["benchmark_index"] = benchmark
+    for key in PERFORMANCE_REVIEW_NUMBER_FIELDS:
+        value = required_finite_number(performance, key, source)
+        if value < 0:
+            raise ValueError(f"strategy policy performance_review.{key} must be non-negative: {source}")
+        normalized_performance[key] = value
+
     return {
         "schema_version": str(payload.get("schema_version") or "1"),
         "tracked_indexes": [str(item).strip() for item in tracked if str(item).strip()],
@@ -219,6 +252,7 @@ def validate_strategy_policy_config(payload: Any, source: Path) -> dict[str, Any
         "regime_bias": normalized_bias,
         "downside_add_review": {"target": downside_target},
         "unheld_review_top_k": top_k,
+        "performance_review": normalized_performance,
     }
 
 
@@ -569,6 +603,7 @@ def build_strategy_context(
         "index_drop_sell_review_bias": bias.get("index_drop_sell_review_bias") or "neutral",
         "advisory_reason": bias.get("advisory_reason") or "",
         "advisory_labels": policy.get("advisory_labels") or {},
+        "performance_review": policy.get("performance_review") or {},
     }
 
 
@@ -1172,6 +1207,14 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
     market_news_context = compact_market_news_context(news_context_json)
     account_exposure_summary = account_summary(account)
     strategy_context = build_strategy_context(strategy_policy, strategy_policy_path, market_index_snapshot)
+    inferred_workspace = output_dir.parents[2] if len(output_dir.parents) >= 3 else Path.cwd()
+    workspace_dir = Path(getattr(args, "workspace_dir", "") or inferred_workspace).resolve()
+    account_performance_context = build_account_performance_context(
+        workspace_dir=workspace_dir,
+        runs_root=output_dir.parent,
+        started_at=started_at,
+        policy=strategy_policy,
+    )
 
     artifact = common_envelope(run_id, started_at, "decision-brief")
     artifact.update(
@@ -1188,6 +1231,7 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
             "market_news_context": market_news_context,
             "account_exposure_summary": account_exposure_summary,
             "strategy_context": strategy_context,
+            "account_performance_context": account_performance_context,
         }
     )
 
@@ -1660,6 +1704,22 @@ def build_second_spec(args: argparse.Namespace) -> dict[str, Any]:
         else set()
     )
     brief_by_symbol = indexed_symbols(decision_brief.get("symbols"))
+    current_started_at = args.started_at or decision_brief.get("started_at") or ""
+    history_cache = RunArtifactJsonCache()
+    unresolved_buy_set = {
+        symbol_id
+        for symbol_id, item in brief_by_symbol.items()
+        if symbol_id in eligible
+        and prior_decision_context(
+            output_dir,
+            symbol_id,
+            current_started_at,
+            item.get("today_trade_timeline_context"),
+            history_cache,
+            item,
+        ).get("unresolved_buy_intent", {}).get("status")
+        == "active"
+    }
 
     # No score band and no assigned candidate direction: every eligible held or
     # active-order symbol is always in scope, and up to unheld_review_top_k other
@@ -1677,6 +1737,8 @@ def build_second_spec(args: argparse.Namespace) -> dict[str, Any]:
         review_scope_reasons[symbol_id] = "held_position"
     for symbol_id in sorted(active_order_set - holding_set):
         review_scope_reasons[symbol_id] = "active_order"
+    for symbol_id in sorted(unresolved_buy_set - set(review_scope_reasons)):
+        review_scope_reasons[symbol_id] = "unresolved_buy_intent"
     for symbol_id in sorted(
         symbol_id
         for symbol_id, item in brief_by_symbol.items()
@@ -1703,7 +1765,7 @@ def build_second_spec(args: argparse.Namespace) -> dict[str, Any]:
     )
     payload = {
         "run_id": args.run_id or decision_brief.get("run_id") or output_dir.name,
-        "started_at": args.started_at or decision_brief.get("started_at") or "",
+        "started_at": current_started_at,
         "stage": "judge-review",
         "review_contract_version": REVIEW_CONTRACT_VERSION,
         "agent_role": "judge",
@@ -2148,6 +2210,7 @@ def build_parser() -> argparse.ArgumentParser:
     decision.add_argument("--expected-symbol-news-date", default="")
     decision.add_argument("--market-index-snapshot-json", default="")
     decision.add_argument("--strategy-policy-config", default="")
+    decision.add_argument("--workspace-dir", default="")
     decision.add_argument("--run-id")
     decision.add_argument("--started-at")
     decision.add_argument("--output", type=Path, default=None)

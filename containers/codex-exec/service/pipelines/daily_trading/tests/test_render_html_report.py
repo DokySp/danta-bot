@@ -39,6 +39,7 @@ from ..scripts.render_html_report import (
     order_status_badge,
     parse_cited_argument_ids,
     render_combined_chart,
+    render_account_performance,
     render_chart_periods,
     render_header,
     render_market_and_quality,
@@ -552,6 +553,56 @@ def self_test() -> int:
 
 
 class RenderHtmlReportSelfTest(unittest.TestCase):
+    def test_account_performance_panel_labels_metrics_as_advisory(self) -> None:
+        rendered = render_account_performance(
+            {
+                "account_performance_context": {
+                    "benchmark_index": "KOSPI",
+                    "references": {
+                        "primary_return_target_pct": 0.0,
+                        "primary_excess_return_target_pct": 0.0,
+                        "max_drawdown_pct": 8.0,
+                        "max_symbol_weight_pct": 35.0,
+                        "max_daily_gross_turnover_pct": 30.0,
+                    },
+                    "periods": {
+                        "primary": {
+                            "requested_trading_days": 20,
+                            "observed_trading_days": 20,
+                            "included_return_days": 19,
+                            "excluded_dates": ["2026-08-19"],
+                            "account_return_pct": 1.2,
+                            "benchmark_return_pct": 0.8,
+                            "excess_return_pct": 0.4,
+                            "max_drawdown_pct": 2.1,
+                            "max_daily_gross_turnover_pct": 31.0,
+                            "incomplete_turnover_dates": ["2026-08-18"],
+                            "goal_status": "met",
+                        },
+                        "auxiliary": {
+                            "requested_trading_days": 5,
+                            "observed_trading_days": 5,
+                            "included_return_days": 5,
+                            "goal_status": "reference_only",
+                        },
+                    },
+                    "latest_day": {
+                        "date": "2026-08-20",
+                        "gross_turnover_pct": None,
+                        "turnover_collection_status": "partial",
+                    },
+                    "current_risk": {"largest_symbol_name": "삼성전자", "largest_symbol_weight_pct": 34.0},
+                }
+            }
+        )
+
+        self.assertIn("국내 매매계좌 성과 목표", rendered)
+        self.assertIn("Judge 참고값이며 주문 허용·차단 규칙이 아닙니다", rendered)
+        self.assertIn("2026-08-19", rendered)
+        self.assertIn("회전율 수집 불완전일: 2026-08-18", rendered)
+        self.assertIn("수집 partial", rendered)
+        self.assertIn("KOSPI", rendered)
+
     def test_self_test_suite_runs_every_check_and_reports_success(self) -> None:
         """Wrapper-orchestration check only: real behavior is covered by the
         granular tests below, so this mocks every helper instead of
@@ -1059,7 +1110,7 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
         self.assertFalse(valid_analyst_score(10.1))
 
     def test_judge_symbol_scope_status_distinguishes_resolved_unresolved_not_selected_and_legacy(self) -> None:
-        from ..scripts.render_html_report import judge_symbol_scope_status
+        from ..scripts.render_html_report import judge_symbol_scope_status, render_judge_route_summary
 
         final_by_symbol = {"000001": {"final_holding_quantity": 5}}
         scope_reasons = {"000002": "unheld_score_rank"}
@@ -1085,6 +1136,14 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
             judge_symbol_scope_status("000003", final_by_symbol.get("000003"), scope_reasons, False),
             "legacy_unknown",
         )
+        _, rendered = render_judge_route_summary(
+            "000004",
+            {"final_first_score": 7},
+            None,
+            {"000004": "unresolved_buy_intent"},
+            True,
+        )
+        self.assertIn("당일 미해결 매수 의도", rendered)
 
     def test_inspector_treats_existing_v1_spec_without_scope_key_as_unknown(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

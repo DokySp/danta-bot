@@ -86,6 +86,7 @@ GUARD_STATUS_LABELS = {"allowed": "허용", "blocked": "차단", "no_change": "�
 SCOPE_REASON_LABELS = {
     "held_position": "보유 심사대상",
     "active_order": "활성주문 심사대상",
+    "unresolved_buy_intent": "당일 미해결 매수 심사대상",
     "symbol_news": "종목뉴스 심사대상",
     "unheld_score_rank": "비보유 상위선정",
 }

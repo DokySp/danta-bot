@@ -2409,7 +2409,9 @@ class Pipeline:
             "held_review_scope_count": sum(1 for reason in review_scope_reasons.values() if reason == "held_position"),
             "active_order_review_scope_count": sum(1 for reason in review_scope_reasons.values() if reason == "active_order"),
             "unheld_review_scope_count": sum(
-                1 for reason in review_scope_reasons.values() if reason in {"symbol_news", "unheld_score_rank"}
+                1
+                for reason in review_scope_reasons.values()
+                if reason in {"unresolved_buy_intent", "symbol_news", "unheld_score_rank"}
             ),
             "hold_symbol_count": len(scored_symbol_ids - set(review_scope_reasons)),
             "symbols": rows,
@@ -2912,6 +2914,9 @@ class Pipeline:
                 **today_trade_amounts,
             },
             "today_trade_summary": today_trade_summary,
+            "account_performance_context": decision_brief.get("account_performance_context")
+            if isinstance(decision_brief.get("account_performance_context"), dict)
+            else {},
             "order_lifecycle": order_lifecycle_view,
             "evidence_summary": evidence_summary,
             "reporting_view": reporting_view,
@@ -3042,6 +3047,8 @@ class Pipeline:
             str(portfolio_path),
             "--strategy-policy-config",
             str(self.strategy_policy_config_path),
+            "--workspace-dir",
+            str(self.workspace_dir),
             "--expected-symbol-news-date",
             self.optional_cache_date(),
         ]

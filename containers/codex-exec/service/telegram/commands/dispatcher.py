@@ -2,6 +2,7 @@ import html
 from collections.abc import Callable
 from typing import Any
 
+from .external_flow import handle_external_flow, handle_external_flow_clear
 from .new_usage import handle_new, handle_usage
 from .portfolio import (
     handle_add_portfolio_except_ticker,
@@ -35,6 +36,8 @@ def handle_telegram_command(worker: Any, task: Any, command: str, args: str) -> 
         "remove_portfolio_except_ticker": handle_remove_portfolio_except_ticker,
         "schedule_on": handle_schedule_on,
         "schedule_off": handle_schedule_off,
+        "external_flow": handle_external_flow,
+        "external_flow_clear": handle_external_flow_clear,
     }
     handler = handlers.get(command)
     if handler is None:

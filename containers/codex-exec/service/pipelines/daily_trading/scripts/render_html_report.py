@@ -56,6 +56,7 @@ JUDGE_SCOPE_STATUS_LABELS = {
 JUDGE_SCOPE_REASON_LABELS = {
     "held_position": "보유 종목",
     "active_order": "활성 주문 종목",
+    "unresolved_buy_intent": "당일 미해결 매수 의도",
     "symbol_news": "종목뉴스 연결",
     "unheld_score_rank": "비보유 종목 점수 상위",
 }
@@ -1118,13 +1119,15 @@ def render_time_symbol_inspector(runs: list[dict[str, Any]], fills: list[dict[st
         # "not selected" can be reconstructed.
         has_judge_scope_metadata = isinstance(judge_spec.get("review_scope_reasons"), dict)
         judge_scope_resolved = set(final_by_symbol)
-        # held_position/active_order/symbol_news/unheld_score_rank distinguish WHY a symbol entered Judge scope;
+        # These reasons distinguish WHY a symbol entered Judge scope;
         # not_selected (scored but never in scope) and in-scope-unresolved (in scope but Judge
         # never returned a valid result) are separate categories from either of those.
         judge_held_count = sum(1 for reason in judge_scope_reasons.values() if reason == "held_position")
         judge_active_order_count = sum(1 for reason in judge_scope_reasons.values() if reason == "active_order")
         judge_unheld_count = sum(
-            1 for reason in judge_scope_reasons.values() if reason in {"symbol_news", "unheld_score_rank"}
+            1
+            for reason in judge_scope_reasons.values()
+            if reason in {"unresolved_buy_intent", "symbol_news", "unheld_score_rank"}
         )
         judge_scope_unresolved_count = sum(
             1
@@ -1935,6 +1938,58 @@ def render_policy_panel(summary: dict[str, Any]) -> str:
         <tr><td>집중도 조정 최대 축소율</td><td>{decimal(policy.get('concentration_rebalance_max_reduction_pct'), 1)}%</td></tr>
         <tr><td>일일 회전한도</td><td>{decimal(policy.get('max_daily_turnover_pct'), 1)}%</td></tr>
       </tbody></table></div>
+    </section>
+    """
+
+
+def render_account_performance(summary: dict[str, Any]) -> str:
+    context = summary.get("account_performance_context")
+    if not isinstance(context, dict) or not context:
+        return ""
+    periods = context.get("periods") if isinstance(context.get("periods"), dict) else {}
+    references = context.get("references") if isinstance(context.get("references"), dict) else {}
+
+    def goal_badge(value: Any) -> str:
+        labels = {
+            "met": ("ok", "달성"),
+            "not_met": ("warn", "미달"),
+            "insufficient_coverage": ("info", "표본 부족"),
+            "reference_only": ("info", "참고"),
+        }
+        css, label = labels.get(str(value or ""), ("info", "확인 불가"))
+        return f'<span class="badge {css}">{label}</span>'
+
+    rows = []
+    for key, label in (("primary", "주평가"), ("auxiliary", "보조")):
+        item = periods.get(key) if isinstance(periods.get(key), dict) else {}
+        rows.append(
+            f"<tr><td><strong>{label}</strong><br>{number(item.get('requested_trading_days'))}거래일</td>"
+            f"<td>{number(item.get('included_return_days'))} / {number(item.get('observed_trading_days'))}일</td>"
+            f"<td>{signed_decimal(item.get('account_return_pct'))}%</td>"
+            f"<td>{signed_decimal(item.get('benchmark_return_pct'))}%</td>"
+            f"<td>{signed_decimal(item.get('excess_return_pct'))}%</td>"
+            f"<td>{decimal(item.get('max_drawdown_pct'))}%</td>"
+            f"<td>{decimal(item.get('max_daily_gross_turnover_pct'))}%</td>"
+            f"<td>{goal_badge(item.get('goal_status'))}</td></tr>"
+        )
+    primary = periods.get("primary") if isinstance(periods.get("primary"), dict) else {}
+    excluded = primary.get("excluded_dates") if isinstance(primary.get("excluded_dates"), list) else []
+    insufficient = primary.get("insufficient_snapshot_dates") if isinstance(primary.get("insufficient_snapshot_dates"), list) else []
+    incomplete_turnover = primary.get("incomplete_turnover_dates") if isinstance(primary.get("incomplete_turnover_dates"), list) else []
+    risk = context.get("current_risk") if isinstance(context.get("current_risk"), dict) else {}
+    latest = context.get("latest_day") if isinstance(context.get("latest_day"), dict) else {}
+    return f"""
+    <section class="panel" id="account-performance">
+      <div class="section-head"><div><p class="kicker">ACCOUNT PERFORMANCE</p><h2>국내 매매계좌 성과 목표</h2></div><span class="badge info">참고 지표</span></div>
+      <div class="notice">일별 첫·마지막 유효 계좌 스냅샷을 연결한 수수료·세금 반영 총평가 성과입니다. 목표와 위험 기준은 Judge 참고값이며 주문 허용·차단 규칙이 아닙니다.</div>
+      <div class="table-wrap"><table><thead><tr><th>기간</th><th>포함 / 관측</th><th>계좌 수익률</th><th>{esc(context.get('benchmark_index'))}</th><th>초과수익</th><th>MDD</th><th>최대 일회전율</th><th>목표</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div>
+      <div class="symbol-metrics">
+        <article><span>최대 종목 비중</span><strong>{decimal(risk.get('largest_symbol_weight_pct'))}%</strong><small>{esc(risk.get('largest_symbol_name') or '-')} · 참고선 {decimal(references.get('max_symbol_weight_pct'))}%</small></article>
+        <article><span>최근 일회전율</span><strong>{decimal(latest.get('gross_turnover_pct'))}%</strong><small>{esc(latest.get('date') or '-')} · 수집 {esc(latest.get('turnover_collection_status') or '-')} · 참고선 {decimal(references.get('max_daily_gross_turnover_pct'))}%</small></article>
+        <article><span>주평가 목표</span><strong>&gt; {decimal(references.get('primary_return_target_pct'))}%</strong><small>초과수익 ≥ {decimal(references.get('primary_excess_return_target_pct'))}%</small></article>
+        <article><span>MDD 참고선</span><strong>{decimal(references.get('max_drawdown_pct'))}%</strong><small>초과 시 목표 노출 재검토 참고</small></article>
+      </div>
+      <p class="source-note">외부 입출금 제외일: {esc(', '.join(excluded) or '없음')} · 스냅샷 부족일: {esc(', '.join(insufficient) or '없음')} · 회전율 수집 불완전일: {esc(', '.join(incomplete_turnover) or '없음')}</p>
     </section>
     """
 
@@ -2819,11 +2874,10 @@ def build_html(runs_root: Path, target_run: str) -> str:
     fills, fill_status, fill_scope = cumulative_today_fills(runs)
     trade_html, submitted_orders = render_trade_ledger(runs, fills, fill_status, fill_scope)
     history_runs = find_daily_history(runs_root, target_started_at, calendar_days=30)
-    overview = render_header(summary, len(runs), fills, submitted_orders, fill_status, fill_scope) + render_chart_periods(
-        runs_root,
-        target_started_at,
-        runs,
-        history_runs,
+    overview = (
+        render_header(summary, len(runs), fills, submitted_orders, fill_status, fill_scope)
+        + render_chart_periods(runs_root, target_started_at, runs, history_runs)
+        + render_account_performance(summary)
     )
     symbol_detail = render_symbol_detail_tab(
         target_dir,

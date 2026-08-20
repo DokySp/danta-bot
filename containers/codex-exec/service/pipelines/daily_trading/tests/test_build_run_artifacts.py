@@ -227,6 +227,19 @@ def step_decision_brief_evidence_and_strategy_context_checks(tmp: Path, run_dir:
             failures.append(f"neutral strategy context should use neutral new-exposure bias: {strategy}")
         if not str((strategy.get("policy_source") or {}).get("sha256") or ""):
             failures.append(f"strategy context should include policy source hash: {strategy}")
+        performance_review = strategy.get("performance_review") if isinstance(strategy.get("performance_review"), dict) else {}
+        if (
+            performance_review.get("primary_window_trading_days") != 20
+            or performance_review.get("auxiliary_window_trading_days") != 5
+            or performance_review.get("benchmark_index") != "KOSPI"
+            or performance_review.get("max_drawdown_pct") != 8.0
+            or performance_review.get("max_symbol_weight_pct") != 35.0
+            or performance_review.get("max_daily_gross_turnover_pct") != 30.0
+        ):
+            failures.append(f"strategy context should include advisory performance references: {strategy}")
+        account_performance = brief.get("account_performance_context") if isinstance(brief.get("account_performance_context"), dict) else {}
+        if account_performance.get("scope") != "domestic_trading_account":
+            failures.append(f"decision brief should include domestic account performance context: {account_performance}")
         strategy_policy, strategy_policy_path = load_strategy_policy_config("")
         if "concentration_levels" in strategy_policy:
             failures.append(f"strategy policy kept removed concentration levels: {strategy_policy}")
@@ -439,8 +452,8 @@ def step_first_specs_and_analyst_review_checks(tmp: Path, run_dir: Path) -> list
         )
         if len(first_specs["specs"]) != 2 or not Path(first_specs["specs"][0]["artifact_paths"]["persona"]).is_absolute():
             failures.append(f"unexpected first specs: {first_specs}")
-        if any(spec.get("review_contract_version") != 4 for spec in first_specs["specs"]):
-            failures.append(f"analyst specs must use review contract version 4: {first_specs}")
+        if any(spec.get("review_contract_version") != 5 for spec in first_specs["specs"]):
+            failures.append(f"analyst specs must use review contract version 5: {first_specs}")
         subagent_dir = run_dir / "subagents"
         for role in ANALYST_REVIEW_SPEC_ROLES:
             parsed_symbols = [
@@ -809,8 +822,8 @@ def step_second_spec_checks(tmp: Path, run_dir: Path) -> list[str]:
             )
 
         second_spec = build_second_spec(second_spec_args(str(run_dir / "analyst-review.json"), "judge-review-spec.json"))
-        if second_spec.get("review_contract_version") != 4:
-            failures.append(f"judge spec must use review contract version 4: {second_spec}")
+        if second_spec.get("review_contract_version") != 5:
+            failures.append(f"judge spec must use review contract version 5: {second_spec}")
         if second_spec["symbol_ids"] != ["000660", "005930"]:
             failures.append(f"unexpected second spec symbols: {second_spec}")
         if second_spec.get("review_scope_reasons") != {"005930": "held_position", "000660": "symbol_news"}:
@@ -1395,6 +1408,106 @@ class RunSelfTestStepsAreIndividuallyDiscoverableTest(unittest.TestCase):
 
 
 class BuildRunArtifactsSelfTest(unittest.TestCase):
+    def test_unresolved_cash_blocked_buy_stays_in_judge_scope_outside_top_k(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            workspace = Path(tmp_name)
+            runs = workspace / "reports" / "runs"
+            previous = runs / "previous"
+            current = runs / "current"
+            previous.mkdir(parents=True)
+            current.mkdir()
+            write_json(
+                previous / "judge-review.json",
+                {
+                    "run_id": "previous",
+                    "started_at": "2026-08-20T10:00:00+09:00",
+                    "status": "success",
+                    "symbols": [
+                        {
+                            "symbol_id": "005930",
+                            "target_position_value_krw": 100_000,
+                            "final_holding_quantity": 1,
+                            "reason_code": "increase_target",
+                            "one_line_reason": "근거 있는 신규 매수",
+                        }
+                    ],
+                },
+            )
+            write_json(
+                previous / "execution.json",
+                {
+                    "started_at": "2026-08-20T10:00:00+09:00",
+                    "orders": [
+                        {
+                            "symbol_id": "005930",
+                            "direction": "buy",
+                            "result": "blocked",
+                            "reason": "buy_quantity_exceeds_order_available_quantity",
+                        }
+                    ],
+                },
+            )
+            write_json(
+                current / "decision-brief.json",
+                {
+                    "run_id": "current",
+                    "started_at": "2026-08-20T11:00:00+09:00",
+                    "symbols": [
+                        {
+                            "symbol_id": "005930",
+                            "eligible_for_review": True,
+                            "today_trade_timeline_context": {
+                                "collection_status": "complete",
+                                "fill_count": 0,
+                                "fills": [],
+                            },
+                        }
+                    ],
+                },
+            )
+            write_json(
+                current / "analyst-review.json",
+                {"symbols": [{"symbol_id": "005930", "final_first_score": 1.0}]},
+            )
+            write_json(
+                current / "account-before-order.json",
+                {
+                    "status": "success",
+                    "active_order_lookup_performed": False,
+                    "symbols": [{"symbol_id": "005930", "current_live_holding_quantity": 0}],
+                },
+            )
+            write_json(current / "today-fills.json", {"status": "success", "fills": []})
+            write_json(workspace / "portfolio.json", {"holding": []})
+            zero_top_k_policy = workspace / "policy.yaml"
+            zero_top_k_policy.write_text(
+                default_strategy_policy_config_path().read_text(encoding="utf-8").replace(
+                    "unheld_review_top_k: 5",
+                    "unheld_review_top_k: 0",
+                ),
+                encoding="utf-8",
+            )
+
+            spec = build_second_spec(
+                argparse.Namespace(
+                    output_dir=current,
+                    output=current / "judge-review-spec.json",
+                    decision_brief=str(current / "decision-brief.json"),
+                    analyst_review=str(current / "analyst-review.json"),
+                    portfolio_json=str(workspace / "portfolio.json"),
+                    run_id=None,
+                    started_at=None,
+                    workspace_dir=workspace,
+                    pipeline_dir=pipeline_dir(),
+                    relative_paths=False,
+                    strategy_policy_config=str(zero_top_k_policy),
+                    review_extra_instructions_file="",
+                )
+            )
+
+            self.assertEqual(spec["symbol_ids"], ["005930"])
+            self.assertEqual(spec["review_scope_reasons"], {"005930": "unresolved_buy_intent"})
+
     def test_self_test_suite_runs_every_step_and_reports_success(self) -> None:
         """Wrapper-orchestration check only: each step's real behavior is
         covered by the granular tests below, so this mocks every step

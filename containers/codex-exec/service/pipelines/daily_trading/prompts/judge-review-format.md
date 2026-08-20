@@ -6,9 +6,9 @@
 
 ## Review Scope (no direction precondition)
 
-The input set is selected deterministically: every eligible held symbol, every eligible symbol with an active order or directly linked `symbol_news_summary`, and up to `unheld_review_top_k` remaining unheld symbols with valid scores ranked by continuous `final_first_score` then symbol id. `review_scope_reasons` records `held_position`, `active_order`, `symbol_news`, or `unheld_score_rank` for audit only. There is no score band or assigned buy/sell direction.
+The input set is selected deterministically: every eligible held symbol, every eligible symbol with an active order, same-day `unresolved_buy_intent`, or directly linked `symbol_news_summary`, and up to `unheld_review_top_k` remaining unheld symbols with valid scores ranked by continuous `final_first_score` then symbol id. `review_scope_reasons` records `held_position`, `active_order`, `unresolved_buy_intent`, `symbol_news`, or `unheld_score_rank` for audit only. There is no score band or assigned buy/sell direction.
 
-The `review-core` supplies each selected symbol's `holding_quantity_context` and top-level `account_exposure_summary.orderable_cash_amount`. Holdings are the baseline for target-value comparison; orderable cash is only the aggregate incremental-buy budget.
+The `review-core` supplies each selected symbol's `holding_quantity_context`, top-level `account_exposure_summary.orderable_cash_amount`, and advisory `account_performance_context`. Holdings are the baseline for target-value comparison; orderable cash is only the aggregate incremental-buy budget. Performance goals and risk references inform sizing but never authorize, block, or mechanically force a trade.
 
 `final_first_score` is the simple mean of the included Analyst view scores; the included per-view scores carry its evidence.
 
@@ -73,6 +73,6 @@ Return JSON:
 
 ### Position-thesis fields (audit context)
 
-- Each symbol's `prior_decision_context` contains `status` (`available`/`no_prior_decision`) and, when available, `previous_session`, `latest_decision`, `current_session_target_path`, and the latest valid historical `thesis_definition`. `previous_session.realized_pnl.scope=symbol_session` identifies a broker fact.
+- Each symbol's `prior_decision_context` contains `status` (`available`/`no_prior_decision`) and, when available, `previous_session`, `latest_decision`, `current_session_target_path`, and the latest valid historical `thesis_definition`. An active `unresolved_buy_intent` is a same-day cash-gated buy target with no confirmed submission or fill; use its target as the default baseline unless current material investment evidence invalidates it, and name that changed evidence in `one_line_reason` when reducing or withdrawing it. `previous_session.realized_pnl.scope=symbol_session` identifies a broker fact.
 - `thesis_definition` is valid only when `core_rationale` is non-empty and at least one `invalidation_conditions[]` entry has both a non-empty `condition_id` and a non-empty `description`. An empty, missing, or otherwise malformed `thesis_definition` is never treated as valid.
 - `thesis_definition` is optional; only a valid structure is persisted. `thesis_assessment` is optional with `status` (`intact`/`damaged`/`uncertain`) and `matched_invalidation_condition_ids`.
