@@ -466,7 +466,7 @@ def step_direct_target_and_reservation_normalization_checks(root: Path) -> list[
     if processed_unfilled_reservation.get("remaining_quantity") != 1 or processed_unfilled_reservation.get("active_status") != "inactive":
         failures.append(f"processed unfilled reservation was not marked inactive: {processed_unfilled_reservation}")
 
-    rejected_reservation = normalize_reservation(
+    unprocessed_reservation = normalize_reservation(
         {
             "rsvn_ord_seq": "137656",
             "rsvn_ord_ord_dt": "20260622",
@@ -477,10 +477,11 @@ def step_direct_target_and_reservation_normalization_checks(root: Path) -> list[
             "kor_item_shtn_name": "기아",
             "sll_buy_dvsn_cd": "02",
             "prcs_rslt": "미처리",
+            "ord_tmd": "070000",
         }
     )
-    if rejected_reservation.get("remaining_quantity") != 2 or rejected_reservation.get("active_status") != "inactive":
-        failures.append(f"rejected reservation was not marked inactive: {rejected_reservation}")
+    if unprocessed_reservation.get("remaining_quantity") != 2 or unprocessed_reservation.get("active_status") != "active":
+        failures.append(f"unprocessed reservation was not kept active: {unprocessed_reservation}")
 
     if normalize_limit_price(474250, "sell") != 474000:
         failures.append("sell limit price was not rounded down to KRX tick")
@@ -3040,6 +3041,59 @@ class ExecuteOrdersSelfTest(unittest.TestCase):
         self.assertEqual(item["order_id"], "0001452900")
         self.assertEqual(item["rsvn_ord_seq"], "")
         self.assertEqual(item["odno"], "0001452900")
+
+    def test_unprocessed_reservation_blocks_duplicate_immediate_order(self) -> None:
+        reservation = normalize_reservation(
+            {
+                "rsvn_ord_seq": "96610",
+                "pdno": "001450",
+                "sll_buy_dvsn_cd": "01",
+                "ord_rsvn_qty": "2",
+                "tot_ccld_qty": "0",
+                "ord_rsvn_unpr": "49500",
+                "prcs_rslt": "미처리",
+            }
+        )
+        reservation["execution_environment"] = "real"
+        execution = {
+            "exchange": "AUTO",
+            "orders": [
+                {
+                    "symbol_id": "001450",
+                    "symbol_name": "현대해상",
+                    "final_holding_quantity": 20,
+                    "order_price": 49500,
+                    "order_path": "immediate",
+                    "excg_id_dvsn_cd": "SOR",
+                    "eligible_for_order": True,
+                }
+            ],
+        }
+
+        reconcile(
+            {
+                "account_summary": {"cash_amount": 1_000_000},
+                "symbols": [
+                    {
+                        "symbol_id": "001450",
+                        "symbol_name": "현대해상",
+                        "current_live_holding_quantity": 22,
+                    }
+                ],
+            },
+            execution,
+            [reservation],
+            {},
+            {},
+            submit=False,
+            kis=None,
+        )
+
+        order = execution["orders"][0]
+        self.assertEqual(reservation["active_status"], "active")
+        self.assertEqual(order["result"], "blocked")
+        self.assertEqual(order["reason"], "active_order_adjustment_required")
+        self.assertEqual(order["order_or_reservation_id"], "96610")
 
     def test_fetch_reservations_pages_through_all_results_preserving_continuation(self) -> None:
         class FakePaginatedKis:

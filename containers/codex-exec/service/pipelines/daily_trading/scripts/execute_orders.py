@@ -554,8 +554,9 @@ def normalize_reservation(row: dict[str, Any]) -> dict[str, Any]:
         )
     )
     processed_time = str(first(row, ("ord_tmd", "ORD_TMD")) or "").strip()
-    inactive = any(marker in status_text for marker in ("취소", "완료", "거부", "거절", "만료", "실효", "미처리"))
-    if "처리" in status_text and processed_time:
+    unprocessed = "미처리" in status_text
+    inactive = any(marker in status_text for marker in ("취소", "완료", "거부", "거절", "만료", "실효"))
+    if not unprocessed and "처리" in status_text and processed_time:
         inactive = True
     return {
         "symbol_id": symbol,
