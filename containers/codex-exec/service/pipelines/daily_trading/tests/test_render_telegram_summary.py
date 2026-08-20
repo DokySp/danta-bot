@@ -367,6 +367,30 @@ def build_rejected_payload() -> dict:
     return rejected_payload
 
 
+def build_pending_payload() -> dict:
+    pending_payload = json.loads(json.dumps(PAYLOAD_SUBMITTED, ensure_ascii=False))
+    pending_payload["run_id"] = "self-test-pending"
+    pending_payload["status"] = "partial"
+    pending_payload["execution"]["status"] = "partial"
+    pending_payload["execution"]["broker_reconciliation"] = {
+        "status": "partial",
+        "submitted_cash_order_count": 1,
+        "filled_order_count": 0,
+        "partially_filled_order_count": 0,
+        "pending_order_count": 1,
+        "rejected_order_count": 0,
+        "canceled_order_count": 0,
+        "unconfirmed_order_count": 0,
+    }
+    pending_payload["execution"]["orders"][0]["broker_reconciliation"] = {
+        "status": "pending",
+        "filled_quantity": 0,
+        "rejected_quantity": 0,
+        "remaining_quantity": 1,
+    }
+    return pending_payload
+
+
 CASES = {
     "submitted": (
         PAYLOAD_SUBMITTED,
@@ -389,7 +413,7 @@ CASES = {
     "blocked-with-skips": (
         PAYLOAD_BLOCKED,
         [
-            "<b>daily-trading ⚠️ 부분 완료</b>",
+            "<b>daily-trading 🛡️ 안전 차단</b>",
             "<b>계좌</b> 국내매매 총평가 조회 실패 · 평가손익 조회 실패",
             "<b>당일 누계</b>(2026-07-02 · 이번 run 주문 전 기준) 매수 조회 실패 · 매도 조회 실패 · 체결 조회 실패",
             "<b>이번 run</b> real-submit · 신규주문 0 · 정정 0 · 취소 0 · 차단·실패 2 · 스킵 6",
@@ -428,13 +452,25 @@ CASES = {
     ),
     "domestic-account-unavailable-not-masked-by-legacy": (
         PAYLOAD_DOMESTIC_UNAVAILABLE,
-        ["<b>계좌</b> 국내매매 총평가 조회 실패 · 평가손익 조회 실패"],
+        [
+            "<b>daily-trading ⚠️ 부분 완료</b>",
+            "<b>계좌</b> 국내매매 총평가 조회 실패 · 평가손익 조회 실패",
+        ],
         ["555,555원"],
+    ),
+    "broker-pending": (
+        None,
+        [
+            "<b>daily-trading ⏳ 주문 확인 중</b> · 09:00",
+            "- KIS 확인: 체결 0 · 거절 0 · 대기·기타 1",
+            "- <code>005930</code> 삼성전자: 매수 3주→1주 · 제출(접수, 조정=매수가능수량으로 축소) · KIS 미체결 / <code>r1</code>",
+        ],
+        ["⚠️ 부분 완료", "KIS 체결", "KIS 거절"],
     ),
     "broker-rejected": (
         None,  # built lazily by build_rejected_payload() since it derives from PAYLOAD_SUBMITTED
         [
-            "<b>daily-trading ⚠️ 부분 완료</b> · 09:00",
+            "<b>daily-trading ⚠️ 주문 일부 실패</b> · 09:00",
             "- KIS 확인: 체결 0 · 거절 1 · 대기·기타 0",
             "- 사전 주문상태: 미체결 1 · 이전 제출 2 · 수량 확인 필요 1",
             "- <code>005930</code> 삼성전자: 매수 3주→1주 · 제출(접수, 조정=매수가능수량으로 축소) · KIS 거절 / <code>r1</code>",
@@ -446,6 +482,8 @@ CASES = {
 
 def payload_for_case(name: str) -> dict:
     payload, _required, _forbidden = CASES[name]
+    if name == "broker-pending":
+        return build_pending_payload()
     return build_rejected_payload() if payload is None else payload
 
 
@@ -526,8 +564,22 @@ class RenderCaseTest(unittest.TestCase):
     def test_domestic_account_unavailable_not_masked_by_legacy(self) -> None:
         check_case_renders_without_failures("domestic-account-unavailable-not-masked-by-legacy")
 
+    def test_broker_pending(self) -> None:
+        check_case_renders_without_failures("broker-pending")
+
     def test_broker_rejected(self) -> None:
         check_case_renders_without_failures("broker-rejected")
+
+    def test_order_level_broker_failure_without_aggregate_is_not_pending(self) -> None:
+        for broker_status in ("rejected", "canceled", "partially_filled_rejected", "partially_filled_canceled"):
+            with self.subTest(broker_status=broker_status):
+                payload = build_rejected_payload()
+                payload["execution"].pop("broker_reconciliation")
+                payload["execution"]["orders"][0]["broker_reconciliation"]["status"] = broker_status
+                rendered = render(payload)
+
+                self.assertIn("<b>daily-trading ⚠️ 주문 일부 실패</b>", rendered)
+                self.assertNotIn("⏳ 주문 확인 중", rendered)
 
 
 class OrderLineLifecycleTest(unittest.TestCase):

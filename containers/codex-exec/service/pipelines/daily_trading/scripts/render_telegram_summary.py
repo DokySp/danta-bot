@@ -167,6 +167,52 @@ def status_label(value: Any) -> str:
     return STATUS_LABELS.get(raw, raw or "-")
 
 
+def run_status_label(summary: dict[str, Any]) -> str:
+    if text(summary.get("status")) != "partial":
+        return status_label(summary.get("status"))
+    execution = summary.get("execution") if isinstance(summary.get("execution"), dict) else {}
+    orders = [item for item in execution.get("orders", []) if isinstance(item, dict)]
+    broker = execution.get("broker_reconciliation") if isinstance(execution.get("broker_reconciliation"), dict) else {}
+    submitted_orders = [item for item in orders if item.get("result") == "submitted"]
+    order_broker_statuses = [
+        text(item["broker_reconciliation"].get("status"))
+        for item in submitted_orders
+        if isinstance(item.get("broker_reconciliation"), dict)
+    ]
+    if (
+        any(item.get("result") == "failed" for item in orders)
+        or any(
+            status in {"rejected", "canceled", "partially_filled_rejected", "partially_filled_canceled"}
+            for status in order_broker_statuses
+        )
+        or any(
+            as_int(broker.get(key)) > 0 for key in ("rejected_order_count", "canceled_order_count")
+        )
+    ):
+        return "⚠️ 주문 일부 실패"
+    submitted_count = len(submitted_orders)
+    unresolved_count = sum(
+        as_int(broker.get(key))
+        for key in ("partially_filled_order_count", "pending_order_count", "unconfirmed_order_count")
+    )
+    all_submitted_filled = submitted_count > 0 and (
+        (
+            len(order_broker_statuses) == submitted_count
+            and all(status == "filled" for status in order_broker_statuses)
+        )
+        or (
+            not order_broker_statuses
+            and as_int(broker.get("submitted_cash_order_count")) == submitted_count
+            and as_int(broker.get("filled_order_count")) == submitted_count
+        )
+    )
+    if unresolved_count > 0 or (submitted_count > 0 and not all_submitted_filled):
+        return "⏳ 주문 확인 중"
+    if any(item.get("result") == "blocked" for item in orders):
+        return "🛡️ 안전 차단"
+    return status_label(summary.get("status"))
+
+
 def result_label(value: Any) -> str:
     raw = text(value)
     return RESULT_LABELS.get(raw, raw or "-")
@@ -359,7 +405,7 @@ def render(summary: dict[str, Any]) -> str:
     started_at = text(summary.get("started_at"))
     time_suffix = f" · {esc(clock(started_at))}" if clock(started_at) else ""
     lines = [
-        f"<b>daily-trading {status_label(summary.get('status'))}</b>{time_suffix}",
+        f"<b>daily-trading {run_status_label(summary)}</b>{time_suffix}",
         f"<code>{esc(summary.get('run_id') or '-')}</code>",
         "",
         f"<b>계좌</b> 국내매매 총평가 {money(account.get('total_evaluation_amount'))} · 평가손익 {signed_money(account.get('total_pnl_amount'))}",
