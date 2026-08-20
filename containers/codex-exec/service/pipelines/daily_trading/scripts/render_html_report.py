@@ -682,7 +682,14 @@ def cumulative_today_fills(runs: list[dict[str, Any]]) -> tuple[list[dict[str, A
     return fills, latest_status, latest_scope
 
 
-def render_header(summary: dict[str, Any], run_count: int, fills: list[dict[str, Any]], submitted_orders: list[dict[str, Any]]) -> str:
+def render_header(
+    summary: dict[str, Any],
+    run_count: int,
+    fills: list[dict[str, Any]],
+    submitted_orders: list[dict[str, Any]],
+    fill_status: str,
+    fill_scope: str,
+) -> str:
     legacy_account = summary.get("account_display_summary") if isinstance(summary.get("account_display_summary"), dict) else {}
     legacy_asset = summary.get("account_asset_summary") if isinstance(summary.get("account_asset_summary"), dict) else {}
     reporting_view = summary.get("reporting_view") if isinstance(summary.get("reporting_view"), dict) else {}
@@ -699,6 +706,12 @@ def render_header(summary: dict[str, Any], run_count: int, fills: list[dict[str,
     account = domestic_account_view if domestic_account_view else legacy_account
     full_account_amount = full_account_view.get("total_asset_amount") if full_account_view else legacy_asset.get("total_asset_amount")
     started_at = str(summary.get("started_at") or "")
+    session_date = started_at[:10]
+    fills_complete = fill_status == "success" and fill_scope == "account"
+    buy_amount = sum(int(item.get("filled_amount") or 0) for item in fills if item.get("direction") == "buy") if fills_complete else None
+    sell_amount = sum(int(item.get("filled_amount") or 0) for item in fills if item.get("direction") == "sell") if fills_complete else None
+    buy_amount_text = f"{number(buy_amount)}원" if buy_amount is not None else "조회 실패"
+    sell_amount_text = f"{number(sell_amount)}원" if sell_amount is not None else "조회 실패"
     cut_off = time_text(started_at)
     status = str(summary.get("status") or "-")
     run_id = str(summary.get("run_id") or "-")
@@ -739,7 +752,7 @@ def render_header(summary: dict[str, Any], run_count: int, fills: list[dict[str,
       <article><span>국내매매 총평가</span><strong>{number(account.get('total_evaluation_amount'))}원</strong><small>주식 {number(account.get('securities_valuation_amount'))}원</small></article>
       <article><span>평가손익</span><strong class="negative">{number(account.get('total_pnl_amount'))}원</strong><small>전체 매입가 대비</small></article>
       <article><span>주문가능</span><strong>{number(account.get('orderable_cash_amount'))}원</strong><small>D+2 기준</small></article>
-      <article><span>당일 누적 매수</span><strong>{number(((legacy_account.get('today_trade_amounts') or {}).get('buy_amount')))}원</strong><small>계좌 누계</small></article>
+      <article><span>당일 체결대금</span><strong>매수 {buy_amount_text}</strong><small>매도 {sell_amount_text} · {esc(session_date)} 체결 합계</small></article>
       {asset_metric}
     </section>
     """
@@ -2806,7 +2819,7 @@ def build_html(runs_root: Path, target_run: str) -> str:
     fills, fill_status, fill_scope = cumulative_today_fills(runs)
     trade_html, submitted_orders = render_trade_ledger(runs, fills, fill_status, fill_scope)
     history_runs = find_daily_history(runs_root, target_started_at, calendar_days=30)
-    overview = render_header(summary, len(runs), fills, submitted_orders) + render_chart_periods(
+    overview = render_header(summary, len(runs), fills, submitted_orders, fill_status, fill_scope) + render_chart_periods(
         runs_root,
         target_started_at,
         runs,

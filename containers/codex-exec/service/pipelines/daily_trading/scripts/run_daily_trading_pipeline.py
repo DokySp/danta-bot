@@ -1855,7 +1855,33 @@ class Pipeline:
         payload = load_json_if_exists(self.output_dir / "check-portfolio.json")
         return payload if isinstance(payload, dict) else {}
 
-    def build_account_display_summary(self, account_summary: dict[str, Any]) -> dict[str, Any]:
+    def build_today_trade_amounts(self, today_fills: dict[str, Any]) -> dict[str, Any]:
+        fills = today_fills.get("fills") if isinstance(today_fills.get("fills"), list) else []
+        complete = (
+            today_fills.get("status") == "success"
+            and not today_fills.get("skipped")
+            and today_fills.get("fill_scope") == "account"
+        )
+        return {
+            "session_date": report_date_from(today_fills.get("started_at") or self.started_at),
+            "buy_amount": (
+                sum(as_int(item.get("filled_amount")) for item in fills if isinstance(item, dict) and item.get("direction") == "buy")
+                if complete
+                else None
+            ),
+            "sell_amount": (
+                sum(as_int(item.get("filled_amount")) for item in fills if isinstance(item, dict) and item.get("direction") == "sell")
+                if complete
+                else None
+            ),
+            "source": "today-fills.json",
+        }
+
+    def build_account_display_summary(
+        self,
+        account_summary: dict[str, Any],
+        today_trade_amounts: dict[str, Any],
+    ) -> dict[str, Any]:
         return {
             "cash_amount": account_summary.get("cash_amount"),
             "orderable_cash_amount": account_summary.get("orderable_cash_amount"),
@@ -1863,9 +1889,8 @@ class Pipeline:
             "total_evaluation_amount": account_summary.get("total_evaluation_amount"),
             "total_pnl_amount": account_summary.get("total_pnl_amount"),
             "today_trade_amounts": {
-                "buy_amount": account_summary.get("today_buy_amount"),
-                "sell_amount": account_summary.get("today_sell_amount"),
-                "display_policy": "Do not mix these cumulative same-day amounts into the main account state; show only if explicitly useful as 당일 거래 누계. These are the this-run pre-order snapshot captured from account-before-order.json, not values current at Telegram delivery time.",
+                **today_trade_amounts,
+                "display_policy": "Same-session amounts derived from the account-scoped today-fills.json snapshot collected before this run's orders; do not present them as values current at Telegram delivery time or as trades caused by this command.",
             },
         }
 
@@ -2805,7 +2830,8 @@ class Pipeline:
         review_summary = self.build_review_summary(account, execution)
         symbols = normalize_symbol_ids(portfolio.get("universe"))
         account_summary = account.get("account_summary") if isinstance(account.get("account_summary"), dict) else {}
-        account_display_summary = self.build_account_display_summary(account_summary)
+        today_trade_amounts = self.build_today_trade_amounts(today_fills)
+        account_display_summary = self.build_account_display_summary(account_summary, today_trade_amounts)
         account_collection_status = str(account.get("status") or "unavailable")
         order_gate_status = str(account.get("order_gate_status") or "").strip()
         if order_gate_status not in {"not_run", "success", "failed", "not_required"}:
@@ -2883,6 +2909,7 @@ class Pipeline:
                 "skipped": bool(today_fills.get("skipped")),
                 "fill_scope": today_fills.get("fill_scope") or "universe",
                 "fill_count": len(today_fills.get("fills", [])) if isinstance(today_fills.get("fills"), list) else 0,
+                **today_trade_amounts,
             },
             "today_trade_summary": today_trade_summary,
             "order_lifecycle": order_lifecycle_view,
@@ -2921,7 +2948,7 @@ class Pipeline:
                     "total_evaluation_amount",
                     "total_pnl_amount",
                 ],
-                "today_trade_amount_policy": "Show today_buy_amount/today_sell_amount and today_fills_summary.fill_count only under a separate 당일 거래 누계 label when relevant, explicitly marked as this run's pre-order snapshot (account-before-order.json / collection-time today-fills.json), never as values current at Telegram delivery time; never present them as newly caused by this command unless execution.json confirms submitted orders.",
+                "today_trade_amount_policy": "Show today_fills_summary.session_date/buy_amount/sell_amount/fill_count only under a separate same-session trade-total label, explicitly marked as the collection-time today-fills.json pre-order snapshot; never use account-summary thdt amounts whose session date is unavailable, and never present totals as newly caused by this command unless execution.json confirms submitted orders.",
                 "gate_label": "주문 전 기존 미체결/예약 주문",
                 "evidence_policy": "Report evidence_summary.financial.display_text, evidence_summary.symbol_news.display_text, evidence_summary.market_news.display_text, and evidence_summary.investor_flow.display_text; keep per-symbol KIS news distinct from market-wide stored news and distinguish missing cache from cache_exists_zero_usable_articles.",
                 "review_policy": "Mention judge/judge-review outcome using review_summary.final_sell_count/final_buy_count/final_hold_count (final decisions derived from current->final holding quantity direction) and unresolved_review_scope_count; never present held_review_scope_count/unheld_review_scope_count/hold_symbol_count as final verdicts. Highlight submitted or final-quantity-changed symbols, including final holding quantity, requested_action/canonical_action, and one_line_reason when available.",

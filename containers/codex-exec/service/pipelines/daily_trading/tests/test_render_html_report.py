@@ -375,6 +375,7 @@ REQUIRED_CUMULATIVE_REPORT_STRINGS = [
     'class="symbol-price-line"',
     'class="symbol-quantity-line"',
     "당일 주문·체결",
+    "당일 체결대금",
     "계좌 전체 당일 체결 조회를 기준으로 표시합니다.",
     "현재 수집 정보",
     "외국인 120주",
@@ -735,6 +736,8 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
             1,
             [],
             [],
+            "success",
+            "account",
         )
 
         self.assertIn("12,601,357원", rendered)
@@ -753,10 +756,58 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
             1,
             [],
             [],
+            "success",
+            "account",
         )
 
         self.assertIn("5,000,000원", rendered)
         self.assertIn("KIS 총자산</span><strong>6,000,000원", rendered)
+
+    def test_render_header_uses_same_day_fills_instead_of_undated_account_totals(self) -> None:
+        rendered = render_header(
+            {
+                "run_id": "same-day-amount-probe",
+                "started_at": "2026-08-16T22:00:00+09:00",
+                "status": "success",
+                "account_display_summary": {
+                    "today_trade_amounts": {"buy_amount": 720995, "sell_amount": 1002700},
+                },
+            },
+            1,
+            [
+                {"direction": "buy", "filled_amount": 100000},
+                {"direction": "sell", "filled_amount": 75000},
+            ],
+            [],
+            "success",
+            "account",
+        )
+
+        self.assertIn("당일 체결대금", rendered)
+        self.assertIn("매수 100,000원", rendered)
+        self.assertIn("매도 75,000원 · 2026-08-16 체결 합계", rendered)
+        self.assertNotIn("720,995", rendered)
+        self.assertNotIn("1,002,700", rendered)
+
+    def test_render_header_does_not_confirm_incomplete_or_non_account_fill_totals(self) -> None:
+        summary = {
+            "run_id": "incomplete-fill-probe",
+            "started_at": "2026-08-16T22:00:00+09:00",
+            "status": "partial",
+        }
+        for fill_status, fill_scope in (("partial", "account"), ("success", "universe")):
+            with self.subTest(fill_status=fill_status, fill_scope=fill_scope):
+                rendered = render_header(
+                    summary,
+                    1,
+                    [{"direction": "buy", "filled_amount": 1234}],
+                    [],
+                    fill_status,
+                    fill_scope,
+                )
+
+                self.assertIn("매수 조회 실패", rendered)
+                self.assertNotIn("1,234원", rendered)
 
     def test_render_market_and_quality_prefers_reporting_view_evidence_domains(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -867,6 +918,8 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
             1,
             [],
             [],
+            "success",
+            "account",
         )
 
         self.assertNotIn("555,555", rendered)
@@ -881,6 +934,8 @@ class RenderHtmlReportSelfTest(unittest.TestCase):
             1,
             [],
             [],
+            "success",
+            "account",
         )
 
         self.assertIn("실행 ID", rendered)

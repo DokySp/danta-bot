@@ -367,7 +367,9 @@ def render(summary: dict[str, Any]) -> str:
     ]
     if full_account_amount is not None:
         lines.append(f"- 전체 계좌 총자산(KIS 잔고) {money(full_account_amount)}")
-    today = legacy_account.get("today_trade_amounts") if isinstance(legacy_account.get("today_trade_amounts"), dict) else {}
+    legacy_today = legacy_account.get("today_trade_amounts") if isinstance(legacy_account.get("today_trade_amounts"), dict) else {}
+    today = today_fills if any(key in today_fills for key in ("session_date", "buy_amount", "sell_amount")) else legacy_today
+    session_date = text(today_fills.get("session_date"))
     today_buy = today.get("buy_amount", today.get("today_buy_amount"))
     today_sell = today.get("sell_amount", today.get("today_sell_amount"))
     fill_count = today_fills.get("fill_count")
@@ -377,10 +379,12 @@ def render(summary: dict[str, Any]) -> str:
         fill_count_text = f"확인 {as_int(fill_count)}건 ({esc(today_fills.get('status') or 'partial')})"
     else:
         fill_count_text = "조회 실패"
+    cumulative_label = "당일 누계" if session_date else "거래 누계"
+    cumulative_basis = f"{esc(session_date)} · 이번 run 주문 전 기준" if session_date else "기준일 미확인 · 이번 run 주문 전 기준"
     lines.extend(
         [
             "",
-            f"<b>당일 누계</b>(이번 run 주문 전 기준) 매수 {money(today_buy)} · 매도 {money(today_sell)} · 체결 {fill_count_text}",
+            f"<b>{cumulative_label}</b>({cumulative_basis}) 매수 {money(today_buy)} · 매도 {money(today_sell)} · 체결 {fill_count_text}",
             "",
             f"<b>이번 run</b> {esc(execution.get('request_type') or '-')}{exchange_text} · 신규주문 {new_order_count} · 정정 {correction_count} · 취소 {cancellation_count} · 차단·실패 {blocked_failed_count} · 스킵 {skipped_count}",
         ]

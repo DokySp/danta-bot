@@ -36,8 +36,8 @@ PAYLOAD_SUBMITTED = {
         "securities_valuation_amount": 2000,
         "total_evaluation_amount": 3000,
         "total_pnl_amount": -10,
-        # 생산자(run_daily_trading_pipeline.build_account_display_summary) 실제 키
-        "today_trade_amounts": {"buy_amount": 100, "sell_amount": 0},
+        # 구버전 account summary의 날짜 없는 누계는 새 today-fills 요약보다 우선하면 안 된다.
+        "today_trade_amounts": {"buy_amount": 720995, "sell_amount": 1002700},
     },
     "account_asset_summary": {"total_asset_amount": 17039121},
     "evidence_summary": {
@@ -46,7 +46,16 @@ PAYLOAD_SUBMITTED = {
         "market_news": {"status": "supplied", "display_text": "시장뉴스: 6건 반영", "article_count": 6},
         "investor_flow": {"status": "partial", "display_text": "장중 수급: 일부 종목 추정치 반영"},
     },
-    "today_fills_summary": {"status": "success", "skipped": False, "fill_scope": "account", "fill_count": 7},
+    "today_fills_summary": {
+        "status": "success",
+        "skipped": False,
+        "fill_scope": "account",
+        "fill_count": 7,
+        "session_date": "2026-06-18",
+        "buy_amount": 100,
+        "sell_amount": 0,
+        "source": "today-fills.json",
+    },
     "today_trade_summary": {
         "symbol_count_with_fills": 6,
         "symbols": [
@@ -123,7 +132,16 @@ PAYLOAD_BLOCKED = {
         "symbol_news": {},
         "market_news": {},
     },
-    "today_fills_summary": {"status": "partial", "skipped": False, "fill_scope": "account", "fill_count": 0},
+    "today_fills_summary": {
+        "status": "partial",
+        "skipped": False,
+        "fill_scope": "account",
+        "fill_count": 0,
+        "session_date": "2026-07-02",
+        "buy_amount": None,
+        "sell_amount": None,
+        "source": "today-fills.json",
+    },
     "execution": {
         "request_type": "real-submit",
         "status": "partial",
@@ -358,7 +376,7 @@ CASES = {
             "<b>계좌</b> 국내매매 총평가 3,000원 · 평가손익 -10원",
             "- 주문가능 1,043,015원 · 주식평가 2,000원",
             "- 전체 계좌 총자산(KIS 잔고) 17,039,121원",
-            "<b>당일 누계</b>(이번 run 주문 전 기준) 매수 100원 · 매도 0원 · 체결 7건",
+            "<b>당일 누계</b>(2026-06-18 · 이번 run 주문 전 기준) 매수 100원 · 매도 0원 · 체결 7건",
             "<b>이번 run</b> real-submit · 거래소 SOR · 신규주문 1 · 정정 0 · 취소 0 · 차단·실패 0 · 스킵 0",
             "- <code>005930</code> 삼성전자: 매수 3주→1주 · 제출(접수, 조정=매수가능수량으로 축소) / <code>r1</code>",
             "- 포지션 변화(보유수량 기준): 매도 0 · 매수 1 · 유지 0 · 미결 2",
@@ -366,14 +384,14 @@ CASES = {
             "상세 리포트: <code>daily-trading-report.html</code> 첨부",
             "토큰: 123",
         ],
-        ["<b>근거</b>", "<b>당일 체결 타임라인</b>", "테스트 &lt;근거&gt;", "데이터 확인 필요", "/workspace/reports", "평결:", "Judge 후보", "Judge 검토", "미선정"],
+        ["<b>근거</b>", "<b>당일 체결 타임라인</b>", "테스트 &lt;근거&gt;", "데이터 확인 필요", "/workspace/reports", "평결:", "Judge 후보", "Judge 검토", "미선정", "720,995원", "1,002,700원"],
     ),
     "blocked-with-skips": (
         PAYLOAD_BLOCKED,
         [
             "<b>daily-trading ⚠️ 부분 완료</b>",
             "<b>계좌</b> 국내매매 총평가 조회 실패 · 평가손익 조회 실패",
-            "<b>당일 누계</b>(이번 run 주문 전 기준) 매수 조회 실패 · 매도 조회 실패 · 체결 조회 실패",
+            "<b>당일 누계</b>(2026-07-02 · 이번 run 주문 전 기준) 매수 조회 실패 · 매도 조회 실패 · 체결 조회 실패",
             "<b>이번 run</b> real-submit · 신규주문 0 · 정정 0 · 취소 0 · 차단·실패 2 · 스킵 6",
             "- <code>402340</code> SK스퀘어: 매도 1주 · 차단(매도가능수량 초과) / <code>0028360200</code>",
             "- <code>000660</code> SK하이닉스: - 0주 · 차단(제외 종목 차단)",
@@ -385,7 +403,7 @@ CASES = {
     "legacy-candidate-only": (
         PAYLOAD_LEGACY,
         [
-            "<b>당일 누계</b>(이번 run 주문 전 기준) 매수 조회 실패 · 매도 조회 실패 · 체결 0건",
+            "<b>거래 누계</b>(기준일 미확인 · 이번 run 주문 전 기준) 매수 조회 실패 · 매도 조회 실패 · 체결 0건",
             # hold_symbol_count(=scored_count - len(review_scope_reasons))는 Judge의 보유 판단이 아니라
             # 심사대상으로 선정되지 않은 scored 종목 수이므로 "유지"가 아닌 "미선정"으로 표기해야 한다.
             "- Judge 검토: 보유 심사대상 2 · 비보유 심사대상 3 · 미선정 25",

@@ -243,6 +243,8 @@ def write_self_test_fixtures(workspace: Path, run_dir: Path) -> Path:
                 "cash_amount": 1000000,
                 "orderable_cash_amount": 900000,
                 "total_evaluation_amount": 1500000,
+                "today_buy_amount": 720995,
+                "today_sell_amount": 1002700,
             },
             "active_orders": [],
             "symbols": [
@@ -1166,13 +1168,27 @@ print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
         ):
             failures.append(f"pipeline summary did not distinguish confirmed empty same-day history: {today_trade_summary}")
         today_fills_summary = summary.get("today_fills_summary") if isinstance(summary.get("today_fills_summary"), dict) else {}
-        if today_fills_summary.get("status") != "success" or today_fills_summary.get("fill_count") != 0:
+        if (
+            today_fills_summary.get("status") != "success"
+            or today_fills_summary.get("fill_count") != 0
+            or today_fills_summary.get("session_date") != "2026-06-18"
+            or today_fills_summary.get("buy_amount") != 0
+            or today_fills_summary.get("sell_amount") != 0
+        ):
             failures.append(f"pipeline summary omitted account fill collection status: {today_fills_summary}")
         account_display = summary.get("account_display_summary") if isinstance(summary.get("account_display_summary"), dict) else {}
         if "today_buy_amount" in account_display or "today_sell_amount" in account_display:
             failures.append(f"display account summary should not expose same-day totals as main fields: {account_display}")
-        if not isinstance(account_display.get("today_trade_amounts"), dict):
+        today_trade_amounts = account_display.get("today_trade_amounts") if isinstance(account_display.get("today_trade_amounts"), dict) else {}
+        if not today_trade_amounts:
             failures.append(f"display account summary omitted separate same-day trade bucket: {account_display}")
+        elif (
+            today_trade_amounts.get("session_date") != "2026-06-18"
+            or today_trade_amounts.get("buy_amount") != 0
+            or today_trade_amounts.get("sell_amount") != 0
+            or today_trade_amounts.get("source") != "today-fills.json"
+        ):
+            failures.append(f"display account summary used stale undated account totals: {today_trade_amounts}")
         account_summary = summary.get("account_summary") if isinstance(summary.get("account_summary"), dict) else {}
         if account_summary.get("total_evaluation_amount") != 1500000:
             failures.append(f"account asset snapshot should not overwrite account_summary: {account_summary}")
@@ -1704,6 +1720,32 @@ class RunSelfTestStepsAreIndividuallyDiscoverableTest(unittest.TestCase):
 
 
 class RunDailyTradingPipelineSelfTest(unittest.TestCase):
+    def test_build_today_trade_amounts_requires_account_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            pipeline = Pipeline(
+                argparse.Namespace(
+                    command="summarize",
+                    workspace_dir=str(workspace),
+                    output_dir=str(workspace / "run"),
+                    run_id="fill-scope-probe",
+                    started_at="2026-08-16T22:00:00+09:00",
+                )
+            )
+
+            amounts = pipeline.build_today_trade_amounts(
+                {
+                    "started_at": "2026-08-16T22:00:00+09:00",
+                    "status": "success",
+                    "skipped": False,
+                    "fill_scope": "universe",
+                    "fills": [{"direction": "buy", "filled_amount": 1234}],
+                }
+            )
+
+        self.assertIsNone(amounts["buy_amount"])
+        self.assertIsNone(amounts["sell_amount"])
+
     def test_self_test_suite_runs_every_step_and_reports_success(self) -> None:
         """Wrapper-orchestration check only: each step's real behavior is
         covered by the granular tests below, so this mocks every step
