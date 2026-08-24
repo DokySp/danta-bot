@@ -3090,6 +3090,27 @@ class ExecuteOrdersSelfTest(unittest.TestCase):
         self.assertEqual(item["rsvn_ord_seq"], "")
         self.assertEqual(item["odno"], "0001452900")
 
+    def test_terminal_rejected_one_shot_reservation_is_inactive(self) -> None:
+        row = {
+            "rsvn_ord_seq": "96613",
+            "pdno": "078930",
+            "sll_buy_dvsn_cd": "01",
+            "ord_rsvn_qty": "1",
+            "tot_ccld_qty": "0",
+            "ord_rsvn_unpr": "117000",
+            "prcs_rslt": "미처리",
+            "rjct_rson2": "주문 가능한 수량을 초과했습니다.",
+            "odno": "",
+            "rsvn_end_dt": "",
+        }
+
+        rejected = normalize_reservation(row)
+        period = normalize_reservation({**row, "rsvn_end_dt": "20260831"})
+
+        self.assertEqual(rejected["active_status"], "inactive")
+        self.assertEqual(execute_orders_module.active_quantities([rejected]), {})
+        self.assertEqual(period["active_status"], "active")
+
     def test_unprocessed_reservation_blocks_duplicate_immediate_order(self) -> None:
         reservation = normalize_reservation(
             {

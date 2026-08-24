@@ -566,8 +566,19 @@ def normalize_reservation(row: dict[str, Any]) -> dict[str, Any]:
         )
     )
     processed_time = str(first(row, ("ord_tmd", "ORD_TMD")) or "").strip()
+    rejection_reason = str(first(row, ("rjct_rson2", "RJCT_RSON2")) or "").strip()
+    reservation_end_date = str(first(row, ("rsvn_end_dt", "RSVN_END_DT")) or "").strip()
     unprocessed = "미처리" in status_text
-    inactive = any(marker in status_text for marker in ("취소", "완료", "거부", "거절", "만료", "실효"))
+    terminal_rejected_one_shot = (
+        unprocessed
+        and bool(rejection_reason)
+        and not resulting_order_id
+        and not reservation_end_date
+        and filled_quantity == 0
+    )
+    inactive = terminal_rejected_one_shot or any(
+        marker in status_text for marker in ("취소", "완료", "거부", "거절", "만료", "실효")
+    )
     if not unprocessed and "처리" in status_text and processed_time:
         inactive = True
     return {
