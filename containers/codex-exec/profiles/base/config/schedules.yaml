@@ -50,7 +50,7 @@ schedules:
       env: acct
       request_type: real-submit
       submit_orders: true
-      order_path: immediate
+      order_path: auto
       exchange: AUTO
 
   - id: daily-02
@@ -60,7 +60,7 @@ schedules:
       env: acct
       request_type: real-submit
       submit_orders: true
-      order_path: immediate
+      order_path: auto
       exchange: AUTO
 
   - id: daily-10
@@ -70,7 +70,7 @@ schedules:
       env: acct
       request_type: real-submit
       submit_orders: true
-      order_path: immediate
+      order_path: auto
       exchange: AUTO
     # 이전 Main Codex message:
     # $check-portfolio로 recommended, specified, holding, universe JSON을 확인하고, check-portfolio의 universe를 $daily-trading 대상으로 사용해줘.
@@ -83,7 +83,7 @@ schedules:
       env: acct
       request_type: real-submit
       submit_orders: true
-      order_path: immediate
+      order_path: auto
       exchange: AUTO
     # 이전 Main Codex message:
     # $check-portfolio로 recommended, specified, holding, universe JSON을 확인하고, check-portfolio의 universe를 $daily-trading 대상으로 사용해줘.
@@ -96,7 +96,7 @@ schedules:
       env: acct
       request_type: real-submit
       submit_orders: true
-      order_path: immediate
+      order_path: auto
       exchange: AUTO
     # 이전 Main Codex message:
     # $check-portfolio로 recommended, specified, holding, universe JSON을 확인하고, check-portfolio의 universe를 $daily-trading 대상으로 사용해줘.
@@ -110,7 +110,7 @@ schedules:
       env: acct
       request_type: real-submit
       submit_orders: true
-      order_path: immediate
+      order_path: auto
       exchange: AUTO
       review_extra_instructions:
         judge_review:
@@ -126,7 +126,7 @@ schedules:
       env: acct
       request_type: real-submit
       submit_orders: true
-      order_path: immediate
+      order_path: auto
       exchange: AUTO
 
   - id: daily-42
@@ -136,7 +136,7 @@ schedules:
       env: acct
       request_type: real-submit
       submit_orders: true
-      order_path: immediate
+      order_path: auto
       exchange: AUTO
 
   - id: daily-43
@@ -146,7 +146,7 @@ schedules:
       env: acct
       request_type: real-submit
       submit_orders: true
-      order_path: immediate
+      order_path: auto
       exchange: AUTO
 
   - id: weekend-01

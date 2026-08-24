@@ -22,9 +22,9 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 try:
-    from .order_session import cash_order_session_open, reservation_order_session_open
+    from .order_session import resolve_order_path_for_exchange
 except ImportError:  # direct script execution
-    from order_session import cash_order_session_open, reservation_order_session_open
+    from order_session import resolve_order_path_for_exchange
 
 KST = ZoneInfo("Asia/Seoul")
 TOKEN_USAGE_FIELDS = (
@@ -70,26 +70,8 @@ def parse_kst_datetime(value: str) -> datetime:
     return parsed.astimezone(KST)
 
 
-def resolve_order_path(order_path: str, started_at: str) -> tuple[str, str]:
-    requested = str(order_path or ORDER_PATH_AUTO)
-    if requested in {"reservation", "immediate"}:
-        return requested, "explicit"
-    if requested != ORDER_PATH_AUTO:
-        raise ValueError(f"unsupported order_path: {requested}")
-
-    started = parse_kst_datetime(started_at)
-    if started.weekday() >= 5:
-        return "reservation", "auto_closed_weekend"
-    if cash_order_session_open("SOR", started):
-        reason = "auto_regular_session" if cash_order_session_open("KRX", started) else "auto_extended_session"
-        return "immediate", reason
-    if reservation_order_session_open(started):
-        return "reservation", "auto_reservation_session"
-    raise ValueError(
-        "auto order path cannot select a supported KIS order API for "
-        f"{started.isoformat(timespec='minutes')}; SOR order_cash window is "
-        "08:00-20:00 KST and order_resv window is 15:40-07:30 KST"
-    )
+def resolve_order_path(order_path: str, started_at: str, exchange: str = "SOR") -> tuple[str, str]:
+    return resolve_order_path_for_exchange(order_path, exchange, parse_kst_datetime(started_at))
 
 
 def write_json(path: Path, payload: Any) -> None:
@@ -649,15 +631,23 @@ class Pipeline:
         if self.exchange not in ALLOWED_EXCHANGES:
             raise ValueError(f"unsupported exchange: {self.exchange}")
         self.market = EXCHANGE_MARKET_CODES.get(self.exchange, EXCHANGE_AUTO)
-        try:
-            self.order_path, self.order_path_reason = resolve_order_path(self.order_path_requested, self.started_at)
-        except ValueError:
-            if self.order_path_requested == ORDER_PATH_AUTO and (
-                getattr(args, "command", "") == "summarize" or getattr(args, "request_type", "") not in {"prepare", "demo-submit", "real-submit"}
-            ):
-                self.order_path, self.order_path_reason = "reservation", "auto_unresolved_non_submit"
-            else:
-                raise
+        if self.order_path_requested == ORDER_PATH_AUTO and self.exchange == EXCHANGE_AUTO:
+            self.order_path, self.order_path_reason = ORDER_PATH_AUTO, "auto_per_symbol"
+        else:
+            try:
+                self.order_path, self.order_path_reason = resolve_order_path(
+                    self.order_path_requested,
+                    self.started_at,
+                    self.exchange,
+                )
+            except ValueError:
+                if self.order_path_requested == ORDER_PATH_AUTO and (
+                    getattr(args, "command", "") == "summarize"
+                    or getattr(args, "request_type", "") not in {"prepare", "demo-submit", "real-submit"}
+                ):
+                    self.order_path, self.order_path_reason = "reservation", "auto_unresolved_non_submit"
+                else:
+                    raise
         if self.order_path == "reservation" and self.exchange not in {"KRX", EXCHANGE_AUTO}:
             raise ValueError("reservation orders require exchange=KRX")
         self.logs: list[dict[str, Any]] = []
@@ -2979,7 +2969,7 @@ class Pipeline:
             "main_agent_read_policy": (
                 "Read pipeline-summary.json first. For explicit demo-submit or real-submit runs, pass --submit-orders so execute_orders.py refreshes "
                 "read-only account/order gates, reconciles active pending/reserved orders, and submits, adjusts, or blocks immediate/reservation orders before summary generation. "
-                "When --order-path auto is used, the pipeline resolves an open SOR cash session to immediate/order_cash, and otherwise uses reservation/order_resv during its supported window or on weekends. "
+                "When --order-path auto and --exchange AUTO are used, the pipeline resolves each symbol's live KIS exchange eligibility before choosing immediate/order_cash or reservation/order_resv. "
                 "For explicit limit requests, treat execution-plan order_price values as the default limit price candidates unless a current API gate rejects them. "
                 "Open command_log_path or other intermediate artifacts only when a stage failed and the summary is insufficient."
             ),
@@ -3195,7 +3185,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--order-path",
         choices=[ORDER_PATH_AUTO, "reservation", "immediate"],
         default=ORDER_PATH_AUTO,
-        help="Order API path. auto prefers an open SOR cash session, otherwise uses the KIS reservation window or weekends.",
+        help="Order API path. With exchange=AUTO, auto resolves each symbol's exchange before choosing cash or reservation.",
     )
     run.add_argument("--exchange", choices=sorted(ALLOWED_EXCHANGES), default="KRX")
     run.add_argument("--date", default="")

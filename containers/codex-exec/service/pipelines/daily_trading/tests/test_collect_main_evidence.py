@@ -31,11 +31,13 @@ from ..scripts.collect_main_evidence import (
     build_account_summary,
     build_collection_summary,
     build_price_row,
+    cached_market_open_day,
     collect_account_artifact,
     collect_account_asset_snapshot,
     collect_extended_market_evidence,
     collect_today_fills_artifact,
     exchange_preflight,
+    fetch_market_open_day,
     latest_investor_flow_row,
     merge_duplicate_fills,
     normalize_fill,
@@ -658,6 +660,43 @@ class ParsingAndSummaryHelperTest(unittest.TestCase):
     def test_skipped_account_asset_snapshot_shape(self) -> None:
         check_skipped_account_asset_snapshot_shape()
 
+    def test_fetch_market_open_day_uses_started_at_date(self) -> None:
+        with patch(
+            "service.pipelines.daily_trading.scripts.collect_main_evidence.call_endpoint",
+            return_value=({"output": [{"opnd_yn": "Y"}]}, {}),
+        ) as call_mock:
+            self.assertTrue(
+                fetch_market_open_day(
+                    "2026-08-24T08:00:00+09:00",
+                    app_key="key",
+                    app_secret="secret",
+                    token="token",
+                    retries=0,
+                    env_dv="real",
+                )
+            )
+        self.assertEqual(call_mock.call_args.args[1]["BASS_DT"], "20260824")
+
+    def test_market_open_day_cache_reuses_same_date(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_name, patch(
+            "service.pipelines.daily_trading.scripts.collect_main_evidence.fetch_market_open_day",
+            return_value=True,
+        ) as fetch_mock:
+            output_dir = Path(tmp_name) / "reports" / "runs" / "run-1"
+            for _ in range(2):
+                self.assertTrue(
+                    cached_market_open_day(
+                        "2026-08-24T08:00:00+09:00",
+                        output_dir=output_dir,
+                        app_key="key",
+                        app_secret="secret",
+                        token="token",
+                        retries=0,
+                        env_dv="real",
+                    )
+                )
+        fetch_mock.assert_called_once()
+
 
 class BuildPriceRowTest(unittest.TestCase):
     @classmethod
@@ -696,8 +735,19 @@ class BuildPriceRowTest(unittest.TestCase):
                 {"market_operation_code": "30"},
                 market="NX",
                 order_path="immediate",
+            )["status"],
+            "eligible",
+        )
+        self.assertEqual(
+            exchange_preflight(
+                {"tr_stop_yn": "N"},
+                {},
+                market="J",
+                order_path="immediate",
+                market_open_day=False,
+                market_open_day_checked=True,
             )["reasons"],
-            ["exchange.session_not_open"],
+            ["order_day.market_closed"],
         )
         self.assertEqual(
             exchange_preflight(

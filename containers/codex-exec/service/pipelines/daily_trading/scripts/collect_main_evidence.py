@@ -20,6 +20,11 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
+try:
+    from .order_session import as_kst
+except ImportError:  # direct script execution
+    from order_session import as_kst
+
 
 KST = ZoneInfo("Asia/Seoul")
 KIS_BASE_URL = "https://openapi.koreainvestment.com:9443"
@@ -27,6 +32,7 @@ EXCHANGE_MARKET_CODES = {"KRX": "J", "NXT": "NX", "SOR": "UN"}
 MARKET_EXCHANGE_CODES = {market: exchange for exchange, market in EXCHANGE_MARKET_CODES.items()}
 AUTO_MARKET = "AUTO"
 ACCOUNT_ASSET_HISTORY_RELATIVE_PATH = Path("memory") / "account-assets" / "account-assets.jsonl"
+MARKET_OPEN_DAY_CACHE_RELATIVE_DIR = Path("memory") / "kis-market-calendar"
 ACCOUNT_ASSET_ALLOWLIST = (
     "tot_asst_amt",
     "tot_dncl_amt",
@@ -37,6 +43,10 @@ ACCOUNT_ASSET_ALLOWLIST = (
 )
 
 ENDPOINTS = {
+    "chk_holiday": {
+        "path": "/uapi/domestic-stock/v1/quotations/chk-holiday",
+        "tr_id": "CTCA0903R",
+    },
     "search_stock_info": {
         "path": "/uapi/domestic-stock/v1/quotations/search-stock-info",
         "tr_id": "CTPF1002R",
@@ -479,6 +489,8 @@ def exchange_preflight(
     order_path: str = "",
     requested_market: str = "",
     routing_reasons: list[str] | None = None,
+    market_open_day: bool | None = None,
+    market_open_day_checked: bool = False,
 ) -> dict[str, Any]:
     exchange = MARKET_EXCHANGE_CODES.get(str(market or "").upper(), "")
     requested = str(requested_market or market or "").upper()
@@ -504,8 +516,11 @@ def exchange_preflight(
         elif krx_trade_stopped == "Y":
             reasons.append("exchange.krx_trade_stopped")
 
-    if order_path == "immediate" and not market_operation_code.startswith("2"):
-        reasons.append("exchange.session_not_open")
+    if order_path == "immediate" and market_open_day_checked:
+        if market_open_day is False:
+            reasons.append("order_day.market_closed")
+        elif market_open_day is None:
+            reasons.append("order_day.open_unknown")
 
     return {
         "status": "blocked" if reasons else "eligible",
@@ -516,6 +531,8 @@ def exchange_preflight(
         "krx_trade_stopped": krx_trade_stopped,
         "nxt_trade_stopped": nxt_trade_stopped,
         "market_operation_code": market_operation_code,
+        "market_open_day": market_open_day,
+        "market_open_day_checked": market_open_day_checked,
         "reasons": reasons,
     }
 
@@ -582,6 +599,8 @@ def build_price_row(
     order_path: str = "",
     requested_market: str = "",
     routing_reasons: list[str] | None = None,
+    market_open_day: bool | None = None,
+    market_open_day_checked: bool = False,
 ) -> dict[str, Any]:
     symbol_name = text_first(info, ("prdt_abrv_name", "prdt_name", "prdt_name120")) or text_first(price, ("hts_kor_isnm", "bstp_kor_isnm")) or symbol
     current_price = parse_int(first_present(price, ("stck_prpr", "thdt_clpr", "stck_prdy_clpr")))
@@ -603,6 +622,8 @@ def build_price_row(
         order_path=order_path,
         requested_market=requested_market,
         routing_reasons=routing_reasons,
+        market_open_day=market_open_day,
+        market_open_day_checked=market_open_day_checked,
     )
     signals = [
         price_signal("day_change_pct", parse_float(price.get("prdy_ctrt"))),
@@ -629,6 +650,8 @@ def build_price_row(
         {"api": "direct_kis.search_stock_info", "env_dv": env_dv, "market": market},
         {"api": "direct_kis.inquire_price", "env_dv": env_dv, "market": market},
     ]
+    if market_open_day_checked:
+        sources.append({"api": "direct_kis.chk_holiday", "env_dv": env_dv, "market": "KRX"})
     if any(charts.values()):
         sources.append({"api": "direct_kis.inquire_daily_itemchartprice", "env_dv": env_dv, "market": market})
     if intraday:
@@ -690,6 +713,79 @@ def call_endpoint(endpoint_name: str, params: dict[str, str], app_key: str, app_
         message = str(body.get("msg1") or body.get("msg_cd") or body.get("rt_cd") or "KIS API failed")
         raise RuntimeError(message)
     return body, response_headers
+
+
+def fetch_market_open_day(
+    started_at: str,
+    *,
+    app_key: str,
+    app_secret: str,
+    token: str,
+    retries: int,
+    env_dv: str,
+) -> bool:
+    body, _headers = call_endpoint(
+        "chk_holiday",
+        {
+            "BASS_DT": as_kst(started_at).strftime("%Y%m%d"),
+            "CTX_AREA_FK": "",
+            "CTX_AREA_NK": "",
+        },
+        app_key,
+        app_secret,
+        token,
+        retries,
+        env_dv=env_dv,
+    )
+    open_yn = text_first(output_first(body), ("opnd_yn", "OPND_YN")).upper()
+    if open_yn not in {"Y", "N"}:
+        raise RuntimeError("chk_holiday returned unknown opnd_yn")
+    return open_yn == "Y"
+
+
+def cached_market_open_day(
+    started_at: str,
+    *,
+    output_dir: Path,
+    app_key: str,
+    app_secret: str,
+    token: str,
+    retries: int,
+    env_dv: str,
+) -> bool:
+    market_date = as_kst(started_at).strftime("%Y%m%d")
+    cache_path = market_open_day_cache_path(output_dir, market_date)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = cache_path.with_suffix(cache_path.suffix + ".lock")
+    with open(lock_path, "a", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            if cache_path.is_file():
+                try:
+                    cached = read_json(cache_path)
+                except (OSError, json.JSONDecodeError):
+                    cached = {}
+                if cached.get("date") == market_date and isinstance(cached.get("market_open_day"), bool):
+                    return bool(cached["market_open_day"])
+            market_open_day = fetch_market_open_day(
+                started_at,
+                app_key=app_key,
+                app_secret=app_secret,
+                token=token,
+                retries=retries,
+                env_dv=env_dv,
+            )
+            write_json(
+                cache_path,
+                {
+                    "date": market_date,
+                    "market_open_day": market_open_day,
+                    "source_api": "direct_kis.chk_holiday",
+                },
+            )
+            return market_open_day
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
 
 
 def yyyymmdd(value: datetime) -> str:
@@ -870,7 +966,22 @@ def collect_extended_market_evidence(
     return charts, intraday, orderbook, trade_flow, investor_flow, errors
 
 
-def collect_price_chart(symbols: list[str], *, run_id: str, started_at: str, env_dv: str, market: str, app_key: str, app_secret: str, token: str, retries: int, include_extended: bool = True, order_path: str = "") -> dict[str, Any]:
+def collect_price_chart(
+    symbols: list[str],
+    *,
+    run_id: str,
+    started_at: str,
+    env_dv: str,
+    market: str,
+    app_key: str,
+    app_secret: str,
+    token: str,
+    retries: int,
+    include_extended: bool = True,
+    order_path: str = "",
+    market_open_day: bool | None = None,
+    market_open_day_checked: bool = False,
+) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     artifact_errors: list[dict[str, Any]] = []
     for symbol in symbols:
@@ -944,6 +1055,8 @@ def collect_price_chart(symbols: list[str], *, run_id: str, started_at: str, env
             order_path=order_path,
             requested_market=market,
             routing_reasons=routing_reasons,
+            market_open_day=market_open_day,
+            market_open_day_checked=market_open_day_checked,
         )
         rows.append(row)
         artifact_errors.extend(symbol_errors)
@@ -958,6 +1071,8 @@ def collect_price_chart(symbols: list[str], *, run_id: str, started_at: str, env
         "generated_at": now_kst_iso(),
         "stage": "price-chart",
         "status": status,
+        "market_open_day": market_open_day,
+        "market_open_day_checked": market_open_day_checked,
         "skipped": False,
         "skip_reason": "",
         "errors": artifact_errors,
@@ -1603,6 +1718,13 @@ def account_asset_history_path(output_dir: Path) -> Path:
     return output_dir.resolve().parent / ACCOUNT_ASSET_HISTORY_RELATIVE_PATH
 
 
+def market_open_day_cache_path(output_dir: Path, market_date: str) -> Path:
+    for parent in output_dir.resolve().parents:
+        if parent.name == "reports":
+            return parent.parent / MARKET_OPEN_DAY_CACHE_RELATIVE_DIR / f"{market_date}.json"
+    return output_dir.resolve().parent / MARKET_OPEN_DAY_CACHE_RELATIVE_DIR / f"{market_date}.json"
+
+
 def account_asset_summary_from_row(row: dict[str, Any]) -> dict[str, Any]:
     purchase = parse_int(first_present(row, ("pchs_amt_smtl",)))
     pnl = parse_int(first_present(row, ("evlu_pfls_amt_smtl",)))
@@ -1971,6 +2093,27 @@ def command_collect(args: argparse.Namespace) -> int:
         print(json.dumps({"status": summary["status"], "paths": summary["paths"], "counts": summary["counts"], "warnings": summary["warnings"], "errors": summary["errors"]}, ensure_ascii=False, indent=2, sort_keys=True))
         return 1
 
+    market_open_day: bool | None = None
+    market_open_day_error: dict[str, Any] | None = None
+    try:
+        market_open_day = cached_market_open_day(
+            started_at,
+            output_dir=output_dir,
+            app_key=app_key,
+            app_secret=app_secret,
+            token=token,
+            retries=args.retries,
+            env_dv=env_dv,
+        )
+    except Exception as exc:  # noqa: BLE001 - order planning fails closed while review evidence remains usable
+        market_open_day_error = safe_error(
+            exc,
+            code="market_open_day_lookup_failed",
+            stage="price-chart",
+            source="direct_kis.chk_holiday",
+            required=False,
+        )
+
     price_artifact = collect_price_chart(
         symbols,
         run_id=args.run_id,
@@ -1983,7 +2126,11 @@ def command_collect(args: argparse.Namespace) -> int:
         retries=args.retries,
         include_extended=not args.skip_extended_market_evidence,
         order_path=args.order_path,
+        market_open_day=market_open_day,
+        market_open_day_checked=True,
     )
+    if market_open_day_error is not None:
+        price_artifact["errors"].append(market_open_day_error)
     price_path = output_dir / "price-chart.json"
     write_json(price_path, price_artifact)
 

@@ -356,8 +356,12 @@ def step_cache_coverage_and_evidence_checks(workspace: Path, run_dir: Path) -> l
         failures.append(f"matching-date news cache should satisfy coverage: covered={covered}, missing={missing}")
     if resolve_order_path(ORDER_PATH_AUTO, "2026-06-18T09:00:00+09:00") != ("immediate", "auto_regular_session"):
         failures.append("auto order path did not select immediate during regular KST session")
-    if resolve_order_path(ORDER_PATH_AUTO, "2026-06-18T08:48:00+09:00") != ("immediate", "auto_extended_session"):
-        failures.append("auto order path did not select immediate during extended SOR session")
+    if resolve_order_path(ORDER_PATH_AUTO, "2026-06-18T08:48:00+09:00") != ("immediate", "auto_regular_session"):
+        failures.append("auto order path did not select immediate while KRX was accepting opening-auction orders")
+    if resolve_order_path(ORDER_PATH_AUTO, "2026-06-18T08:35:00+09:00", "KRX") != ("immediate", "auto_regular_session"):
+        failures.append("auto order path did not select KRX immediate during opening-auction order acceptance")
+    if resolve_order_path(ORDER_PATH_AUTO, "2026-06-18T18:00:00+09:00", "KRX") != ("reservation", "auto_reservation_session"):
+        failures.append("auto order path did not select reservation for a KRX-only symbol after KRX cash close")
     if resolve_order_path(ORDER_PATH_AUTO, "2026-06-18T18:00:00+09:00") != ("immediate", "auto_extended_session"):
         failures.append("auto order path did not prefer immediate during the overlapping reservation window")
     if resolve_order_path(ORDER_PATH_AUTO, "2026-06-18T07:00:00+09:00") != ("reservation", "auto_reservation_session"):

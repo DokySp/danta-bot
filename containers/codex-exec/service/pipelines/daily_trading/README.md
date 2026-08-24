@@ -12,7 +12,7 @@ Scheduled daily-trading jobs with a `daily_trading` block in `schedules.yaml` ar
 
 Analyst의 0-10 점수는 evidence 강도/방향의 advisory/ranking/reporting 입력일 뿐이며, 후보 방향·목표 방향·주문 허용 규칙이 아니다. 보유 중인 모든 eligible 종목은 점수 유무와 무관하게 Judge 대상에 포함되고, 비보유 종목은 `daily-trading-strategy-policy.yaml`의 `unheld_review_top_k`만큼 점수 순으로 추가된다. Judge는 종목별 `target_position_value_krw`를 최종 전략 결정으로 내리고 pipeline은 이를 주 단위 수량으로 반올림한다. `decision_basis`, thesis 필드, `additional_buy_reason`은 감사와 다음 판단의 문맥일 뿐 목표를 허용하거나 차단하지 않는다. 주문 단계는 명시적 submit 승인, 계좌·현금·보유수량·매도가능수량, 활성 주문, 주문 가격·시장 상태와 lifecycle 검증을 유지한다.
 
-`당일 누계`(매수/매도 금액·체결 건수)는 `account-before-order.json`과 수집 시점 `today-fills.json`에서 온 이번 run 주문 전 스냅샷이므로 `당일 누계(이번 run 주문 전 기준)`으로 표기한다. 명시적으로 승인된 `demo-submit` 또는 `real-submit`에서는 `--submit-orders`를 함께 넘겨 `scripts/execute_orders.py`가 broker gate 갱신, 기존 pending/reserved 주문 조정, 주문 제출·정정·취소·차단과 최종 summary 재생성을 수행한다. `--order-path auto`는 KST 기준 평일 09:00~15:30을 즉시주문, 15:40 이후·07:30 이전과 주말을 예약주문으로 해석한다. `--exchange KRX|NXT|SOR`는 즉시주문의 증거수집 시장(`J|NX|UN`)과 KIS `EXCG_ID_DVSN_CD`를 함께 지정하며 예약주문은 `KRX`만 허용한다. 설치 또는 pipeline 변경 후에는 README 하단의 daily-trading self-test와 저장소 테스트를 실행한다.
+`당일 누계`(매수/매도 금액·체결 건수)는 `account-before-order.json`과 수집 시점 `today-fills.json`에서 온 이번 run 주문 전 스냅샷이므로 `당일 누계(이번 run 주문 전 기준)`으로 표기한다. 명시적으로 승인된 `demo-submit` 또는 `real-submit`에서는 `--submit-orders`를 함께 넘겨 `scripts/execute_orders.py`가 broker gate 갱신, 기존 pending/reserved 주문 조정, 주문 제출·정정·취소·차단과 최종 summary 재생성을 수행한다. `--order-path auto --exchange AUTO`는 KIS 종목정보로 종목별 거래소를 먼저 정한 뒤 해당 거래소의 즉시주문 시간 또는 KRX 예약주문 경로를 선택한다. 예약주문은 `KRX`만 허용하며 23:40~00:10 서버 초기화 시간에는 제출하지 않는다. `--exchange KRX|NXT|SOR`를 명시하면 즉시주문의 증거수집 시장(`J|NX|UN`)과 KIS `EXCG_ID_DVSN_CD`를 함께 지정한다. 설치 또는 pipeline 변경 후에는 README 하단의 daily-trading self-test와 저장소 테스트를 실행한다.
 
 Telegram으로 전송하는 HTML 문서명은 각 실행을 구분할 수 있도록 `daily-trading-report-<run_id>.html`을 사용하며, run 디렉터리 안의 원본 artifact 이름은 `daily-trading-report.html`로 유지한다.
 
@@ -206,7 +206,7 @@ Run 아티팩트는 `reports/runs/<run_id>/` 아래에 둔다.
 
 ## 스케줄 daily-trading 실행
 
-각 `schedules.yaml` 호출은 전체 증거 수집, Analyst, Judge, 주문 계획을 실행한다. `daily_trading.exchange`는 `KRX`, `NXT`, `SOR` 중 하나이며 기본값은 `KRX`다. 즉시주문 제출 직전에 평일 거래시간을 확인하고, NXT는 08:00~08:50·09:00:30~15:20·15:30~20:00, SOR는 08:00~20:00 범위에서만 제출한다. `demo-submit`/`real-submit`은 판단 전에 주문 lifecycle preflight를 수행하고, 명시적 `--submit-orders`와 제출 직전 계좌·현금·보유수량·활성주문 검증을 통과한 주문만 제출한다. scheduler와 Telegram 실행은 하나의 프로세스 잠금으로 직렬화한다.
+각 `schedules.yaml` 호출은 전체 증거 수집, Analyst, Judge, 주문 계획을 실행한다. `daily_trading.exchange`는 `AUTO`, `KRX`, `NXT`, `SOR` 중 하나이며 기본값은 `KRX`다. `AUTO` 즉시주문은 KIS `search_stock_info`의 NXT 거래대상·KRX/NXT 거래정지 값을 사용해 NXT 가능 종목을 `SOR`, 그 외 종목을 `KRX`로 정한다. 주문일 여부는 KIS `chk_holiday`를 날짜별로 캐시한다. 즉시주문 제출 직전에 KRX는 08:20~15:30, NXT는 08:00~08:50·09:00:30~15:20·15:30~20:00, SOR는 08:00~20:00 범위인지 다시 확인한다. `demo-submit`/`real-submit`은 판단 전에 주문 lifecycle preflight를 수행하고, 명시적 `--submit-orders`와 제출 직전 계좌·현금·보유수량·활성주문 검증을 통과한 주문만 제출한다. scheduler와 Telegram 실행은 하나의 프로세스 잠금으로 직렬화한다.
 
 ## 유지보수 계약
 

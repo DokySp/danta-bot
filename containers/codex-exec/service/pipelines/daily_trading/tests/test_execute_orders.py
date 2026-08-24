@@ -53,11 +53,17 @@ class ExchangeRoutingTest(unittest.TestCase):
 
         self.assertEqual(execute_orders_module.market_code("NXT"), "NX")
         self.assertEqual(execute_orders_module.market_code("SOR"), "UN")
+        self.assertFalse(execute_orders_module.cash_order_session_open("KRX", at("2026-08-07T08:19:59+09:00")))
+        self.assertTrue(execute_orders_module.cash_order_session_open("KRX", at("2026-08-07T08:20:00+09:00")))
         self.assertTrue(execute_orders_module.cash_order_session_open("NXT", at("2026-08-07T08:05:00+09:00")))
         self.assertFalse(execute_orders_module.cash_order_session_open("NXT", at("2026-08-07T08:55:00+09:00")))
         self.assertTrue(execute_orders_module.cash_order_session_open("NXT", at("2026-08-07T09:00:30+09:00")))
         self.assertTrue(execute_orders_module.cash_order_session_open("SOR", at("2026-08-07T18:00:00+09:00")))
         self.assertFalse(execute_orders_module.cash_order_session_open("SOR", at("2026-08-07T20:00:00+09:00")))
+        self.assertTrue(execute_orders_module.reservation_order_session_open(at("2026-08-07T18:00:00+09:00")))
+        self.assertFalse(execute_orders_module.reservation_order_session_open(at("2026-08-07T23:50:00+09:00")))
+        self.assertFalse(execute_orders_module.reservation_order_session_open(at("2026-08-08T00:05:00+09:00")))
+        self.assertTrue(execute_orders_module.reservation_order_session_open(at("2026-08-08T00:10:00+09:00")))
         self.assertTrue(execute_orders_module.exchange_matches({"excg_id_dvsn_cd": "NXT"}, "SOR"))
         self.assertFalse(execute_orders_module.exchange_matches({"excg_id_dvsn_cd": "KRX"}, "NXT"))
 
@@ -90,6 +96,48 @@ class ExchangeRoutingTest(unittest.TestCase):
         status_kis = StatusKis()
         execute_orders_module.fetch_cash_order_status_rows(status_kis, "20260807")
         self.assertEqual(status_kis.params["EXCG_ID_DVSN_CD"], "ALL")
+
+    def test_auto_preflight_routes_before_path_without_orderbook_probe(self) -> None:
+        class LiveKis:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            def call(self, name: str, *, params: dict[str, str]) -> dict[str, Any]:
+                self.calls.append(name)
+                if name == "search_stock_info":
+                    return {
+                        "output": {
+                            "cptt_trad_tr_psbl_yn": "N",
+                            "tr_stop_yn": "N",
+                            "nxt_tr_stop_yn": "N",
+                        }
+                    }
+                raise AssertionError(name)
+
+        kis = LiveKis()
+        order = {
+            "symbol_id": "411060",
+            "requested_order_path": "auto",
+            "order_path": "immediate",
+            "excg_id_dvsn_cd": "SOR",
+        }
+        with patch.object(
+            execute_orders_module,
+            "resolve_order_path_for_exchange",
+            return_value=("reservation", "auto_reservation_session"),
+        ), patch.object(execute_orders_module, "reservation_order_session_open", return_value=True):
+            preflight = execute_orders_module.live_order_exchange_preflight(
+                kis,
+                order,
+                requested_exchange="AUTO",
+                market_open_day=True,
+                market_open_day_checked=True,
+            )
+
+        self.assertEqual(kis.calls, ["search_stock_info"])
+        self.assertEqual(order["excg_id_dvsn_cd"], "KRX")
+        self.assertEqual(order["order_path"], "reservation")
+        self.assertEqual(preflight["status"], "eligible")
 
     def test_ineligible_auto_route_is_blocked_before_submission(self) -> None:
         account = {

@@ -126,6 +126,21 @@ class SchedulerDailyTradingFailureClassificationTest(unittest.TestCase):
             with self.subTest(schedule_id=job.get("id")):
                 validate_daily_trading_config(job["daily_trading"])
 
+    def test_base_daily_trading_schedules_use_intended_order_path_policy(self) -> None:
+        codex_exec_root = Path(__file__).resolve().parents[3]
+        schedules = parse_yaml_schedule(codex_exec_root / "profiles" / "base" / "config" / "schedules.yaml")
+        paths = {
+            str(item.get("id")): str((item.get("daily_trading") or {}).get("order_path"))
+            for item in schedules
+            if isinstance(item.get("daily_trading"), dict)
+        }
+
+        for schedule_id in {"daily-01", "daily-02", "daily-10", "daily-20", "daily-21", "daily-30", "daily-41", "daily-42", "daily-43"}:
+            with self.subTest(schedule_id=schedule_id):
+                self.assertEqual(paths.get(schedule_id), "auto")
+        self.assertEqual(paths.get("daily-00"), "reservation")
+        self.assertEqual(paths.get("weekend-01"), "reservation")
+
     def test_schedule_toggle_never_reenables_unmanaged_daily_run(self) -> None:
         codex_exec_root = Path(__file__).resolve().parents[3]
         schedule_path = codex_exec_root / "profiles" / "base" / "config" / "schedules.yaml"

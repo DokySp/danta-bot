@@ -20,9 +20,11 @@ from typing import Any
 
 try:
     from .account_performance import build_account_performance_context
+    from .order_session import resolve_order_path_for_exchange
     from .run_subagent import RunArtifactJsonCache, prior_decision_context
 except ImportError:  # direct script execution
     from account_performance import build_account_performance_context
+    from order_session import resolve_order_path_for_exchange
     from run_subagent import RunArtifactJsonCache, prior_decision_context
 
 
@@ -1820,14 +1822,15 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
     brief_by_symbol = indexed_symbols(decision_brief.get("symbols"))
     active = active_quantities(account)
     order_path = str(getattr(args, "order_path", "reservation") or "reservation")
-    if order_path not in {"reservation", "immediate"}:
+    if order_path not in {"auto", "reservation", "immediate"}:
         raise ValueError(f"unsupported order_path: {order_path}")
     exchange = str(getattr(args, "exchange", "KRX") or "KRX").upper()
     if exchange not in {"AUTO", "KRX", "NXT", "SOR"}:
         raise ValueError(f"unsupported exchange: {exchange}")
     if order_path == "reservation" and exchange not in {"AUTO", "KRX"}:
         raise ValueError("reservation orders require exchange=KRX")
-    order_api = "order_cash" if order_path == "immediate" else "order_resv"
+    default_order_path = "reservation" if order_path == "auto" else order_path
+    default_order_api = "order_cash" if default_order_path == "immediate" else "order_resv"
 
     run_id = args.run_id or judge_review.get("run_id") or account.get("run_id") or output_dir.name
     started_at = args.started_at or judge_review.get("started_at") or account.get("started_at") or ""
@@ -1839,6 +1842,9 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
             "schema_version": "3",
             "request_type": args.request_type,
             "exchange": exchange,
+            "order_path_requested": order_path,
+            "market_open_day": None,
+            "market_open_day_checked": False,
             "requires_main_agent_order_execution": False,
             "required_main_agent_actions": [],
             "latest_available_cash": None,
@@ -1886,13 +1892,41 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
         route_reasons = list(brief_item.get("order_block_reasons") or preflight.get("reasons") or [])
         selected_exchange = "KRX" if order_path == "reservation" else exchange
         route_eligible = bool(brief_item.get("eligible_for_order", True))
-        if exchange == "AUTO" and order_path == "immediate":
+        if exchange == "AUTO" and order_path != "reservation":
             selected_exchange = str(preflight.get("exchange") or "").upper()
             if selected_exchange not in {"KRX", "NXT", "SOR"}:
                 selected_exchange = "KRX"
                 route_eligible = False
                 if "exchange.auto_route_unavailable" not in route_reasons:
                     route_reasons.append("exchange.auto_route_unavailable")
+        market_open_day_checked = preflight.get("market_open_day_checked") is True
+        market_open_day = preflight.get("market_open_day") if isinstance(preflight.get("market_open_day"), bool) else None
+        if market_open_day_checked and artifact["market_open_day_checked"] is False:
+            artifact["market_open_day"] = market_open_day
+            artifact["market_open_day_checked"] = True
+        selected_order_path = order_path
+        order_path_reason = "explicit"
+        if order_path == "auto":
+            try:
+                selected_order_path, order_path_reason = resolve_order_path_for_exchange(
+                    order_path,
+                    selected_exchange,
+                    started_at,
+                    market_open_day=market_open_day if market_open_day_checked else None,
+                )
+            except ValueError:
+                selected_order_path = "immediate"
+                order_path_reason = "auto_no_supported_session"
+                route_eligible = False
+                if "order_path.no_supported_session" not in route_reasons:
+                    route_reasons.append("order_path.no_supported_session")
+            if market_open_day_checked and market_open_day is None:
+                route_eligible = False
+                if "order_day.open_unknown" not in route_reasons:
+                    route_reasons.append("order_day.open_unknown")
+        if selected_order_path == "reservation":
+            selected_exchange = "KRX"
+        selected_order_api = "order_cash" if selected_order_path == "immediate" else "order_resv"
         active_item = active.get(symbol_id, {"buy": 0, "sell": 0})
         current_qty = as_int(account_item.get("current_live_holding_quantity"))
         buy_qty = active_item.get("buy", 0)
@@ -1989,9 +2023,13 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
                 "additional_required_quantity": delta,
                 "validated_order_quantity": abs(delta),
                 "order_price": order_price,
-                "order_path": order_path,
-                "order_api": order_api,
+                "requested_order_path": order_path,
+                "order_path": selected_order_path,
+                "order_path_reason": order_path_reason,
+                "order_api": selected_order_api,
                 "excg_id_dvsn_cd": selected_exchange,
+                "market_open_day": market_open_day,
+                "market_open_day_checked": market_open_day_checked,
                 "eligible_for_order": route_eligible,
                 "order_block_reasons": route_reasons,
                 "active_order_reconciliation_required": active_order_reconciliation_required,
@@ -2025,8 +2063,8 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
             or next((as_number(row.get("order_price")) for row in active_rows if as_number(row.get("order_price"))), 0)
             or 0
         )
-        active_path = str(next((row.get("order_path") for row in active_rows if row.get("order_path")), order_path))
-        active_api = str(next((row.get("order_api") for row in active_rows if row.get("order_api")), order_api))
+        active_path = str(next((row.get("order_path") for row in active_rows if row.get("order_path")), default_order_path))
+        active_api = str(next((row.get("order_api") for row in active_rows if row.get("order_api")), default_order_api))
         active_exchange = str(
             next(
                 (row.get("excg_id_dvsn_cd") for row in active_rows if row.get("excg_id_dvsn_cd")),
@@ -2056,6 +2094,7 @@ def build_execution_plan(args: argparse.Namespace) -> dict[str, Any]:
                 "additional_required_quantity": delta,
                 "validated_order_quantity": abs(delta),
                 "order_price": order_price,
+                "requested_order_path": active_path,
                 "order_path": active_path,
                 "order_api": active_api,
                 "excg_id_dvsn_cd": active_exchange,
@@ -2254,7 +2293,7 @@ def build_parser() -> argparse.ArgumentParser:
     execution.add_argument("--decision-brief", help="Path to decision-brief.json. Defaults to <output-dir>/decision-brief.json.")
     execution.add_argument("--analyst-review", help="Path to analyst-review.json. Defaults to <output-dir>/analyst-review.json.")
     execution.add_argument("--request-type", choices=["analysis", "prepare", "demo-submit", "real-submit"], default="analysis")
-    execution.add_argument("--order-path", choices=["reservation", "immediate"], default="reservation")
+    execution.add_argument("--order-path", choices=["auto", "reservation", "immediate"], default="reservation")
     execution.add_argument("--exchange", choices=["AUTO", "KRX", "NXT", "SOR"], default="KRX")
     execution.add_argument("--run-id")
     execution.add_argument("--started-at")

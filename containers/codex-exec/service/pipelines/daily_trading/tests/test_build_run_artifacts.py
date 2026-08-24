@@ -1673,7 +1673,7 @@ class BuildRunArtifactsSelfTest(unittest.TestCase):
                 run_dir / "account-before-order.json",
                 {
                     "run_id": "auto-route",
-                    "started_at": "2026-08-10T09:05:00+09:00",
+                    "started_at": "2026-08-10T18:00:00+09:00",
                     "active_order_lookup_performed": True,
                     "order_available_lookup_performed": True,
                     "active_orders": [],
@@ -1692,7 +1692,7 @@ class BuildRunArtifactsSelfTest(unittest.TestCase):
                 run_dir / "judge-review.json",
                 {
                     "run_id": "auto-route",
-                    "started_at": "2026-08-10T09:05:00+09:00",
+                    "started_at": "2026-08-10T18:00:00+09:00",
                     "symbols": [
                         {
                             "symbol_id": symbol_id,
@@ -1712,7 +1712,12 @@ class BuildRunArtifactsSelfTest(unittest.TestCase):
                             "price": {"current_or_last": price},
                             "eligible_for_order": eligible,
                             "order_block_reasons": reasons,
-                            "exchange_preflight": {"exchange": exchange, "reasons": reasons},
+                            "exchange_preflight": {
+                                "exchange": exchange,
+                                "reasons": reasons,
+                                "market_open_day": True,
+                                "market_open_day_checked": True,
+                            },
                         }
                         for symbol_id, _symbol_name, price, eligible, exchange, reasons in symbols
                     ]
@@ -1730,14 +1735,18 @@ class BuildRunArtifactsSelfTest(unittest.TestCase):
                     run_id=None,
                     started_at=None,
                     request_type="real-submit",
-                    order_path="immediate",
+                    order_path="auto",
                     exchange="AUTO",
                 )
             )
 
             by_symbol = {item["symbol_id"]: item for item in execution["orders"]}
             self.assertEqual(by_symbol["005930"]["excg_id_dvsn_cd"], "SOR")
+            self.assertEqual(by_symbol["005930"]["order_path"], "immediate")
+            self.assertEqual(by_symbol["005930"]["order_api"], "order_cash")
             self.assertEqual(by_symbol["411060"]["excg_id_dvsn_cd"], "KRX")
+            self.assertEqual(by_symbol["411060"]["order_path"], "reservation")
+            self.assertEqual(by_symbol["411060"]["order_api"], "order_resv")
             self.assertEqual(by_symbol["000660"]["reason"], "exchange_preflight_blocked")
 
     def test_financial_summary_omits_stale_quote_and_uses_fresh_price_for_target_gap(self) -> None:

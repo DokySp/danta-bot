@@ -23,10 +23,10 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 try:
     from .collect_main_evidence import exchange_preflight, resolve_order_market
-    from .order_session import KST, cash_order_session_open, reservation_order_session_open
+    from .order_session import KST, cash_order_session_open, reservation_order_session_open, resolve_order_path_for_exchange
 except ImportError:  # direct script execution
     from collect_main_evidence import exchange_preflight, resolve_order_market
-    from order_session import KST, cash_order_session_open, reservation_order_session_open
+    from order_session import KST, cash_order_session_open, reservation_order_session_open, resolve_order_path_for_exchange
 
 
 KIS_BASE_URL = "https://openapi.koreainvestment.com:9443"
@@ -34,9 +34,9 @@ EXCHANGE_MARKET_CODES = {"KRX": "J", "NXT": "NX", "SOR": "UN"}
 MARKET_EXCHANGE_CODES = {market: exchange for exchange, market in EXCHANGE_MARKET_CODES.items()}
 
 ENDPOINTS = {
+    "chk_holiday": ("/uapi/domestic-stock/v1/quotations/chk-holiday", "GET", "CTCA0903R", "CTCA0903R"),
     "search_stock_info": ("/uapi/domestic-stock/v1/quotations/search-stock-info", "GET", "CTPF1002R", "CTPF1002R"),
     "inquire_price": ("/uapi/domestic-stock/v1/quotations/inquire-price", "GET", "FHKST01010100", "FHKST01010100"),
-    "inquire_asking_price_exp_ccn": ("/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn", "GET", "FHKST01010200", "FHKST01010200"),
     "inquire_psbl_order": ("/uapi/domestic-stock/v1/trading/inquire-psbl-order", "GET", "TTTC8908R", "VTTC8908R"),
     "inquire_psbl_sell": ("/uapi/domestic-stock/v1/trading/inquire-psbl-sell", "GET", "TTTC8408R", "VTTC8408R"),
     "inquire_psbl_rvsecncl": ("/uapi/domestic-stock/v1/trading/inquire-psbl-rvsecncl", "GET", "TTTC0084R", "VTTC0084R"),
@@ -417,9 +417,12 @@ def live_order_exchange_preflight(
     *,
     requested_exchange: str = "",
     active_exchange: str = "",
+    market_open_day: bool | None = None,
+    market_open_day_checked: bool = False,
 ) -> dict[str, Any]:
     symbol = symbol_key(order)
     order_path = str(order.get("order_path") or "reservation")
+    requested_order_path = str(order.get("requested_order_path") or order_path)
     info_rows = rows(
         kis.call(
             "search_stock_info",
@@ -430,44 +433,53 @@ def live_order_exchange_preflight(
     exchange = "KRX" if order_path == "reservation" else exchange_code(order.get("excg_id_dvsn_cd"))
     requested = str(requested_exchange or exchange).strip().upper()
     routing_reasons: list[str] = []
-    if requested == "AUTO" and order_path == "immediate":
+    if requested == "AUTO" and requested_order_path != "reservation":
         selected_market, routing_reasons = resolve_order_market(
             info,
             requested_market="AUTO",
-            order_path=order_path,
+            order_path=requested_order_path,
         )
         exchange = exchange_code(active_exchange) if active_exchange else MARKET_EXCHANGE_CODES[selected_market]
         order["excg_id_dvsn_cd"] = exchange
-    market = market_code(exchange)
-    orderbook: dict[str, Any] = {}
-    if order_path == "immediate":
-        orderbook_rows = rows(
-            kis.call(
-                "inquire_asking_price_exp_ccn",
-                params={"FID_COND_MRKT_DIV_CODE": market, "FID_INPUT_ISCD": symbol},
+    if requested_order_path == "auto":
+        try:
+            order_path, order_path_reason = resolve_order_path_for_exchange(
+                requested_order_path,
+                exchange,
+                market_open_day=market_open_day if market_open_day_checked else None,
             )
-        )
-        orderbook_row = orderbook_rows[0] if orderbook_rows else {}
-        orderbook["market_operation_code"] = str(
-            first(orderbook_row, ("new_mkop_cls_code", "NEW_MKOP_CLS_CODE")) or ""
-        ).strip()
+        except ValueError:
+            order_path_reason = "auto_no_supported_session"
+            if "order_path.no_supported_session" not in routing_reasons:
+                routing_reasons.append("order_path.no_supported_session")
+        else:
+            order["order_path"] = order_path
+            order["order_path_reason"] = order_path_reason
+            order["order_api"] = "order_cash" if order_path == "immediate" else "order_resv"
+            if order_path == "reservation":
+                exchange = "KRX"
+                order["excg_id_dvsn_cd"] = exchange
+    market = market_code(exchange)
 
     preflight = exchange_preflight(
         info,
-        orderbook,
+        {},
         market=market,
         order_path=order_path,
         requested_market="AUTO" if requested == "AUTO" else market,
         routing_reasons=routing_reasons,
+        market_open_day=market_open_day,
+        market_open_day_checked=market_open_day_checked,
     )
     reasons = list(preflight.get("reasons") or [])
     if order_path == "immediate" and not cash_order_session_open(exchange):
         if "exchange.session_not_open" not in reasons:
             reasons.append("exchange.session_not_open")
-    elif order_path == "reservation" and not reservation_order_session_open():
+    elif order_path == "reservation" and not reservation_order_session_open(market_open_day=market_open_day):
         reasons.append("order_path.reservation_session_not_open")
     preflight["status"] = "blocked" if reasons else "eligible"
     preflight["reasons"] = reasons
+    preflight["order_path"] = order_path
     preflight["observed_at"] = now_iso()
     return preflight
 
@@ -1826,6 +1838,23 @@ def default_date_range() -> tuple[str, str]:
     return (today - timedelta(days=30)).strftime("%Y%m%d"), (today + timedelta(days=30)).strftime("%Y%m%d")
 
 
+def fetch_market_open_day(kis: Kis) -> bool:
+    holiday_rows = rows(
+        kis.call(
+            "chk_holiday",
+            params={
+                "BASS_DT": datetime.now(KST).strftime("%Y%m%d"),
+                "CTX_AREA_FK": "",
+                "CTX_AREA_NK": "",
+            },
+        )
+    )
+    open_yn = str(first(holiday_rows[0], ("opnd_yn", "OPND_YN")) if holiday_rows else "").strip().upper()
+    if open_yn not in {"Y", "N"}:
+        raise RuntimeError("chk_holiday returned unknown opnd_yn")
+    return open_yn == "Y"
+
+
 def refresh_gates(args: argparse.Namespace, account: dict[str, Any], execution: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, dict[str, int]], dict[str, dict[str, int]], list[dict[str, Any]], Kis | None]:
     if args.offline:
         active = [item for item in account.get("active_orders", []) if isinstance(item, dict)]
@@ -1844,6 +1873,22 @@ def refresh_gates(args: argparse.Namespace, account: dict[str, Any], execution: 
     capacities: dict[str, dict[str, int]] = {}
     sell_capacities: dict[str, dict[str, int]] = {}
     errors: list[dict[str, Any]] = []
+    market_open_day_checked = execution.get("market_open_day_checked") is True
+    market_open_day = execution.get("market_open_day") if isinstance(execution.get("market_open_day"), bool) else None
+    needs_order_preflight = any(
+        isinstance(item, dict)
+        and item.get("active_cancel_only") is not True
+        and item.get("reconciliation_only") is not True
+        for item in execution.get("orders", [])
+    )
+    if needs_order_preflight and market_open_day_checked and market_open_day is None:
+        try:
+            market_open_day = fetch_market_open_day(kis)
+        except Exception as exc:  # noqa: BLE001 - immediate orders fail closed on unknown order day
+            errors.append(error("market_open_day_lookup_failed", redact(exc)))
+        market_open_day_checked = True
+        execution["market_open_day"] = market_open_day
+        execution["market_open_day_checked"] = True
     for item in execution.get("orders", []):
         if not isinstance(item, dict):
             continue
@@ -1867,6 +1912,8 @@ def refresh_gates(args: argparse.Namespace, account: dict[str, Any], execution: 
                 item,
                 requested_exchange=str(execution.get("exchange") or ""),
                 active_exchange=active_exchange,
+                market_open_day=market_open_day,
+                market_open_day_checked=market_open_day_checked,
             )
         except Exception as exc:  # noqa: BLE001 - real-order route checks fail closed
             item["eligible_for_order"] = False
