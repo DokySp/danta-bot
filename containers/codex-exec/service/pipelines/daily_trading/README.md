@@ -86,8 +86,8 @@ python3 <daily-trading-pipeline>/scripts/run_daily_trading_pipeline.py run \
 | Agent | 역할 | launcher model | launcher effort |
 |---|---|---|---|
 | `collect-financial-information` | KIS quotation/financial/estimate API 기반 재무 YAML 캐시 경로 | `gpt-5.6-luna` | `low` |
-| selected 2 analyst-review execution personas | `analyst-review` 독립 종목 점수 (`analyst-quality-risk`와 `analyst-momentum-news`가 각각 두 view 산출) | `gpt-5.6-sol` | `xhigh` |
-| `judge` | `judge-review` 포트폴리오 목표금액 (내부 대립 관점 검토 포함) | `gpt-5.6-sol` | `xhigh` |
+| selected 2 analyst-review execution personas | `analyst-review` 독립 종목 점수 (`analyst-quality-risk`와 `analyst-momentum-news`가 각각 두 view 산출) | `gpt-6-astra` | `xhigh` |
+| `judge` | `judge-review` 포트폴리오 목표금액 (내부 대립 관점 검토 포함) | `gpt-6-astra` | `xhigh` |
 
 ## API 권한
 

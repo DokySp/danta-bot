@@ -37,8 +37,8 @@ DEFAULT_RUNTIME_CONFIG_PATH = Path("/app/config") / RUNTIME_CONFIG_FILENAME
 BAKED_RUNTIME_CONFIG_PATH = Path("/app/default-config") / RUNTIME_CONFIG_FILENAME
 DEFAULT_SUBAGENT_MODEL_CONFIG = {
     "collection": {"model": "gpt-5.6-luna", "model_reasoning_effort": "low"},
-    "analyst_review": {"model": "gpt-5.6-sol", "model_reasoning_effort": "xhigh"},
-    "judge_review": {"model": "gpt-5.6-sol", "model_reasoning_effort": "xhigh"},
+    "analyst_review": {"model": "gpt-6-astra", "model_reasoning_effort": "xhigh"},
+    "judge_review": {"model": "gpt-6-astra", "model_reasoning_effort": "xhigh"},
 }
 SUBAGENT_MODEL_CONFIG_KEYS = ("collection", "analyst_review", "judge_review")
 COLLECTION_STAGES = {"financial-collection"}
