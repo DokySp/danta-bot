@@ -141,7 +141,7 @@ else:
             "symbols": [{"symbol_id": "005930", "symbol_name": "삼성전자", "errors": []}],
         }
     else:
-        prompt = sys.argv[-1] if sys.argv else ""
+        prompt = sys.stdin.read() if sys.argv and sys.argv[-1] == "-" else (sys.argv[-1] if sys.argv else "")
         if "stage: analyst-review" in prompt or "stage: judge-review" in prompt:
             stage = "judge-review" if "stage: judge-review" in prompt else "analyst-review"
             symbol_line = next((line for line in prompt.splitlines() if line.startswith("symbol_ids: ")), "symbol_ids: 005930")
@@ -240,6 +240,9 @@ if "--json" in sys.argv:
         print(json.dumps({"type": "token_count", "info": {"last_token_usage": {"input_tokens": 7, "cached_input_tokens": 3, "output_tokens": 2, "reasoning_output_tokens": 1, "total_tokens": 9}}}))
         print(json.dumps({"type": "turn.completed", "usage": {"input_tokens": 11, "cached_input_tokens": 5, "output_tokens": 4, "reasoning_output_tokens": 2, "total_tokens": 15}}))
         print("diagnostic stderr", file=sys.stderr)
+    elif os.environ.get("FAKE_CODEX_REAL_TOOL_EVENTS") == "1":
+        print(json.dumps({"type": "item.started", "item": {"id": "item-1", "type": "command_execution", "command": "/bin/sh -lc pwd", "status": "in_progress"}}))
+        print(json.dumps({"type": "item.completed", "item": {"id": "item-2", "type": "web_search", "query": "current market news", "status": "completed"}}))
     else:
         print(json.dumps({
             "type": "event_msg",
@@ -2012,6 +2015,147 @@ class RunSelfTestStepsAreIndividuallyDiscoverableTest(unittest.TestCase):
 
 
 class RunSubagentSelfTest(unittest.TestCase):
+    def test_strict_artifact_policy_embeds_inputs_and_changes_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            write_sample_review_inputs(tmp)
+            prompt_dir = tmp / "prompts"
+            prompt_dir.mkdir()
+            (prompt_dir / "judge.md").write_text("STRICT PERSONA MARKER", encoding="utf-8")
+            (prompt_dir / "judge-review-format.md").write_text("STRICT FORMAT MARKER", encoding="utf-8")
+            test_spec = compact_spec(tmp, stage="judge-review", agent_role="judge", task_name="strict-prompt")
+            ordinary_fingerprint = run_subagent_module.spec_fingerprint(test_spec)
+            test_spec["tool_policy"] = run_subagent_module.STRICT_ARTIFACT_TOOL_POLICY
+
+            prompt = build_prompt(test_spec)
+
+            self.assertIn("All permitted inputs are embedded in this prompt.", prompt)
+            self.assertIn("Do not call shell, MCP, web, network, KIS", prompt)
+            self.assertIn("STRICT PERSONA MARKER", prompt)
+            self.assertIn("STRICT FORMAT MARKER", prompt)
+            self.assertIn('"decision_brief"', prompt)
+            self.assertNotIn("decision_brief: " + test_spec["artifact_paths"]["decision_brief"], prompt)
+            self.assertNotEqual(ordinary_fingerprint, run_subagent_module.spec_fingerprint(test_spec))
+
+    def test_strict_artifact_policy_uses_stdin_read_only_mode_and_rejects_tool_calls(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            write_sample_review_inputs(tmp)
+            prompt_dir = tmp / "prompts"
+            prompt_dir.mkdir()
+            (prompt_dir / "analyst-quality-risk.md").write_text("review persona", encoding="utf-8")
+            (prompt_dir / "analyst-review-format.md").write_text("return review JSON", encoding="utf-8")
+            fake = tmp / "codex"
+            argv_log = tmp / "argv.jsonl"
+            fake_codex_script(fake)
+            old_env = os.environ.copy()
+            os.environ["CODEX_BIN"] = str(fake)
+            os.environ["FAKE_CODEX_ARGV_LOG"] = str(argv_log)
+            os.environ["CODEX_BYPASS_APPROVALS_AND_SANDBOX"] = "1"
+            try:
+                strict_spec = compact_spec(
+                    tmp,
+                    stage="analyst-review",
+                    agent_role="analyst-quality-risk",
+                    task_name="strict-no-tools",
+                )
+                strict_spec["tool_policy"] = run_subagent_module.STRICT_ARTIFACT_TOOL_POLICY
+                wrapper = run_one(strict_spec)
+                argv = json.loads(argv_log.read_text(encoding="utf-8").splitlines()[-1])
+
+                self.assertEqual(wrapper["status"], "success")
+                self.assertEqual(wrapper["prompt_mode"], run_subagent_module.STRICT_ARTIFACT_TOOL_POLICY)
+                self.assertEqual(argv[-1], "-")
+                self.assertIn("--sandbox", argv)
+                self.assertEqual(argv[argv.index("--sandbox") + 1], "read-only")
+                self.assertIn("--ignore-user-config", argv)
+                self.assertIn("--ephemeral", argv)
+                self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", argv)
+
+                os.environ["FAKE_CODEX_REAL_TOOL_EVENTS"] = "1"
+                violating_spec = dict(strict_spec)
+                violating_spec["task_name"] = "strict-tool-call"
+                violating_wrapper = run_one(violating_spec)
+
+                self.assertEqual(violating_wrapper["status"], "failed")
+                self.assertTrue(
+                    any(
+                        item.get("code") == "strict_artifact_tool_call_detected"
+                        for item in violating_wrapper["errors"]
+                    )
+                )
+            finally:
+                os.environ.clear()
+                os.environ.update(old_env)
+
+    def test_unknown_tool_policy_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            test_spec = compact_spec(
+                Path(tmp_name),
+                stage="analyst-review",
+                agent_role="analyst-quality-risk",
+                task_name="unknown-tool-policy",
+            )
+            test_spec["tool_policy"] = "unknown"
+
+            with self.assertRaisesRegex(ValueError, "unsupported tool_policy"):
+                validate_spec(test_spec)
+
+    def test_real_codex_jsonl_tool_item_types_are_detected(self) -> None:
+        stdout = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "item.started",
+                        "item": {
+                            "id": "item-1",
+                            "type": "command_execution",
+                            "command": "/bin/sh -lc pwd",
+                            "status": "in_progress",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "id": "item-2",
+                            "type": "web_search",
+                            "query": "current market news",
+                            "status": "completed",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "id": "item-3",
+                            "type": "mcp_tool_call",
+                            "server": "kis",
+                            "tool": "quote",
+                            "status": "completed",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "id": "item-4",
+                            "type": "file_change",
+                            "changes": [],
+                            "status": "completed",
+                        },
+                    }
+                ),
+            ]
+        )
+
+        diagnostics = run_subagent_module.summarize_codex_event_stream(stdout, {})
+
+        self.assertEqual(diagnostics["tool_call_count"], 4)
+
     def test_self_test_suite_runs_every_step_and_reports_success(self) -> None:
         """Wrapper-orchestration check only: each step's real behavior is
         covered by the granular tests below (and by directly invoking the

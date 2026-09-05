@@ -8,6 +8,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -24,6 +25,8 @@ from ..scripts.build_run_artifacts import (
     build_strategy_context,
     build_symbol_strategy_context,
     build_token_summary,
+    compact_chart_context,
+    compact_market_index_snapshot,
     compact_summary_is_usable,
     default_strategy_policy_config_path,
     etf_summary_for,
@@ -1408,6 +1411,53 @@ class RunSelfTestStepsAreIndividuallyDiscoverableTest(unittest.TestCase):
 
 
 class BuildRunArtifactsSelfTest(unittest.TestCase):
+    def test_market_index_snapshot_drops_observations_after_information_cutoff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            path = Path(tmp_name) / "market-index-snapshot.json"
+            write_json(
+                path,
+                {
+                    "generated_at": "2026-06-18T09:31:00+09:00",
+                    "indexes": [
+                        {
+                            "symbol": "KOSPI",
+                            "status": "success",
+                            "value": 3000,
+                            "observed_at": "2026-06-18T09:31:00+09:00",
+                        }
+                    ],
+                },
+            )
+
+            result = compact_market_index_snapshot(
+                str(path),
+                datetime.fromisoformat("2026-06-18T09:30:00+09:00"),
+            )
+
+            self.assertEqual(result["indexes"], [])
+            self.assertIn("market_index_observation_after_information_cutoff", result["warnings"])
+
+    def test_chart_context_drops_rows_after_information_cutoff(self) -> None:
+        context = compact_chart_context(
+            {
+                "charts": {
+                    "daily": [
+                        {"date": "20260619", "close": 999},
+                        {"date": "20260618", "close": 100},
+                        {"date": "20260617", "close": 90},
+                    ]
+                },
+                "intraday": [
+                    {"time": "09:20:00", "price": 100},
+                    {"time": "09:40:00", "price": 999},
+                ],
+            },
+            datetime.fromisoformat("2026-06-18T09:30:00+09:00"),
+        )
+
+        self.assertEqual(context["daily_summary"]["latest_date"], "20260618")
+        self.assertEqual(context["intraday_summary"]["latest_price"], 100)
+
     def test_unresolved_cash_blocked_buy_stays_in_judge_scope_outside_top_k(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_name:
             workspace = Path(tmp_name)

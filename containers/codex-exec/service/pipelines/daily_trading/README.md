@@ -145,7 +145,17 @@ News 수집 허용 범위:
 - 주문 API
 - raw prompt fallback
 
+과거 시점 재현용 `scripts/agent_replay_backtest.py`는 허용 입력을 prompt에 직접 포함하고 user config와 MCP를 불러오지 않는 read-only·ephemeral 실행을 사용한다. event stream에서 도구 호출이 관측되면 해당 wrapper를 실패 처리한다. replay는 생산 Judge 목표를 그대로 가상 체결하며 별도 전략 규칙을 추가하지 않는다. `scripts/account_performance_audit.py`는 보관된 계좌·체결·시장지수 아티팩트로 실적, 무거래 기준, MDD와 회전율을 읽기 전용 계산한다.
+
 평결 JSON에서 생성하는 companion Markdown은 사람이 각 자산 판단을 확인하기 위한 보조 산출물이다. 파일명은 `prompts/analyst-review-format.md`의 safe-name 규칙을 따른다. 이 Markdown은 점수 집계, 최종 보유수량 조정, 주문 후보 계산, 실행 gate의 입력으로 쓰지 않는다.
+
+## Stable 분석 기준과 실험 보존
+
+전략·Judge 프롬프트·주문 실행·deferred-buy-retry는 `v20260825-001-stable` (`f90efa6`) 기준이다. Phase 1~3의 최소 보유기간, 교체 문턱, 순위 자금배분과 전체시장 후보 주입은 활성 코드에 남기지 않는다. `834be6f`의 감사·시점 제한·strict artifact replay 도구와 거래일 증거 확인만 연구 경로에 보존한다.
+
+`scripts/market_scanner.py collect-history`는 `a86e209`의 재개 가능한 KIS 일봉 수집 기능만 제공한다. 실전 후보 발굴·점수화·매수 로직이나 스캐너 백테스트는 제공하지 않으며, 기존 SQLite와 실험 결과는 외부 분석 폴더에 보존한다. 현재 종목 마스터에 따른 생존편향은 남는다.
+
+기존 replay의 가상 체결은 매도 우선·가상 매도대금 즉시 재사용 모형이다. stable 실전의 주문 순서, KIS 현금 한도 갱신과 deferred retry를 그대로 실행하지 않으므로, 이를 실전 동일 성과로 해석하지 않는다. 과거 실험 수익률은 원래 코드·입력·비용·체결 가정에 귀속되며 stable의 새 검증 결과로 재분류하지 않는다. 신규 Agent 재실행 전에는 이 실행 차이와 입력 범위를 먼저 명시해야 한다.
 
 ## 아티팩트
 

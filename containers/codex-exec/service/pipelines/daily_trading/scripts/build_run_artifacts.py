@@ -441,13 +441,28 @@ def account_summary(account: dict[str, Any]) -> dict[str, Any]:
     return {"orderable_cash_amount": summary.get("orderable_cash_amount")}
 
 
-def compact_market_index_snapshot(path: str | None) -> dict[str, Any]:
+def compact_market_index_snapshot(
+    path: str | None,
+    information_cutoff: datetime | None = None,
+) -> dict[str, Any]:
     if not path:
         return {"status": "missing", "indexes": [], "warnings": ["market_index_snapshot_not_supplied"], "errors": []}
     payload = load_json(Path(path))
+    generated_at = parse_kst_timestamp(payload.get("generated_at"))
+    snapshot_after_cutoff = (
+        information_cutoff is not None
+        and generated_at is not None
+        and generated_at > information_cutoff
+    )
     indexes: list[dict[str, Any]] = []
     for item in payload.get("indexes", []):
         if not isinstance(item, dict):
+            continue
+        observed_at = parse_kst_timestamp(item.get("observed_at"))
+        if snapshot_after_cutoff or (
+            information_cutoff is not None
+            and (observed_at is None or observed_at > information_cutoff)
+        ):
             continue
         indexes.append(
             {
@@ -461,14 +476,36 @@ def compact_market_index_snapshot(path: str | None) -> dict[str, Any]:
                 "market_status": item.get("market_status") or "",
             }
         )
+    warnings = list(payload.get("warnings") or [])[:5]
+    if snapshot_after_cutoff or len(indexes) < len(
+        [item for item in payload.get("indexes", []) if isinstance(item, dict)]
+    ):
+        warnings.append("market_index_observation_after_information_cutoff")
     return {
         "schema_version": payload.get("schema_version") or "1",
+        "run_id": payload.get("run_id") or "",
+        "started_at": payload.get("started_at") or "",
         "status": payload.get("status") or "unknown",
         "generated_at": payload.get("generated_at") or "",
         "indexes": indexes[:5],
-        "warnings": list(payload.get("warnings") or [])[:5],
+        "warnings": warnings[:5],
         "errors": list(payload.get("errors") or [])[:5],
     }
+
+
+def parse_kst_timestamp(value: Any) -> datetime | None:
+    text = str(value or "").strip().replace(" KST", "+09:00")
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=KST)
+    return parsed.astimezone(KST)
 
 
 def compact_market_news_context(path: str | None) -> dict[str, Any]:
@@ -1148,19 +1185,54 @@ def intraday_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {key: value for key, value in summary.items() if value not in (None, "", [], {})}
 
 
-def compact_chart_context(item: dict[str, Any]) -> dict[str, Any]:
+def compact_chart_context(
+    item: dict[str, Any],
+    information_cutoff: datetime | None = None,
+) -> dict[str, Any]:
     charts = item.get("charts") if isinstance(item.get("charts"), dict) else {}
     result: dict[str, Any] = {}
+    cutoff_date = information_cutoff.date().isoformat() if information_cutoff is not None else ""
     for key in ("daily", "weekly", "monthly"):
         rows = charts.get(key) if isinstance(charts, dict) else []
         if not isinstance(rows, list):
             rows = []
-        compact_rows = [row for row in rows if isinstance(row, dict)]
+        compact_rows = [
+            row
+            for row in rows
+            if isinstance(row, dict)
+            and (
+                not cutoff_date
+                or not normalized_calendar_date(row.get("date"))
+                or normalized_calendar_date(row.get("date")) <= cutoff_date
+            )
+        ]
         if compact_rows:
             result[f"{key}_summary"] = chart_series_summary(compact_rows)
             result[f"recent_{key}"] = compact_ohlcv_rows(compact_rows, CHART_RECENT_ROW_LIMITS[key])
     intraday = item.get("intraday") if isinstance(item.get("intraday"), list) else []
     compact_intraday = [row for row in intraday if isinstance(row, dict)]
+    daily_rows = charts.get("daily") if isinstance(charts.get("daily"), list) else []
+    latest_daily_date = max(
+        (
+            normalized_calendar_date(row.get("date"))
+            for row in daily_rows
+            if isinstance(row, dict)
+            and normalized_calendar_date(row.get("date"))
+            and (
+                not cutoff_date
+                or normalized_calendar_date(row.get("date")) <= cutoff_date
+            )
+        ),
+        default="",
+    )
+    if information_cutoff is not None and latest_daily_date == information_cutoff.date().isoformat():
+        cutoff_time = information_cutoff.strftime("%H%M%S")
+        compact_intraday = [
+            row
+            for row in compact_intraday
+            if len("".join(character for character in str(row.get("time") or "") if character.isdigit())[:6]) == 6
+            and "".join(character for character in str(row.get("time") or "") if character.isdigit())[:6] <= cutoff_time
+        ]
     if compact_intraday:
         result["intraday_summary"] = intraday_summary(compact_intraday)
         result["recent_intraday"] = compact_intraday_rows(compact_intraday, CHART_RECENT_ROW_LIMITS["intraday"])
@@ -1184,6 +1256,7 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
     fills_by_id = fills_by_symbol(today_fills)
     run_id = args.run_id or price_chart.get("run_id") or account.get("run_id") or output_dir.name
     started_at = args.started_at or price_chart.get("started_at") or account.get("started_at") or ""
+    information_cutoff = parse_kst_timestamp(getattr(args, "information_cutoff", ""))
     expected_symbol_news_date = expected_news_calendar_date(getattr(args, "expected_symbol_news_date", ""), started_at)
 
     account_by_symbol = indexed_symbols(account.get("symbols"))
@@ -1205,7 +1278,7 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
     strategy_policy, strategy_policy_path = load_strategy_policy_config(
         getattr(args, "strategy_policy_config", "")
     )
-    market_index_snapshot = compact_market_index_snapshot(args.market_index_snapshot_json)
+    market_index_snapshot = compact_market_index_snapshot(args.market_index_snapshot_json, information_cutoff)
     market_news_context = compact_market_news_context(news_context_json)
     account_exposure_summary = account_summary(account)
     strategy_context = build_strategy_context(strategy_policy, strategy_policy_path, market_index_snapshot)
@@ -1222,6 +1295,7 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
     artifact.update(
         {
             "brief_type": "decision-brief",
+            "information_cutoff": information_cutoff.isoformat() if information_cutoff is not None else "",
             "source_artifacts": source_artifacts,
             "portfolio": {
                 "recommanded": portfolio.get("recommanded", []),
@@ -1245,7 +1319,12 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
         price = item.get("price") if isinstance(item.get("price"), dict) else {}
         required_missing = list(item.get("required_missing") or [])
         errors = list(item.get("errors") or [])
-        usable_price = price.get("current_or_last") is not None and bool(price.get("observed_at"))
+        price_observed_at = parse_kst_timestamp(price.get("observed_at"))
+        usable_price = (
+            price.get("current_or_last") is not None
+            and price_observed_at is not None
+            and (information_cutoff is None or price_observed_at <= information_cutoff)
+        )
         eligible = bool(item.get("eligible_for_review", True)) and usable_price and not required_missing
         if not usable_price and "price.current_or_last/observed_at" not in required_missing:
             required_missing.append("price.current_or_last/observed_at")
@@ -1285,7 +1364,7 @@ def build_decision_brief(args: argparse.Namespace) -> dict[str, Any]:
                 "snapshot_mode": price.get("snapshot_mode") or "",
             },
             "price_chart_signals": list(item.get("local_signals") or [])[:12],
-            "chart_context": compact_chart_context(item),
+            "chart_context": compact_chart_context(item, information_cutoff),
             "orderbook_summary": compact_optional_dict(item, "orderbook_summary"),
             "trade_flow_summary": compact_optional_dict(item, "trade_flow_summary"),
             "investor_flow_summary": compact_optional_dict(item, "investor_flow_summary"),
@@ -2252,6 +2331,7 @@ def build_parser() -> argparse.ArgumentParser:
     decision.add_argument("--workspace-dir", default="")
     decision.add_argument("--run-id")
     decision.add_argument("--started-at")
+    decision.add_argument("--information-cutoff", default="")
     decision.add_argument("--output", type=Path, default=None)
 
     first_specs = subparsers.add_parser("first-specs", help="Build analyst-review-specs.json.")
