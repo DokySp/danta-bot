@@ -6,12 +6,16 @@ import tempfile
 import unittest
 from datetime import date, datetime, time, timezone
 from pathlib import Path
+from unittest.mock import patch
+from types import SimpleNamespace
 
-from ..scripts import run_subagent
+from ..scripts import agent_replay_backtest as replay, run_subagent
 from ..scripts.agent_replay_backtest import (
     align_replay_generated_at,
+    backtest,
     benchmark_history,
     discover_run_rows,
+    execution_preflight,
     future_input_timestamps,
     performance_period,
     rebuilt_market_news_context,
@@ -56,6 +60,7 @@ def brief(started_at: str, *, price_a: int = 100, price_b: int = 100) -> dict:
         "status": "success",
         "run_id": "source",
         "started_at": started_at,
+        "source_artifacts": {"information_cutoff": started_at},
         "portfolio": {"holding": ["A"], "specified": ["A", "B"], "universe": ["A", "B"]},
         "account_exposure_summary": {"total_evaluation_amount": 999999},
         "account_performance_context": {"periods": {"primary": {"account_return_pct": 99}}},
@@ -117,6 +122,228 @@ def write_run(
 
 
 class AgentReplayBacktestTest(unittest.TestCase):
+    @staticmethod
+    def fake_analyst_group(specs: list[dict], max_workers: int) -> dict:
+        wrappers = []
+        for spec in specs:
+            model, effort = run_subagent.launcher_model_effort(spec["stage"], spec["agent_role"])
+            wrapper = {
+                **{key: spec[key] for key in ("stage", "agent_role", "task_name", "run_id")},
+                "status": "success", "model": model, "model_reasoning_effort": effort,
+                "spec_fingerprint": run_subagent.spec_fingerprint(spec),
+                "token_usage": {"total_tokens": 10},
+                "parsed_json": {"symbols": [
+                    {"symbol_id": symbol, "views": {
+                        role: {"score": 6, "reason_code": "hold_neutral", "one_line_reason": "Evidence", "missing_data": []}
+                        for role in run_subagent.COMBINED_ANALYST_REVIEW_ROLE_OUTPUTS[spec["agent_role"]]
+                    }} for symbol in spec["symbol_ids"]
+                ]},
+            }
+            write_json(run_subagent.wrapper_paths(spec)[0], wrapper)
+            wrappers.append(wrapper)
+        return {"status": "success", "wrappers": wrappers}
+
+    def test_comparison_reuses_identical_analysts_but_runs_distinct_judges(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            baseline, candidate = root / "baseline" / "same-day", root / "candidate" / "same-day"
+            for output in (baseline, candidate):
+                write_run(output.parent, output.name, "2026-08-27T09:05:00+09:00", 3000)
+            candidate_account = account("2026-08-27T09:05:00+09:00")
+            candidate_account["symbols"][0]["current_live_holding_quantity"] = 7
+            write_json(candidate / "account-before-order.json", candidate_account)
+            candidate_brief = brief("2026-08-27T09:05:00+09:00")
+            candidate_brief["symbols"][0]["account_exposure"]["current_live_holding_quantity"] = 7
+            write_json(candidate / "decision-brief.json", candidate_brief)
+            judge_snapshot = root / "baseline-judge.md"
+            judge_snapshot.write_text("Original Judge instructions", encoding="utf-8")
+            judge_calls = []
+
+            def fake_judge(spec: dict) -> dict:
+                judge_calls.append((spec, replay.read_json(Path(spec["output_dir"]) / "account-before-order.json")))
+                return {"status": "success", "stage": "judge-review", "token_usage": {"total_tokens": 5}}
+
+            with patch.object(run_subagent, "run_group", side_effect=self.fake_analyst_group) as group, \
+                    patch.object(run_subagent, "run_one", side_effect=fake_judge), \
+                    patch.object(replay.Pipeline, "write_judge_review", return_value={"status": "success", "symbols": []}):
+                _, baseline_wrappers = replay.run_daily_agents(baseline, root, judge_prompt=judge_snapshot)
+                _, candidate_wrappers = replay.run_daily_agents(candidate, root, analyst_reuse_dir=baseline)
+            self.assertEqual(group.call_count, 1)
+            self.assertEqual(len(judge_calls), 2)
+            self.assertEqual(judge_calls[0][0]["artifact_paths"]["persona"], str(judge_snapshot))
+            self.assertEqual(judge_calls[1][0]["artifact_paths"]["persona"], str(replay.PIPELINE_DIR / "prompts" / "judge.md"))
+            self.assertEqual([item[1]["symbols"][0]["current_live_holding_quantity"] for item in judge_calls], [10, 7])
+            self.assertEqual(len(baseline_wrappers), 3)
+            self.assertEqual(sum(bool(item.get("reused_analyst_source")) for item in candidate_wrappers), 2)
+            self.assertFalse(candidate_wrappers[-1].get("reused_existing_wrapper"))
+            self.assertEqual(replay.read_json(baseline / "analyst-review.json"), replay.read_json(candidate / "analyst-review.json"))
+
+    def test_analyst_reuse_rejects_changed_evidence_before_judge(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            baseline, candidate = root / "baseline" / "same-day", root / "candidate" / "same-day"
+            for output in (baseline, candidate):
+                write_run(output.parent, output.name, "2026-08-27T09:05:00+09:00", 3000)
+            with patch.object(run_subagent, "run_group", side_effect=self.fake_analyst_group), \
+                    patch.object(run_subagent, "run_one", return_value={"status": "success"}), \
+                    patch.object(replay.Pipeline, "write_judge_review", return_value={"status": "success", "symbols": []}):
+                replay.run_daily_agents(baseline, root)
+            changed = brief("2026-08-27T09:05:00+09:00", price_a=101)
+            write_json(candidate / "decision-brief.json", changed)
+            with patch.object(run_subagent, "run_group") as group, patch.object(run_subagent, "run_one") as judge:
+                with self.assertRaisesRegex(ValueError, "input/model mismatch"):
+                    replay.run_daily_agents(candidate, root, analyst_reuse_dir=baseline)
+                group.assert_not_called()
+                judge.assert_not_called()
+
+    def test_analyst_reuse_identity_covers_models_rules_and_original_wrapper(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            baseline, candidate = root / "baseline" / "same-day", root / "candidate" / "same-day"
+            for output in (baseline, candidate):
+                write_run(output.parent, output.name, "2026-08-27T09:05:00+09:00", 3000)
+            with patch.object(run_subagent, "run_group", side_effect=self.fake_analyst_group), \
+                    patch.object(run_subagent, "run_one", return_value={"status": "success"}), \
+                    patch.object(replay.Pipeline, "write_judge_review", return_value={"status": "success", "symbols": []}):
+                replay.run_daily_agents(baseline, root)
+            with patch.object(run_subagent, "launcher_model_effort", return_value=("different-model", "xhigh")), \
+                    patch.object(run_subagent, "run_one") as judge:
+                with self.assertRaisesRegex(ValueError, "input/model mismatch"):
+                    replay.run_daily_agents(candidate, root, analyst_reuse_dir=baseline)
+                judge.assert_not_called()
+            spec = replay.read_json(baseline / "analyst-review-specs.json")["specs"][0]
+            original_identity = replay.analyst_prompt_identity(spec)
+            altered_rule = root / "altered-rule.md"
+            altered_rule.write_text("Changed rule", encoding="utf-8")
+            for key in ("persona", "review_format"):
+                with self.subTest(key=key):
+                    altered = {**spec, "artifact_paths": {**spec["artifact_paths"], key: str(altered_rule)}}
+                    self.assertNotEqual(original_identity, replay.analyst_prompt_identity(altered))
+            wrapper_path, _ = run_subagent.wrapper_paths(spec)
+            wrapper = replay.read_json(wrapper_path)
+            wrapper["parsed_json"]["symbols"][0]["views"][next(iter(wrapper["parsed_json"]["symbols"][0]["views"]))]["score"] = 10
+            write_json(wrapper_path, wrapper)
+            with patch.object(run_subagent, "run_one") as judge:
+                with self.assertRaisesRegex(ValueError, "source wrapper changed"):
+                    replay.run_daily_agents(candidate, root, analyst_reuse_dir=baseline)
+                judge.assert_not_called()
+
+    def test_sale_proceeds_cannot_fund_same_batch_buy(self) -> None:
+        state = {"cash": 0.0, "positions": {"A": {"quantity": 10, "average_price": 90}}}
+        result = simulate_targets(state, {"symbols": [
+            {"symbol_id": "A", "final_holding_quantity": 0},
+            {"symbol_id": "B", "final_holding_quantity": 10},
+        ]}, {"A": {"sell_price": 100, "sell_quantity": 10},
+             "B": {"buy_price": 100, "buy_quantity": 10}}, {"A": 100, "B": 100}, cost_bps=0)
+        self.assertEqual([row["symbol_id"] for row in result["fills"]], ["A"])
+        self.assertEqual(result["decisions"][1]["unsubmitted_quantity"], 10)
+        self.assertEqual(state, {"cash": 1000.0, "positions": {}})
+
+    def test_cash_gate_keeps_row_order_not_symbol_or_rank_order(self) -> None:
+        state = {"cash": 1000.0, "positions": {}}
+        result = simulate_targets(state, {"symbols": [
+            {"symbol_id": "Z", "final_holding_quantity": 10, "relative_attractiveness_rank": 2},
+            {"symbol_id": "A", "final_holding_quantity": 10, "relative_attractiveness_rank": 1},
+        ]}, {s: {"buy_price": 100, "buy_quantity": 10} for s in ("Z", "A")},
+            {"Z": 100, "A": 100}, cost_bps=0)
+        self.assertEqual([row["symbol_id"] for row in result["fills"]], ["Z"])
+        self.assertEqual(result["reserved_buy_notional"], 1000)
+
+    def test_limit_must_be_met_for_both_sides_and_cash_stays_reserved(self) -> None:
+        state = {"cash": 1000.0, "positions": {"S": {"quantity": 10, "average_price": 90}}}
+        result = simulate_targets(state, {"symbols": [
+            {"symbol_id": "B", "final_holding_quantity": 10},
+            {"symbol_id": "S", "final_holding_quantity": 0},
+            {"symbol_id": "C", "final_holding_quantity": 1},
+        ]}, {"B": {"buy_price": 101, "buy_quantity": 10},
+             "S": {"sell_price": 99, "sell_quantity": 10},
+             "C": {"buy_price": 100, "buy_quantity": 10}},
+            {"B": 100, "S": 100, "C": 100}, cost_bps=0)
+        self.assertEqual(result["fills"], [])
+        self.assertEqual(result["unfilled_order_quantity"], 20)
+        self.assertEqual(result["unsubmitted_order_quantity"], 1)
+        self.assertEqual(state["cash"], 1000)
+
+    def test_partial_fill_reports_unfilled_and_fee_reserve(self) -> None:
+        state = {"cash": 1000.0, "positions": {}}
+        result = simulate_targets(state, {"symbols": [{"symbol_id": "A", "final_holding_quantity": 10}]},
+            {"A": {"buy_price": 100, "buy_quantity": 3}}, {"A": 100}, cost_bps=20)
+        decision = result["decisions"][0]
+        self.assertEqual((decision["validated_quantity"], decision["filled_quantity"],
+                          decision["unfilled_quantity"], decision["unsubmitted_quantity"]), (9, 3, 6, 1))
+        self.assertAlmostEqual(state["cash"], 699.4)
+        self.assertEqual(result["reserved_buy_notional"], 900)
+
+    def test_execution_plan_limits_and_blocked_routes_are_used(self) -> None:
+        state = {"cash": 1000.0, "positions": {}}
+        plan = {"status": "partial", "errors": [{"code": "order_submission_blocked", "required": True}], "orders": [
+            {"symbol_id": "A", "final_holding_quantity": 1, "order_price": 90, "order_path": "immediate"},
+            {"symbol_id": "B", "final_holding_quantity": 1, "order_price": 100,
+             "result": "blocked", "reason": "exchange_preflight_blocked"},
+        ]}
+        result = simulate_targets(state, {"symbols": []},
+            {s: {"buy_price": 95, "buy_quantity": 10} for s in ("A", "B")},
+            {"A": 100, "B": 100}, cost_bps=0, execution_plan=plan)
+        self.assertEqual(result["fills"], [])
+        self.assertEqual(result["decisions"][0]["limit_price"], 90)
+        self.assertEqual(result["decisions"][1]["execution_reason"], "exchange_preflight_blocked")
+        self.assertNotIn("attempts", plan["orders"][0])
+
+    def test_missing_orders_from_plan_schema_errors_cannot_be_silent_holds(self) -> None:
+        for code in ("duplicate_judge_symbol", "invalid_final_holding_quantity"):
+            state = {"cash": 1000.0, "positions": {}}
+            plan = {"status": "partial", "errors": [{"code": code, "required": True}], "orders": []}
+            with self.subTest(code=code), self.assertRaisesRegex(ValueError, code):
+                simulate_targets(state, {"symbols": []}, {}, {}, cost_bps=0, execution_plan=plan)
+            self.assertEqual(state, {"cash": 1000.0, "positions": {}})
+        with self.assertRaisesRegex(ValueError, "invalid production Judge"):
+            simulate_targets({"cash": 1000, "positions": {}},
+                {"status": "partial", "errors": [{"code": "invalid_target", "required": True}], "symbols": []},
+                {}, {}, cost_bps=0, execution_plan={"orders": []})
+
+    def test_invalid_targets_and_costs_fail_without_trading(self) -> None:
+        for value in (-1, None, 1.5, True):
+            state = {"cash": 1000.0, "positions": {}}
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                simulate_targets(state, {"symbols": [{"symbol_id": "A", "final_holding_quantity": value}]},
+                                 {}, {"A": 100}, cost_bps=0)
+            self.assertEqual(state["cash"], 1000)
+        for cost in (-1, float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                simulate_targets({"cash": 1000, "positions": {}}, {"symbols": []}, {}, {}, cost_bps=cost)
+
+    def test_preflight_blocks_missing_routes_before_model_calls(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            root = Path(tmp_name)
+            for label, stamp in (("decision", "09:05"), ("fill", "09:20"), ("close", "15:15")):
+                write_run(root, label, f"2026-08-05T{stamp}:00+09:00", 100)
+            args = SimpleNamespace(runs_root=root, start=date(2026, 8, 5), end=date(2026, 8, 5),
+                decision_time=time(9, 5), output_root=root / "output", preflight_only=True)
+            with patch("service.pipelines.daily_trading.scripts.agent_replay_backtest.run_daily_agents") as agents:
+                preflight = backtest(args)
+                self.assertEqual(preflight["status"], "blocked")
+                self.assertIn("archived_exchange_route_missing", preflight["blocking_reasons"])
+                self.assertTrue((args.output_root / "execution-preflight.json").exists())
+                args.preflight_only = False
+                with self.assertRaisesRegex(ValueError, "before model calls"):
+                    backtest(args)
+                agents.assert_not_called()
+
+    def test_preflight_distinguishes_supported_input_and_active_orders(self) -> None:
+        source = {"brief": brief("2026-08-05T09:05:00+09:00"),
+                  "account": account("2026-08-05T09:05:00+09:00"),
+                  "started_at": datetime.fromisoformat("2026-08-05T09:05:00+09:00"),
+                  "path": Path("source"), "market_open_day": True}
+        for item in source["brief"]["symbols"]:
+            item["exchange_preflight"] = {"exchange": "KRX"}
+        days = [{"date": "2026-08-05", "decision": source,
+                 "fill": {"started_at": datetime.fromisoformat("2026-08-05T09:20:00+09:00")}}]
+        self.assertEqual(execution_preflight(days)["status"], "ready_for_approximate_replay")
+        source["account"]["active_orders"] = [{"active_status": "inactive", "remaining_quantity": 1}]
+        self.assertEqual(execution_preflight(days)["status"], "ready_for_approximate_replay")
+        source["account"]["active_orders"] = [{"active_status": "active", "remaining_quantity": 1}]
+        self.assertIn("initial_active_orders_not_supported", execution_preflight(days)["blocking_reasons"])
+
     def test_session_selection_requires_positive_archived_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_name:
             root = Path(tmp_name)

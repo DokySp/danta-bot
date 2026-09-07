@@ -8,7 +8,7 @@ import json
 import os
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -3265,6 +3265,132 @@ class ExecuteOrdersSelfTest(unittest.TestCase):
 
         self.assertEqual(kis.calls, 1)
         self.assertEqual(len(results), 1)
+
+
+class ExecutionHoldingRefreshTest(unittest.TestCase):
+    """Recorded 9/2 shape: 5 shares, one pending sell, target 4; never sell twice."""
+
+    def run_case(self, *, fresh_quantity: int = 4, fresh_buy: int = 0, fresh_sell: int = 1,
+                 filled_buy: int = 0, filled_sell: int = 1, pending_buy: int = 0, pending_sell: int = 1,
+                 target: int = 4, active: list[dict[str, Any]] | None = None,
+                 fill_errors: list[dict[str, Any]] | None = None, account_failure: bool = False,
+                 cancel_only: bool = False, reconciliation_only: bool = False) -> tuple[dict[str, Any], dict[str, Any], Any]:
+        from types import SimpleNamespace
+
+        started_at = now_iso()
+        refreshed_at = (datetime.fromisoformat(started_at) + timedelta(seconds=30)).isoformat()
+        account = {
+            "started_at": started_at, "generated_at": started_at, "execution_environment": "real", "account_summary": {},
+            "symbols": [{"symbol_id": "068270", "symbol_name": "셀트리온",
+                         "current_live_holding_quantity": 5, "today_buy_quantity": 0, "today_sell_quantity": 0,
+                         "pending_and_reserved_buy_quantity": pending_buy,
+                         "pending_and_reserved_sell_quantity": pending_sell, "holding_state_status": "consistent"}],
+        }
+        execution = {
+            "started_at": started_at, "request_type": "real-submit", "execution_environment": "real",
+            "orders": [{"symbol_id": "068270", "symbol_name": "셀트리온", "current_live_holding_quantity": 5,
+                        "holding_state_status": "consistent", "final_holding_quantity": target,
+                        "order_price": 188_000, "order_path": "immediate", "excg_id_dvsn_cd": "SOR",
+                        "reconciliation_only": reconciliation_only, "active_cancel_only": cancel_only}],
+        }
+        fresh = {
+            "status": "success", "errors": [], "generated_at": refreshed_at,
+            "account_summary": {"total_evaluation_amount": 1_000_000},
+            "symbols": [{"symbol_id": "068270", "symbol_name": "셀트리온",
+                         "current_live_holding_quantity": fresh_quantity, "today_buy_quantity": fresh_buy,
+                         "today_sell_quantity": fresh_sell, "observed_at": refreshed_at}],
+        }
+        fills = [{"symbol_id": "068270", "direction": side, "filled_quantity": qty}
+                 for side, qty in (("buy", filled_buy), ("sell", filled_sell)) if qty]
+        client = SimpleNamespace(env="real", app_key="fixture", app_secret="fixture", token="fixture", retries=0)
+        with tempfile.TemporaryDirectory() as temp, patch.object(
+            execute_orders_module, "refresh_gates", return_value=(active or [],
+                {"068270": {"max_buy_qty": 10, "max_buy_amt": 10_000_000}},
+                {"068270": {"max_sell_qty": 10}}, [], client)
+        ), patch.object(execute_orders_module, "collect_day_fills", return_value=(fills, fill_errors or [])), patch.object(
+            execute_orders_module, "collect_account_artifact", return_value=fresh,
+            side_effect=RuntimeError("private broker response") if account_failure else None,
+        ), patch.object(execute_orders_module, "submit_order", return_value="fixture-order") as submit, patch.object(
+            execute_orders_module, "reconcile_submitted_cash_orders"
+        ), patch.object(execute_orders_module, "adjust_active_order", return_value=("fixture-cancel", "cancel", "accepted")
+        ), patch.object(execute_orders_module, "load_portfolio_except_symbols", return_value=set()):
+            root = Path(temp)
+            write_json(root / "account-before-order.json", account)
+            write_json(root / "execution.json", execution)
+            result = execute(argparse.Namespace(output_dir=temp, execution_json="", account_before_order="",
+                env="real", submit=True, offline=False, retries=0, reservation_start_date="", reservation_end_date=""))
+            saved_account = load_json(root / "account-before-order.json")
+        return result, saved_account, submit
+
+    def test_completed_pending_sell_does_not_submit_another_sell(self) -> None:
+        result, account, submit = self.run_case()
+        submit.assert_not_called()
+        self.assertEqual(result["orders"][0]["reason"], "final_equals_expected_holding_quantity")
+        self.assertEqual(result["orders"][0]["current_live_holding_quantity"], 4)
+        self.assertEqual(result["holding_refresh"]["symbols"][0]["status"], "consistent")
+        self.assertEqual(account["symbols"][0]["current_live_holding_quantity"], 5)
+        self.assertEqual(account["symbols"][0]["today_sell_quantity"], 0)
+        self.assertEqual(account["generated_at"], account["started_at"])
+        self.assertGreater(result["holding_refresh"]["observed_at"], account["generated_at"])
+        self.assertEqual(account["account_summary"], {})
+
+    def test_stale_account_and_mixed_pending_snapshots_block(self) -> None:
+        active = [{"symbol_id": "068270", "active_status": "active", "direction": "sell", "remaining_quantity": 1}]
+        for kwargs, reason in [
+            ({"fresh_quantity": 5, "fresh_sell": 0}, "fresh_fills_disagree_with_account_today_quantities"),
+            ({"fresh_quantity": 5}, "fresh_holding_disagrees_with_fill_delta"),
+            ({"fresh_quantity": 5, "fresh_sell": 0, "filled_sell": 0}, "expected_holding_changed_during_execution"),
+            ({"active": active}, "expected_holding_changed_during_execution"),
+        ]:
+            with self.subTest(reason=reason):
+                result, account, submit = self.run_case(**kwargs)
+                submit.assert_not_called()
+                self.assertEqual(result["orders"][0]["reason"], "holding_state_not_verified")
+                self.assertIn(reason, result["holding_refresh"]["symbols"][0]["reasons"])
+
+    def test_completed_pending_buy_does_not_submit_another_buy(self) -> None:
+        result, _, submit = self.run_case(fresh_quantity=6, fresh_buy=1, fresh_sell=0,
+            filled_buy=1, filled_sell=0, pending_buy=1, pending_sell=0, target=6)
+        submit.assert_not_called()
+        self.assertEqual(result["orders"][0]["reason"], "final_equals_expected_holding_quantity")
+
+    def test_consistent_account_allows_a_genuine_new_order(self) -> None:
+        result, _, submit = self.run_case(fresh_quantity=5, fresh_sell=0, filled_sell=0, pending_sell=0)
+        submit.assert_called_once()
+        self.assertEqual(result["orders"][0]["validated_order_quantity"], 1)
+        self.assertEqual(result["orders"][0]["result"], "submitted")
+
+    def test_collection_failures_never_fall_back_to_saved_holdings(self) -> None:
+        for kwargs in ({"fill_errors": [{"code": "venue_unavailable"}]}, {"account_failure": True}):
+            with self.subTest(kwargs=kwargs):
+                result, account, submit = self.run_case(**kwargs)
+                submit.assert_not_called()
+                self.assertEqual(result["status"], "failed")
+                self.assertEqual(account["order_gate_status"], "failed")
+                self.assertEqual(result["errors"][-1]["code"], "holding_refresh_failed")
+                self.assertNotIn("private broker response", json.dumps(result))
+
+    def test_cancel_only_does_not_require_a_new_holding_refresh(self) -> None:
+        active = [{"symbol_id": "068270", "symbol_name": "셀트리온", "active_status": "active",
+                   "order_id": "fixture-pending", "order_kind": "pending", "direction": "sell",
+                   "remaining_quantity": 1, "order_price": 188_000, "order_api": "order_cash",
+                   "order_path": "immediate", "execution_environment": "real", "observed_at": now_iso()}]
+        for reconciliation_only in (False, True):
+            with self.subTest(reconciliation_only=reconciliation_only):
+                result, _, submit = self.run_case(cancel_only=True, reconciliation_only=reconciliation_only,
+                    account_failure=True, target=5, active=active)
+                submit.assert_not_called()
+                self.assertNotIn("holding_refresh", result)
+                self.assertEqual(result["orders"][0]["reason"], "active_order_cancel_submitted")
+
+    def test_partial_fill_keeps_only_the_remaining_order(self) -> None:
+        active = [{"symbol_id": "068270", "symbol_name": "셀트리온", "active_status": "active",
+                   "order_id": "fixture-partial", "order_kind": "pending", "direction": "sell",
+                   "remaining_quantity": 1, "order_price": 188_000, "order_api": "order_cash",
+                   "order_path": "immediate", "excg_id_dvsn_cd": "SOR", "execution_environment": "real", "observed_at": now_iso()}]
+        result, _, submit = self.run_case(pending_sell=2, target=3, active=active)
+        submit.assert_not_called()
+        self.assertEqual(result["orders"][0]["reason"], "existing_matching_order_kept")
 
 
 class ReconcileSafetyTest(unittest.TestCase):

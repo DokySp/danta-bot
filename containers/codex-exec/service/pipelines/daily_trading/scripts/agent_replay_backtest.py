@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import math
 import shutil
@@ -15,11 +16,12 @@ from types import SimpleNamespace
 from typing import Any
 
 try:
-    from . import build_run_artifacts, run_subagent
+    from . import build_run_artifacts, execute_orders, run_subagent
     from .run_daily_trading_pipeline import Pipeline
     from ...news_context.builder import item_keys, merge_unique, select_market_items
 except ImportError:  # pragma: no cover - direct script fallback
     import build_run_artifacts  # type: ignore
+    import execute_orders  # type: ignore
     import run_subagent  # type: ignore
     from run_daily_trading_pipeline import Pipeline  # type: ignore
     from service.pipelines.news_context.builder import item_keys, merge_unique, select_market_items  # type: ignore
@@ -324,6 +326,69 @@ def daily_decision_history(
         if distance_seconds <= tolerance_seconds:
             selected.append(nearest)
     return selected
+
+
+def execution_preflight(days: list[dict[str, Any]]) -> dict[str, Any]:
+    """Reject unsupported archive inputs before spending tokens on any agent."""
+    rows = []
+    for day in days:
+        source = day["decision"]
+        missing_routes = []
+        reservations = []
+        for item in source["brief"].get("symbols", []):
+            if not isinstance(item, dict) or item.get("eligible_for_order") is False:
+                continue
+            route = item.get("exchange_preflight") or {}
+            exchange = route.get("exchange")
+            if exchange not in {"KRX", "NXT", "SOR"}:
+                missing_routes.append(symbol_key(item))
+                continue
+            try:
+                path, _ = build_run_artifacts.resolve_order_path_for_exchange(
+                    "auto", exchange, source["started_at"].isoformat(),
+                    market_open_day=source.get("market_open_day"),
+                )
+            except ValueError:
+                path = "unsupported"
+            if path != "immediate":
+                reservations.append(symbol_key(item))
+        rows.append({
+            "date": day["date"],
+            "source_run_id": source["path"].name,
+            "missing_route_symbols": missing_routes,
+            "unsupported_order_path_symbols": reservations,
+            "next_quote_gap_seconds": round((
+                day["fill"]["started_at"] - decision_information_cutoff(source)
+            ).total_seconds(), 3),
+        })
+    first_account = days[0]["decision"]["account"] if days else {}
+    active = [item for item in first_account.get("active_orders", []) if isinstance(item, dict)
+              and (item.get("active_status") == "active" or (
+                  item.get("active_status") != "inactive" and as_int(item.get("remaining_quantity")) > 0
+              ))]
+    problems = []
+    if not days:
+        problems.append("no_replay_days")
+    if any(row["missing_route_symbols"] for row in rows):
+        problems.append("archived_exchange_route_missing")
+    if any(row["unsupported_order_path_symbols"] for row in rows):
+        problems.append("reservation_or_unsupported_order_path")
+    if days and first_account.get("active_order_lookup_performed") is not True:
+        problems.append("initial_active_order_lookup_unavailable")
+    if active:
+        problems.append("initial_active_orders_not_supported")
+    return {
+        "status": "blocked" if problems else "ready_for_approximate_replay",
+        "blocking_reasons": problems,
+        "model_calls": 0,
+        "trading_days": len(days),
+        "days": rows,
+        "limitations": [
+            "Quote snapshots cannot establish exact fill time, queue position, or intraday fills between observations.",
+            "Unfilled quantities are reported, not silently assumed filled; pending carry and deferred retries are not simulated.",
+            "Virtual buying capacity is a cash-only proxy with modeled fees reserved, not historical KIS buying capacity.",
+        ],
+    }
 
 
 def benchmark_history(rows: list[dict[str, Any]], decision_at: time) -> list[tuple[str, float]]:
@@ -897,7 +962,75 @@ def virtualize_inputs(
     return brief
 
 
-def run_daily_agents(output_dir: Path, workspace_dir: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def analyst_prompt_identity(spec: dict[str, Any]) -> dict[str, str]:
+    """Fingerprint the production-rendered inputs, excluding an output-only location."""
+    if spec.get("stage") != "analyst-review" or spec.get("tool_policy") != run_subagent.STRICT_ARTIFACT_TOOL_POLICY:
+        raise ValueError("analyst reuse requires strict artifact-only Analyst specs")
+    run_subagent.validate_spec(spec)
+    slices = run_subagent.write_review_input_slices(spec)
+    prompt = run_subagent.build_prompt(run_subagent.spec_with_review_slices(spec, slices))
+    # Files are forbidden in strict mode; only this unused output destination differs between arms.
+    prompt = "\n".join(
+        "human_markdown_path: <output-only>" if line.startswith("human_markdown_path: ") else line
+        for line in prompt.split("\n")
+    )
+    model, effort = run_subagent.launcher_model_effort(str(spec["stage"]), str(spec["agent_role"]))
+    return {"prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+            "model": model, "model_reasoning_effort": effort}
+
+
+def run_replay_analysts(specs: list[dict[str, Any]], output_dir: Path, reuse_dir: Path | None) -> dict[str, Any]:
+    identities = {str(spec["task_name"]): analyst_prompt_identity(spec) for spec in specs}
+    if reuse_dir is None:
+        group = run_subagent.run_group(specs, max_workers=2)
+        if group.get("status") != "success":
+            raise RuntimeError(f"analyst agents failed: {group.get('wrappers')}")
+        manifest = {}
+        for spec in specs:
+            task = str(spec["task_name"])
+            wrapper_path, _ = run_subagent.wrapper_paths(spec)
+            wrapper = read_json(wrapper_path)
+            if wrapper.get("status") != "success" or any(
+                wrapper.get(key) != identities[task][key] for key in ("model", "model_reasoning_effort")
+            ) or wrapper.get("spec_fingerprint") != run_subagent.spec_fingerprint(spec):
+                raise ValueError(f"Analyst execution identity mismatch: {task}")
+            manifest[task] = {**identities[task], "wrapper_sha256": run_subagent.file_sha256(wrapper_path)}
+        write_json(output_dir / "analyst-reuse-manifest.json", manifest)
+        return group
+
+    manifest = read_json(reuse_dir / "analyst-reuse-manifest.json")
+    if set(manifest) != set(identities):
+        raise ValueError("Analyst reuse manifest missing or task set differs")
+    wrappers = []
+    for spec in specs:
+        task = str(spec["task_name"])
+        identity = identities[task]
+        source_spec = {**spec, "output_dir": str(reuse_dir)}
+        source_path, _ = run_subagent.wrapper_paths(source_spec)
+        saved = manifest[task]
+        wrapper = read_json(source_path)
+        if not isinstance(saved, dict) or any(saved.get(key) != value for key, value in identity.items()):
+            raise ValueError(f"Analyst reuse input/model mismatch: {task}")
+        if not saved.get("wrapper_sha256") or saved["wrapper_sha256"] != run_subagent.file_sha256(source_path):
+            raise ValueError(f"Analyst reuse source wrapper changed: {task}")
+        if wrapper.get("status") != "success" or wrapper.get("reused_analyst_source") or any(
+            wrapper.get(key) != spec[key] for key in ("stage", "agent_role", "task_name")
+        ) or any(wrapper.get(key) != identity[key] for key in ("model", "model_reasoning_effort")):
+            raise ValueError(f"Analyst reuse source execution mismatch: {task}")
+        wrapper_path, _ = run_subagent.wrapper_paths(spec)
+        wrapper.update({"wrapper_path": str(wrapper_path), "reused_analyst_source": str(source_path),
+                        "reused_existing_wrapper": True, "analyst_prompt_identity": identity})
+        wrappers.append(wrapper)
+    # Check every source before copying any output; never reuse a Judge or another arm's account state.
+    for wrapper in wrappers:
+        write_json(Path(wrapper["wrapper_path"]), wrapper)
+    return {"status": "success", "wrappers": wrappers}
+
+
+def run_daily_agents(
+    output_dir: Path, workspace_dir: Path, *, judge_prompt: Path | None = None,
+    analyst_reuse_dir: Path | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     common = {
         "output_dir": output_dir,
         "decision_brief": "",
@@ -917,9 +1050,7 @@ def run_daily_agents(output_dir: Path, workspace_dir: Path) -> tuple[dict[str, A
     for analyst_spec in first_specs.get("specs", []):
         analyst_spec["tool_policy"] = run_subagent.STRICT_ARTIFACT_TOOL_POLICY
     write_json(output_dir / "analyst-review-specs.json", first_specs)
-    analyst_group = run_subagent.run_group(first_specs["specs"], max_workers=2)
-    if analyst_group.get("status") != "success":
-        raise RuntimeError(f"analyst agents failed: {analyst_group.get('wrappers')}")
+    analyst_group = run_replay_analysts(first_specs["specs"], output_dir, analyst_reuse_dir)
     merge_args = SimpleNamespace(
         output_dir=output_dir,
         decision_brief="",
@@ -945,6 +1076,8 @@ def run_daily_agents(output_dir: Path, workspace_dir: Path) -> tuple[dict[str, A
     )
     judge_spec = build_run_artifacts.build_second_spec(second_args)
     judge_spec["tool_policy"] = run_subagent.STRICT_ARTIFACT_TOOL_POLICY
+    if judge_prompt is not None:
+        judge_spec["artifact_paths"]["persona"] = str(judge_prompt.resolve())
     write_json(output_dir / "judge-review-spec.json", judge_spec)
     wrappers = list(analyst_group.get("wrappers", []))
     if not judge_spec.get("symbol_ids"):
@@ -980,8 +1113,22 @@ def simulate_targets(
     decision_prices: dict[str, float],
     *,
     cost_bps: float,
+    execution_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Fill the production Judge targets without adding a replay-only strategy rule."""
+    """Use production quantity gates before a separate, approximate quote fill step.
+
+    All orders reserve the opening cash budget before any fill is applied. A
+    quote is evidence of a possible limit fill, not proof of a historical fill.
+    Pending-order lifecycle and deferred retries are deliberately not invented.
+    """
+    if not math.isfinite(cost_bps) or cost_bps < 0:
+        raise ValueError("cost_bps must be finite and non-negative")
+    for label, payload in (("Judge", judge), ("execution plan", execution_plan or {})):
+        fatal_errors = [str(item.get("code") or "unknown_error") for item in payload.get("errors", [])
+                        if isinstance(item, dict) and item.get("required") is True
+                        and not (label == "execution plan" and item.get("code") == "order_submission_blocked")]
+        if payload.get("status") == "failed" or fatal_errors:
+            raise ValueError(f"invalid production {label}: {','.join(fatal_errors) or 'failed'}")
     opening_nav, missing = portfolio_value(state, decision_prices)
     if missing:
         raise ValueError(f"missing decision prices: {','.join(missing)}")
@@ -990,40 +1137,90 @@ def simulate_targets(
     costs = 0.0
     fills: list[dict[str, Any]] = []
     decisions: list[dict[str, Any]] = []
-    candidates: list[tuple[int, str, dict[str, Any], int, int]] = []
-    for item in judge.get("symbols", []) if isinstance(judge.get("symbols"), list) else []:
+    orders = copy.deepcopy(execution_plan["orders"]) if execution_plan is not None else [
+        {**item, "order_price": decision_prices.get(symbol_key(item), 0.0)}
+        for item in judge.get("symbols", []) if isinstance(item, dict)
+    ]
+    symbols = [symbol_key(item) for item in orders]
+    if any(not symbol for symbol in symbols) or len(symbols) != len(set(symbols)):
+        raise ValueError("replay orders must have unique, non-empty symbol IDs")
+    # This cash-only proxy reserves modeled fees as well. It is not a claim
+    # about a broker's credit, collateral, or symbol-specific buying capacity.
+    cash_budget = math.floor(float(state["cash"]) / (1.0 + cost_rate))
+    capacities = {symbol: {"max_buy_amt": cash_budget} for symbol in symbols}
+    cash_limit = execute_orders.buy_cash_limit(capacities)
+    used_cash = 0
+    candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for item in orders:
         if not isinstance(item, dict):
             continue
         symbol_id = symbol_key(item)
         current = as_int(state["positions"].get(symbol_id, {}).get("quantity"))
-        target = as_int(item.get("final_holding_quantity"))
+        target = execute_orders.non_negative_int_value(item.get("final_holding_quantity"))
+        if target is None:
+            raise ValueError(f"{symbol_id}: invalid final_holding_quantity")
         direction = "sell" if target < current else "buy" if target > current else "hold"
-        decisions.append(
-            {
-                "symbol_id": symbol_id,
-                "symbol_name": str(item.get("symbol_name") or symbol_id),
-                "judge_target_quantity": target,
-                "current_quantity": current,
-                "relative_attractiveness_rank": as_int(item.get("relative_attractiveness_rank")),
-                "requested_action": direction,
-                "reason_code": str(item.get("reason_code") or ""),
-            }
+        decision = {
+            "symbol_id": symbol_id,
+            "symbol_name": str(item.get("symbol_name") or symbol_id),
+            "judge_target_quantity": target,
+            "current_quantity": current,
+            "relative_attractiveness_rank": as_int(item.get("relative_attractiveness_rank")),
+            "requested_action": direction,
+            "reason_code": str(item.get("reason_code") or ""),
+            "requested_quantity": abs(target - current),
+            "validated_quantity": 0,
+            "filled_quantity": 0,
+            "unfilled_quantity": 0,
+            "unsubmitted_quantity": 0,
+            "execution_reason": "hold",
+        }
+        decisions.append(decision)
+        if direction == "hold":
+            continue
+        price = execute_orders.normalize_limit_price(item.get("order_price"), direction)
+        decision["limit_price"] = price
+        if item.get("result") == "blocked" or item.get("eligible_for_order") is False or price <= 0:
+            decision["execution_reason"] = item.get("reason") or "invalid_or_ineligible_order"
+            decision["unsubmitted_quantity"] = abs(target - current)
+            continue
+        if item.get("order_path", "immediate") != "immediate":
+            raise ValueError(f"{symbol_id}: reservation execution is not supported by quote replay")
+        item.update(direction=direction, validated_order_quantity=abs(target - current))
+        item.setdefault("attempts", [])
+        qty, required_cash, blocked = execute_orders.apply_quantity_gates(
+            item, symbol=symbol_id, side=direction, qty=abs(target - current), price=price,
+            current=current, active_sell_quantity=0, capacities=capacities,
+            sell_capacities={symbol_id: {"max_sell_qty": current}}, used_cash=used_cash,
+            cash_limit=cash_limit, local_sell_gate=True, require_sell_capacity=True,
         )
-        if direction != "hold":
-            candidates.append((0 if direction == "sell" else 1, symbol_id, item, current, target))
-
-    for _priority, symbol_id, item, current, target in sorted(candidates):
-        direction = "sell" if target < current else "buy"
-        quote = quotes.get(symbol_id, {})
-        fill_price = float(quote.get(f"{direction}_price") or 0.0)
-        quote_quantity = int(quote.get(f"{direction}_quantity") or 0)
-        desired_quantity = abs(target - current)
-        fill_quantity = min(desired_quantity, quote_quantity)
+        decision["execution_reason"] = item.get("reason") or "validated"
+        decision["quantity_adjustment"] = copy.deepcopy(item.get("quantity_adjustment") or {})
+        decision["unsubmitted_quantity"] = abs(target - current) if blocked else abs(target - current) - qty
+        if blocked:
+            continue
         if direction == "buy":
-            fill_quantity = min(
-                fill_quantity,
-                affordable_quantity(float(state["cash"]), fill_price * (1.0 + cost_rate)),
-            )
+            used_cash += required_cash
+        decision["validated_quantity"] = qty
+        decision["unfilled_quantity"] = qty
+        candidates.append((item, decision))
+
+    # Preserve production row order; neither rank nor future fills may change
+    # the cash gate of another order in this submission batch.
+    for item, decision in candidates:
+        symbol_id = decision["symbol_id"]
+        direction = decision["requested_action"]
+        quote = quotes.get(symbol_id, {})
+        fill_price = number(quote.get(f"{direction}_price")) or 0.0
+        quote_quantity = as_int(quote.get(f"{direction}_quantity"))
+        limit = decision["limit_price"]
+        if fill_price <= 0 or quote_quantity <= 0:
+            decision["execution_reason"] = "no_executable_quote"
+            continue
+        if (direction == "buy" and fill_price > limit) or (direction == "sell" and fill_price < limit):
+            decision["execution_reason"] = "limit_not_marketable_at_observation"
+            continue
+        fill_quantity = min(decision["validated_quantity"], quote_quantity)
         if fill_price <= 0 or fill_quantity <= 0:
             continue
         notional = fill_quantity * fill_price
@@ -1058,6 +1255,9 @@ def simulate_targets(
         )
         turnover += notional
         costs += cost
+        decision["filled_quantity"] = fill_quantity
+        decision["unfilled_quantity"] -= fill_quantity
+        decision["execution_reason"] = "partial_quote_fill" if decision["unfilled_quantity"] else "quote_fill"
 
     for decision in decisions:
         decision["simulated_final_quantity"] = as_int(
@@ -1068,6 +1268,10 @@ def simulate_targets(
         "gross_turnover_amount": turnover,
         "gross_turnover_pct": turnover / opening_nav * 100.0 if opening_nav > 0 else 0.0,
         "modeled_cost_amount": costs,
+        "opening_buy_cash_limit": cash_limit,
+        "reserved_buy_notional": used_cash,
+        "unfilled_order_quantity": sum(item["unfilled_quantity"] for item in decisions),
+        "unsubmitted_order_quantity": sum(item["unsubmitted_quantity"] for item in decisions),
         "fills": fills,
         "decisions": decisions,
     }
@@ -1137,6 +1341,8 @@ def build_result(
     cost = sum(item["modeled_cost_amount"] for item in daily)
     token_usage: dict[str, int] = {}
     for wrapper in calls:
+        if wrapper.get("reused_analyst_source"):
+            continue
         usage = wrapper.get("token_usage") if isinstance(wrapper.get("token_usage"), dict) else {}
         for key, value in usage.items():
             token_usage[key] = token_usage.get(key, 0) + as_int(value)
@@ -1161,9 +1367,10 @@ def build_result(
     ]
     limitations = [
         "Single LLM sample; model nondeterminism is not estimated.",
-        "Current Analyst/Judge prompts are replayed against archived point-in-time inputs; historical prompt bodies were not archived.",
-        "Virtual fills use the next archived observation's best ask for buys and best bid for sells, capped by level-1 quantity.",
-        "Virtual execution sells first and immediately reuses virtual sale proceeds; it does not reproduce stable production order sequencing, broker cash gates, or deferred retries.",
+        "Analysts use current prompts and Judge uses the manifest's current or explicit snapshot prompt against archived point-in-time inputs; these are not historical model decisions.",
+        "Approximate fills require the next observed ask/bid to satisfy the production limit price and are capped by level-1 quantity; queue priority and intervening fills are unknown.",
+        "Production order planning and quantity gates are reused in row order with the opening virtual cash budget; sale proceeds do not fund another order in the same batch.",
+        "Buying capacity is a cash-only proxy with modeled fees reserved, not exact KIS capacity. Pending carry, deferred retries, and reservations are not simulated; unfilled quantities are reported.",
         f"A flat {config['cost_bps']} bps is modeled on each traded notional because archived broker fee/tax data is unavailable.",
         "Intraday emergency exits are outside this once-daily replay.",
         "Headline max drawdown uses the initial decision NAV and one archived closing NAV per trading day; decision-and-close observed-point MDD is also reported, but full intraday paths are unavailable.",
@@ -1189,7 +1396,10 @@ def build_result(
             "decision_cycles": len(daily),
             "expected_model_calls": len(daily) * 3,
             "observed_wrappers": len(calls),
-            "new_model_calls": len(calls) if new_model_calls is None else new_model_calls,
+            "reused_analyst_calls": sum(bool(item.get("reused_analyst_source")) for item in calls),
+            "total_model_calls": sum(not item.get("reused_analyst_source") for item in calls),
+            "new_model_calls": sum(not item.get("reused_existing_wrapper") and not item.get("reused_analyst_source")
+                                   for item in calls) if new_model_calls is None else new_model_calls,
             "failed_wrappers": sum(item.get("status") != "success" for item in calls),
             "degraded_wrappers": degraded_wrappers,
             "degraded_dependency_codes": degraded_dependency_codes,
@@ -1276,8 +1486,23 @@ def markdown_report(result: dict[str, Any]) -> str:
 
 
 def backtest(args: argparse.Namespace) -> dict[str, Any]:
+    judge_prompt = (getattr(args, "judge_prompt", None) or PIPELINE_DIR / "prompts" / "judge.md").resolve()
+    if not judge_prompt.is_file():
+        raise ValueError(f"Judge prompt unavailable: {judge_prompt}")
+    analyst_reuse_root = getattr(args, "analyst_reuse_root", None)
+    if analyst_reuse_root is not None:
+        analyst_reuse_root = analyst_reuse_root.resolve()
+        if analyst_reuse_root == args.output_root.resolve():
+            raise ValueError("Analyst reuse source must be a separate replay root")
     rows = discover_run_rows(args.runs_root)
     days = select_replay_days(rows, args.start, args.end, args.decision_time)
+    preflight = execution_preflight(days)
+    args.output_root.mkdir(parents=True, exist_ok=True)
+    write_json(args.output_root / "execution-preflight.json", preflight)
+    if getattr(args, "preflight_only", False):
+        return preflight
+    if preflight["status"] == "blocked":
+        raise ValueError("execution preflight blocked before model calls: " + ",".join(preflight["blocking_reasons"]))
     if not days:
         raise ValueError("no replay days found")
     expected_dates = [item["date"] for item in days]
@@ -1289,6 +1514,11 @@ def backtest(args: argparse.Namespace) -> dict[str, Any]:
     )
     config = {
         "strategy_mode": "production_judge_targets",
+        "execution_model": "production_plan_gates_limit_quote_v2",
+        "models": run_subagent.load_subagent_model_config(),
+        "judge_prompt_path": str(judge_prompt),
+        "judge_prompt_sha256": build_run_artifacts.file_sha256(judge_prompt),
+        "analyst_reuse_root": str(analyst_reuse_root) if analyst_reuse_root is not None else None,
         "strategy_policy_path": str(strategy_policy_path),
         "strategy_policy_sha256": build_run_artifacts.file_sha256(strategy_policy_path),
         "runs_root": str(args.runs_root),
@@ -1300,7 +1530,8 @@ def backtest(args: argparse.Namespace) -> dict[str, Any]:
         "decision_time_tolerance_seconds": DECISION_TIME_TOLERANCE_SECONDS,
         "information_cutoff": "archived_decision_brief_generated_at",
         "fill_observation": "next archived run after information cutoff",
-        "fill_price": "buy=best_ask,sell=best_bid",
+        "fill_price": "limit-compatible next ask/bid only",
+        "buy_cash_budget": "opening_virtual_cash_less_modeled_fee_reserve",
         "fill_quantity_cap": "level_1_quantity",
         "cost_bps": args.cost_bps,
         "daily_gross_turnover_reference_pct": turnover_reference_pct,
@@ -1370,9 +1601,17 @@ def backtest(args: argparse.Namespace) -> dict[str, Any]:
         ]
         if future_inputs:
             raise ValueError(f"{day['date']}: replay input after information cutoff: {','.join(future_inputs)}")
-        print(f"[{day_index + 1}/{len(days)}] {day['date']} Analyst 2 + Judge 1", flush=True)
-        judge, wrappers = run_daily_agents(output_dir, args.workspace_dir)
+        reuse_dir = analyst_reuse_root / "runs" / output_dir.name if analyst_reuse_root is not None else None
+        print(f"[{day_index + 1}/{len(days)}] {day['date']} Analyst 2 {'reuse' if reuse_dir else 'new'} + Judge 1", flush=True)
+        judge, wrappers = run_daily_agents(
+            output_dir, args.workspace_dir, judge_prompt=judge_prompt, analyst_reuse_dir=reuse_dir,
+        )
         calls.extend(wrappers)
+        execution_plan = build_run_artifacts.build_execution_plan(SimpleNamespace(
+            output_dir=output_dir, judge_review="", account_before_order="", decision_brief="",
+            analyst_review="", run_id="", started_at="", request_type="analysis",
+            order_path="auto", exchange="AUTO", output=output_dir / "execution-plan.json",
+        ))
         decision_prices = symbol_prices(brief, read_json(output_dir / "account-before-order.json"))
         simulation = simulate_targets(
             state,
@@ -1380,6 +1619,7 @@ def backtest(args: argparse.Namespace) -> dict[str, Any]:
             fill_quotes(day["fill"]["brief"]),
             decision_prices,
             cost_bps=args.cost_bps,
+            execution_plan=execution_plan,
         )
         recorded_fills = [
             {
@@ -1409,6 +1649,10 @@ def backtest(args: argparse.Namespace) -> dict[str, Any]:
             "gross_turnover_amount": rounded_metrics(simulation["gross_turnover_amount"]),
             "gross_turnover_pct": rounded_metrics(simulation["gross_turnover_pct"]),
             "modeled_cost_amount": rounded_metrics(simulation["modeled_cost_amount"]),
+            "opening_buy_cash_limit": simulation["opening_buy_cash_limit"],
+            "reserved_buy_notional": simulation["reserved_buy_notional"],
+            "unfilled_order_quantity": simulation["unfilled_order_quantity"],
+            "unsubmitted_order_quantity": simulation["unsubmitted_order_quantity"],
             "fills": recorded_fills,
             "ending_cash_amount": rounded_metrics(float(state["cash"])),
             "ending_cash_pct": rounded_metrics(float(state["cash"]) / closing_nav * 100.0 if closing_nav > 0 else 0.0),
@@ -1454,7 +1698,8 @@ def backtest(args: argparse.Namespace) -> dict[str, Any]:
         original_state,
         daily,
         calls,
-        new_model_calls=len(calls) - previous_call_count,
+        new_model_calls=sum(not item.get("reused_existing_wrapper") and not item.get("reused_analyst_source")
+                            for item in calls[previous_call_count:]),
     )
     write_json(args.output_root / "backtest-result.json", result)
     (args.output_root / "backtest-report.md").write_text(markdown_report(result), encoding="utf-8")
@@ -1475,10 +1720,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--workspace-dir", type=Path, default=DEFAULT_WORKSPACE)
     parser.add_argument("--market-news-db", type=Path, default=DEFAULT_MARKET_NEWS_DB)
     parser.add_argument("--output-root", type=Path, required=True)
+    parser.add_argument("--judge-prompt", type=Path, help="Explicit baseline Judge persona snapshot; defaults to production.")
+    parser.add_argument("--analyst-reuse-root", type=Path,
+                        help="Reuse this replay's same-date Analysts only after exact rendered-input/model checks; Judges remain separate.")
     parser.add_argument("--start", type=parse_date, default=date(2026, 8, 4))
     parser.add_argument("--end", type=parse_date, default=date(2026, 9, 1))
     parser.add_argument("--decision-time", type=parse_time, default=time(9, 5))
     parser.add_argument("--cost-bps", type=float, default=20.0)
+    parser.add_argument("--preflight-only", action="store_true", help="Check archive execution coverage without model calls.")
     return parser
 
 
@@ -1486,10 +1735,10 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.start > args.end:
         raise SystemExit("--start must be on or before --end")
-    if args.cost_bps < 0:
-        raise SystemExit("--cost-bps must be non-negative")
+    if not math.isfinite(args.cost_bps) or args.cost_bps < 0:
+        raise SystemExit("--cost-bps must be finite and non-negative")
     result = backtest(args)
-    print(json.dumps(result["strategies"], ensure_ascii=False, indent=2, sort_keys=True))
+    print(json.dumps(result if args.preflight_only else result["strategies"], ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 
 

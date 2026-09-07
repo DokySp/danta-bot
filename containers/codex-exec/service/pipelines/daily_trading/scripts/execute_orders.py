@@ -8,6 +8,7 @@ cancel, or correct orders only when --submit is explicitly present.
 from __future__ import annotations
 
 import argparse
+import copy
 import importlib.util
 import json
 import math
@@ -22,10 +23,10 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 try:
-    from .collect_main_evidence import exchange_preflight, resolve_order_market
+    from .collect_main_evidence import collect_account_artifact, collect_day_fills, exchange_preflight, resolve_order_market
     from .order_session import KST, cash_order_session_open, reservation_order_session_open, resolve_order_path_for_exchange
 except ImportError:  # direct script execution
-    from collect_main_evidence import exchange_preflight, resolve_order_market
+    from collect_main_evidence import collect_account_artifact, collect_day_fills, exchange_preflight, resolve_order_market
     from order_session import KST, cash_order_session_open, reservation_order_session_open, resolve_order_path_for_exchange
 
 
@@ -1960,6 +1961,87 @@ def refresh_gates(args: argparse.Namespace, account: dict[str, Any], execution: 
     return active, capacities, sell_capacities, errors, kis
 
 
+def refresh_execution_holdings(kis: Kis, account: dict[str, Any], execution: dict[str, Any], active: list[dict[str, Any]]) -> None:
+    """Refresh positions without combining fresh pending orders with stale holdings."""
+    day = execution_order_day(execution)
+    if day != datetime.now(KST).strftime("%Y%m%d") or execution_order_day(account) != day:
+        raise ValueError("execution/account day is not the current trading date")
+    account_by_symbol = {symbol_key(item): item for item in account.get("symbols", []) if isinstance(item, dict)}
+    order_symbols = {symbol_key(order) for order in execution.get("orders", [])
+                     if isinstance(order, dict) and order.get("active_cancel_only") is not True}
+    symbols = sorted((set(account_by_symbol) | order_symbols) - {""})
+    credentials = dict(env_dv=kis.env, app_key=kis.app_key, app_secret=kis.app_secret, token=kis.token, retries=kis.retries)
+    fills, fill_errors = collect_day_fills(day, default_required=True, **credentials)
+    fresh = collect_account_artifact(
+        symbols, run_id=str(execution.get("run_id") or ""), started_at=str(execution.get("started_at") or ""),
+        max_pages=20, request_type=str(execution.get("request_type") or ""), **credentials,
+    )
+    if fill_errors or fresh.get("status") != "success" or fresh.get("errors"):
+        raise ValueError("fresh account/fill collection is incomplete")
+    if fresh.get("account_summary", {}).get("total_evaluation_amount") is None:
+        raise ValueError("fresh account summary is missing")
+    filled_quantities: dict[str, dict[str, int]] = {}
+    for fill in fills:
+        symbol, side = symbol_key(fill), str(fill.get("direction") or "")
+        quantity = non_negative_int_value(fill.get("filled_quantity"))
+        if not symbol or side not in {"buy", "sell"} or quantity is None:
+            raise ValueError("fresh fill quantity is invalid")
+        filled_quantities.setdefault(symbol, {"buy": 0, "sell": 0})[side] += quantity
+    pending = active_quantities(active)
+    checks = []
+    for item in fresh["symbols"]:
+        symbol = symbol_key(item)
+        if symbol not in order_symbols:
+            continue
+        previous = account_by_symbol.get(symbol, {})
+        reasons = []
+        if previous.get("holding_state_status") in {"unconfirmed", "inconsistent"}:
+            reasons.append("initial_holding_state_not_verified")
+        keys = ("current_live_holding_quantity", "today_buy_quantity", "today_sell_quantity",
+                "pending_and_reserved_buy_quantity", "pending_and_reserved_sell_quantity")
+        old = [non_negative_int_value(previous.get(key)) for key in keys]
+        new = [non_negative_int_value(item.get(key)) for key in keys[:3]]
+        if any(value is None for value in old + new):
+            reasons.append("holding_refresh_quantity_missing")
+        else:
+            current, bought, sold = new
+            old_current, old_bought, old_sold, old_buy_pending, old_sell_pending = old
+            observed = filled_quantities.get(symbol, {"buy": 0, "sell": 0})
+            if bought != observed["buy"] or sold != observed["sell"]:
+                reasons.append("fresh_fills_disagree_with_account_today_quantities")
+            if current != old_current + bought - old_bought - sold + old_sold:
+                reasons.append("fresh_holding_disagrees_with_fill_delta")
+            active_item = pending.get(symbol, {"buy": 0, "sell": 0})
+            expected = current + active_item["buy"] - active_item["sell"]
+            old_expected = old_current + old_buy_pending - old_sell_pending
+            # ponytail: broker reads are non-atomic; changed exposure waits for the next run.
+            if expected != old_expected:
+                reasons.append("expected_holding_changed_during_execution")
+        updated = account_by_symbol.setdefault(symbol, {})
+        updated.update(item)
+        updated["holding_state_status"] = "unconfirmed" if reasons else "consistent"
+        updated["holding_state_reasons"] = reasons
+        updated["pending_and_reserved_buy_quantity"] = pending.get(symbol, {}).get("buy", 0)
+        updated["pending_and_reserved_sell_quantity"] = pending.get(symbol, {}).get("sell", 0)
+        if symbol in order_symbols:
+            checks.append({"symbol_id": symbol, "status": updated["holding_state_status"], "reasons": reasons,
+                           "previous_holding_quantity": old[0], "current_live_holding_quantity": item.get("current_live_holding_quantity"),
+                           "today_buy_quantity": item.get("today_buy_quantity"), "today_sell_quantity": item.get("today_sell_quantity")})
+    account["symbols"] = list(account_by_symbol.values())
+    account["account_summary"] = fresh["account_summary"]
+    account["non_universe_account_positions"] = fresh.get("non_universe_account_positions", [])
+    execution["holding_refresh"] = {
+        "status": "partial" if any(check["reasons"] for check in checks) else "success",
+        "observed_at": fresh["generated_at"], "fill_count": len(fills), "symbols": checks,
+        "account_summary": fresh["account_summary"],
+    }
+    for order in execution.get("orders", []):
+        if isinstance(order, dict) and symbol_key(order) in order_symbols:
+            item = account_by_symbol[symbol_key(order)]
+            order["holding_state_status"] = item["holding_state_status"]
+            order["holding_state_reasons"] = item["holding_state_reasons"]
+
+
 def reconcile(account: dict[str, Any], execution: dict[str, Any], active: list[dict[str, Any]], capacities: dict[str, dict[str, int]], sell_capacities: dict[str, dict[str, int]], *, submit: bool, kis: Kis | None) -> None:
     portfolio_except = load_portfolio_except_symbols()
     active_qty = active_quantities(active)
@@ -2627,6 +2709,18 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         return execution
     normalize_execution_order_prices(execution, account)
     active, capacities, sell_capacities, gate_errors, kis = refresh_gates(args, account, execution)
+    account_for_orders = account
+    if not gate_errors and kis is not None and any(
+        isinstance(order, dict) and order.get("active_cancel_only") is not True
+        for order in execution.get("orders", [])
+    ):
+        # Preserve the decision-time snapshot for audit/replay; fresh evidence lives in execution.
+        account_for_orders = copy.deepcopy(account)
+        try:
+            refresh_execution_holdings(kis, account_for_orders, execution, active)
+        except Exception:  # Fail closed; never expose broker credentials or fall back to old holdings.
+            gate_errors.append(error("holding_refresh_failed", "fresh account/fill reconciliation unavailable"))
+            execution["holding_refresh"] = {"status": "failed", "observed_at": now_iso()}
     account["active_order_lookup_performed"] = True
     account["order_available_lookup_performed"] = not bool(gate_errors)
     account["order_gate_status"] = "failed" if gate_errors else "success"
@@ -2639,7 +2733,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         execution["requires_main_agent_order_execution"] = False
         execution["required_main_agent_actions"] = []
     else:
-        reconcile(account, execution, active, capacities, sell_capacities, submit=args.submit, kis=kis)
+        reconcile(account_for_orders, execution, active, capacities, sell_capacities, submit=args.submit, kis=kis)
         if args.submit and kis is not None:
             reconcile_submitted_cash_orders(kis, execution)
     execution["order_execution_mode"] = "submit" if args.submit else "dry-run"
