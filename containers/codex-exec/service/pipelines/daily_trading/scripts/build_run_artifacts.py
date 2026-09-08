@@ -61,9 +61,9 @@ CHART_RECENT_ROW_LIMITS = {
     "monthly": 4,
     "intraday": 5,
 }
-# Bumped when review input/output semantics change. Version 5 adds advisory
-# account performance and same-day unresolved-buy continuity to Judge context.
-REVIEW_CONTRACT_VERSION = 5
+# Version 8 restores advisory-only strategy context and validates prior fill
+# dates. Do not reuse wrappers produced with experimental versions 6/7.
+REVIEW_CONTRACT_VERSION = 8
 STRATEGY_POLICY_CONFIG_ENV = "DAILY_TRADING_STRATEGY_POLICY_CONFIG"
 STRATEGY_POLICY_CONFIG_FILENAME = "daily-trading-strategy-policy.yaml"
 STRATEGY_ADVISORY_LABELS = {

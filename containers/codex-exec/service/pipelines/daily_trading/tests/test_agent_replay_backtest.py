@@ -122,6 +122,80 @@ def write_run(
 
 
 class AgentReplayBacktestTest(unittest.TestCase):
+    def test_frozen_replay_uses_production_plan_and_no_model_calls(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runs, advice = root / "archive", root / "advice"
+            for session in ("2026-08-05", "2026-08-06"):
+                for label, stamp in (("decision", "09:05"), ("fill", "09:20"), ("close", "15:15")):
+                    name = f"{session}-{label}"
+                    write_run(runs, name, f"{session}T{stamp}:00+09:00", 100)
+                    payload = replay.read_json(runs / name / "decision-brief.json")
+                    for row in payload["symbols"]:
+                        row["exchange_preflight"] = {"exchange": "KRX"}
+                        row["orderbook_summary"].update(best_ask=100, best_bid=100)
+                        row["position_management_context"] = {"enabled": True, "entry_allowed": False}
+                    write_json(runs / name / "decision-brief.json", payload)
+                source = advice / "runs" / f"{session.replace('-', '')}T090500+0900-replay"
+                write_json(source / "decision-brief.json", {"replay_context": {"source_run_id": f"{session}-decision"}})
+                write_json(source / "judge-review.json", {"status": "success", "symbols": [
+                    {"symbol_id": "A", "target_position_value_krw": 1000},
+                    {"symbol_id": "B", "target_position_value_krw": 0, "requested_target_position_value_krw": 500,
+                     "reason_code": "entry_overextended", "one_line_reason": "policy blocked increase",
+                     "position_management": {"adjustment_reason": "entry_overextended",
+                                             "judge_reason_code": "agent_increase",
+                                             "judge_one_line_reason": "original Agent evidence"}},
+                ]})
+            args = replay.build_parser().parse_args([
+                "--runs-root", str(runs), "--workspace-dir", str(root), "--market-news-db", str(root / "missing.sqlite3"),
+                "--frozen-targets-root", str(advice), "--start", "2026-08-05", "--end", "2026-08-06",
+                "--output-root", str(root / "baseline"),
+            ])
+            with patch.object(replay, "run_daily_agents", side_effect=AssertionError("model call forbidden")), \
+                    patch.object(replay.build_run_artifacts, "build_execution_plan",
+                                 wraps=replay.build_run_artifacts.build_execution_plan) as plans:
+                result = backtest(args)
+            self.assertEqual(plans.call_count, 2)
+            self.assertEqual(result["mode"], "conditional_frozen_judge_replay")
+            self.assertEqual(result["coverage"]["new_model_calls"], 0)
+            self.assertEqual(result["coverage"]["expected_model_calls"], 0)
+            self.assertEqual(sum(len(day["fills"]) for day in result["daily"]), 1)
+            self.assertIn("Agent 재판단 백테스트 아님", replay.markdown_report(result))
+            # The second decision uses the first day's virtual holdings/cash,
+            # not the archived real account. No chart-driven entry cap remains.
+            second_dir = root / "baseline/runs/20260806T090500+0900-replay"
+            second = replay.read_json(second_dir / "account-before-order.json")
+            self.assertEqual({s["symbol_id"]: s["current_live_holding_quantity"] for s in second["symbols"]}["B"], 5)
+            for row in replay.read_json(second_dir / "frozen-review-core.json")["symbols"]:
+                self.assertNotIn("position_management_context", row)
+            restored = replay.read_json(second_dir / "judge-review.json")["symbols"][1]
+            self.assertEqual(restored["final_holding_quantity"], 5)
+            self.assertEqual(restored["reason_code"], "agent_increase")
+            self.assertEqual(restored["one_line_reason"], "original Agent evidence")
+            self.assertNotIn("position_management", restored)
+            with self.assertRaisesRegex(ValueError, "identical archived"):
+                replay.normalize_frozen_judge(second_dir, advice / "runs/20260805T090500+0900-replay")
+            manifest = replay.read_json(args.output_root / "manifest.json")
+            self.assertEqual(manifest["review_contract_version"], 8)
+            manifest["review_contract_version"] = 7
+            write_json(args.output_root / "manifest.json", manifest)
+            with patch.object(replay, "run_daily_agents", side_effect=AssertionError("model call forbidden")):
+                with self.assertRaisesRegex(ValueError, "different configuration"):
+                    backtest(args)
+            source_dir = advice / "runs" / second_dir.name
+            original = replay.read_json(source_dir / "judge-review.json")
+            for missing in ("judge_reason_code", "judge_one_line_reason", "requested_target_position_value_krw"):
+                with self.subTest(missing=missing):
+                    invalid = json.loads(json.dumps(original))
+                    row = invalid["symbols"][1]
+                    if missing.startswith("judge_"):
+                        row["position_management"].pop(missing)
+                    else:
+                        row.pop(missing)
+                    write_json(source_dir / "judge-review.json", invalid)
+                    with self.assertRaisesRegex(ValueError, "lacks original Agent"):
+                        replay.normalize_frozen_judge(second_dir, source_dir)
+
     @staticmethod
     def fake_analyst_group(specs: list[dict], max_workers: int) -> dict:
         wrappers = []
@@ -621,6 +695,8 @@ class AgentReplayBacktestTest(unittest.TestCase):
             write_run(root, "baseline", "2026-07-07T09:05:13+09:00", 99)
             write_run(root, "source", "2026-08-04T09:05:13+09:00", 100)
             source_brief = json.loads((source_dir / "decision-brief.json").read_text())
+            source_brief["generated_at"] = "2026-08-04T09:06:30+09:00"
+            source_brief["symbols"][0]["price"]["observed_at"] = "2026-08-04T09:05:40+09:00"
             source_brief["symbols"][0]["active_rotation_momentum"] = {"excess_return_pct_point": 99}
             write_json(source_dir / "decision-brief.json", source_brief)
             rows = discover_run_rows(root)
@@ -666,6 +742,19 @@ class AgentReplayBacktestTest(unittest.TestCase):
             )
             replay_account = json.loads((output / "account-before-order.json").read_text())
             replay_fills = json.loads((output / "today-fills.json").read_text())
+
+            self.assertEqual(replay_brief["started_at"], source_brief["generated_at"])
+            self.assertEqual(replay_brief["source_artifacts"]["collection_started_at"], source_brief["started_at"])
+            self.assertEqual(replay.read_json(source_dir / "decision-brief.json")["started_at"], source_brief["started_at"])
+            with patch.object(run_subagent, "run_group", side_effect=self.fake_analyst_group) as group, \
+                    patch.object(run_subagent, "run_one", return_value={"status": "success"}) as judge, \
+                    patch.object(replay.Pipeline, "write_judge_review", return_value={"status": "success", "symbols": []}):
+                replay.run_daily_agents(output, root)
+            for spec in [*group.call_args.args[0], judge.call_args.args[0]]:
+                self.assertEqual(spec["started_at"], source_brief["generated_at"])
+                slices = run_subagent.write_review_input_slices(spec)
+                prompt = run_subagent.build_prompt(run_subagent.spec_with_review_slices(spec, slices))
+                self.assertIn("started_at: " + source_brief["generated_at"] + "\n", prompt)
 
             self.assertEqual(replay_brief["account_exposure_summary"]["total_evaluation_amount"], 2_000.0)
             self.assertEqual(replay_brief["account_performance_context"]["latest_day"], history[0])

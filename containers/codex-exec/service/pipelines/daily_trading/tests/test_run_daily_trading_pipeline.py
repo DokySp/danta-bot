@@ -2240,6 +2240,13 @@ class RunDailyTradingPipelineSelfTest(unittest.TestCase):
             context = {
                 "price": {"current_or_last": 70000},
                 "holding_quantity_context": {"expected_holding_quantity": 10},
+                # A stale experiment input cannot constrain this baseline.
+                "position_management_context": {
+                    "enabled": True, "status": "ready", "entry_allowed": False,
+                    "max_target_quantity": 1, "protect_trend_reductions": True,
+                    "holding_trend_confirmed": True, "sharp_price_drop": False,
+                    "weight_limit_quantity": 10,
+                },
             }
             cases = [
                 (
@@ -2276,6 +2283,7 @@ class RunDailyTradingPipelineSelfTest(unittest.TestCase):
                 self.assertEqual(normalized["canonical_action"], expected_action)
                 self.assertNotIn("decision_guard", normalized)
                 self.assertNotIn("protected_loss_gate", normalized)
+                self.assertNotIn("position_management", normalized)
 
     def test_increase_accepts_missing_or_malformed_thesis_definition(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

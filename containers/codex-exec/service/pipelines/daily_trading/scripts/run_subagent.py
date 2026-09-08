@@ -1287,6 +1287,19 @@ def prior_decision_context(
         if isinstance(previous_evidence, dict) and evidence_day == previous_day
         else "unavailable"
     )
+    # A query/session label alone does not prove each returned fill's date.
+    # Invalid dates must not become confirmed previous-session trade context.
+    dated_previous_fills = []
+    for fill in previous_fills:
+        filled_at = parse_iso_datetime(fill.get("filled_at"))
+        order_day = str(fill.get("order_date") or "").replace("-", "")
+        if (filled_at is None
+                or filled_at.astimezone(DAILY_TRADING_TIMEZONE).strftime("%Y%m%d") != previous_day
+                or (order_day and order_day != previous_day)):
+            previous_coverage = "partial"
+            continue
+        dated_previous_fills.append(fill)
+    previous_fills = dated_previous_fills
     end_holding_quantity: int | None = None
     account = read_json_cached(output_dir / "account-before-order.json", cache)
     account_symbols = account.get("symbols", []) if isinstance(account, dict) else []
@@ -2375,6 +2388,7 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
     stdout = ""
     stderr = ""
     try:
+        timeout_seconds = int(os.getenv("CODEX_SUBAGENT_TIMEOUT_SECONDS", os.getenv("CODEX_TIMEOUT_SECONDS", "1800")))
         result = subprocess.run(
             cmd,
             cwd=Path(str(spec["workspace_dir"])),
@@ -2383,7 +2397,8 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=int(os.getenv("CODEX_SUBAGENT_TIMEOUT_SECONDS", os.getenv("CODEX_TIMEOUT_SECONDS", "1800"))),
+            # Explicit 0 allows an authorized long replay; deployment default is unchanged.
+            timeout=None if timeout_seconds == 0 else timeout_seconds,
             check=False,
         )
         returncode = result.returncode

@@ -2060,7 +2060,11 @@ class RunSubagentSelfTest(unittest.TestCase):
                     task_name="strict-no-tools",
                 )
                 strict_spec["tool_policy"] = run_subagent_module.STRICT_ARTIFACT_TOOL_POLICY
-                wrapper = run_one(strict_spec)
+                with patch.dict(os.environ, {"CODEX_SUBAGENT_TIMEOUT_SECONDS": "0"}), patch.object(
+                    run_subagent_module.subprocess, "run", wraps=run_subagent_module.subprocess.run
+                ) as unlimited_run:
+                    wrapper = run_one(strict_spec)
+                self.assertIsNone(unlimited_run.call_args.kwargs["timeout"])
                 argv = json.loads(argv_log.read_text(encoding="utf-8").splitlines()[-1])
 
                 self.assertEqual(wrapper["status"], "success")
@@ -2075,7 +2079,11 @@ class RunSubagentSelfTest(unittest.TestCase):
                 os.environ["FAKE_CODEX_REAL_TOOL_EVENTS"] = "1"
                 violating_spec = dict(strict_spec)
                 violating_spec["task_name"] = "strict-tool-call"
-                violating_wrapper = run_one(violating_spec)
+                with patch.dict(os.environ, {"CODEX_SUBAGENT_TIMEOUT_SECONDS": "300"}), patch.object(
+                    run_subagent_module.subprocess, "run", wraps=run_subagent_module.subprocess.run
+                ) as limited_run:
+                    violating_wrapper = run_one(violating_spec)
+                self.assertEqual(limited_run.call_args.kwargs["timeout"], 300)
 
                 self.assertEqual(violating_wrapper["status"], "failed")
                 self.assertTrue(
@@ -2387,6 +2395,26 @@ class RunSubagentSelfTest(unittest.TestCase):
             self.assertEqual(previous_session["close_vs_last_fill_pct"], -10.0)
             self.assertEqual(context["current_session_target_path"], [])
             self.assertEqual(context["thesis_definition"], thesis)
+            # Coverage belongs to each fill's actual KST day, not just the
+            # query label. Keep this data check without any reentry strategy.
+            evidence = json.loads((current / "today-fills.json").read_text(encoding="utf-8"))
+            original_fill = dict(evidence["previous_session"]["fills"][0])
+            for fields, expected_quantity in (
+                ({"filled_at": "2026-07-13T15:15:00Z", "order_date": "2026-07-14"}, 2),
+                ({"filled_at": "2026-07-13T14:59:00Z"}, 0),
+                ({"filled_at": "2026-07-15T09:00:00+09:00"}, 0),
+                ({"filled_at": ""}, 0),
+                ({"order_date": "20260713"}, 0),
+            ):
+                with self.subTest(fields=fields):
+                    evidence["previous_session"]["fills"] = [{**original_fill, **fields}]
+                    write_json(current / "today-fills.json", evidence)
+                    checked = prior_decision_context(current, "042660", "2026-07-15T15:00:00+09:00")
+                    summary = checked["previous_session"]["fill_summary"]
+                    self.assertEqual(summary["sell_quantity"], expected_quantity)
+                    self.assertEqual(summary["coverage_status"], "complete" if expected_quantity else "partial")
+                    if not expected_quantity:
+                        self.assertIsNone(checked["previous_session"]["close_vs_last_fill_pct"])
             self.assertEqual(
                 prior_decision_context(current, "999999", "2026-07-15T15:00:00+09:00")["status"],
                 "no_prior_decision",

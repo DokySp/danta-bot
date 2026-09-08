@@ -736,9 +736,12 @@ def virtualize_inputs(
     brief["portfolio"] = portfolio
     brief["run_id"] = output_dir.name
     information_cutoff = decision_information_cutoff(source)
+    # Strict Agent prompts use started_at as the information boundary, not collection start.
+    brief["started_at"] = information_cutoff.isoformat()
     brief["source_artifacts"] = {
         "mode": "archived_point_in_time_replay",
         "source_run_id": source["path"].name,
+        "collection_started_at": source["started_at"].isoformat(),
         "information_cutoff": information_cutoff.isoformat(),
     }
     brief["account_exposure_summary"] = {
@@ -818,6 +821,9 @@ def virtualize_inputs(
             }
         )
         item["symbol_strategy_context"] = strategy
+        # Archived experiments must not leak their policy instructions into a
+        # fresh baseline review; no active position-management policy remains.
+        item.pop("position_management_context", None)
         item["today_trade_price_context"] = {
             "artifact_status": "success",
             "collection_status": "complete",
@@ -1104,6 +1110,52 @@ def run_daily_agents(
     pipeline.started_at = str(judge_spec.get("started_at") or "")
     artifact = pipeline.write_judge_review(wrapper)
     return artifact, wrappers
+
+
+def normalize_frozen_judge(output_dir: Path, source_dir: Path) -> dict[str, Any]:
+    """Replay fixed advice through current normalization; NOT new Agent decisions."""
+    brief = read_json(output_dir / "decision-brief.json")
+    source_brief = read_json(source_dir / "decision-brief.json")
+    if (not source_brief or source_brief.get("replay_context", {}).get("source_run_id")
+            != brief.get("replay_context", {}).get("source_run_id")):
+        raise ValueError("frozen targets must use the identical archived decision observation")
+    source = read_json(source_dir / "judge-review.json")
+    if source.get("status") != "success" or any(error.get("required") is True for error in source.get("errors", [])):
+        raise ValueError("frozen Judge unavailable or invalid")
+    rows = copy.deepcopy(source.get("symbols", []))
+    for row in rows:
+        adjustment = row.pop("position_management", None)
+        if isinstance(adjustment, dict) and adjustment.get("adjustment_reason"):
+            # Restore the explanation together with the pre-policy target;
+            # otherwise a buy can misleadingly retain an entry-block reason.
+            if "requested_target_position_value_krw" not in row or any(
+                not isinstance(adjustment.get(f"judge_{field}"), str)
+                for field in ("reason_code", "one_line_reason")
+            ):
+                raise ValueError("frozen policy-adjusted Judge lacks original Agent target or reason")
+            for field in ("reason_code", "one_line_reason"):
+                row[field] = adjustment[f"judge_{field}"]
+        row["target_position_value_krw"] = row.get("requested_target_position_value_krw", row.get("target_position_value_krw"))
+    selected = [symbol_key(row) for row in rows]
+    if not selected or len(set(selected)) != len(selected):
+        raise ValueError("frozen Judge requires unique nonempty decisions")
+    core = run_subagent.build_review_core_payload(brief, selected, "judge")
+    core = run_subagent.add_judge_review_holding_context(core, output_dir, str(brief.get("started_at") or ""))
+    if set(selected) != {symbol_key(row) for row in core.get("symbols", [])}:
+        raise ValueError("frozen Judge symbols are absent from the current replay input")
+    core_path = output_dir / "frozen-review-core.json"
+    write_json(core_path, core)
+    write_json(output_dir / "judge-review-spec.json", {"symbol_ids": selected})
+    # Scores remain frozen too; production plan construction still consumes its
+    # usual artifact rather than an alternate simulator-only allocation rule.
+    write_json(output_dir / "analyst-review.json", read_json(source_dir / "analyst-review.json"))
+    pipeline = object.__new__(Pipeline)
+    pipeline.output_dir, pipeline.run_id = output_dir, output_dir.name
+    pipeline.started_at = str(brief.get("started_at") or "")
+    return pipeline.write_judge_review({
+        "parsed_json": {"symbols": rows}, "errors": [],
+        "review_input_paths": {"review_core": str(core_path)},
+    })
 
 
 def simulate_targets(
@@ -1453,6 +1505,7 @@ def markdown_report(result: dict[str, Any]) -> str:
     actual = result["strategies"]["same_boundary_actual"]
     no_trade = result["strategies"]["no_trade"]
     benchmark = result["benchmark"]
+    frozen = result.get("mode") == "conditional_frozen_judge_replay"
     comparison_rows = [
         f"| replay | {replay['return_pct']:.4f}% | {replay['kospi_excess_return_pct']:.4f}%p | {replay['max_drawdown_pct']:.4f}% | {replay['gross_turnover_pct']:.4f}% |",
     ]
@@ -1464,10 +1517,11 @@ def markdown_report(result: dict[str, Any]) -> str:
         ]
     )
     lines = [
-        "# Daily agent replay backtest",
+        "# Fixed-advice execution replay" if frozen else "# Daily agent replay backtest",
         "",
         f"- 기간: {result['coverage']['start_date']} ~ {result['coverage']['end_date']} ({result['coverage']['trading_days']}거래일)",
-        f"- 판단: 거래일당 1회, 총 {result['coverage']['decision_cycles']}회; Analyst 2 + Judge 1",
+        (f"- 기존 판단 고정: 거래일당 1회, {result['coverage']['decision_cycles']}일 연속 계좌 계산; 새 모델 호출 0회, Agent 재판단 백테스트 아님"
+         if frozen else f"- 판단: 거래일당 1회, 총 {result['coverage']['decision_cycles']}회; Analyst 2 + Judge 1"),
         f"- 모델 wrapper: 총 {result['coverage']['observed_wrappers']}개; 이번 실행 신규 {result['coverage']['new_model_calls']}개",
         "",
         "| 전략 | 수익률 | KOSPI 초과수익 | MDD | 총회전율 |",
@@ -1490,6 +1544,11 @@ def backtest(args: argparse.Namespace) -> dict[str, Any]:
     if not judge_prompt.is_file():
         raise ValueError(f"Judge prompt unavailable: {judge_prompt}")
     analyst_reuse_root = getattr(args, "analyst_reuse_root", None)
+    frozen_root = getattr(args, "frozen_targets_root", None)
+    if frozen_root is not None:
+        frozen_root = frozen_root.resolve()
+        if analyst_reuse_root is not None or frozen_root == args.output_root.resolve():
+            raise ValueError("frozen targets require a separate source and no Analyst reuse option")
     if analyst_reuse_root is not None:
         analyst_reuse_root = analyst_reuse_root.resolve()
         if analyst_reuse_root == args.output_root.resolve():
@@ -1513,7 +1572,15 @@ def backtest(args: argparse.Namespace) -> dict[str, Any]:
         strategy_policy.get("performance_review", {}).get("max_daily_gross_turnover_pct") or 0
     )
     config = {
-        "strategy_mode": "production_judge_targets",
+        "strategy_mode": "frozen_judge_targets" if frozen_root else "production_judge_targets",
+        "review_contract_version": build_run_artifacts.REVIEW_CONTRACT_VERSION,
+        "frozen_targets_root": str(frozen_root) if frozen_root else None,
+        "frozen_source_models": read_json(frozen_root / "manifest.json").get("models") if frozen_root else None,
+        "frozen_target_sha256": {
+            day["date"]: build_run_artifacts.file_sha256(
+                frozen_root / "runs" / f"{day['date'].replace('-', '')}T090500+0900-replay" / "judge-review.json"
+            ) for day in days
+        } if frozen_root else {},
         "execution_model": "production_plan_gates_limit_quote_v2",
         "models": run_subagent.load_subagent_model_config(),
         "judge_prompt_path": str(judge_prompt),
@@ -1529,6 +1596,7 @@ def backtest(args: argparse.Namespace) -> dict[str, Any]:
         "decision_time_kst": args.decision_time.strftime("%H:%M:%S"),
         "decision_time_tolerance_seconds": DECISION_TIME_TOLERANCE_SECONDS,
         "information_cutoff": "archived_decision_brief_generated_at",
+        "agent_clock": "decision_information_cutoff",
         "fill_observation": "next archived run after information cutoff",
         "fill_price": "limit-compatible next ask/bid only",
         "buy_cash_budget": "opening_virtual_cash_less_modeled_fee_reserve",
@@ -1602,10 +1670,15 @@ def backtest(args: argparse.Namespace) -> dict[str, Any]:
         if future_inputs:
             raise ValueError(f"{day['date']}: replay input after information cutoff: {','.join(future_inputs)}")
         reuse_dir = analyst_reuse_root / "runs" / output_dir.name if analyst_reuse_root is not None else None
-        print(f"[{day_index + 1}/{len(days)}] {day['date']} Analyst 2 {'reuse' if reuse_dir else 'new'} + Judge 1", flush=True)
-        judge, wrappers = run_daily_agents(
-            output_dir, args.workspace_dir, judge_prompt=judge_prompt, analyst_reuse_dir=reuse_dir,
-        )
+        if frozen_root is not None:
+            print(f"[{day_index + 1}/{len(days)}] {day['date']} frozen-target execution replay; no model calls", flush=True)
+            judge = normalize_frozen_judge(output_dir, frozen_root / "runs" / output_dir.name)
+            wrappers = []
+        else:
+            print(f"[{day_index + 1}/{len(days)}] {day['date']} Analyst 2 {'reuse' if reuse_dir else 'new'} + Judge 1", flush=True)
+            judge, wrappers = run_daily_agents(
+                output_dir, args.workspace_dir, judge_prompt=judge_prompt, analyst_reuse_dir=reuse_dir,
+            )
         calls.extend(wrappers)
         execution_plan = build_run_artifacts.build_execution_plan(SimpleNamespace(
             output_dir=output_dir, judge_review="", account_before_order="", decision_brief="",
@@ -1701,6 +1774,15 @@ def backtest(args: argparse.Namespace) -> dict[str, Any]:
         new_model_calls=sum(not item.get("reused_existing_wrapper") and not item.get("reused_analyst_source")
                             for item in calls[previous_call_count:]),
     )
+    if frozen_root is not None:
+        result["mode"] = "conditional_frozen_judge_replay"
+        result["coverage"]["expected_model_calls"] = 0
+        result["limitations"][:2] = [
+            "No new model calls: archived Agent target values and Analyst opinions are fixed. "
+            "Cash, positions, order plans and quote fills evolve continuously in this replay.",
+            "This diagnoses execution conditional on old advice; it does NOT measure how an Agent "
+            "would change its advice after receiving different rules, inputs or holdings.",
+        ]
     write_json(args.output_root / "backtest-result.json", result)
     (args.output_root / "backtest-report.md").write_text(markdown_report(result), encoding="utf-8")
     return result
@@ -1723,6 +1805,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--judge-prompt", type=Path, help="Explicit baseline Judge persona snapshot; defaults to production.")
     parser.add_argument("--analyst-reuse-root", type=Path,
                         help="Reuse this replay's same-date Analysts only after exact rendered-input/model checks; Judges remain separate.")
+    parser.add_argument("--frozen-targets-root", type=Path,
+                        help="Replay fixed archived Judge targets through current execution; no model calls. Not an Agent backtest.")
     parser.add_argument("--start", type=parse_date, default=date(2026, 8, 4))
     parser.add_argument("--end", type=parse_date, default=date(2026, 9, 1))
     parser.add_argument("--decision-time", type=parse_time, default=time(9, 5))
