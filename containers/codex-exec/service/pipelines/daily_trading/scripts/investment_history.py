@@ -55,7 +55,7 @@ def rationale(judge: dict[str, Any], key: str, before: datetime, *, simulated: b
         "decided_at": decided.isoformat(),
         **({"decision_clock": "replay_information_cutoff"} if simulated else {}),
         **{field: copy.deepcopy(row[field]) for field in (
-            "reason_code", "one_line_reason", "additional_buy_reason", "thesis_definition",
+            "reason_code", "one_line_reason", "additional_buy_reason", "thesis_definition", "plan_review",
         ) if field in row},
     }
 

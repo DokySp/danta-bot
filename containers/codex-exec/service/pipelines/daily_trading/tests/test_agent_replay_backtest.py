@@ -176,8 +176,8 @@ class AgentReplayBacktestTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "identical archived"):
                 replay.normalize_frozen_judge(second_dir, advice / "runs/20260805T090500+0900-replay")
             manifest = replay.read_json(args.output_root / "manifest.json")
-            self.assertEqual(manifest["review_contract_version"], 9)
-            manifest["review_contract_version"] = 8
+            self.assertEqual(manifest["review_contract_version"], 10)
+            manifest["review_contract_version"] = 9
             write_json(args.output_root / "manifest.json", manifest)
             with patch.object(replay, "run_daily_agents", side_effect=AssertionError("model call forbidden")):
                 with self.assertRaisesRegex(ValueError, "different configuration"):

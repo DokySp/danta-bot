@@ -61,8 +61,8 @@ CHART_RECENT_ROW_LIMITS = {
     "monthly": 4,
     "intraday": 5,
 }
-# Version 9 binds Judge memory to confirmed investment episodes, not latest advice.
-REVIEW_CONTRACT_VERSION = 9
+# Version 10 asks Judge to distinguish new facts from changes of interpretation.
+REVIEW_CONTRACT_VERSION = 10
 STRATEGY_POLICY_CONFIG_ENV = "DAILY_TRADING_STRATEGY_POLICY_CONFIG"
 STRATEGY_POLICY_CONFIG_FILENAME = "daily-trading-strategy-policy.yaml"
 STRATEGY_ADVISORY_LABELS = {

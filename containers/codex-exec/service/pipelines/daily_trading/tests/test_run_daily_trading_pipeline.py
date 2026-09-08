@@ -2312,6 +2312,58 @@ class RunDailyTradingPipelineSelfTest(unittest.TestCase):
                 self.assertEqual(normalized["canonical_action"], "increase")
                 self.assertNotIn("thesis_definition", normalized)
 
+    def test_plan_review_distinguishes_change_claims_without_gating_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pipeline = self._make_pipeline(Path(tmp), "plan-comparison")
+            context = {"price": {"current_or_last": 100},
+                "holding_quantity_context": {"expected_holding_quantity": 10},
+                "investment_context": {"status": "unavailable", "active_investment": None}}
+            review = {"business_quality": "사업 경쟁력은 유지", "entry_price": "좋은 회사지만 현재 가격은 비쌈",
+                "comparison": "이전 평가에서 반영하지 못한 집중 위험을 재평가하여 노출을 줄임",
+                "evidence_refs": ["review-core:account_exposure"]}
+            for change_type, target, contradictory in (
+                ("new_information", 300, False), ("reassessment", 0, False),
+                ("no_material_change", 1000, False), ("no_material_change", 0, True),
+                ("unavailable", 0, False), ("no_material_change", 1001, False),
+            ):
+                with self.subTest(change_type=change_type, target=target):
+                    item = {"symbol_id": "005930", "target_position_value_krw": target,
+                        "thesis_assessment": {"status": "intact", "matched_invalidation_condition_ids": []},
+                        "plan_review": {**review, "change_type": change_type},
+                        "plan_review_audit": {"blocks_order": True}}
+                    normalized, errors = pipeline.derive_judge_final_quantity(item, context)
+                    self.assertEqual(errors, [])
+                    self.assertEqual(normalized["final_holding_quantity"], round(target / 100))
+                    self.assertEqual(normalized["plan_review"]["business_quality"], review["business_quality"])
+                    self.assertEqual(normalized["plan_review"]["entry_price"], review["entry_price"])
+                    audit = normalized["plan_review_audit"]
+                    self.assertEqual("quantity_change_without_material_change" in audit["flags"], contradictory)
+                    self.assertFalse(audit["blocks_order"])
+                    self.assertEqual(audit["semantics"], "judge_self_report_not_fact_verification")
+            # Missing or invalid memory/audit fields must not prevent emergency exit.
+            for raw in (None, [], {}, {"change_type": [], "business_quality": 3, "entry_price": True}):
+                normalized, errors = pipeline.derive_judge_final_quantity(
+                    {"symbol_id": "005930", "target_position_value_krw": 0, "plan_review": raw}, context)
+                self.assertEqual(errors, [])
+                self.assertEqual(normalized["final_holding_quantity"], 0)
+                self.assertEqual(normalized["plan_review_audit"]["status"], "needs_review")
+                self.assertFalse(normalized["plan_review_audit"]["blocks_order"])
+
+    def test_plan_review_is_bounded_and_unverified_not_raw_agent_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pipeline = self._make_pipeline(Path(tmp), "plan-comparison-format")
+            raw = {"business_quality": "x" * 201, "entry_price": "y" * 201, "comparison": "z" * 301,
+                "change_type": "new_information", "evidence_refs": [False, 123, {}, "a", "a", "b", "c", "d", "e"],
+                "raw_news": {"ignored": True}, "hidden_reasoning": "ignored"}
+            review, flags = pipeline.sanitize_plan_review(raw)
+            self.assertEqual(flags, [])
+            self.assertEqual([len(review[key]) for key in ("business_quality", "entry_price", "comparison")], [200, 200, 300])
+            self.assertEqual(review["evidence_refs"], ["a", "b", "c", "d"])
+            self.assertNotIn("raw_news", review)
+            self.assertNotIn("hidden_reasoning", review)
+            raw["evidence_refs"] = []
+            self.assertIn("missing_evidence_refs", pipeline.sanitize_plan_review(raw)[1])
+
     def test_valid_thesis_definition_is_sanitized_as_audit_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)

@@ -1105,12 +1105,23 @@ def assert_optional_evidence_policy() -> None:
         or "수수료·세금·손익분기 수치가 공급되지 않으면" not in judge_text
         or "prior_decision_context.latest_decision.opposing_view" not in judge_text
         or "어떤 중요한 현재 근거가 판단의 균형을 바꿨는지" not in judge_text
-        or "같은 방향의 수량 조절이나 일반적인 목표 재평가에는" not in judge_text
+        or "같은 방향의 추가매수·부분매도와 다른 거래일의 변경에도 적용한다" not in judge_text
         or "단일 실시간 가격에서 함께 파생된 여러 차트 지표를 독립된 확인으로 세지 않는다" not in judge_text
-        or "직전 근거 상태에 대한 메타 설명 없이" not in judge_text
+        or "기존 계획과의 비교는 `plan_review`에 남긴다" not in judge_text
         or "latest_decision.decided_at" not in judge_text
     ):
         raise AssertionError("judge.md missing same-session reversal policy")
+    for required in (
+        "investment_context.active_investment.entry", "plan_review.business_quality", "plan_review.entry_price",
+        "기존 계획을 바꿀 만한 사실이 생겼나", "현재 가격 × `expected_holding_quantity`",
+        "new_information", "no_material_change", "reassessment", "unavailable",
+        "가격 하락 자체를 투자 실패로 선언하지 않는다", "가격 상승 자체를 추가매수 근거로 쓰지 않는다",
+        "옛 철회 조건과의 불일치는 매도 금지 사유가 아니다", "Judge의 설명이지 검증된 시장 사실이 아니다",
+    ):
+        if required not in judge_text:
+            raise AssertionError(f"judge.md missing plan-comparison policy: {required}")
+    if "같은 방향의 수량 조절이나 일반적인 목표 재평가에는 이 특별 비교를 적용하지 않는다" in judge_text:
+        raise AssertionError("plan comparison still excludes ordinary quantity adjustments")
     if any(part in judge_text for part in ("진행 중인 계획", "해소·무효화", "이를 압도")):
         raise AssertionError("judge.md retains stale continuity guidance")
     format_text = (prompt_dir / "judge-review-format.md").read_text(encoding="utf-8")
@@ -1129,6 +1140,8 @@ def assert_optional_evidence_policy() -> None:
         or "`opposing_view` is required" not in format_text
         or "`additional_buy_reason` is optional audit text" not in format_text
         or "`thesis_assessment` is optional with `status`" not in format_text
+        or "Return a compact `plan_review` for every symbol" not in format_text
+        or "An audit flag never authorizes or blocks an order" not in format_text
     ):
         raise AssertionError("judge-review-format.md missing field contract")
     duplicated_policy = (
@@ -2237,6 +2250,9 @@ class RunSubagentSelfTest(unittest.TestCase):
                 "increase_case": {"summary": "volume-backed breakout", "evidence_refs": ["chart_context"]},
                 "reduce_case": {"summary": "valuation and spread risk", "evidence_refs": ["financial_context"]},
             }
+            plan_review = {"business_quality": "quality moat", "entry_price": "valuation risk",
+                "change_type": "reassessment", "comparison": "reassess valuation versus the original plan",
+                "evidence_refs": ["financial_context"]}
             write_json(
                 previous_open / "judge-review.json",
                 {
@@ -2261,6 +2277,7 @@ class RunSubagentSelfTest(unittest.TestCase):
                             "one_line_reason": "목표 비중 확대",
                             "opposing_view": opposing_view,
                             "thesis_definition": thesis,
+                            "plan_review": plan_review,
                         }
                     ],
                 },
@@ -2384,6 +2401,7 @@ class RunSubagentSelfTest(unittest.TestCase):
             self.assertEqual(latest["source_run_id"], "previous")
             self.assertEqual(latest["final_holding_quantity"], 7)
             self.assertEqual(latest["opposing_view"], opposing_view)
+            self.assertEqual(latest["plan_review"], plan_review)
             self.assertEqual(latest["order_outcomes"][0]["broker_status"], "rejected")
             self.assertEqual(latest["subsequent_fill_summary"]["coverage_status"], "complete")
             self.assertEqual(latest["subsequent_fill_summary"]["sell_quantity"], 2)

@@ -1435,6 +1435,8 @@ def prior_decision_context(
     previous_opposing_view = decision.get("opposing_view")
     if isinstance(previous_opposing_view, dict):
         result["latest_decision"]["opposing_view"] = previous_opposing_view
+    if isinstance(decision.get("plan_review"), dict):
+        result["latest_decision"]["plan_review"] = decision["plan_review"]
     if best_thesis is not None:
         result["thesis_source_run_id"] = best_thesis[1]
         result["thesis_definition"] = best_thesis[2]

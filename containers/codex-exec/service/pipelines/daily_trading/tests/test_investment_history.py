@@ -46,6 +46,8 @@ def snapshot(root: Path, name: str, stamp: str, held: int, buys: int, sells: int
             "generated_at": (dt + timedelta(seconds=10)).isoformat(), "status": "success", "symbols": [{
                 "symbol_id": "A", "target_position_value_krw": 500, "final_holding_quantity": 5,
                 "reason_code": label, "one_line_reason": label, "thesis_definition": thesis(label),
+                "plan_review": {"business_quality": label, "entry_price": "price assessment",
+                    "change_type": "unavailable", "comparison": label, "evidence_refs": []},
             }]})
     if order:
         order_id, side = order
@@ -72,7 +74,9 @@ class InvestmentHistoryTest(unittest.TestCase):
             history = memory.build_history(current, memory.timestamp(day + "T12:01:00+09:00"), read)
             active = history["symbols"]["A"]["active_investment"]
             self.assertEqual(active["entry"]["rationale"]["thesis_definition"], thesis("entry-plan"))
+            self.assertEqual(active["entry"]["rationale"]["plan_review"]["comparison"], "entry-plan")
             self.assertEqual([change["rationale"]["reason_code"] for change in active["changes"]], ["add-plan", "trim-plan"])
+            self.assertEqual([change["rationale"]["plan_review"]["comparison"] for change in active["changes"]], ["add-plan", "trim-plan"])
             first_id = active["investment_id"]
             snapshot(root, "exit", day + "T13:00:00+09:00", 3, 5, 2, fills=[initial, added, trimmed], label="exit-plan", order=("4", "sell"))
             closed = fill("4", day, "sell", 3, "13:01")

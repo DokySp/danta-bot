@@ -151,7 +151,7 @@ News 수집 허용 범위:
 
 ## Stable 분석 기준과 실험 보존
 
-전략·Judge 프롬프트·deferred-buy-retry는 `v20260825-001-stable` (`f90efa6`) 기준이며 Astra 모델 설정과 감사·replay 도구는 유지한다. 미검증 보유·매도 프롬프트 변경은 별도 사본으로 보존하고 활성 프롬프트에서 제외했다. Phase 1~3의 최소 보유기간, 교체 문턱, 순위 자금배분과 전체시장 후보 주입은 활성 코드에 남기지 않는다. `834be6f`의 감사·시점 제한·strict artifact replay 도구와 거래일 증거 확인을 연구 경로에 보존한다. 연구 데이터·`research-strategy-v1.json`은 실전 판단·주문 경로와 분리한다.
+1단계의 전략·Judge 프롬프트·deferred-buy-retry 기준은 `v20260825-001-stable` (`f90efa6`)이며 Astra 모델 설정과 감사·replay 도구를 유지했다. 과거 실험용 보유·매도 프롬프트 변경은 별도 사본으로 보존하고 활성 프롬프트에서 제외했다. 현재 기준에 추가한 기억 연결과 Judge 판단 변경은 아래 2·3단계에 명시한다. 옛 Phase 1~3의 최소 보유기간, 교체 문턱, 순위 자금배분과 전체시장 후보 주입은 활성 코드에 남기지 않는다. `834be6f`의 감사·시점 제한·strict artifact replay 도구와 거래일 증거 확인을 연구 경로에 보존한다. 연구 데이터·`research-strategy-v1.json`은 실전 판단·주문 경로와 분리한다.
 
 ### 2026-09-08 1단계: 비교 기준 정리
 
@@ -163,7 +163,7 @@ News 수집 허용 범위:
 - Replay `started_at`을 아카이브 decision brief 생성 완료 시각인 `source_artifacts.information_cutoff`와 맞춘다. 수집 시작은 `source_artifacts.collection_started_at`으로 보존하며 실제 cutoff 이후 입력은 계속 차단한다. manifest의 `agent_clock`과 review contract가 다른 실행을 이어 붙이지 않는다.
 - 이전 거래일 체결은 개별 `filled_at`의 한국 날짜와 제공된 `order_date`까지 확인한다. 다른 날짜·시각 누락은 합계에서 제외하고 coverage를 `partial`로 표시한다. 특정 매수·재진입 예외로 사용하지 않는다.
 - `CODEX_SUBAGENT_TIMEOUT_SECONDS=0`은 해당 실행의 subprocess timeout을 해제한다. 미지정 기본 1800초와 양수 제한은 유지한다.
-- 당시 Review contract를 **8**로 구분해 실험 버전 6/7의 저장 wrapper를 재사용하지 않았다. 아래 2단계부터는 contract **9**를 사용한다.
+- 당시 Review contract를 **8**로 구분해 실험 버전 6/7의 저장 wrapper를 재사용하지 않았다. 아래 2단계는 contract **9**, 3단계는 **10**을 사용한다.
 
 `agent_replay_backtest.py --frozen-targets-root <기존 replay 폴더>`는 원래 요청 목표금액과 Analyst 의견을 고정하고 현재 주문 계획·수량/현금 게이트·다음 호가 모형으로 연속 가상 계좌를 계산하는 진단 도구다. 새 모델 호출은 0회이며 **Agent 재판단이나 새 전략의 수익성 검증이 아니다**. 보관된 실험용 `position_management_context`는 새 replay 입력에서 제거한다. 정책 조정된 과거 판단은 목표금액과 함께 보존된 원래 Agent 사유도 복원하며, 원래 목표·사유를 확인할 수 없으면 재생을 거부한다. 기존 `--disable-position-management` 옵션은 해당 정책 제거와 함께 삭제했다. 과거 실험을 정확히 재현할 때는 당시 소스와 manifest를 사용한다.
 
@@ -180,6 +180,18 @@ Judge 입력을 만들 때 `scripts/investment_history.py`가 같은 계좌 환�
 - 새 체결 증거가 들어오면 입력 생성 후 fingerprint를 계산해 예전 Judge wrapper 재사용을 방지한다. 과거 가상 계좌는 `simulated-judge-review.json`만 사용하고 `simulated_fills`로 표시하여 실제 broker 체결과 섞지 않는다. 가상 판단 시각은 replay의 `started_at`(과거 입력 cutoff)이며 실제 파일 생성 시각과 구분한다.
 
 이 변경은 기억과 출처를 연결하는 단계다. Astra 설정, 목표금액·주문 수량·매수/매도 허용 규칙은 바꾸지 않는다. 철회 조건이나 평가 시점이 없다는 이유로 필요한 매도를 차단하지 않는다. 원본 run이 삭제되면 추적 가능한 범위가 줄어드므로 해당 기록의 보관이 필요하다. 누락된 평일이 실제 휴장이었는지 증거가 없을 때도 보수적으로 근거 미확인으로 처리한다. 수익성 개선과 새 판단 방식은 별도 검증 대상이며 이 단계에서 모델 호출 백테스트나 배포를 수행하지 않는다.
+
+### 2026-09-09 3단계: 기억을 실제 판단에 사용
+
+`prompts/judge.md`는 실제 투자 진입·체결 변경 이력을 현재 사실과 비교하도록 한다. 같은 날 방향 반전뿐 아니라 추가매수·부분매도와 다른 거래일의 수량 변경에도 적용한다. 종목의 사업적 질과 현재 가격의 매수 적절성을 분리하며, 가격 하락만으로 thesis 훼손을 선언하거나 가격 상승만으로 확대하지 않는다. 수량을 유지할 때는 과거 목표금액을 복사하지 않고 현재 가격 × 예상 보유수량을 기준으로 판단한다.
+
+Judge는 `plan_review`에 `business_quality`, `entry_price`, `comparison`과 최대 4개 `evidence_refs`를 짧게 남긴다. `change_type`은 `new_information`(새 사실), `reassessment`(같은 사실에 대한 가정·위험 판단 재평가), `no_material_change`(중요 변화 없음), `unavailable`(기존 계획·신규성 비교 불가)로 구분한다. 재평가를 새 사건인 것처럼 쓰지 않으며 반복 헤드라인이나 표현만 바꾼 설명을 독립된 새 사실로 세지 않는다. 원래 기억과 철회 조건이 없어도 현재 위험 근거에 따른 축소·청산은 가능하다.
+
+`run_daily_trading_pipeline.py`는 이 설명을 길이·자료형·허용 분류에 맞춰 저장한다. 실제 정수 수량을 바꾸면서 `no_material_change`라고 설명하면 `plan_review_audit.flags`에 `quantity_change_without_material_change`를 남기며, 빠진 설명·분류·필요한 출처도 표시한다. `recorded`는 형식 기록을 뜻할 뿐 사실 검증 통과가 아니다. 신규성이나 근거 내용의 의미를 Python이 판정하는 기능은 아니며, 이 자기보고·형식 검사 결과는 목표금액·수량·주문을 허용하거나 막지 않는다. Agent가 반환한 `plan_review_audit`는 사용하지 않는다.
+
+저장된 비교는 다음 Judge의 최근 판단 문맥과 체결된 투자 이력에 함께 전달한다. 미체결 비교는 최근 의견으로만 남고 실제 진입 근거를 덮어쓰지 않는다. Review contract는 **10**이며 구버전 wrapper 재사용과 다른 contract로 만든 replay 실행의 이어 붙이기를 막는다. 명시적인 `--frozen-targets-root` 진단은 과거 contract의 목표도 입력받지만, 결과를 `conditional_frozen_judge_replay`로 구분한다. 이는 기존 목표의 주문 재현이지 3단계 Agent의 새 판단 검증이 아니다.
+
+Astra 설정, Analyst 판단 규칙, 주문 안전 조건은 유지한다. 새 서버·의존성·모델 호출 단계·최소 보유기간·스캐너·매도 승인 게이트는 추가하지 않는다. 오프라인 검사는 출력 보존·분류별 표시·주문 비차단·이력 전달을 확인한다. 실제 Astra가 새로운 사실과 재서술을 일관되게 구분하는지, 거래 결과가 좋아지는지는 별도 4단계 새 판단 비교에서 검증해야 하며 이 개발 검사를 수익성 검증으로 부르지 않는다.
 
 ### 실험 판단 기록 — 과거 결과이며 현재 기준의 새 성적이 아님
 

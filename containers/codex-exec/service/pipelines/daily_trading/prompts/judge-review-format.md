@@ -31,6 +31,13 @@ Return JSON:
       "decision_basis": "none",
       "reason_code": "hold_final_quantity",
       "one_line_reason": "기준금액 수준의 목표금액을 유지한다.",
+      "plan_review": {
+        "business_quality": "기존 실적과 경쟁력 근거는 유지된다.",
+        "entry_price": "현재 가격에서 추가 확대할 편익은 확인되지 않는다.",
+        "change_type": "no_material_change",
+        "comparison": "진입 당시 실적 근거와 현재 관측 사이에 중요한 변화가 없어 수량을 유지한다.",
+        "evidence_refs": ["analyst-review:005930:analyst-quality-value"]
+      },
       "opposing_view": {
         "increase_case": {
           "summary": "quality moat and pricing power support maintaining exposure",
@@ -69,6 +76,9 @@ Return JSON:
 - `reason_code` and `one_line_reason` must match the reduce/hold/increase direction implied by the target versus baseline.
 - `opposing_view` is required. `increase_case` and `reduce_case` each contain a short `summary` and its own supplied usable-evidence `evidence_refs`. Do not add a second action, resolution, confidence, transcript, or hidden reasoning field.
 - `additional_buy_reason` is optional audit text for an increase after a same-day buy, not an authorization field.
+- Return a compact `plan_review` for every symbol. `business_quality` and `entry_price` are separate short assessments (up to 200 characters each); `comparison` is a short prior/current/decision explanation (up to 300 characters); `evidence_refs` contains up to 4 supplied source references. Use explicit uncertainty rather than invented values or a reconstructed old plan.
+- `plan_review.change_type` is one of `new_information`, `reassessment`, `no_material_change`, `unavailable`. These are the Judge's claims about the comparison, not independently verified facts. `reassessment` discloses a changed interpretation or risk judgment without pretending a new event occurred; `unavailable` includes a missing comparison baseline.
+- Missing or malformed `plan_review` is recorded as incomplete audit metadata, not grounds to reject a valid target or prevent an exit. `plan_review_audit` is pipeline-owned; do not return it. An audit flag never authorizes or blocks an order.
 - Do not return long `cash_rationale`, `duplicate_exposure_limits`, `price_chart_view`, `rationale`, `risks`, prose arrays, or raw source payloads.
 
 ### Position-thesis fields (audit context)

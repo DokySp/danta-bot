@@ -1597,6 +1597,30 @@ class Pipeline:
             "reduce_case": self.sanitize_opposing_view_case(raw.get("reduce_case")),
         }
 
+    def sanitize_plan_review(self, raw: Any) -> tuple[dict[str, Any] | None, list[str]]:
+        """Bound self-reported comparison metadata; never decide the target."""
+        if not isinstance(raw, dict):
+            return None, ["missing_plan_review"]
+        review: dict[str, Any] = {}
+        flags: list[str] = []
+        for field, limit in (("business_quality", 200), ("entry_price", 200), ("comparison", 300)):
+            value = raw.get(field)
+            review[field] = value.strip()[:limit] if isinstance(value, str) else ""
+            if not review[field]:
+                flags.append(f"missing_{field}")
+        change_type = raw.get("change_type")
+        if not isinstance(change_type, str) or change_type not in {"new_information", "reassessment", "no_material_change", "unavailable"}:
+            change_type = "unavailable"
+            flags.append("invalid_change_type")
+        review["change_type"] = change_type
+        refs = raw.get("evidence_refs")
+        review["evidence_refs"] = list(dict.fromkeys(
+            value.strip()[:160] for value in refs if isinstance(value, str) and value.strip()
+        ))[:4] if isinstance(refs, list) else []
+        if change_type in {"new_information", "reassessment"} and not review["evidence_refs"]:
+            flags.append("missing_evidence_refs")
+        return review, flags
+
     def judge_review_context_by_symbol(self, wrapper: dict[str, Any]) -> dict[str, dict[str, Any]]:
         paths = wrapper.get("review_input_paths") if isinstance(wrapper.get("review_input_paths"), dict) else {}
         review_core_path = paths.get("review_core")
@@ -1735,6 +1759,17 @@ class Pipeline:
         opposing_view_echo = self.sanitize_opposing_view(item.get("opposing_view"))
         if opposing_view_echo is not None:
             normalized["opposing_view"] = opposing_view_echo
+        plan_review, plan_flags = self.sanitize_plan_review(item.get("plan_review"))
+        if plan_review is not None:
+            normalized["plan_review"] = plan_review
+            if canonical_action != "hold" and plan_review["change_type"] == "no_material_change":
+                plan_flags.append("quantity_change_without_material_change")
+        normalized["plan_review_audit"] = {
+            "status": "needs_review" if plan_flags else "recorded",
+            "flags": plan_flags,
+            "semantics": "judge_self_report_not_fact_verification",
+            "blocks_order": False,
+        }
         investment = context.get("investment_context")
         if isinstance(investment, dict):
             normalized["investment_context"] = investment
