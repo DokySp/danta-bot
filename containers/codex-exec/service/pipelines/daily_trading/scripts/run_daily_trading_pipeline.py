@@ -1550,11 +1550,15 @@ class Pipeline:
             conditions.append({"condition_id": condition_id, "description": description[:200]})
         if not conditions:
             return None
-        return {
+        result = {
             "defined_at_run_id": self.run_id,
             "core_rationale": core_rationale.strip()[:300],
             "invalidation_conditions": conditions[:8],
         }
+        evaluation_point = raw.get("evaluation_point")
+        if isinstance(evaluation_point, str) and evaluation_point.strip():
+            result["evaluation_point"] = evaluation_point.strip()[:200]
+        return result
 
     def sanitize_thesis_assessment(self, raw: dict[str, Any]) -> dict[str, Any]:
         status = str(raw.get("status") or "").strip().lower()
@@ -1617,12 +1621,17 @@ class Pipeline:
     ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
         symbol_id = symbol_key(item)
         errors: list[dict[str, Any]] = []
+        investment = context.get("investment_context")
         if context:
             merged_context = dict(item)
             merged_context.update(context)
             context = merged_context
         else:
             context = item
+        context = dict(context)
+        context.pop("investment_context", None)
+        if isinstance(investment, dict):
+            context["investment_context"] = investment
         requested_target_value = non_negative_decimal_value(item.get("target_position_value_krw"))
         if requested_target_value is None:
             errors.append(
@@ -1726,7 +1735,18 @@ class Pipeline:
         opposing_view_echo = self.sanitize_opposing_view(item.get("opposing_view"))
         if opposing_view_echo is not None:
             normalized["opposing_view"] = opposing_view_echo
-        if assessment_echo is not None or thesis_definition_out is not None:
+        investment = context.get("investment_context")
+        if isinstance(investment, dict):
+            normalized["investment_context"] = investment
+            active = investment.get("active_investment") or {}
+            basis = (active.get("entry") or {}).get("rationale") or {}
+            selected = None
+            if investment.get("status") == "reconciled" and thesis_definition_is_valid(basis.get("thesis_definition")):
+                selected = {"source_run_id": basis.get("source_run_id"), "source_started_at": basis.get("decided_at"),
+                            "thesis_definition": basis["thesis_definition"]}
+            normalized["prior_thesis_context"] = self.prior_thesis_context_from_selection(selected)
+            normalized["prior_thesis_context"]["investment_id"] = active.get("investment_id")
+        elif assessment_echo is not None or thesis_definition_out is not None:
             normalized["prior_thesis_context"] = self.prior_thesis_context(symbol_id)
         return normalized
 

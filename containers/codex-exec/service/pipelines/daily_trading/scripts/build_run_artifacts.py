@@ -61,9 +61,8 @@ CHART_RECENT_ROW_LIMITS = {
     "monthly": 4,
     "intraday": 5,
 }
-# Version 8 restores advisory-only strategy context and validates prior fill
-# dates. Do not reuse wrappers produced with experimental versions 6/7.
-REVIEW_CONTRACT_VERSION = 8
+# Version 9 binds Judge memory to confirmed investment episodes, not latest advice.
+REVIEW_CONTRACT_VERSION = 9
 STRATEGY_POLICY_CONFIG_ENV = "DAILY_TRADING_STRATEGY_POLICY_CONFIG"
 STRATEGY_POLICY_CONFIG_FILENAME = "daily-trading-strategy-policy.yaml"
 STRATEGY_ADVISORY_LABELS = {

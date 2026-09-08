@@ -19,6 +19,11 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 from typing import Any
 
+try:
+    from . import investment_history
+except ImportError:  # direct script execution
+    import investment_history
+
 
 REQUIRED_SPEC_FIELDS = {
     "run_id",
@@ -1441,6 +1446,38 @@ def add_judge_review_holding_context(payload: Any, output_dir: Path | None = Non
         return payload
     context_output_dir = output_dir or Path("")
     cache = RunArtifactJsonCache()
+    source = payload.get("source_artifacts")
+    source = source if isinstance(source, dict) else {}
+    cutoff = investment_history.timestamp(
+        payload.get("information_cutoff")
+        or source.get("information_cutoff")
+        or payload.get("generated_at") or current_started_at
+    )
+    history = {}
+    if output_dir is not None and cutoff is not None:
+        history = investment_history.build_history(
+            output_dir, cutoff, cache.read,
+            simulated=source.get("mode") == "archived_point_in_time_replay",
+        )
+        write_json(output_dir / "investment-history.json", history)
+
+    def attach_investment(item: dict[str, Any], key: str = "") -> dict[str, Any]:
+        holding = item.get("holding_quantity_context") or {}
+        context = investment_history.review_context(history, symbol_key(item) or key, holding.get("current_live_holding_quantity"))
+        item["investment_context"] = context
+        prior = item.get("prior_decision_context") or {}
+        # Latest unfilled/hold advice remains decision history, never the
+        # original rationale of the actually held investment.
+        prior.pop("thesis_definition", None)
+        prior.pop("thesis_source_run_id", None)
+        prior["thesis_scope"] = "active_investment_entry"
+        active = context.get("active_investment") or {}
+        basis = (active.get("entry") or {}).get("rationale") or {}
+        if context.get("status") == "reconciled" and thesis_definition_is_valid(basis.get("thesis_definition")):
+            prior["thesis_definition"] = basis["thesis_definition"]
+            prior["thesis_source_run_id"] = basis.get("source_run_id")
+        item["prior_decision_context"] = prior
+        return item
     symbols = payload.get("symbols")
     if isinstance(symbols, list):
         enriched: list[Any] = []
@@ -1462,7 +1499,7 @@ def add_judge_review_holding_context(payload: Any, output_dir: Path | None = Non
                     current_started_at,
                     cache,
                 )
-                enriched.append(copied)
+                enriched.append(attach_investment(copied))
             else:
                 enriched.append(item)
         copied_payload = dict(payload)
@@ -1471,7 +1508,7 @@ def add_judge_review_holding_context(payload: Any, output_dir: Path | None = Non
     if isinstance(symbols, dict):
         copied_payload = dict(payload)
         copied_payload["symbols"] = {
-            symbol_id: dict(
+            symbol_id: attach_investment(dict(
                 item,
                 holding_quantity_context=build_holding_quantity_context(item),
                 prior_decision_context=prior_decision_context(
@@ -1488,7 +1525,7 @@ def add_judge_review_holding_context(payload: Any, output_dir: Path | None = Non
                     current_started_at,
                     cache,
                 ),
-            )
+            ), str(symbol_id))
             if isinstance(item, dict)
             else item
             for symbol_id, item in symbols.items()
@@ -2257,6 +2294,7 @@ def artifact_content_fingerprints(spec: dict[str, Any]) -> dict[str, str | None]
         output_dir = str(spec.get("output_dir", "")).strip()
         if output_dir:
             fingerprints["account_before_order_position_cost"] = file_sha256(Path(output_dir) / "account-before-order.json")
+            fingerprints["investment_history"] = file_sha256(Path(output_dir) / "investment-history.json")
     return fingerprints
 
 
@@ -2308,11 +2346,14 @@ def existing_success_wrapper(spec: dict[str, Any], fingerprint: str) -> dict[str
 
 def reusable_success_wrapper(spec: dict[str, Any]) -> dict[str, Any] | None:
     validate_spec(spec)
+    if spec.get("stage") == "judge-review":
+        write_review_input_slices(spec)
     return existing_success_wrapper(spec, spec_fingerprint(spec))
 
 
 def run_one(spec: dict[str, Any]) -> dict[str, Any]:
     validate_spec(spec)
+    slice_paths = write_review_input_slices(spec) if spec.get("stage") == "judge-review" else None
     fingerprint = spec_fingerprint(spec)
     reused = existing_success_wrapper(spec, fingerprint)
     if reused is not None:
@@ -2321,7 +2362,8 @@ def run_one(spec: dict[str, Any]) -> dict[str, Any]:
     wrapper_path, raw_output_path = wrapper_paths(spec)
     event_log_path, stderr_path = event_log_paths(spec)
     raw_output_path.parent.mkdir(parents=True, exist_ok=True)
-    slice_paths = write_review_input_slices(spec)
+    if slice_paths is None:
+        slice_paths = write_review_input_slices(spec)
     prompt_spec = spec_with_review_slices(spec, slice_paths)
     prompt_text = build_prompt(prompt_spec)
     strict_artifact_only = spec.get("tool_policy") == STRICT_ARTIFACT_TOOL_POLICY

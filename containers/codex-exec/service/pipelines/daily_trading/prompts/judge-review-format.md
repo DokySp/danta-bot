@@ -2,7 +2,7 @@
 
 ## Input Contract
 
-`judge-review` reads the supplied `review-core` (including compact `prior_decision_context` and `analyst_history_context`), the selected-symbol slice from the current `analyst-review.json`, the Judge persona, and this format. `agent_scores` excluded from aggregation are intentionally omitted from the selected slice. Raw prompt fallback and unrelated symbols or files are outside the input contract.
+`judge-review` reads the supplied `review-core` (including compact `investment_context`, `prior_decision_context` and `analyst_history_context`), the selected-symbol slice from the current `analyst-review.json`, the Judge persona, and this format. `agent_scores` excluded from aggregation are intentionally omitted from the selected slice. Raw prompt fallback and unrelated symbols or files are outside the input contract.
 
 ## Review Scope (no direction precondition)
 
@@ -73,6 +73,8 @@ Return JSON:
 
 ### Position-thesis fields (audit context)
 
-- Each symbol's `prior_decision_context` contains `status` (`available`/`no_prior_decision`) and, when available, `previous_session`, `latest_decision`, `current_session_target_path`, and the latest valid historical `thesis_definition`. An active `unresolved_buy_intent` is a same-day cash-gated buy target with no confirmed submission or fill; use its target as the default baseline unless current material investment evidence invalidates it, and name that changed evidence in `one_line_reason` when reducing or withdrawing it. `previous_session.realized_pnl.scope=symbol_session` identifies a broker fact.
+- Each symbol's `prior_decision_context` contains `status` (`available`/`no_prior_decision`) and, when available, `previous_session`, `latest_decision`, and `current_session_target_path`. Its `thesis_definition`, when present, is the confirmed active investment's entry thesis, not the newest unfilled or hold-only advice. An active `unresolved_buy_intent` is a same-day cash-gated buy target with no confirmed submission or fill; use its target as the default baseline unless current material investment evidence invalidates it, and name that changed evidence in `one_line_reason` when reducing or withdrawing it. `previous_session.realized_pnl.scope=symbol_session` identifies a broker fact.
+- `investment_context` is launcher-owned fill/account provenance. `active_investment.entry` is immutable entry evidence; `changes` contains up to 12 latest confirmed changes with original decision reasons and `change_count` discloses the full count. `last_closed_investment` is separate from a new entry. Missing entry/conditions/evaluation point or incomplete history is unknown, never permission to invent an original plan. `reported_at` can be the broker's order timestamp; `confirmed_at` is the observation time, not guaranteed exact fill time. `simulated_fills` is virtual evidence, never a broker claim. Do not return or rewrite `investment_context`; it never authorizes or blocks a target.
 - `thesis_definition` is valid only when `core_rationale` is non-empty and at least one `invalidation_conditions[]` entry has both a non-empty `condition_id` and a non-empty `description`. An empty, missing, or otherwise malformed `thesis_definition` is never treated as valid.
 - `thesis_definition` is optional; only a valid structure is persisted. `thesis_assessment` is optional with `status` (`intact`/`damaged`/`uncertain`) and `matched_invalidation_condition_ids`.
+- Optional `thesis_definition.evaluation_point` records an explicitly chosen evaluation date or event (short text). Omit it when unspecified; do not infer one for an old holding. It is audit metadata, not a deadline or a holding/selling rule.

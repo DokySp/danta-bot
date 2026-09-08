@@ -455,8 +455,8 @@ def step_first_specs_and_analyst_review_checks(tmp: Path, run_dir: Path) -> list
         )
         if len(first_specs["specs"]) != 2 or not Path(first_specs["specs"][0]["artifact_paths"]["persona"]).is_absolute():
             failures.append(f"unexpected first specs: {first_specs}")
-        if any(spec.get("review_contract_version") != 8 for spec in first_specs["specs"]):
-            failures.append(f"analyst specs must use review contract version 8: {first_specs}")
+        if any(spec.get("review_contract_version") != 9 for spec in first_specs["specs"]):
+            failures.append(f"analyst specs must use review contract version 9: {first_specs}")
         subagent_dir = run_dir / "subagents"
         for role in ANALYST_REVIEW_SPEC_ROLES:
             parsed_symbols = [
@@ -825,8 +825,8 @@ def step_second_spec_checks(tmp: Path, run_dir: Path) -> list[str]:
             )
 
         second_spec = build_second_spec(second_spec_args(str(run_dir / "analyst-review.json"), "judge-review-spec.json"))
-        if second_spec.get("review_contract_version") != 8:
-            failures.append(f"judge spec must use review contract version 8: {second_spec}")
+        if second_spec.get("review_contract_version") != 9:
+            failures.append(f"judge spec must use review contract version 9: {second_spec}")
         if second_spec["symbol_ids"] != ["000660", "005930"]:
             failures.append(f"unexpected second spec symbols: {second_spec}")
         if second_spec.get("review_scope_reasons") != {"005930": "held_position", "000660": "symbol_news"}:

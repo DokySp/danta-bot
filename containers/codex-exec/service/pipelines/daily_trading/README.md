@@ -163,11 +163,23 @@ News 수집 허용 범위:
 - Replay `started_at`을 아카이브 decision brief 생성 완료 시각인 `source_artifacts.information_cutoff`와 맞춘다. 수집 시작은 `source_artifacts.collection_started_at`으로 보존하며 실제 cutoff 이후 입력은 계속 차단한다. manifest의 `agent_clock`과 review contract가 다른 실행을 이어 붙이지 않는다.
 - 이전 거래일 체결은 개별 `filled_at`의 한국 날짜와 제공된 `order_date`까지 확인한다. 다른 날짜·시각 누락은 합계에서 제외하고 coverage를 `partial`로 표시한다. 특정 매수·재진입 예외로 사용하지 않는다.
 - `CODEX_SUBAGENT_TIMEOUT_SECONDS=0`은 해당 실행의 subprocess timeout을 해제한다. 미지정 기본 1800초와 양수 제한은 유지한다.
-- Review contract를 **8**로 구분해 실험 버전 6/7의 저장 wrapper를 재사용하지 않는다. 기억을 체결된 투자 단위로 연결하는 2단계는 아직 구현하지 않았다.
+- 당시 Review contract를 **8**로 구분해 실험 버전 6/7의 저장 wrapper를 재사용하지 않았다. 아래 2단계부터는 contract **9**를 사용한다.
 
 `agent_replay_backtest.py --frozen-targets-root <기존 replay 폴더>`는 원래 요청 목표금액과 Analyst 의견을 고정하고 현재 주문 계획·수량/현금 게이트·다음 호가 모형으로 연속 가상 계좌를 계산하는 진단 도구다. 새 모델 호출은 0회이며 **Agent 재판단이나 새 전략의 수익성 검증이 아니다**. 보관된 실험용 `position_management_context`는 새 replay 입력에서 제거한다. 정책 조정된 과거 판단은 목표금액과 함께 보존된 원래 Agent 사유도 복원하며, 원래 목표·사유를 확인할 수 없으면 재생을 거부한다. 기존 `--disable-position-management` 옵션은 해당 정책 제거와 함께 삭제했다. 과거 실험을 정확히 재현할 때는 당시 소스와 manifest를 사용한다.
 
 보존 위치: `/home/uhug/Downloads/danta-stage1-baseline-20260908-1gir5k/`. `source-before.tar.gz`는 정리 전 추적 파일과 미추적 실험 파일, `tracked-before.patch`는 HEAD 대비 원래 변경, `experiments-before.tar.gz`는 아래 최근 결과 3개 폴더의 원본이다. 압축 무결성과 원본 일치를 확인했으며 기존 결과 폴더도 수정하지 않았다. 이 로컬 백업과 기존 `backup/master-before-stable-rebuild-20260905` 브랜치는 배포 파일이 아니다.
+
+### 2026-09-09 2단계: 실제 체결 투자에 기억 연결
+
+Judge 입력을 만들 때 `scripts/investment_history.py`가 같은 계좌 환경의 기존 `execution.json`, `order-lifecycle.json`, `today-fills.json`, `account-before-order.json`, `judge-review.json`을 읽어 `investment-history.json`을 생성한다. 별도 서버·DB·메모리 Agent 없이 실행 기록을 재구성하며 판단 시점 이후의 자료는 제외한다.
+
+- 날짜·종목·매수/매도·현금 주문번호가 정확히 일치하는 제출 주문과 확인 체결만 매수 판단에 연결한다. 기존 lifecycle의 deferred retry 원본 run 연결도 재사용한다. 예약번호를 현금 주문번호로 추정하지 않는다.
+- 0주에서 실제 매수되면 새 `investment_id`와 원래 사유·철회 조건·명시된 평가 시점(`thesis_definition.evaluation_point`, 선택 필드)을 고정한다. 체결된 추가매수·부분매도 사유는 `changes`에 누적하고, 전량 매도는 종료한 투자로 보관한다. 재진입은 새 투자다. 누적 부분체결량은 증가분만 기록하며 미체결·보유 판단으로 진입 근거를 바꾸지 않는다.
+- 원본 매수 사유, 빠진 거래일, 수량 정합성을 확인할 수 없으면 `unavailable`/`incomplete`로 표시한다. 확인된 휴장일에 당일 체결이 없으면 전 거래일에서 이월된 매매 수량은 당일 거래로 세지 않으며 실제 보유수량은 계속 대조한다. 다음 날 확인된 늦은 체결은 완전한 전 거래일 조회와 다음 날 시작 잔고가 일치할 때만 연결한다. `reported_at`은 KIS의 주문 시각일 수도 있고 `confirmed_at`은 확인 시각이므로 정확한 체결 시각이라고 단정하지 않는다.
+- Judge의 `investment_context`에는 진입 근거, 최근 변경 12개와 전체 변경 수, 직전 종료 투자를 전달한다. 전체 변경·종료 기록은 원본 artifact에 남는다. `prior_decision_context.thesis_definition`도 최근 미체결 의견이 아닌 실제 투자 진입 근거를 가리키며, 저장되는 `prior_thesis_context` 역시 같은 출처를 사용한다. Agent가 반환한 `investment_context`는 채택하지 않는다.
+- 새 체결 증거가 들어오면 입력 생성 후 fingerprint를 계산해 예전 Judge wrapper 재사용을 방지한다. 과거 가상 계좌는 `simulated-judge-review.json`만 사용하고 `simulated_fills`로 표시하여 실제 broker 체결과 섞지 않는다. 가상 판단 시각은 replay의 `started_at`(과거 입력 cutoff)이며 실제 파일 생성 시각과 구분한다.
+
+이 변경은 기억과 출처를 연결하는 단계다. Astra 설정, 목표금액·주문 수량·매수/매도 허용 규칙은 바꾸지 않는다. 철회 조건이나 평가 시점이 없다는 이유로 필요한 매도를 차단하지 않는다. 원본 run이 삭제되면 추적 가능한 범위가 줄어드므로 해당 기록의 보관이 필요하다. 누락된 평일이 실제 휴장이었는지 증거가 없을 때도 보수적으로 근거 미확인으로 처리한다. 수익성 개선과 새 판단 방식은 별도 검증 대상이며 이 단계에서 모델 호출 백테스트나 배포를 수행하지 않는다.
 
 ### 실험 판단 기록 — 과거 결과이며 현재 기준의 새 성적이 아님
 
