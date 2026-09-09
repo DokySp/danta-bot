@@ -10,7 +10,7 @@ daily_trading:
     model_reasoning_effort: low
   analyst_review:
     model: gpt-6-astra
-    model_reasoning_effort: xhigh
+    model_reasoning_effort: medium
   judge_review:
     model: gpt-6-astra
-    model_reasoning_effort: xhigh
+    model_reasoning_effort: medium
