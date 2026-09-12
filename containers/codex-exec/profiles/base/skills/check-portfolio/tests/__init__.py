@@ -1,1 +1,0 @@
-"""Check portfolio skill tests."""

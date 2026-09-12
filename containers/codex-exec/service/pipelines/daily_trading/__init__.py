@@ -1,1 +1,0 @@
-"""Daily trading pipeline."""

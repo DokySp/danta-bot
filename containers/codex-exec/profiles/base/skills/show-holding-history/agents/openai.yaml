@@ -1,3 +1,0 @@
-name: show-holding-history
-short_description: "Render holding quantity chart"
-default_prompt: "Use $show-holding-history to render recent submitted holding quantity changes as a time/quantity chart from memory/show-holding-history/holding-changes.csv."

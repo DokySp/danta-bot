@@ -1,3 +1,0 @@
-name: show-touch-point
-short_description: "Render trigger points on candles"
-default_prompt: "Use /show_touch_point {trigger_id} to render codex-exec touch_log_file events on the matching 30-minute indicator candlestick chart."

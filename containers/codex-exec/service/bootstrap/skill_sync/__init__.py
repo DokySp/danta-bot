@@ -1,1 +1,0 @@
-"""Bundled skill synchronization pipeline."""
