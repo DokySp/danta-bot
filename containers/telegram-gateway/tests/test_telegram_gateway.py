@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
+import hmac
+import io
 import json
+import os
+import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from html.parser import HTMLParser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Thread
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from urllib.error import HTTPError
@@ -101,6 +109,119 @@ class TelegramGatewayHtmlSplitTest(unittest.TestCase):
         self.assertTrue(all(len(chunk) <= 4096 for chunk in chunks))
         for chunk in chunks:
             assert_balanced(self, chunk)
+
+
+class GatewayMenuContractTest(unittest.TestCase):
+    def test_example_menu_matches_receiver_commands_without_aliases(self) -> None:
+        receiver_source = MODULE_PATH.parents[1] / "codex-exec" / "src"
+        with patch.object(sys, "path", [str(receiver_source), *sys.path]):
+            from danta.adapters.telegram import COMMANDS
+
+        example = MODULE_PATH.parent / "config" / "routes.example.yaml"
+        routes = telegram_gateway.yaml.safe_load(example.read_text())["routes"]
+        self.assertEqual(set(routes), {"v1"})
+        route = routes["v1"]
+        self.assertEqual(route["url"], "http://codex-exec:8080/telegram")
+        commands = telegram_gateway.route_bot_commands(route, "v1")
+        self.assertEqual({item.command for item in commands}, COMMANDS)
+        self.assertEqual(len(commands), len(COMMANDS))
+        for item in commands:
+            self.assertEqual(item.instruction, f"/{item.command}")
+            text = f"/{item.command} argument"
+            self.assertEqual(
+                telegram_gateway.apply_bot_command_alias(SimpleNamespace(bot_commands=commands), text),
+                text,
+            )
+
+
+class GatewaySigningTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.key = b"ab" * 32
+        self.path = Path(self.tmp.name) / "peer.secret"
+        self.path.write_bytes(self.key + b"\n")
+        self.path.chmod(0o600)
+
+    def test_private_file_validation_fails_without_unsigned_fallback(self) -> None:
+        for mode in (0o400, 0o600):
+            self.path.chmod(mode)
+            self.assertEqual(telegram_gateway.read_peer_secret(self.path), self.key)
+        self.path.chmod(0o600)
+        link = self.path.with_name("link")
+        link.symlink_to(self.path)
+        fifo = self.path.with_name("fifo")
+        os.mkfifo(fifo, 0o600)
+        for bad_path in (link, fifo, self.path.parent, self.path.with_name("missing")):
+            with self.subTest(path=bad_path.name), self.assertRaises(ValueError):
+                telegram_gateway.CodexExecClient(1, signing_secret_file=bad_path)
+        self.path.chmod(0o644)
+        with self.assertRaises(ValueError):
+            telegram_gateway.read_peer_secret(self.path)
+        self.path.chmod(0o600)
+        for content in (b"REPLACE_WITH_64_HEX_CHARACTERS", b"z" * 64, self.key + b" " * 100):
+            self.path.write_bytes(content)
+            with self.subTest(size=len(content)), self.assertRaises(ValueError) as raised:
+                telegram_gateway.read_peer_secret(self.path)
+            self.assertNotIn(content.decode(), str(raised.exception))
+
+    def test_signature_covers_exact_bytes_and_restricts_target(self) -> None:
+        client = telegram_gateway.CodexExecClient(2, signing_secret_file=self.path)
+        client._opener = Mock()
+        client._opener.open.return_value = io.BytesIO(b'{"accepted":true}')
+        payload = {"text": "/status 한글", "chat_id": "synthetic"}
+        self.assertEqual(client.post_message("http://receiver/telegram", payload), {"accepted": True})
+        request = client._opener.open.call_args.args[0]
+        headers = {key.lower(): value for key, value in request.header_items()}
+        timestamp = headers["x-danta-timestamp"]
+        self.assertLess(abs((datetime.now(timezone.utc) - datetime.fromisoformat(timestamp)).total_seconds()), 5)
+        self.assertEqual(json.loads(request.data), payload)
+        expected = hmac.new(self.key, timestamp.encode() + b"\nPOST\n/telegram\n" + request.data, hashlib.sha256).hexdigest()
+        self.assertEqual(headers["x-danta-signature"], expected)
+        self.assertNotIn(self.key.decode(), json.dumps(headers))
+        for url in ("file:///telegram", "http://user:password@receiver/telegram", "http://receiver/other",
+                    "http://receiver/telegram?key=value", "http://receiver/telegram#fragment"):
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                client.post_message(url, payload)
+        self.assertEqual(client._opener.open.call_count, 1)
+
+    def test_unconfigured_client_preserves_unsigned_legacy_behavior(self) -> None:
+        client = telegram_gateway.CodexExecClient(2)
+        with patch.object(telegram_gateway, "urlopen", return_value=io.BytesIO(b"legacy reply")) as opened:
+            self.assertEqual(client.post_message("http://legacy/old-path", {}), {"reply_text": "legacy reply"})
+        self.assertFalse(any(key.lower().startswith("x-danta-") for key, _ in opened.call_args.args[0].header_items()))
+
+    def test_signed_http_does_not_follow_redirect_or_environment_proxy(self) -> None:
+        received = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                received.append(self.path)
+                self.send_response(302)
+                self.send_header("Location", "/redirected")
+                self.end_headers()
+
+            def do_GET(self):
+                received.append(self.path)
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *_args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with patch.dict(os.environ, {"http_proxy": "http://127.0.0.1:1"}, clear=True):
+                client = telegram_gateway.CodexExecClient(2, signing_secret_file=self.path)
+                with self.assertRaisesRegex(RuntimeError, "HTTP 302"):
+                    client.post_message(f"http://127.0.0.1:{server.server_port}/telegram", {})
+            self.assertEqual(received, ["/telegram"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(2)
 
 
 class TelegramClientTest(unittest.TestCase):

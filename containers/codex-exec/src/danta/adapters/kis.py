@@ -1,13 +1,19 @@
-"""KIS direct REST contract; mutations have no implicit retry or token refresh."""
+"""KIS direct REST contract; token renewal happens before requests, never on retry."""
 
+import fcntl
+import hashlib
 import io
 import json
+import os
 import re
+import stat
 import zipfile
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from urllib.parse import urlencode
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from . import AdapterError, FetchResult, http_transport, require_http_ok, utcnow
@@ -45,6 +51,10 @@ class KisToken:
     expires_at: datetime
 
 
+class OrderNotSent(AdapterError):
+    """A local failure before the broker transport was invoked."""
+
+
 def issue_token(*, environment, app_key, app_secret, transport=None, mode="offline", authorize=None):
     """Explicit authorized authentication. Never called by an order retry."""
     if environment not in BASE_URLS:
@@ -56,18 +66,126 @@ def issue_token(*, environment, app_key, app_secret, transport=None, mode="offli
         if authorize is None:
             raise AdapterError("AUTHORIZATION_REQUIRED")
         authorize("broker_auth", environment)
-    response = request("POST", BASE_URLS[environment] + "/oauth2/tokenP", {"content-type": "application/json"},
-                       json.dumps({"grant_type": "client_credentials", "appkey": app_key, "appsecret": app_secret}).encode(), 15)
+    try:
+        response = request("POST", BASE_URLS[environment] + "/oauth2/tokenP", {"content-type": "application/json"},
+                           json.dumps({"grant_type": "client_credentials", "appkey": app_key, "appsecret": app_secret}).encode(), 15)
+    except OSError:
+        raise AdapterError("AUTH_TRANSPORT_FAILED") from None
     require_http_ok(response)
     body = response.json()
     try:
         token = body["access_token"]
         expiry = datetime.strptime(body["access_token_token_expired"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo("Asia/Seoul"))
-        if not isinstance(token, str) or not token:
+        if not isinstance(token, str) or not re.fullmatch(r"[!-~]{1,16384}", token):
             raise ValueError
         return KisToken(token, expiry)
     except (ValueError, TypeError, KeyError):
         raise AdapterError("AUTH_FAILED") from None
+
+
+class KisTokenCache:
+    """Private per-account cache; a file lock covers read, renewal and replacement."""
+
+    def __init__(self, environment, app_key, app_secret, path, transport=None, mode="offline", authorize=None, clock=utcnow):
+        if environment not in BASE_URLS:
+            raise AdapterError("BROKER_ENVIRONMENT_UNSET")
+        if not all(isinstance(value, str) and value for value in (app_key, app_secret)):
+            raise AdapterError("AUTH_CREDENTIALS_REQUIRED")
+        self.environment, self.app_key, self.app_secret = environment, app_key, app_secret
+        self.path = Path(os.path.abspath(path))
+        self.identity = hashlib.sha256(json.dumps([app_key, app_secret]).encode()).hexdigest()
+        self.transport = transport or http_transport(allowed_origins={BASE_URLS[environment]})
+        self.mode, self.authorize, self.clock = mode, authorize, clock
+
+    @staticmethod
+    def _open(directory, name, flags):
+        fd = os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=directory)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1:
+            os.close(fd)
+            raise AdapterError("TOKEN_CACHE_UNSAFE")
+        return fd
+
+    def _now(self):
+        now = self.clock()
+        if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
+            raise AdapterError("TOKEN_CLOCK_INVALID")
+        return now
+
+    def _read(self, directory):
+        try:
+            fd = self._open(directory, self.path.name, os.O_RDONLY)
+        except FileNotFoundError:
+            return None
+        with os.fdopen(fd, "r", encoding="utf-8") as stream:
+            try:
+                data = json.loads(stream.read(32769))
+                if not isinstance(data, dict) or set(data) != {"environment", "identity", "access_token", "expires_at"}:
+                    raise ValueError
+                token = data["access_token"]
+                expiry = datetime.fromisoformat(data["expires_at"])
+                if not isinstance(token, str) or not re.fullmatch(r"[!-~]{1,16384}", token) or expiry.utcoffset() is None:
+                    raise ValueError
+            except (ValueError, TypeError, KeyError, UnicodeError):
+                raise AdapterError("TOKEN_CACHE_INVALID") from None
+        if data["environment"] == self.environment and data["identity"] == self.identity and expiry > self._now() + timedelta(seconds=60):
+            return token
+        return None
+
+    def _write(self, directory, token):
+        name = ".kis-token-" + uuid4().hex + ".tmp"
+        fd = self._open(directory, name, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump({"environment": self.environment, "identity": self.identity,
+                           "access_token": token.access_token, "expires_at": token.expires_at.isoformat()}, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(name, self.path.name, src_dir_fd=directory, dst_dir_fd=directory)
+            os.fsync(directory)
+        finally:
+            try:
+                os.unlink(name, dir_fd=directory)
+            except FileNotFoundError:
+                pass
+
+    def __call__(self, *, allow_refresh=True):
+        if self.mode == "offline" and not getattr(self.transport, "fixture_only", False):
+            raise AdapterError("OFFLINE_NETWORK_BLOCKED")
+        if self.mode != "offline":
+            if self.authorize is None:
+                raise AdapterError("AUTHORIZATION_REQUIRED")
+            self.authorize("broker_auth", self.environment)
+        directory = None
+        try:
+            if any(parent.is_symlink() for parent in self.path.parents):
+                raise AdapterError("TOKEN_CACHE_UNSAFE")
+            self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            directory = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            info = os.fstat(directory)
+            if info.st_uid != os.getuid() or info.st_mode & 0o022:
+                raise AdapterError("TOKEN_CACHE_UNSAFE")
+            with os.fdopen(self._open(directory, self.path.name + ".lock", os.O_RDWR | os.O_CREAT), "r+b") as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | (0 if allow_refresh else fcntl.LOCK_NB))
+                except BlockingIOError:
+                    raise AdapterError("TOKEN_REFRESH_REQUIRED") from None
+                cached = self._read(directory)
+                if cached is not None:
+                    return cached
+                if not allow_refresh:
+                    raise AdapterError("TOKEN_REFRESH_REQUIRED")
+                token = issue_token(environment=self.environment, app_key=self.app_key, app_secret=self.app_secret,
+                                    transport=self.transport, mode=self.mode, authorize=self.authorize)
+                if token.expires_at <= self._now() + timedelta(seconds=60):
+                    raise AdapterError("TOKEN_EXPIRY_INVALID")
+                self._write(directory, token)
+                return token.access_token
+        except OSError:
+            raise AdapterError("TOKEN_CACHE_IO_FAILED") from None
+        finally:
+            if directory is not None:
+                os.close(directory)
 
 
 def order_price(value):
@@ -89,7 +207,7 @@ def symbol(value):
 
 
 class KisAdapter:
-    def __init__(self, *, environment, credentials, transport=None, mode="offline", authorize=None, max_pages=100):
+    def __init__(self, *, environment, credentials, transport=None, mode="offline", authorize=None, max_pages=100, token_provider=None, clock=utcnow):
         if environment not in BASE_URLS:
             raise AdapterError("BROKER_ENVIRONMENT_UNSET")
         self.environment, self.credentials, self.mode = environment, credentials, mode
@@ -97,6 +215,8 @@ class KisAdapter:
         self.transport = transport or http_transport(allowed_origins={self.base_url, MASTER_ORIGIN})
         self.authorize = authorize
         self.max_pages = max_pages
+        self.token_provider = token_provider
+        self.clock = clock
 
     def _permit(self, operation):
         if self.mode == "offline" and not getattr(self.transport, "fixture_only", False):
@@ -110,13 +230,34 @@ class KisAdapter:
         if self.mode == "live" and self.environment != "real" or self.mode == "broker_demo" and self.environment != "demo":
             raise AdapterError("BROKER_ENVIRONMENT_MISMATCH")
 
-    def _request(self, path, tr_id, params, *, post=False, continuation=""):
-        self._permit("broker_write" if post else "broker_read" if path.startswith(TRADING) else "market_read")
+    def _request(self, path, tr_id, params, *, post=False, continuation="", valid_until=None):
+        operation = "broker_write" if post else "broker_read" if path.startswith(TRADING) else "market_read"
+        self._permit(operation)
         c = self.credentials
-        headers = {"content-type": "application/json; charset=utf-8", "authorization": "Bearer " + c.token,
+        try:
+            token = self.token_provider(allow_refresh=not post) if self.token_provider is not None else c.token
+        except Exception as error:
+            if post:
+                raise OrderNotSent(getattr(error, "code", type(error).__name__)) from None
+            raise
+        headers = {"content-type": "application/json; charset=utf-8", "authorization": "Bearer " + token,
                    "appkey": c.app_key, "appsecret": c.app_secret, "custtype": "P", "tr_id": tr_id, "tr_cont": continuation}
-        response = self.transport("POST" if post else "GET", self.base_url + path + ("" if post else "?" + urlencode(params)),
-                                  headers, json.dumps(params).encode() if post else None, 15)
+        def before_send():
+            try:
+                self._permit(operation)
+                if valid_until is not None and self.clock() >= valid_until:
+                    raise AdapterError("ORDER_VALIDITY_EXPIRED")
+            except Exception as error:
+                if post:
+                    raise OrderNotSent(getattr(error, "code", type(error).__name__)) from None
+                raise
+        args = ("POST" if post else "GET", self.base_url + path + ("" if post else "?" + urlencode(params)),
+                headers, json.dumps(params).encode() if post else None, 15)
+        if post and hasattr(self.transport, "request_checked"):
+            response = self.transport.request_checked(*args, before_send=before_send)
+        else:
+            before_send()
+            response = self.transport(*args)
         require_http_ok(response)
         data = response.json()
         if not isinstance(data, dict) or "rt_cd" not in data:
@@ -255,14 +396,16 @@ class KisAdapter:
             raise AdapterError("MASTER_CONTRACT_MISMATCH") from None
         return FetchResult(rows, "COMPLETE" if rows else "FETCH_FAILED", utcnow(), metadata={"board": board, "point_in_time": False})
 
-    def _mutation(self, path, tr, params):
+    def _mutation(self, path, tr, params, *, valid_until=None):
         try:
-            data, _ = self._request(path, tr, params, post=True)
+            data, _ = self._request(path, tr, params, post=True, valid_until=valid_until)
             output = data.get("output", {})
             order_id = output.get("ODNO") or output.get("odno")
             if not order_id:
                 return BrokerResult("UNKNOWN", code="ACK_WITHOUT_ORDER_ID")
             return BrokerResult("ACKNOWLEDGED", str(order_id), output.get("KRX_FWDG_ORD_ORGNO") or output.get("krx_fwdg_ord_orgno"))
+        except OrderNotSent as exc:
+            return BrokerResult("NOT_SENT", code=exc.code)
         except AdapterError as exc:
             if exc.code.startswith("BROKER_REJECTED:"):
                 return BrokerResult("REJECTED", code=exc.code.split(":", 1)[1])
@@ -272,7 +415,7 @@ class KisAdapter:
         except (TimeoutError, OSError):
             return BrokerResult("UNKNOWN", code="TRANSPORT_FAILED")
 
-    def submit(self, ticker, side, quantity, *, limit_price=None):
+    def submit(self, ticker, side, quantity, *, limit_price=None, valid_until=None):
         if type(quantity) is not int or quantity <= 0 or side not in {"BUY", "SELL"}:
             raise AdapterError("INVALID_ORDER")
         if side == "BUY" and limit_price is None:
@@ -281,7 +424,7 @@ class KisAdapter:
             limit_price = order_price(limit_price)
         return self._mutation(TRADING + "order-cash", self._tr("TTC0012U" if side == "BUY" else "TTC0011U"), {
             **self._account_params(), "PDNO": symbol(ticker), "ORD_DVSN": "00" if limit_price is not None else "01", "ORD_QTY": str(quantity),
-            "ORD_UNPR": str(limit_price or 0), "EXCG_ID_DVSN_CD": "KRX", "SLL_TYPE": "01" if side == "SELL" else "", "CNDT_PRIC": ""})
+            "ORD_UNPR": str(limit_price or 0), "EXCG_ID_DVSN_CD": "KRX", "SLL_TYPE": "01" if side == "SELL" else "", "CNDT_PRIC": ""}, valid_until=valid_until)
 
     def cancel(self, order_id, organization, quantity, *, order_type="00"):
         return self._revise(order_id, organization, quantity, "02", "0", order_type)

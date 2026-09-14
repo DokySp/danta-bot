@@ -1,4 +1,6 @@
 /secrets.env
+/config/secrets.yaml
+/auth/
 /secrets/
 /var/
 *.sqlite*

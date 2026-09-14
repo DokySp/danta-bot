@@ -117,6 +117,46 @@ def _matrix(table, left_labels, right_labels):
     raise ValueError("COMPARISON_COLUMNS_UNRECOGNIZED")
 
 
+def _contract_pairs(table):
+    pairs, notes_next = {}, False
+    paths = {
+        ("계약내역", "계약금액원"): "계약금액원",
+        ("계약내역", "최근매출액원"): "최근매출액원",
+        ("계약상대", "계약상대"): "계약상대",
+        ("계약기간", "시작일"): "계약기간시작일",
+        ("계약기간", "종료일"): "계약기간종료일",
+        ("주요계약조건", "계약금선급금유무"): "계약금선급금유무",
+        ("주요계약조건", "대금지급조건등"): "대금지급조건등",
+    }
+    for row in table:
+        if notes_next:
+            if len(row) != 3 or len(set(row)) != 1 or not row[0].strip():
+                raise ValueError("CONTRACT_NOTES_INCOMPLETE")
+            label, value, notes_next = "기타투자판단과관련한중요사항", row[0], False
+        elif len(row) == 3 and len(set(row)) == 1 and _label(row[0]) == "기타투자판단과관련한중요사항":
+            notes_next = True
+            continue
+        elif len(row) == 2:
+            label, value = _label(row[0]), row[1]
+        elif len(row) == 3:
+            label, value = paths.get(tuple(_label(cell) for cell in row[:2])), row[2]
+            if label is None:
+                continue
+        else:
+            continue
+        if label in pairs:
+            raise ValueError("DUPLICATE_CONTRACT_LABEL")
+        pairs[label] = value
+    if notes_next:
+        raise ValueError("CONTRACT_NOTES_INCOMPLETE")
+    terms = ("계약금선급금유무", "대금지급조건등")
+    if any(label in pairs for label in terms):
+        if "계약조건" in pairs or not all(pairs.get(label, "").strip() not in {"", "-", "미정", "미공개", "공시유보"} for label in terms):
+            raise ValueError("CONTRACT_TERMS_INCOMPLETE")
+        pairs["계약조건"] = "; ".join(label + ": " + pairs[label] for label in terms)
+    return pairs
+
+
 def parse_official_event(receipt: dict, documents: list[dict], instrument_id: str,
                          available_at: datetime) -> tuple[EventRecord | None, list[MarketFact], str]:
     title, receipt_id = receipt.get("report_nm", ""), receipt.get("rcept_no", "")
@@ -181,17 +221,13 @@ def parse_official_event(receipt: dict, documents: list[dict], instrument_id: st
                         polarity = "POSITIVE" if all(Decimal(values[key + "_current"]) > Decimal(values[key + "_prior"]) for key in ("revenue", "operating_profit")) else "UNKNOWN"
                         comparison = f"{basis}; KRW; {values['current_period']} vs {values['prior_period']}; {'reported' if family == 'earnings_quality' else 'company forecast, not realized results'}"
                     else:
-                        pairs = {}
-                        for row in table:
-                            if len(row) == 2:
-                                label = _label(row[0])
-                                if label in pairs:
-                                    raise ValueError("DUPLICATE_CONTRACT_LABEL")
-                                pairs[label] = row[1]
+                        pairs = _contract_pairs(table)
                         fields = {"contract_amount": "계약금액원", "previous_revenue": "최근매출액원", "counterparty": "계약상대", "conditions": "계약조건", "start_date": "계약기간시작일", "end_date": "계약기간종료일"}
                         if not all(label in pairs for label in fields.values()):
                             raise ValueError("COMPLETE_CONTRACT_FIELDS_REQUIRED")
                         values = {key: pairs[label] for key, label in fields.items()}
+                        if "기타투자판단과관련한중요사항" in pairs:
+                            values["additional_terms"] = pairs["기타투자판단과관련한중요사항"]
                         for key in ("contract_amount", "previous_revenue"):
                             values[key] = str(_amount(values[key]))
                             if Decimal(values[key]) <= 0:
@@ -199,7 +235,7 @@ def parse_official_event(receipt: dict, documents: list[dict], instrument_id: st
                         for key in ("start_date", "end_date"):
                             value = values[key].replace(".", "-").replace("/", "-")
                             values[key] = date.fromisoformat(value).isoformat()
-                        if values["start_date"] > values["end_date"] or not values["counterparty"].strip() or not values["conditions"].strip():
+                        if values["start_date"] > values["end_date"] or any(values[key].strip() in {"", "-", "미정", "미공개", "공시유보"} for key in ("counterparty", "conditions")):
                             raise ValueError("CONTRACT_TERMS_INCOMPLETE")
                         if any(word in title for word in ("MOU", "업무협약", "검토")):
                             raise ValueError("NOT_A_CONFIRMED_CONTRACT")

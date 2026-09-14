@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import html
+import hashlib
+import hmac
 import json
 import logging
 import base64
@@ -8,6 +10,7 @@ import os
 import re
 import secrets
 import signal
+import stat
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -18,8 +21,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode
-from urllib.request import Request, urlopen
+from urllib.parse import quote, urlencode, urlsplit
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener, urlopen
 
 import yaml
 
@@ -1091,6 +1094,7 @@ class Config:
     attachment_max_file_bytes: int
     attachment_max_total_bytes: int
     attachment_max_pending: int
+    peer_secret_file: Path | None = None
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -1124,6 +1128,7 @@ class Config:
                 200 * 1024 * 1024,
             ),
             attachment_max_pending=env_int("GATEWAY_ATTACHMENT_MAX_PENDING", 10),
+            peer_secret_file=env_path("DANTA_TELEGRAM_PEER_SECRET_FILE"),
         )
 
 
@@ -1452,20 +1457,57 @@ class TelegramClient:
         self.post_multipart(method, payload, {field_name: (filename, content, content_type)})
 
 
+def read_peer_secret(path: Path) -> bytes:
+    """Read one private 64-hex signing key without following a final symlink."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) not in {0o400, 0o600}:
+                raise ValueError
+            raw = stream.read(129)
+        if len(raw) > 128:
+            raise ValueError
+        secret = raw.strip()
+        if not re.fullmatch(rb"[0-9a-fA-F]{64}", secret):
+            raise ValueError
+    except (OSError, ValueError):
+        raise ValueError("Gateway signing secret requires a private 0400/0600 file containing 64 hex characters") from None
+    return secret
+
+
+class NoSignedRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 class CodexExecClient:
-    def __init__(self, timeout: int) -> None:
+    def __init__(self, timeout: int, *, signing_secret_file: Path | None = None) -> None:
         self.timeout = timeout
+        self._signing_secret = read_peer_secret(signing_secret_file) if signing_secret_file is not None else None
+        self._opener = build_opener(ProxyHandler({}), NoSignedRedirect()) if self._signing_secret else None
 
     def post_message(self, url: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         body = json.dumps(payload).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        if self._signing_secret is not None:
+            target = urlsplit(url)
+            if (target.scheme not in {"http", "https"} or not target.hostname or target.username is not None
+                    or target.password is not None or target.path != "/telegram" or target.query or target.fragment):
+                raise ValueError("Signed gateway requests require an HTTP(S) /telegram URL without credentials or query")
+            timestamp = datetime.now(timezone.utc).isoformat()
+            message = timestamp.encode() + b"\nPOST\n/telegram\n" + body
+            headers["X-Danta-Timestamp"] = timestamp
+            headers["X-Danta-Signature"] = hmac.new(self._signing_secret, message, hashlib.sha256).hexdigest()
         request = Request(
             url,
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             method="POST",
         )
         try:
-            with urlopen(request, timeout=self.timeout) as response:
+            open_request = self._opener.open if self._opener else urlopen
+            with open_request(request, timeout=self.timeout) as response:
                 raw = response.read().decode("utf-8")
         except HTTPError as exc:
             raw = exc.read().decode("utf-8", errors="replace")
@@ -1505,7 +1547,7 @@ class GatewayApp:
     def __init__(self, config: Config) -> None:
         self.config = config
         self.routing_store = RoutingConfigStore(config.gateway_routes_file)
-        self.codex = CodexExecClient(config.http_timeout)
+        self.codex = CodexExecClient(config.http_timeout, signing_secret_file=config.peer_secret_file)
         self.router = Router(self.routing_store)
         self.stop_event = threading.Event()
         self.offsets: dict[str, int | None] = {}

@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "id": null,
+  "config_hash": null,
+  "strategy_hash": null,
+  "account_alias": null,
+  "environment": null,
+  "code_id": null,
+  "model_id": null,
+  "prompt_hash": null,
+  "capabilities": [],
+  "issued_at": null,
+  "expires_at": null,
+  "operational_evidence": {
+    "runtime_manifest_sha256": null,
+    "account_reconciled": false,
+    "ownership_reconciled": false,
+    "single_writer": false,
+    "local_storage": false,
+    "backup_restore": false,
+    "model_isolation": false,
+    "cost_schedule": false,
+    "calendar": false,
+    "quote_timestamp": false,
+    "protection_performance": false
+  }
+}

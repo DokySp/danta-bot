@@ -3,3 +3,4 @@ __pycache__/
 config/*.env
 !config/*.env.example
 config/routes.yaml
+config/*.secret

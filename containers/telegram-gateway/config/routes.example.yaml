@@ -1,87 +1,60 @@
 routes:
-  # base worker through bot v1
+  # New codex-exec service; controls still require trusted runtime approval.
   v1:
     env_file: /app/config/telegram-v1.env
     url: http://codex-exec:8080/telegram
     bot_commands:
-      - command: stop
-        description: 현재 Codex 작업 중지
-        instruction: /stop
-      - command: session
-        description: 현재 Codex 세션 정보
-        instruction: /session
-      - command: new
-        description: 새 Codex 세션 생성
-        instruction: /new
+      - command: status
+        description: 엔진 상태와 계좌 대사 상태 확인
+        instruction: /status
+      - command: report
+        description: 거래·판단 기록 보고서 조회
+        instruction: /report
       - command: usage
-        description: Codex 사용량 확인
+        description: 기록된 모델 호출 내역 조회
         instruction: /usage
       - command: version
-        description: 배포 버전 확인
+        description: 코드·설정·전략 버전 확인
         instruction: /version
+      - command: review
+        description: 전체 투자 검토 요청(운영 승인 필요)
+        instruction: /review
+      - command: pause
+        description: 신규 판단 일시정지(보호 감시 유지)
+        instruction: /pause
+      - command: stop
+        description: 신규 판단 일시정지(보호 감시 유지)
+        instruction: /stop
+      - command: resume
+        description: 계좌 대사·승인 확인 후 판단 재개
+        instruction: /resume
+      - command: session
+        description: 현재 대화 세션 확인
+        instruction: /session
+      - command: new
+        description: 새 대화 세션 시작(거래 상태 유지)
+        instruction: /new
+      - command: schedule_on
+        description: 승인된 투자 검토 스케줄 활성화
+        instruction: /schedule_on
+      - command: schedule_off
+        description: 투자 검토 스케줄 중지(보호 감시 유지)
+        instruction: /schedule_off
       - command: reasoning_effort
-        description: 기본 reasoning effort 확인·변경
+        description: 추론 수준 확인·변경 승인 요청
         instruction: /reasoning_effort
+      - command: add_portfolio_ticker
+        description: 검토 후보 종목 추가(보유 변경 없음)
+        instruction: /add_portfolio_ticker
+      - command: remove_portfolio_ticker
+        description: 검토 후보 종목 제거(자동 매도 없음)
+        instruction: /remove_portfolio_ticker
+      - command: add_portfolio_except_ticker
+        description: 검토 제외 종목 추가(자동 매도 없음)
+        instruction: /add_portfolio_except_ticker
+      - command: remove_portfolio_except_ticker
+        description: 검토 제외 종목 해제
+        instruction: /remove_portfolio_except_ticker
       - command: show_touch_point
-        description: 가격 터치 지점 그래프
+        description: 투자 논제와 가격 감시 조건 조회
         instruction: /show_touch_point
-      - command: add_portfolio_ticker
-        description: 포트폴리오 종목 추가
-        instruction: /add_portfolio_ticker
-      - command: remove_portfolio_ticker
-        description: 포트폴리오 종목 삭제
-        instruction: /remove_portfolio_ticker
-      - command: add_portfolio_except_ticker
-        description: 제외 종목 추가
-        instruction: /add_portfolio_except_ticker
-      - command: remove_portfolio_except_ticker
-        description: 제외 종목 삭제
-        instruction: /remove_portfolio_except_ticker
-      - command: schedule_on
-        description: 일일 거래 스케줄 활성화
-        instruction: /schedule_on
-      - command: schedule_off
-        description: 일일 거래 스케줄 비활성화
-        instruction: /schedule_off
-
-  # experimental worker through bot v2
-  v2:
-    env_file: /app/config/telegram-v2.env
-    url: http://codex-exec-experimental:8080/telegram
-    bot_commands:
-      - command: stop
-        description: 현재 Codex 작업 중지
-        instruction: /stop
-      - command: session
-        description: 현재 Codex 세션 정보
-        instruction: /session
-      - command: new
-        description: 새 Codex 세션 생성
-        instruction: /new
-      - command: usage
-        description: Codex 사용량 확인
-        instruction: /usage
-      - command: version
-        description: 배포 버전 확인
-        instruction: /version
-      - command: reasoning_effort
-        description: 기본 reasoning effort 확인·변경
-        instruction: /reasoning_effort
-      - command: add_portfolio_ticker
-        description: 포트폴리오 종목 추가
-        instruction: /add_portfolio_ticker
-      - command: remove_portfolio_ticker
-        description: 포트폴리오 종목 삭제
-        instruction: /remove_portfolio_ticker
-      - command: add_portfolio_except_ticker
-        description: 제외 종목 추가
-        instruction: /add_portfolio_except_ticker
-      - command: remove_portfolio_except_ticker
-        description: 제외 종목 삭제
-        instruction: /remove_portfolio_except_ticker
-      - command: schedule_on
-        description: 일일 거래 스케줄 활성화
-        instruction: /schedule_on
-      - command: schedule_off
-        description: 일일 거래 스케줄 비활성화
-        instruction: /schedule_off

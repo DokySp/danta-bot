@@ -1,0 +1,89 @@
+{
+  "scope": "OFFLINE_RUNTIME_PREPARATION_ONLY",
+  "base_commit": "35db0d2",
+  "tests": {
+    "codex_exec": 150,
+    "telegram_gateway": 28,
+    "repo_scripts": 15,
+    "total": 193,
+    "result": "PASS"
+  },
+  "engine": {
+    "result": "PASS",
+    "evidence": "/tmp/danta-service-image-validation-stdin-600xqrql",
+    "tested_at": "2026-09-14T01:24:42.473620+00:00",
+    "uid": 10001,
+    "image_code_id": "bf9d06808c094e506dadad9a4d0d37653d53518e5e5abb679aee07bf79b9afaf",
+    "doctor": {
+      "code_id": "bf9d06808c094e506dadad9a4d0d37653d53518e5e5abb679aee07bf79b9afaf",
+      "config_hash": "91a0f3b3974f7b8dbc13b5e93392c4133fa501e1d32c4a6b135ec934f7d6855c",
+      "configuration": "VALID",
+      "default_network": "BLOCKED",
+      "external_integration": "EXTERNAL_INTEGRATION_UNVERIFIED",
+      "live": "LIVE_NOT_AUTHORIZED",
+      "mode": "offline",
+      "strategy": "STRATEGY_UNPROVEN",
+      "strategy_hash": "5a171ec89b351cd12dfa55acf087f4cb71c105c0cfad7a58c62cde6a47d5ee2c"
+    },
+    "synthetic_run_status": "COMPLETE",
+    "synthetic_order_status": "FIXTURE_FILLED",
+    "same_request_reused": true,
+    "holdings_count": 1,
+    "service_default_no_socket": true,
+    "readme_sha256": "26d74f328784dcd461dc3aedf0f58d7e60855e41ee9179b0cc6fe8ec51be7006",
+    "design_heading_count": 92,
+    "image_tag": "danta-codex-exec:runtime-20260914",
+    "image_id": "sha256:e8b13c6951663b587f1c6a3d72eb5cceb1165073c3be8fe8f8d17b73749df7b2",
+    "isolation": "nonroot_readonly_network_none_no_capabilities_no_new_privileges"
+  },
+  "container_cli_probe": {
+    "created_at": "2026-09-14T01:24:48.206305+00:00",
+    "cli_version": "codex-cli 0.153.4",
+    "launcher_sha256": "56ef98ab4032d317ab26e9b5e5a175650717351edb16ed9cde0cb6d1734d62da",
+    "market_tools": [
+      "get_bars",
+      "get_candidate",
+      "get_event",
+      "get_fact",
+      "get_position_thesis",
+      "search_official_evidence"
+    ],
+    "remaining_builtin_tools": [
+      "list_mcp_resource_templates",
+      "list_mcp_resources",
+      "read_mcp_resource",
+      "request_user_input"
+    ],
+    "shell_call_refused": true,
+    "patch_call_refused": true,
+    "auth_canary_not_read": true,
+    "environment_keys": [
+      "CODEX_HOME",
+      "HOME",
+      "LANG",
+      "PATH"
+    ],
+    "provider": "local_loopback_fixture",
+    "real_model_or_auth_used": false,
+    "runtime_authorization": false,
+    "operational_auth_mount_verified": false,
+    "image_id": "sha256:e8b13c6951663b587f1c6a3d72eb5cceb1165073c3be8fe8f8d17b73749df7b2"
+  },
+  "compose": {
+    "offline_config": "PASS",
+    "runtime_config": "PASS",
+    "actual_runtime_started": false
+  },
+  "credentials": {
+    "private_file_migrated": true,
+    "mode": "0600",
+    "git_excluded": true,
+    "image_excluded": true,
+    "values_in_shared_changes": false,
+    "actual_kis_token_issued": false
+  },
+  "external_integration": "UNVERIFIED",
+  "actual_auth_or_model_used": false,
+  "live_orders_authorized": false,
+  "docker_push_or_production_deployment": false
+}

@@ -351,6 +351,30 @@ class AdapterContracts(unittest.TestCase):
         self.assertEqual(classify_failure("model_not_found"), "MODEL_UNSUPPORTED")
         self.assertEqual(classify_failure("503 server_error"), "TRANSIENT_FAILURE")
 
+    def test_codex_reuses_operator_login_directory_with_file_storage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            auth = Path(directory) / "auth.with.dots"
+            attempt = Path(directory) / "attempt"
+            command, env = restricted_command(sys.executable, model_id="fixture", reasoning_effort="low",
+                auth_home=auth, attempt_dir=attempt, schema_path=attempt / "schema.json",
+                snapshot_path=attempt / "input.json", auth_mode="chatgpt")
+            self.assertEqual(env["CODEX_HOME"], str(auth))
+            self.assertNotEqual(env["HOME"], env["CODEX_HOME"])
+            self.assertEqual(set(env), {"PATH", "LANG", "HOME", "CODEX_HOME"})
+            overrides = dict(command[i + 1].split("=", 1) for i, arg in enumerate(command) if arg == "-c")
+            self.assertEqual(json.loads(overrides["cli_auth_credentials_store"]), "file")
+            self.assertEqual(json.loads(overrides["forced_login_method"]), "chatgpt")
+            self.assertTrue(json.loads(overrides["features.code_mode_host"]))
+            self.assertEqual(json.loads(overrides["features.code_mode.excluded_tool_namespaces"]), ["functions"])
+            self.assertFalse(json.loads(overrides["agents.enabled"]))
+            self.assertNotIn("--sandbox", command)
+            self.assertEqual(json.loads(overrides["permissions.danta_model.extends"]), ":read-only")
+            self.assertFalse(json.loads(overrides["permissions.danta_model.network.enabled"]))
+            import tomllib
+            filesystem = tomllib.loads("filesystem=" + overrides["permissions.danta_model.filesystem"])["filesystem"]
+            self.assertEqual(filesystem, {":root": "deny", ":minimal": "read", str(attempt): "read", str(auth): "deny"})
+            self.assertEqual(json.loads(overrides["approval_policy"]), "never")
+
     def test_codex_fixture_no_configuration_and_reject_before_delivery(self):
         with tempfile.TemporaryDirectory() as directory:
             calls = []

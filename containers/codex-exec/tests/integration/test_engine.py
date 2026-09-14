@@ -24,7 +24,7 @@ class EngineCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.config_dir = self.root / "config"
-        shutil.copytree(ROOT / "config", self.config_dir)
+        shutil.copytree(ROOT / "config", self.config_dir, ignore=shutil.ignore_patterns("secrets.yaml"))
         app = self.config_dir / "app.yaml"
         app.write_text(app.read_text().replace("state_dir: ./var/offline/research", f"state_dir: {self.root / 'state'}"))
         self.config = load_config(self.config_dir)

@@ -1,0 +1,358 @@
+{
+  "verified_at": "2026-09-14T15:14:23.022350+00:00",
+  "scope": "SYNTHETIC_LOOPBACK_AND_ISOLATED_CONTAINERS",
+  "python_version": "3.12.14",
+  "gateway_http_statuses": [
+    202,
+    202,
+    202
+  ],
+  "durable_restart_duplicate": true,
+  "same_request_id": true,
+  "ledger_counts": {
+    "telegram_requests": 1,
+    "service_requests": 1,
+    "intents": 0
+  },
+  "denials": {
+    "unsigned": 403,
+    "malformed_signature": 403,
+    "expired_timestamp": 403,
+    "tampered_bytes": 403,
+    "malformed_json_valid_signature": 403,
+    "unapproved_socket_source_ip": 403,
+    "expired_peer_profile": 403
+  },
+  "untrusted_profile_path_rejected": true,
+  "root_owned_profile_positive_check": true,
+  "regression": {
+    "codex_exec": 153,
+    "telegram_gateway": 32,
+    "scripts": 15,
+    "total": 200,
+    "result": "PASS"
+  },
+  "private_config": {
+    "peer_keys_match": true,
+    "file_modes": "0600",
+    "other_receiver_fields_unchanged": true
+  },
+  "source_sha256": {
+    "containers/telegram-gateway/telegram_gateway.py": "83e437407a2c44f57f12cdd5582fda74a667a7064a709bf915d1e3cfc8e53ba8",
+    "containers/telegram-gateway/tests/test_telegram_gateway.py": "f1062d3017e2cebd63d78adbdff2d3ba2043df304b3c62924ea9cc3ca934f267",
+    "containers/codex-exec/src/danta/service.py": "7b8c7383e08f74a469940bccf0e0e99a6f915a52a36ca4c02e5554aa7349abf3"
+  },
+  "service_workers_started": false,
+  "external_calls": 0,
+  "production_approval_created": false,
+  "telegram_messages_sent": 0,
+  "orders_sent": 0,
+  "docker_gateway_build_verified": true,
+  "deployed_container_connectivity_verified": false,
+  "independent_review": {
+    "model": "gpt-5.6-luna",
+    "reasoning_effort": "max",
+    "read_only": true,
+    "material_findings": 0,
+    "gateway_tests_rerun": 32,
+    "loopback_rerun": "PASS"
+  },
+  "compose_config_validation": "PASS",
+  "public_peer_key_matches": 0,
+  "previous_docker_blocker": "Docker Desktop inactive; desktop-linux socket missing in this session",
+  "docker_blocker": null,
+  "isolated_container_connectivity_verified": true,
+  "docker_validation": {
+    "verified_at": "2026-09-14T15:14:23.022350+00:00",
+    "local_date": "2026-09-15",
+    "gateway_image_tag": "danta-telegram-gateway:verify-20260915",
+    "gateway_image_tests": {
+      "count": 32,
+      "result": "PASS",
+      "network": "none",
+      "uid": 999
+    },
+    "gateway_image_config_files": [],
+    "gateway_source_matches_workspace": true,
+    "receiver_code_id_matches_workspace": "179ffdafcd5359a3aac78c9a4e4ae32634da6bdd78ffae556a0de360b73722c6",
+    "offline_engine": {
+      "result": "PASS",
+      "evidence": "/tmp/danta-service-image-validation-stdin-cizc_e1r",
+      "tested_at": "2026-09-14T15:06:26.662237+00:00",
+      "uid": 10001,
+      "image_code_id": "179ffdafcd5359a3aac78c9a4e4ae32634da6bdd78ffae556a0de360b73722c6",
+      "doctor": {
+        "code_id": "179ffdafcd5359a3aac78c9a4e4ae32634da6bdd78ffae556a0de360b73722c6",
+        "config_hash": "19fbc857232ef3bc8755f4a9f0720dbabb8936052d9cbe7c9bc6732092376034",
+        "configuration": "VALID",
+        "default_network": "BLOCKED",
+        "external_integration": "EXTERNAL_INTEGRATION_UNVERIFIED",
+        "live": "LIVE_NOT_AUTHORIZED",
+        "mode": "offline",
+        "strategy": "STRATEGY_UNPROVEN",
+        "strategy_hash": "5a171ec89b351cd12dfa55acf087f4cb71c105c0cfad7a58c62cde6a47d5ee2c"
+      },
+      "synthetic_run_status": "COMPLETE",
+      "synthetic_order_status": "FIXTURE_FILLED",
+      "same_request_reused": true,
+      "holdings_count": 1,
+      "service_default_no_socket": true,
+      "readme_sha256": "26d74f328784dcd461dc3aedf0f58d7e60855e41ee9179b0cc6fe8ec51be7006",
+      "design_heading_count": 92,
+      "image_tag": "danta-codex-exec:login-20260914-verified",
+      "image_id": "sha256:62392bdb8af3e893f9b0b493470fe48ddbd2f8a8056f758bcf1e8df96e83a7ee",
+      "isolation": "nonroot_readonly_network_none_no_capabilities_no_new_privileges"
+    },
+    "container_probe": {
+      "after_restart": {
+        "adapter_calls": 0,
+        "allowed_source_ips": [
+          "172.20.0.3"
+        ],
+        "approval_source": "injected FakeApp test fixture only",
+        "boot_id": "fab32af3-685d-4e7c-a947-bba2ea994acf",
+        "clock": "real_utcnow_30_second_signature_gate",
+        "database_filesystem": "ext4",
+        "ledger_counts": [
+          1,
+          1,
+          0
+        ],
+        "ledger_mode": "0o700",
+        "ledger_uid": 10001,
+        "model_calls": 0,
+        "observed_socket_source_ips": [
+          "172.20.0.3"
+        ],
+        "outbound_socket_attempts": 0,
+        "production_approval_created": false,
+        "profile_paths": [
+          {
+            "mode": "0o444",
+            "path": "/proof/profile.json",
+            "symlink": false,
+            "uid": 0
+          },
+          {
+            "mode": "0o755",
+            "path": "/proof",
+            "symlink": false,
+            "uid": 0
+          },
+          {
+            "mode": "0o755",
+            "path": "/",
+            "symlink": false,
+            "uid": 0
+          }
+        ],
+        "profile_writable_by_receiver": false,
+        "request_ids": [
+          "927f60d7-8933-48a3-bf3d-bd3cad90c631"
+        ],
+        "root_owned_profile_accepted": true,
+        "service_workers": 0,
+        "source_file": "/app/src/danta/service.py",
+        "source_sha256": "7b8c7383e08f74a469940bccf0e0e99a6f915a52a36ca4c02e5554aa7349abf3",
+        "subprocess_attempts": 0,
+        "uid": 10001
+      },
+      "after_restart_sender": {
+        "connection_destinations": [
+          [
+            "172.20.0.2",
+            8080
+          ]
+        ],
+        "external_connection_attempts": 0,
+        "gateway_app_started": false,
+        "gateway_module": "/app/telegram_gateway.py",
+        "gateway_source_sha256": "83e437407a2c44f57f12cdd5582fda74a667a7064a709bf915d1e3cfc8e53ba8",
+        "http_statuses": [
+          202
+        ],
+        "key_mode": "0o600",
+        "key_uid": 0,
+        "mode": "restart",
+        "request_id": "927f60d7-8933-48a3-bf3d-bd3cad90c631",
+        "uid": 0
+      },
+      "before_restart": {
+        "adapter_calls": 0,
+        "allowed_source_ips": [
+          "172.20.0.3"
+        ],
+        "approval_source": "injected FakeApp test fixture only",
+        "boot_id": "795147da-9b2f-4b63-98ae-8768bd9762db",
+        "clock": "real_utcnow_30_second_signature_gate",
+        "database_filesystem": "ext4",
+        "ledger_counts": [
+          1,
+          1,
+          0
+        ],
+        "ledger_mode": "0o700",
+        "ledger_uid": 10001,
+        "model_calls": 0,
+        "observed_socket_source_ips": [
+          "172.20.0.3",
+          "172.20.0.4"
+        ],
+        "outbound_socket_attempts": 0,
+        "production_approval_created": false,
+        "profile_paths": [
+          {
+            "mode": "0o444",
+            "path": "/proof/profile.json",
+            "symlink": false,
+            "uid": 0
+          },
+          {
+            "mode": "0o755",
+            "path": "/proof",
+            "symlink": false,
+            "uid": 0
+          },
+          {
+            "mode": "0o755",
+            "path": "/",
+            "symlink": false,
+            "uid": 0
+          }
+        ],
+        "profile_writable_by_receiver": false,
+        "request_ids": [
+          "927f60d7-8933-48a3-bf3d-bd3cad90c631"
+        ],
+        "root_owned_profile_accepted": true,
+        "service_workers": 0,
+        "source_file": "/app/src/danta/service.py",
+        "source_sha256": "7b8c7383e08f74a469940bccf0e0e99a6f915a52a36ca4c02e5554aa7349abf3",
+        "subprocess_attempts": 0,
+        "uid": 10001
+      },
+      "docker_isolation": {
+        "allowed_sender_ip": "172.20.0.3",
+        "denied_sender_ip": "172.20.0.4",
+        "gateway_image_id": "sha256:60de34642b685b8c2b560078e5f378e08e1e0da766c8b3baf5848edcb9c5cb8e",
+        "gateway_sender_user": "0:0 (matches current Compose; synthetic key root-owned 0600)",
+        "host_port_bindings": {},
+        "network_internal": true,
+        "receiver_cap_drop": [
+          "ALL"
+        ],
+        "receiver_image_id": "sha256:62392bdb8af3e893f9b0b493470fe48ddbd2f8a8056f758bcf1e8df96e83a7ee",
+        "receiver_ip": "172.20.0.2",
+        "receiver_mounts": [
+          {
+            "destination": "/state",
+            "rw": true,
+            "source": "/var/lib/docker/volumes/danta-gateway-proof-e0c2076338f9-state/_data",
+            "type": "volume"
+          },
+          {
+            "destination": "/probe",
+            "rw": false,
+            "source": "/home/uhug/git/danta-bot/containers/codex-exec/var/gateway-container-proof-kfxf45h1",
+            "type": "bind"
+          },
+          {
+            "destination": "/fixture/test_service.py",
+            "rw": false,
+            "source": "/home/uhug/git/danta-bot/containers/codex-exec/tests/integration/test_service.py",
+            "type": "bind"
+          },
+          {
+            "destination": "/proof",
+            "rw": false,
+            "source": "/var/lib/docker/volumes/danta-gateway-proof-e0c2076338f9-proof/_data",
+            "type": "volume"
+          }
+        ],
+        "receiver_readonly_rootfs": true,
+        "receiver_security_opt": [
+          "no-new-privileges:true"
+        ],
+        "receiver_user": "10001:10001",
+        "subnet": "172.20.0.0/16"
+      },
+      "existing_containers_modified": false,
+      "external_calls": 0,
+      "forbidden_source_ip": {
+        "connection_destinations": [
+          [
+            "172.20.0.2",
+            8080
+          ]
+        ],
+        "external_connection_attempts": 0,
+        "gateway_app_started": false,
+        "gateway_module": "/app/telegram_gateway.py",
+        "gateway_source_sha256": "83e437407a2c44f57f12cdd5582fda74a667a7064a709bf915d1e3cfc8e53ba8",
+        "http_statuses": [
+          403
+        ],
+        "key_mode": "0o600",
+        "key_uid": 0,
+        "mode": "forbidden-ip",
+        "request_id": null,
+        "uid": 0
+      },
+      "initialization": {
+        "allowed_source_ips": [
+          "172.20.0.3"
+        ],
+        "initialized": true,
+        "synthetic_only": true,
+        "uid": 0
+      },
+      "normal": {
+        "connection_destinations": [
+          [
+            "172.20.0.2",
+            8080
+          ],
+          [
+            "172.20.0.2",
+            8080
+          ],
+          [
+            "172.20.0.2",
+            8080
+          ],
+          [
+            "172.20.0.2",
+            8080
+          ]
+        ],
+        "external_connection_attempts": 0,
+        "gateway_app_started": false,
+        "gateway_module": "/app/telegram_gateway.py",
+        "gateway_source_sha256": "83e437407a2c44f57f12cdd5582fda74a667a7064a709bf915d1e3cfc8e53ba8",
+        "http_statuses": [
+          202,
+          202,
+          403,
+          403
+        ],
+        "key_mode": "0o600",
+        "key_uid": 0,
+        "mode": "normal",
+        "request_id": "927f60d7-8933-48a3-bf3d-bd3cad90c631",
+        "uid": 0
+      },
+      "production_approval_created": false,
+      "real_credentials_mounted": false,
+      "scope": "SYNTHETIC_ISOLATED_CONTAINERS_ONLY",
+      "success": true
+    },
+    "test_containers_network_volumes_removed": true,
+    "setup_retry": "Docker Desktop did not share /tmp; moved synthetic probe scripts to ignored workspace var directory before retry",
+    "probe_script_sha256": {
+      "receiver.py": "8eb82a89e7349292963eaed368e40f14b0706c5ab9eaa5d0676956d592c728e1",
+      "sender.py": "19d5f79e33157cea33f89ad71d463ee8dd109ee89b69fe5dc515f676ae005bd3",
+      "orchestrate.py": "89e62a279212d68d72ffa4cdb55f345b4f877c79785582682bf3f4480c3aedcd"
+    }
+  },
+  "loopback_verified_at": "2026-09-14T13:05:28.321768+00:00"
+}

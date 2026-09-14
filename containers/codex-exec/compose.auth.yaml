@@ -1,0 +1,23 @@
+# One-time operator login, independent of trading configuration and approvals.
+# docker compose -f compose.auth.yaml run --rm codex-login
+services:
+  codex-login:
+    image: ${DANTA_IMAGE:-danta-codex-exec:local}
+    user: "10001:10001"
+    entrypoint: ["codex", "-c", 'cli_auth_credentials_store="file"']
+    command: ["login", "--device-auth"]
+    environment:
+      CODEX_HOME: /app/auth
+    volumes:
+      - ${DANTA_AUTH_DIR:-codex-auth}:/app/auth:rw
+    read_only: true
+    init: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,mode=1777
+
+volumes:
+  codex-auth:
+    name: ${DANTA_AUTH_VOLUME:-codex-exec-auth}

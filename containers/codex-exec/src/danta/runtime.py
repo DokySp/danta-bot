@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import shutil
 import sqlite3
@@ -22,9 +21,9 @@ from uuid import uuid4
 from .adapters import AdapterError, http_transport
 from .adapters.codex_cli import CodexAdapter
 from .adapters.disclosures import DartAdapter, ORIGIN
-from .adapters.kis import BASE_URLS, MASTER_ORIGIN, KisAdapter, KisCredentials
+from .adapters.kis import BASE_URLS, MASTER_ORIGIN, KisAdapter, KisCredentials, KisTokenCache
 from .application import MarketBundle
-from .config import HumanRequired, ROOT, aware_time, canonical, digest, utcnow
+from .config import HumanRequired, ROOT, aware_time, canonical, digest, load_secrets, utcnow
 from .decision import DecisionProposal, validate_proposal
 from .market import SessionCalendar, calculate_features
 from .models import CostSchedule, DailyBar, EventRecord, Instrument, MarketFact, Quote, Session
@@ -80,7 +79,7 @@ def _json(path):
 class RuntimeState:
     def __init__(self, path):
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True,exist_ok=True)
+        self.path.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
         self.lock = threading.RLock()
         self.db = sqlite3.connect(self.path,timeout=30,isolation_level=None,check_same_thread=False)
         self.db.row_factory = sqlite3.Row
@@ -119,7 +118,7 @@ class PriorityTransport:
         self.queue, self.sequence, self.next_at = [], 0, 0.0
         self.fixture_only = getattr(transport, "fixture_only", False)
 
-    def __call__(self, method, url, headers=None, body=None, timeout=15):
+    def __call__(self, method, url, headers=None, body=None, timeout=15, *, before_send=None):
         priority = 0 if "/trading/" in url or "inquire-asking-price" in url or "inquire-price?" in url else 1
         with self.condition:
             self.sequence += 1
@@ -136,7 +135,11 @@ class PriorityTransport:
             self.queue.remove(ticket)
             self.next_at = time.monotonic()+self.interval
             self.condition.notify_all()
+        if before_send is not None:
+            before_send()
         return self.transport(method, url, headers, body, timeout)
+
+    request_checked = __call__
 
 
 class KisBrokerPort:
@@ -146,6 +149,7 @@ class KisBrokerPort:
         self.last_resources = None
         self.last_sellable = {}
         self.store = None
+        self.latest_bundle = None
 
     def bind_store(self,store):
         self.store = store
@@ -156,7 +160,14 @@ class KisBrokerPort:
     def submit(self, intent):
         instrument = intent["instrument_id"]
         ticker = instrument.removeprefix("KRX:")
-        result = self.adapter.submit(ticker, intent["side"], intent["quantity"], limit_price=intent["limit_price"])
+        quote = self.latest_bundle.quotes.get(instrument) if self.latest_bundle else None
+        session = self.latest_bundle.calendar.active(self.clock()) if self.latest_bundle else None
+        if quote is None or session is None:
+            return {"status":"NOT_SENT","reason":"ORDER_MARKET_VALIDITY_UNAVAILABLE"}
+        deadline = min(quote.observed_at + timedelta(seconds=5), session.closes_at)
+        if intent.get("expires_at"):
+            deadline = min(deadline, aware_time(intent["expires_at"]))
+        result = self.adapter.submit(ticker, intent["side"], intent["quantity"], limit_price=intent["limit_price"], valid_until=deadline)
         if result.status != "ACKNOWLEDGED":
             return {"status": result.status, "reason": result.code}
         namespace = self._namespace(self.clock().astimezone(SEOUL).date().isoformat())
@@ -526,6 +537,8 @@ class ExternalRuntime:
             bundle.candidates = [candidate for candidate in bundle.candidates if candidate.instrument.instrument_id in quoted]
             bundle.exclusions.extend(diagnostics)
             self.latest_bundle = bundle
+            if isinstance(self.broker,KisBrokerPort):
+                self.broker.latest_bundle = bundle
             if isinstance(self.broker,PaperBrokerPort):
                 paper = self.broker.snapshot()
                 bundle.data.update(account_snapshot=paper,broker_available_cash=paper["broker_available_cash"],
@@ -691,7 +704,7 @@ def build_external_runtime(config,trusted_approval,*,kis_transport=None,dart_tra
     The optional transports/runner are injection points for contract tests, not
     authority bypasses. Every injected operation still checks the trusted grant.
     """
-    for capability in ("account_read","market_read","disclosure_read","model_call"):
+    for capability in ("account_read","market_read","disclosure_read","model_call","broker_auth"):
         config.require_external(capability,trusted_approval)
     path = config.app["broker"]["capability_manifest"]
     if not path:
@@ -749,21 +762,24 @@ def build_external_runtime(config,trusted_approval,*,kis_transport=None,dart_tra
     isolation = manifest["model"]
     if isolation.get("isolation_verified") is not True or isolation.get("executable_sha256") != executable_hash or not isolation.get("source"):
         raise HumanRequired("Model isolation evidence does not match the executable")
-    environment = os.environ if env is None else env
+    if manifest["credentials"] != {"managed_token": True}:
+        raise HumanRequired("Runtime requires the managed KIS token cache contract")
+    environment = load_secrets(config.directory) if env is None else env
     def secret(name):
         if not isinstance(name,str) or not re.fullmatch(r"[A-Z][A-Z0-9_]*",name) or not environment.get(name):
             raise HumanRequired("An explicitly named runtime credential is unavailable")
         return environment[name]
-    # Environment access occurs only after source, policy and authorization checks.
+    # Private file access occurs only after source, policy and authorization checks.
     account_reference = secret(config.app["broker"]["account_ref_env"])
     if not re.fullmatch(r"\d{8}-\d{2}",account_reference):
         raise HumanRequired("Account reference must contain approved account/product components")
     account,product = account_reference.split("-")
     credentials = KisCredentials(account=account,product=product,app_key=secret(config.app["broker"]["app_key_env"]),
-        app_secret=secret(config.app["broker"]["app_secret_env"]),token=secret(manifest["credentials"]["token_env"]))
+        app_secret=secret(config.app["broker"]["app_secret_env"]),token="")
     def authorize(operation,_environment=None):
-        capability = {"broker_read":"account_read","market_read":"market_read","disclosure_read":"disclosure_read",
+        capability = {"broker_auth":"broker_auth","broker_read":"account_read","market_read":"market_read","disclosure_read":"disclosure_read",
                       "broker_write":"live_orders" if config.mode == "live" else "demo_orders"}[operation]
+        config.assert_current()
         config.require_external(capability,trusted_approval)
     origins = {BASE_URLS[manifest["environment"]],MASTER_ORIGIN}
     kis_transport = kis_transport or http_transport(allowed_origins=origins,network_enabled=True)
@@ -772,7 +788,11 @@ def build_external_runtime(config,trusted_approval,*,kis_transport=None,dart_tra
         raise HumanRequired("Approved rate/monitor budget is unavailable")
     kis_transport = PriorityTransport(kis_transport,minimum_interval_seconds=rate["minimum_interval_seconds"],
                                       maximum_queue_seconds=rate["maximum_queue_seconds"])
-    kis = KisAdapter(environment=manifest["environment"],credentials=credentials,transport=kis_transport,mode=config.mode,authorize=authorize)
+    tokens = KisTokenCache(environment=manifest["environment"], app_key=credentials.app_key,
+        app_secret=credentials.app_secret, path=config.state_dir/"kis-token.json", transport=kis_transport,
+        mode=config.mode, authorize=authorize, clock=clock)
+    kis = KisAdapter(environment=manifest["environment"],credentials=credentials,transport=kis_transport,
+        mode=config.mode,authorize=authorize,token_provider=tokens,clock=clock)
     dart = DartAdapter(api_key=secret(config.app["market"]["dart_key_env"]),mode=config.mode,authorize=authorize,
         official_ir_domains=config.app["market"]["official_ir_domains"],
         transport=dart_transport or http_transport(allowed_origins={ORIGIN,*("https://"+host for host in config.app["market"]["official_ir_domains"])},network_enabled=True))

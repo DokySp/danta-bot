@@ -1,0 +1,164 @@
+{
+  "checked_at": "2026-09-14T15:26:07.424854+09:00",
+  "scope": "USER_AUTHORIZED_DART_READ_ONLY_PROBE",
+  "trade_authority": false,
+  "day": "2026-09-11",
+  "calls": [
+    {
+      "endpoint": "corpCode.xml",
+      "http_status": 200,
+      "elapsed_ms": 400,
+      "body_sha256": "af27a75f5b49024b9b20384b3004aa62e147a1d7f81ac55eb22bdf7be44356f3"
+    },
+    {
+      "endpoint": "list.json",
+      "http_status": 200,
+      "elapsed_ms": 2579,
+      "body_sha256": "e7552199445cf0844c3c5ca334c7b66f9cfeb1817ea4143a53930096de55011f"
+    },
+    {
+      "endpoint": "list.json",
+      "http_status": 200,
+      "elapsed_ms": 2473,
+      "body_sha256": "8991f26418dfabef337177dccdd0ea544176954daa8c4d31805f628ab62eb4b3"
+    },
+    {
+      "endpoint": "list.json",
+      "http_status": 200,
+      "elapsed_ms": 2675,
+      "body_sha256": "310b6a44bea5cadca5fbc50b1a2d4e19a5814075e5663ae3ad4e0c6c15c0ea08"
+    },
+    {
+      "endpoint": "list.json",
+      "http_status": 200,
+      "elapsed_ms": 2537,
+      "body_sha256": "15b61e048108e9c30b5aa58a6278f55f44eaf4b0902f7737a6802caae08e5c25"
+    },
+    {
+      "endpoint": "list.json",
+      "http_status": 200,
+      "elapsed_ms": 2388,
+      "body_sha256": "baf6638e54900553e3c5f1398891b20a6223335fb887060e53119ecf0588da65"
+    },
+    {
+      "endpoint": "list.json",
+      "http_status": 200,
+      "elapsed_ms": 2485,
+      "body_sha256": "00bccf5bda89423273d39252971149687cd3ed9da8cdd8212c61a48193edf9c8"
+    },
+    {
+      "endpoint": "list.json",
+      "http_status": 200,
+      "elapsed_ms": 2694,
+      "body_sha256": "0634f9cb901519e3aac4cce1482c5fd3afe1bb49cf02657a8d0571f629f93639"
+    },
+    {
+      "endpoint": "document.xml",
+      "http_status": 200,
+      "elapsed_ms": 64,
+      "body_sha256": "79029e5178b749efd24612a7dcabd6c55050721693b8ee7ab55abce5fe4b477d"
+    }
+  ],
+  "corporations": {
+    "quality": "COMPLETE",
+    "count": 3990
+  },
+  "disclosures": {
+    "quality": "COMPLETE",
+    "count": 683,
+    "error": null
+  },
+  "document": {
+    "receipt_id": "20260911800002",
+    "report_name": "단일판매ㆍ공급계약체결              ",
+    "quality": "COMPLETE",
+    "files": [
+      {
+        "path": "containers/codex-exec/var/integration/dart/20260911800002/0.xml",
+        "sha256": "ccf5036e170dec6e90b751d9b2c8ddf94393871b2dfd3ddf4af746e3fb7b06a9",
+        "bytes": 9624
+      }
+    ],
+    "parser_status": "SUPPORTED_OFFICIAL_TABLE_PARSED",
+    "event_created": true,
+    "fact_count": 8,
+    "checked_fields": [
+      "contract_amount",
+      "previous_revenue",
+      "start_date",
+      "end_date",
+      "conditions",
+      "additional_terms"
+    ]
+  },
+  "result": "PASS_DART_READ_AND_ONE_CONTRACT_TEMPLATE",
+  "limitations": [
+    "No KIS/model/gateway calls or trading authorization",
+    "Single contract template only; earnings, guidance, corrections and other layouts remain unverified",
+    "Historical retrieval; does not establish intraday event availability"
+  ],
+  "key_validation": {
+    "provider": "OpenDART",
+    "endpoint": "list.json",
+    "date": "20260914",
+    "status": "000",
+    "authenticated": true,
+    "returned_records": 1,
+    "pagination_types": {
+      "page_no": "int",
+      "page_count": "int",
+      "total_count": "int",
+      "total_page": "int"
+    }
+  },
+  "validation": {
+    "tests": {
+      "engine": 152,
+      "gateway": 28,
+      "scripts": 15,
+      "total": 195,
+      "result": "PASS"
+    },
+    "offline_image": {
+      "result": "PASS",
+      "evidence": "/tmp/danta-service-image-validation-stdin-tlekjsfj",
+      "tested_at": "2026-09-14T06:38:41.340159+00:00",
+      "uid": 10001,
+      "image_code_id": "51ca7b5efaa199afa015d630cf2d8a9415b54f621627f23cf0249b00737c3ed4",
+      "doctor": {
+        "code_id": "51ca7b5efaa199afa015d630cf2d8a9415b54f621627f23cf0249b00737c3ed4",
+        "config_hash": "91a0f3b3974f7b8dbc13b5e93392c4133fa501e1d32c4a6b135ec934f7d6855c",
+        "configuration": "VALID",
+        "default_network": "BLOCKED",
+        "external_integration": "EXTERNAL_INTEGRATION_UNVERIFIED",
+        "live": "LIVE_NOT_AUTHORIZED",
+        "mode": "offline",
+        "strategy": "STRATEGY_UNPROVEN",
+        "strategy_hash": "5a171ec89b351cd12dfa55acf087f4cb71c105c0cfad7a58c62cde6a47d5ee2c"
+      },
+      "synthetic_run_status": "COMPLETE",
+      "synthetic_order_status": "FIXTURE_FILLED",
+      "same_request_reused": true,
+      "holdings_count": 1,
+      "service_default_no_socket": true,
+      "readme_sha256": "26d74f328784dcd461dc3aedf0f58d7e60855e41ee9179b0cc6fe8ec51be7006",
+      "design_heading_count": 92,
+      "image_tag": "danta-codex-exec:dart-20260914",
+      "image_id": "sha256:67a436a66df78dce55ea57dff0495ab88d72aca46e3b0d207df7555d86ab485a",
+      "isolation": "nonroot_readonly_network_none_no_capabilities_no_new_privileges"
+    },
+    "credentials": {
+      "private_file_mode": "0600",
+      "git_excluded": true,
+      "shareable_files_scanned": 29,
+      "credential_matches": 0
+    },
+    "review": {
+      "model": "gpt-5.6-luna",
+      "reasoning_effort": "max",
+      "read_only": true,
+      "adopted": "Reject each raw payment term when unset, undisclosed or withheld before combining fields",
+      "followup": "Regression cases, full 195 tests and fresh isolated Docker engine passed"
+    }
+  }
+}

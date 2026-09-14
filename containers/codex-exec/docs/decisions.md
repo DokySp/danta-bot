@@ -68,3 +68,115 @@ Fact: 같은 gpt-5.6-luna/max의 새 읽기 전용 재검토에서 위7개 보�
 - Codex runner의 OSError는 오류 원문을 보존하지 않고 PROCESS_FAILED로 변환한다. 공통 attempt result와 MODEL_ATTEMPT/MODEL_OUTCOME journal에 usage=null로 남기며 자동 재시도하지 않는다.
 
 추가 회귀: 실제 application 임시 정책 변경 후 broker0/예약0/INVALIDATED, 취소 두 번째 권한검사 실패 시 cancel0/기존 예약 유지, 주입 OSError 시 호출1/시도결과1/journal2/원문 미노출. 최종 전체 **133개 테스트 PASS**다. 독립 검토는 총3회(초기 계약, 통합 경로, 채택 보완의 재검토)이며, 마지막 두 국소 수정은 메인이 직접 회귀와 전체 검증으로 확인했다. 새 전략 정책이나 외부 연결을 추가하지 않았으므로 추가 전역 검토는 수행하지 않는다. 최종 image 재검증 증거는 container-verification.json에 기록한다.
+
+
+## 2026-09-14 비밀 설정·토큰·배포 연결
+
+사용자 요청에 따라 레거시를 제외한 기존 구현 74파일을 `35db0d2`로 먼저 커밋했다.
+비밀값은 `config/secrets.yaml`, 빈 예시는 `config/secrets.yaml.example`로 분리했다.
+레거시 env의 주석을 제외해 읽고 기존 계좌 분리 규칙(8자리 + 상품코드 기본01)을 확인한
+뒤 KIS 정보와 gateway 주소를 이전했다. 값 일치·0600·Git 제외만 보고하고 원문은 출력하지 않았다.
+원본 legacy는 변경하지 않았고 실제 토큰 발급/계좌 연결은 실행하지 않았다.
+
+KIS 캐시를 런타임에 연결하고 구식 deploy/test 경로를 수정했다. image에 고정 native
+Codex CLI를 포함하며 runtime Compose에 전용 auth/state/approval mount를 준비했다.
+이 변경은 실제 계좌/운영 승인이나 모델 인증을 생성하지 않는다.
+
+읽기 전용 gpt-5.6-luna/max 검토의 주문 만료 지적을 채택했다. 토큰 발급 중 시각 전진으로
+preflight 뒤 만료 주문을 보낼 수 있었다. POST는 cache-only/nonblocking으로 바꾸고,
+실제 transport 직전(우선순위 대기 후) 결정·호가·세션 시한을 검사한다. 전송되지 않은
+제출은 INVALIDATED/예약 해제, 취소는 이전 상태/예약 유지로 구분했다. 메인 회귀에서
+캐시 부재·60초 경계·잠금 경합·세 가지 시한 경과·원장 복구와 실제 timeout의 UNKNOWN
+유지를 검사했고 전체 193테스트를 통과했다. 이 국소 수정에는 추가 전역 검토를 반복하지 않았다.
+
+원본 README의 env example 트리 지적은 원문 보존 사유로 변경하지 않았다. 해당 파일과
+report.html은 전달받은 원 명세의 사본이다. 사용자 후속 요구로 달라진 실행 방법과 파일
+구조는 루트 README, config-reference, runbook, runtime-contract에 반영했다.
+
+실제 OpenDART 키/모델 인증·운영 manifest·gateway 검증은 남아 있다. 기존 env에는
+OpenDART 키 항목/참조가 없어 secrets.yaml에서 빈 값으로 유지했다. 미확인 값을 만들거나
+승인된 것처럼 외부 호출을 실행하지 않는다.
+
+## 2026-09-14 DART 키 제공 후 재개
+
+사용자가 DART 키를 제공하고 검증·진행을 요청했다. 비밀 설정에 0600으로 저장하고
+공식 목록 API의 정상 응답으로 유효성을 확인했다. 기업 코드·전체 7페이지 목록·계약
+원문 조회까지 수행했다. 앞 절의 DART 키 입력 대기는 해소되었다.
+
+실제 원문은 기존 2열 합성 양식과 달리 3열 병합 셀이다. 명시적 필드 경로만 매핑하고
+계약금/지급조건, 본사 계약분·변동 가능성 등의 추가 주석을 함께 보존하도록 보완했다.
+다른 양식·실거래 승인·과거 공시의 장중 공개시각으로 일반화하지 않는다.
+
+gpt-5.6-luna/max의 국소 읽기 전용 검토에서 두 지급조건을 합친 문자열은 원시 값의
+미정/미공개/공시유보 검사를 우회한다는 지적을 재현·채택했다. 합치기 전에 각 필드를
+검사하도록 수정하고 세 경우를 회귀에 추가했다. 다른 중요 지적은 없었다.
+
+다음 모델 연결에 앞서 기존 `/codex-home`의 저장 방식을 확인했다. 예전 base Compose는
+named volume을 사용하며 현재 로컬의 `containers_codex-home-stock-v1`에는 `auth.json`이
+없다. 인증 부재를 임의의 계정/방식으로 채우지 않고 실제 인증 위치 또는 새 로그인 입력을 기다린다.
+
+## 2026-09-14 로그인 방식 정정
+
+사용자가 기존처럼 `codex login`으로 진행하도록 요청했다. 원 명세는 CLI와 인증 분리를
+요구하며 사용자가 auth.json을 직접 준비하도록 요구하지 않는다. 인증 파일 부재를
+구현 중단 사유로 삼은 이전 판단을 정정한다. 로그인 전용 Compose와 runtime이 같은
+지속 volume을 사용하고 양쪽에서 file credential store를 명시한다. 새 volume의 권한은
+image에서 준비하며 기존 인증/볼륨은 변경하지 않는다. 기존 모델/effort와 ChatGPT
+로그인 방식을 반영했다. 실제 브라우저 로그인은 운영자가 완료하는 실행 단계로 둔다.
+
+## 2026-09-14 로그인 완료 후 연결 검증과 다음 변경 범위
+
+- 사용자 로그인 후 공유 volume의 ChatGPT 인증, 실제 `gpt-5.6-sol`/`xhigh` 응답과
+  frozen 읽기 도구·JSON schema·값 검증을 확인했다. 기존 host 비활성화로 실패한
+  첫 요청도 증적에 남겼다. 설치 모델 정보를 반영한 probe와 권한 profile을 적용하고
+  전체 196개 테스트 및 Docker CLI 검증, gpt-5.6-luna/max 검토를 통과했다.
+- KIS 실전 origin에서 token 발급과 잔고 조회를 각각 1회 확인하고, 0600 캐시를
+  새 인스턴스에서 외부 호출 없이 재사용했다. 주문·Telegram 송신·운영 배포는 하지 않았다.
+- 다음 Telegram 연결을 조사할 당시 외부 gateway의
+  `CodexExecClient.post_message()`는 Content-Type만 보내며 새 수신기의
+  `X-Danta-Timestamp`/`X-Danta-Signature`를 만들지 않는다.
+- 원 명세 §11.4는 새 codex-exec와 필요한 루트 연결만 변경하도록 정했다.
+  gateway 내부 수정은 승인 요청 전에는 적용하지 않았다. 제안 범위는 `telegram-gateway.py`의
+  정확한 요청 body 서명·별도 비밀 파일 로딩, `compose.yaml`의 비밀 파일 경로 참조,
+  `config/codex-peer.secret.example`, 기존 gateway 테스트와 README의 설정 안내다.
+  적용하더라도 메시지 전송·이미지 push·운영 재시작은 별도 실행이다.
+
+## 2026-09-14 gateway 서명 변경 승인 후
+
+- 사용자의 “계속 진행해줘”를 위 gateway 파일 변경 범위 승인으로 반영했다.
+  기존 sender/chat/route 처리 위에 정확한 요청 bytes의 HMAC 서명과 별도 private 파일 로딩을
+  연결했다. 비밀 파일 경로가 없으면 기존 전송을 유지하고, 지정한 파일이 잘못되면 시작을 거부한다.
+- gateway private 파일과 엔진 `secrets.yaml`의 peer 키를 같은 값으로 준비했다.
+  두 파일은 0600이며 실제 값은 Git·이미지·증적에 포함하지 않았다. 다른 인증 항목은 보존했다.
+- 실제 loopback HTTP의 접수/중복/SQLite 재개방 후 중복 202와 7종 거부 403을 확인했다.
+  전체 200개 테스트를 통과했다. 서비스 worker·외부 Telegram 호출·주문은 실행하지 않았다.
+- gpt-5.6-luna/max 독립 검토에서도 중요 결함이 없었으며 gateway 테스트와 loopback 결과를
+  재확인했다. 메인은 현재 범위에서 추가 코드 변경이 필요하지 않다고 판정했다.
+- 이번 세션에는 Docker Desktop 소켓이 없고 서비스가 inactive여서 새 gateway 이미지 및
+  컨테이너 간 연결은 검증하지 못했다. 이전 이미지 검증을 이번 gateway 검증으로 대체하지 않는다.
+
+## 2026-09-15 Docker Desktop 재실행 후 검증 완료
+
+사용자의 Docker 재실행 통보 후 새 gateway 이미지를 빌드하고 이미지 내부 32개 테스트,
+기존 엔진 이미지와 현재 코드 일치 및 offline smoke, 별도 internal network의 이미지 간
+서명 수신과 SQLite 재시작 중복 방지를 확인했다. root 소유 profile을 비root 수신기가
+읽고 변경할 수 없는 조건도 실제 파일·mount로 검증했다.
+
+첫 시도는 Docker Desktop에서 `/tmp` 검증 파일을 bind할 수 없어 시작되지 않았다.
+해당 시도의 임시 자원을 정리하고 합성 파일만 workspace의 Git 제외 `var/`로 옮겨 통과했다.
+제품 코드와 실제 비밀값·운영 설정은 수정하지 않았다. 합성 fixture는 운영 승인으로
+사용하지 않으며, 실제 Telegram 송수신·운영 배포·실주문은 남은 별도 단계다.
+
+## 2026-09-15 원격 배포 준비와 커밋 요청
+
+사용자는 배포 스크립트가 이미 이미지 빌드/push를 담당한다는 점을 확인한 뒤,
+다른 컴퓨터에서 사용할 gateway 메뉴·Compose·운영 설정 세트·설치/업데이트 절차와
+그 검증(1~4번), context-to-git-title을 사용한 커밋을 요청했다.
+
+범위에 맞춰 실제 메뉴와 example을 정리하고, 고정 gateway IP/외부 네트워크 연결,
+소스가 필요 없는 새 전달 폴더 생성기와 별도 운영 PC 로그인·권한·백업 절차를 구현했다.
+실제 비용·달력·인수·권한 검증이 필요한 example은 미확인 상태로 두었다. 운영자의
+정책을 추정하거나 테스트 fixture를 실운영 승인으로 사용하지 않았다.
+
+현재 단계는 로컬 준비·검증 및 Git 커밋이다. 이미지 push/설정 전송/운영 서버 변경은
+다음 단계이며 수행하지 않았다. 레거시·실제 비밀값·인증·DB는 커밋에서 제외한다.

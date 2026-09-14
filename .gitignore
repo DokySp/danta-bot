@@ -2,6 +2,7 @@ containers/codex-exec/legacy/*
 
 # Local environment files
 containers/telegram-gateway/config/routes.yaml
+containers/telegram-gateway/config/*.secret
 containers/telegram-gateway/config/*.env
 !containers/telegram-gateway/config/*.env.example
 containers/kis-trade-mcp/config/*.env

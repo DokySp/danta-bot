@@ -9,197 +9,131 @@
 - https://github.com/koreainvestment/open-trading-api/blob/main/MCP/Kis%20Trading%20MCP/Readme.md
 
 ## Docker 구성
-- telegram-gateway: 텔레그램 송수신 컨테이너
-- codex-exec: codex 예약 및 작업 수행 컨테이너. 프로필별로 스킬 및 스케줄링 관리.
-- kis-trading-mcp: 한국투자증권에서 제작한 컨테이너.
+
+- `codex-exec`: 명세에 따른 투자 연구·실행 엔진. 기본 설정은 offline이며 실제 거래는 별도 승인과 운영 설정이 필요합니다.
+- `telegram-gateway`: 텔레그램 송수신 컨테이너.
+- `kis-trade-mcp`: 한국투자증권 MCP 컨테이너. 새 엔진의 KIS 어댑터는 직접 API를 호출합니다.
+
+명세는 [codex-exec README](containers/codex-exec/README.md), 현재 검증 범위는
+[구현 상태](containers/codex-exec/docs/status.md), 실행·복구 절차는
+[runbook](containers/codex-exec/docs/runbook.md)에 있습니다.
 
 ## 테스트
 
-저장소 전체에서 추적하는 모든 unittest 스위트(codex-exec service, telegram-gateway,
-하이픈 스킬 3종)를 하나의 명령으로 실행하려면 repo root에서 다음을 실행합니다.
+저장소 루트에서 Python 3.12 이상과 고정 의존성을 준비합니다.
 
 ```bash
-$ python3 scripts/run_tests.py
+python3 -m venv .venv
+.venv/bin/python -m pip install -r containers/codex-exec/requirements.lock
+.venv/bin/python scripts/run_tests.py
 ```
 
-이 명령은 각 스위트를 독립된 `unittest discover`로 실행하고 스위트별 결과와 테스트
-개수를 요약한 뒤, 어느 스위트든 실패하거나 테스트를 0개 발견하면 0이 아닌 종료 코드로
-끝납니다. 외부 네트워크나 서드파티 테스트 의존성을 사용하지 않으며 tracked artifact나
-bytecode 캐시를 만들지 않습니다. `scripts/deploy-*.sh`는 `docker build` 전에 이 명령을
-먼저 실행해서 실패하면 빌드/푸시 없이 중단합니다(fail-closed 게이트).
-
-각 파이프라인 패키지의 `scripts/*.py ... self-test` / `--self-test` 명령은 별도의
-회귀 실행이 아니라, 배포된 컨테이너에서도 그대로 남아 있는 기존 CLI 호환 진입점입니다.
-실제 검증 로직과 fixture는 각 패키지의 `tests/test_*.py`에 있고, self-test 명령은 그
-테스트 모듈의 대표 함수를 그대로 호출하는 얇은 wrapper입니다. 검증 로직과 wrapper 호출
-구성은 위 `python3 scripts/run_tests.py`로 회귀 검증하고, 실제 CLI import·인자 경로는
-패키지별 self-test 명령으로 수동 점검합니다. 전체 회귀 확인에는 `scripts/run_tests.py`를
-사용합니다.
+이 명령은 새 `codex-exec/tests`, `telegram-gateway/tests`, `scripts/tests`를 각각
+독립된 `unittest discover`로 실행합니다. 어느 스위트든 실패하거나 테스트를 0개 발견하면
+실패하며, 레거시 스킬 테스트는 실행하지 않습니다. 외부 API·실제 계좌·모델 연결 없이
+검증합니다. 실제 연결과 거래 승인은 테스트 통과와 별개입니다.
 
 ## Docker 이미지 빌드/배포
 
-편의 스크립트:
+기존 명령 형식으로 이미지 빌드와 Docker Hub 푸시를 실행할 수 있습니다.
 
 ```bash
-$ docker login -u dokysp
-
-# version is optional. if omitted, image tag is `latest` and APP_VERSION is resolved from git
-$ ./scripts/deploy-telegram-gateway.sh dokysp
-$ ./scripts/deploy-codex-exec.sh dokysp 1.2.1
-$ ./scripts/deploy-codex-exec-experimental.sh dokysp
+docker login -u YOUR_NAMESPACE
+PYTHON_BIN="$PWD/.venv/bin/python" ./scripts/deploy-codex-exec.sh YOUR_NAMESPACE v1.2.1
+# 버전 생략: latest 태그, APP_VERSION은 git describe 결과
+PYTHON_BIN="$PWD/.venv/bin/python" ./scripts/deploy-codex-exec.sh YOUR_NAMESPACE
 ```
 
-스크립트는 Docker Hub namespace를 필수로 받고, 버전 태그는 선택으로 받습니다.
-버전 태그를 생략하면 Docker 이미지 태그는 `latest`로 빌드/배포하고, 이미지 내부
-`APP_VERSION` 메타데이터는 `git describe --tags --always --dirty` 결과로 설정합니다.
-버전 태그를 직접 넘기면 Docker 이미지 태그와 `APP_VERSION` 모두 그 값으로 설정합니다.
-namespace 인자가 없으면 실행하지 않고 사용법을 출력한 뒤 실패합니다.
-세 스크립트 모두 `docker build` 전에 `python3 scripts/run_tests.py`(테스트 참고)를 먼저
-실행하고, 회귀 테스트가 실패하면 빌드/푸시 없이 중단합니다.
+`PYTHON_BIN`을 생략하면 `python3`를 사용합니다. 스크립트는 전체 회귀 검증을 통과한 뒤
+`containers/codex-exec`만 빌드 컨텍스트로 보내고 이미지를 푸시합니다. 버전을 직접 넘기면
+이미지 태그와 `APP_VERSION`에 같은 값이 들어갑니다. `APP_VERSION`은 OCI 버전 라벨과
+이미지 환경변수이며, Codex CLI 버전은 Dockerfile에 고정되어 있습니다.
 
-수동 빌드:
+`deploy-codex-exec-experimental.sh`도 같은 인자를 받으며, 동일 엔진을
+`codex-exec-experimental` 이미지 이름으로 푸시하는 호환 진입점입니다. 이전 base/experimental
+스킬 프로필은 포함하지 않습니다. 정책과 모드는 외부 설정 파일로 구분합니다.
+
+이 스크립트가 끝나도 NAS 파일 동기화나 컨테이너 재시작은 수행되지 않습니다.
+운영 대상에서 이미지 pull과 Compose 재생성을 별도로 수행해야 합니다.
+
+로컬 이미지 검증은 푸시 없이 실행할 수 있습니다.
 
 ```bash
-$ export IMAGE_TAG=latest
-
-$ docker build --build-arg APP_VERSION=$IMAGE_TAG -t telegram-gateway:$IMAGE_TAG ./containers/telegram-gateway
-$ docker build -f ./containers/codex-exec/Dockerfile --build-arg APP_VERSION=$IMAGE_TAG --build-arg CODEX_EXEC_PROFILE=base --build-arg IMAGE_TITLE=codex-exec -t codex-exec:$IMAGE_TAG ./containers
-$ docker build -f ./containers/codex-exec/Dockerfile --build-arg APP_VERSION=$IMAGE_TAG --build-arg CODEX_EXEC_PROFILE=experimental --build-arg IMAGE_TITLE=codex-exec-experimental -t codex-exec-experimental:$IMAGE_TAG ./containers
+docker build --build-arg APP_VERSION=local -t danta-codex-exec:local ./containers/codex-exec
+PYTHONPATH=containers/codex-exec/src .venv/bin/python containers/codex-exec/scripts/verify_offline_image.py --image danta-codex-exec:local
 ```
 
-`APP_VERSION`은 필수 빌드 인자이며 이미지 내부 메타데이터입니다. Dockerfile에서
-`org.opencontainers.image.version` 라벨과 컨테이너 환경변수 `APP_VERSION`으로 들어갑니다.
-값을 넘기지 않으면 Dockerfile의 `RUN test -n "$APP_VERSION"` 단계에서 빌드가 실패합니다.
-이미지 태그는 Docker가 이미지를 찾고 배포할 때 쓰는 외부 이름입니다.
-현재 편의 스크립트는 버전 태그를 직접 넘긴 경우에만 이미지 태그와 `APP_VERSION`을 같은 값으로 맞춥니다.
-버전 태그를 생략한 `latest` 배포에서는 원격 컨테이너의 `/version` 출력이 git describe 기반
-배포 버전을 보여주도록 `APP_VERSION`만 git 버전으로 설정합니다.
+검증은 네트워크가 없는 임시 컨테이너에서 합성 데이터만 사용합니다.
+실제 비밀값·계좌·기존 운영 데이터를 이미지 검증에 마운트하지 않습니다.
 
-기존 tar 파일 배포 방식:
+Telegram gateway의 기존 배포 명령은 유지됩니다. 같은 의존성 환경을 활성화한 뒤 실행합니다.
 
 ```bash
-$ docker save -o "./containers/*images/telegram-gateway-$IMAGE_TAG.tar" telegram-gateway:$IMAGE_TAG
-$ docker save -o "./containers/*images/codex-exec-$IMAGE_TAG.tar" codex-exec:$IMAGE_TAG
-$ docker save -o "./containers/*images/codex-exec-experimental-$IMAGE_TAG.tar" codex-exec-experimental:$IMAGE_TAG
+source .venv/bin/activate
+./scripts/deploy-telegram-gateway.sh YOUR_NAMESPACE v1.2.1
 ```
 
-Docker Hub 배포 방식:
+## Docker Compose와 설정
+
+새 엔진은 `containers/codex-exec/compose.yaml`을 사용합니다. 기본 명령은 `doctor`이며
+외부 네트워크가 차단됩니다. 지속 실행용 `compose.runtime.yaml`은 `serve`와 재시작 정책을
+추가하며, 실제 계좌·모델·Telegram 연결에는 검증된 설정과 별도 승인 파일이 필요합니다.
+이미지 이름은 `DANTA_IMAGE`로 지정합니다. 구체적인 마운트·권한·실행 명령은
+[runbook](containers/codex-exec/docs/runbook.md)을 따릅니다.
+
+```text
+containers/codex-exec/
+  Dockerfile
+  compose.yaml
+  compose.auth.yaml
+  compose.runtime.yaml
+  config/
+    *.yaml                 # 정책 설정
+    secrets.yaml.example   # 비밀 설정 작성 예시 (Git 포함)
+    secrets.yaml           # 실제 비밀 설정 (Git·이미지 제외)
+  src/danta/
+  tests/
+  docs/
+  var/                     # 모드·계좌별 상태와 발급 토큰 (Git·이미지 제외)
+```
+
+비밀값은 `config/secrets.yaml`에 별도로 두고 config 디렉터리를 읽기 전용으로
+마운트합니다. 발급된 KIS access token은 쓰기 가능한 상태 디렉터리에 별도 보관합니다.
+활성 SQLite DB는 NAS 공유 경로 대신 운영 호스트의 로컬 파일시스템에 두어야 합니다.
+레거시 파일은 새 이미지와 런타임에 포함되지 않습니다.
+
+Codex 인증은 기존처럼 로그인으로 생성합니다. 이미지를 준비한 뒤 아래 명령을 실행하고
+표시된 URL과 일회용 코드를 브라우저에서 완료합니다. `auth.json`을 직접 만들 필요는 없습니다.
 
 ```bash
-$ export DOCKERHUB_NAMESPACE=dokysp  # dokysp namespace는 예시입니다.
-$ export IMAGE_TAG=latest
-
-$ docker login -u $DOCKERHUB_NAMESPACE
-
-$ docker tag telegram-gateway:$IMAGE_TAG $DOCKERHUB_NAMESPACE/telegram-gateway:$IMAGE_TAG
-$ docker tag codex-exec:$IMAGE_TAG $DOCKERHUB_NAMESPACE/codex-exec:$IMAGE_TAG
-$ docker tag codex-exec-experimental:$IMAGE_TAG $DOCKERHUB_NAMESPACE/codex-exec-experimental:$IMAGE_TAG
-# kis-trade-mcp
-$ docker tag kis-trade-mcp:v1.0.0 $DOCKERHUB_NAMESPACE/kis-trade-mcp:v1.0.0
-
-$ docker push $DOCKERHUB_NAMESPACE/telegram-gateway:$IMAGE_TAG
-$ docker push $DOCKERHUB_NAMESPACE/codex-exec:$IMAGE_TAG
-$ docker push $DOCKERHUB_NAMESPACE/codex-exec-experimental:$IMAGE_TAG
-# kis-trade-mcp
-$ docker push $DOCKERHUB_NAMESPACE/kis-trade-mcp:1.0.0
+DANTA_IMAGE=danta-codex-exec:local docker compose -f containers/codex-exec/compose.auth.yaml run --rm codex-login
 ```
 
-배포 대상 서버에서는 tar 파일 대신 pull합니다.
+로그인과 서비스는 기본 Docker volume `codex-exec-auth`를 공유합니다. 프로필별 저장소는
+`DANTA_AUTH_VOLUME`으로 구분하고 양쪽 실행에 같은 값을 사용합니다. 상태 확인은 위
+명령 뒤에 `login status`를 붙입니다. 비밀 설정의 `DANTA_CODEX_AUTH_HOME`은 `/app/auth`입니다.
+
+운영은 다른 컴퓨터에서 수행합니다. [원격 설치·업데이트 절차](containers/codex-exec/deployment/README.md)에
+전달 파일, 운영 PC 권한·네트워크, Codex 로그인, 승인 준비, 실행·백업 명령을 정리했습니다.
 
 ```bash
-$ export DOCKERHUB_NAMESPACE=dokysp
-$ export IMAGE_TAG=latest
-
-$ docker login -u $DOCKERHUB_NAMESPACE
-$ docker pull $DOCKERHUB_NAMESPACE/telegram-gateway:$IMAGE_TAG
-$ docker pull $DOCKERHUB_NAMESPACE/codex-exec:$IMAGE_TAG
-$ docker pull $DOCKERHUB_NAMESPACE/codex-exec-experimental:$IMAGE_TAG
+mkdir -p containers/codex-exec/var
+.venv/bin/python scripts/prepare-codex-deployment.py \
+  --namespace dokysp --version YOUR_RELEASE \
+  --output containers/codex-exec/var/YOUR_RELEASE --include-secrets
 ```
 
-Compose의 `image:` 값은 Docker Hub의 `dokysp/<repository>:<tag>` 이미지를 직접 사용합니다.
-편의 스크립트는 Docker Hub namespace를 첫 번째 인자로 받고, 수동 명령 예시는 `DOCKERHUB_NAMESPACE` 환경변수로 같은 값을 재사용합니다.
-배포 대상 서버에서는 `docker compose pull`로 새 이미지를 받은 뒤 `docker compose up -d`로 재생성합니다.
-`latest`가 아닌 태그로 배포하려면 Compose의 `image:` 태그도 같은 값으로 맞춥니다.
+이 명령은 새 배포 폴더만 생성합니다. 이미지 push·원격 실행은 수행하지 않습니다.
+출력에는 두 서비스의 Compose, 같은 이미지 태그의 `.env`, 설정·비밀 파일 example과
+미승인 운영 검증 파일 example이 들어갑니다. `--include-secrets`를 지정하면 기존 비밀 파일을
+0600으로 복사하며, Codex 인증·원장·레거시는 복사하지 않습니다. 운영 PC의 Codex 로그인은
+그 PC의 전용 volume에 유지합니다. 생성된 기본 설정은 offline이며 shadow 설정은 별도 example입니다.
 
-## Docker 내에 Codex CLI 로그인
-
-```bash
-$ docker exec -it codex-exec bash
-```
-
-## Docker Compose 실행
-
-`telegram-gateway`, `kis-trade-mcp`, `codex-exec`은 분리해서 실행합니다. 각 compose는 공용 네트워크 `danta-bot-net`을 사용하므로 최초 1회 네트워크를 먼저 만듭니다.
-
-```bash
-$ cd containers
-$ docker network create danta-bot-net
-$ docker compose -f kis-trade-mcp/compose.yaml up -d
-$ docker compose -f telegram-gateway/compose.yaml up -d
-$ docker compose -f codex-exec/profiles/base/compose.yaml up -d
-$ docker compose -f codex-exec/profiles/experimental/compose.yaml up -d
-```
-
-이미 네트워크가 있으면 `docker network create`는 한 번만 실행하면 됩니다.
-
-```bash
-$ docker compose -f codex-exec/profiles/experimental/compose.yaml down
-$ docker compose -f codex-exec/profiles/base/compose.yaml down
-$ docker compose -f telegram-gateway/compose.yaml down
-$ docker compose -f kis-trade-mcp/compose.yaml down
-```
-
-## 배포 시, 환경 구조
-
-```
-containers/
-  telegram-gateway/
-    compose.yaml
-    config/
-      routes.yaml            # 라우팅 설정
-      telegram-v1.env        # telegram 봇 연결을 위한 환경변수 설정
-    ...
-
-  kis-trade-mcp/
-    compose.yaml
-    config/
-      kis-trade-mcp.env      # kis-trade-mcp 환경변수 설정
-      kis-trade-mcp.env.example
-
-  codex-exec/
-    Dockerfile
-    README.md
-    codex_exec.py
-    scripts/
-    shared-skills/
-      check-holiday/
-      collect-financial-information/
-      trading-schedule-toggle/
-    pipelines/
-      daily-trading/
-    profiles/
-      base/
-        compose.yaml
-        config/
-          codex-exec.env     # 기본 Codex 실행 및 MCP 연결 환경변수 설정
-          schedules.yaml     # 기본 스케줄링 설정
-          portfolio.txt      # 기본 포트폴리오 설정
-          execute-trade.yaml # $execute-trade 기본 거래 설정
-        skills/
-      experimental/
-        compose.yaml
-        config/
-          codex-exec.env     # 실험 Codex 실행 및 MCP 연결 환경변수 설정
-          schedules.yaml     # 실험 스케줄링 설정
-        skills/
-```
-
-`codex-exec` 프로필 Compose는 `config/`를 `/app/config`로 writable bind mount합니다.
-`schedules.yaml`, `portfolio.txt`, `execute-trade.yaml` 파일 변경은 컨테이너 재시작 없이 다음
-스케줄러 tick 또는 다음 Codex 실행부터 반영됩니다. `$trading-schedule-toggle` 스킬도 이 mount를 통해
-`daily-{number}` 스케줄의 `enabled` 값을 on/off로 직접 바꿀 수 있습니다. 단, `codex-exec.env`처럼
-환경변수로 주입되는 설정은 컨테이너 재생성 후 적용됩니다. 스킬이 config를 수정하려면 호스트
-config 파일과 디렉터리가 컨테이너 실행 UID 1000에 쓰기 가능해야 합니다.
+gateway Compose는 `config/codex-peer.secret`의 64자리 16진 문자열로 항상 서명합니다.
+엔진 `secrets.yaml`의 `DANTA_TELEGRAM_PEER_SECRET`과 같아야 하며 Git·이미지에서 제외됩니다.
+두 서비스는 `.env`의 공통 외부 네트워크에 연결하고, gateway의 고정 IP를 신뢰 peer profile과
+맞춥니다. 실제 달력·수수료·계좌 귀속·허용 sender/chat·승인 검증은 운영 연결 단계에서 확정합니다.
+기존 `codex-exec/profiles/*/compose.yaml` 경로는 사용하지 않습니다.
 
 ## Codex CLI
 

@@ -13,17 +13,19 @@ fee schedule, market calendar, model identity, credential, or live approval.
 by offline tests. CLI, service, protection and review therefore retain one
 order-writing path. Factory imports never read authentication or make requests.
 
-Before reading named environment variables or creating external adapters, the
+Before reading private `config/secrets.yaml` values or creating external adapters, the
 factory requires an unexpired, configuration-bound trusted grant for
-`account_read`, `market_read`, `disclosure_read`, and `model_call`. The runtime
+`account_read`, `market_read`, `disclosure_read`, `model_call`, and `broker_auth`. The runtime
 manifest file SHA-256 must match
 `approval.operational_evidence.runtime_manifest_sha256`. Real account order
 writes still require the application's activation and `live_orders` grant;
 broker demonstration orders require `demo_orders`; paper submissions require the
 application's `paper_simulation` grant. Shadow rejects every mutation.
 
-No automatic token creation, token refresh, model fallback or account adoption is
-performed. Required values that remain null in the shipped configuration cause
+KIS access tokens are issued and refreshed before read requests under `broker_auth`,
+then cached privately in `state_dir/kis-token.json`. No broker request is retried
+after authentication or transport failure. Model fallback and account adoption
+are not automatic. Required values that remain null in the shipped configuration cause
 `WAITING_FOR_HUMAN` when external startup is requested. They do not prevent the
 authorized offline build and synthetic tests.
 
@@ -37,13 +39,13 @@ The `app.broker.capability_manifest` JSON file has exactly these top-level keys:
 | `source`, `verified` | Provenance and explicit verification; bound by trusted approval hash |
 | `account_alias`, `environment` | Exact configured alias and KIS `real` or `demo` environment |
 | `effective_at`, `expires_at` | Aware timestamps covering this use |
-| `credentials` | `token_env`: name of the explicitly supplied KIS access-token environment variable |
+| `credentials` | Exactly `{"managed_token": true}`; access tokens are generated, not user-configured |
 | `calendar` | Verified source and complete ordered `sessions`; actual opens/closes/ordinals |
 | `ticks` | Verified source, `bands` of lower bound/tick pairs, and validity timestamps |
 | `costs` | Non-synthetic, verified `CostSchedule` for the exact account alias and KRX |
 | `normalization` | Verified provider field/code/price-adjustment mappings described below |
 | `bootstrap` | Approved cash, ownership boundaries, historical order range and optional settlement evidence |
-| `model` | Isolated executable identity and an explicitly named authentication-home environment variable |
+| `model` | Isolated executable identity and an explicitly named authentication-home entry in secrets.yaml |
 | `disclosures` | Successful-cursor starting date, corporation mapping, optional source-verified extraction |
 | `rate_limit` | Verified source, positive minimum request interval and maximum queue wait no greater than five seconds |
 
@@ -51,10 +53,19 @@ The `app.broker.capability_manifest` JSON file has exactly these top-level keys:
 this capability manifest containing that object. The runtime compares the
 referenced object to the approval-bound calendar.
 
-The configured KIS account-reference environment variable contains
+The configured KIS account-reference entry in `secrets.yaml` contains
 `account-component-product-component` in the exact `8 digits-2 digits` format.
 Only the component names appear in configuration; actual values must be supplied
-by the trusted deployment. Runtime errors do not print credentials.
+by the trusted deployment. Existing `*_env` reference field names are retained,
+but production resolves those names exclusively in `secrets.yaml`, not the process
+environment. The optional factory `env` argument is an explicit contract-test
+injection. Runtime errors do not print credentials.
+
+The cache is keyed by environment and a digest of the app key/secret, reuses a
+token with more than 60 seconds remaining, and serializes renewal with a file
+lock. Cache and lock files require mode 0600; replacement is atomic and flushed.
+Credentials are loaded once at startup; restart after rotating the private file.
+Secrets are excluded from policy snapshots, config hashes, prompts and images.
 
 ## Provider normalization
 
@@ -143,8 +154,11 @@ entry merely because the system rediscovered it today.
 originals. Supported, explicitly labeled tables can produce earnings, guidance
 or material-contract event facts automatically. Unrecognized templates,
 unresolved corrections, absent units or comparison periods remain `PARTIAL` /
-`WATCH`. Parser tests cover synthetic labeled originals; compatibility with
-actual production DART templates has not been certified. An optional
+`WATCH`. Parser tests cover synthetic labeled originals and the merged-cell
+contract layout observed in receipt `20260911800002`. A read-only probe on
+2026-09-14 verified that original's amounts, dates, payment terms and qualifiers;
+other production layouts remain unverified. See [DART evidence](dart-read-verification.json).
+An optional
 `verified_events_path` must also match its approval-bound
 `verified_events_sha256`, and its extraction must match the fetched original's
 hash and instrument. It is not required for the automatic parser path.
@@ -200,3 +214,18 @@ There were no real account, token, DART, model or order calls in those tests.
 Actual account adoption, fees, source-field contracts, cold-start coverage,
 quote latency, sustained rate limits, model isolation and protection performance
 remain deployment evidence requirements, not simulated successes.
+
+## Final dispatch boundary
+
+Order/cancel POSTs only attempt a nonblocking read of an already valid token
+cache. A missing, expiring or busy cache produces `NOT_SENT`; it cannot initiate
+authentication or wait for another renewal after preflight. The next approved
+read/monitoring request handles renewal. There is no automatic order retry.
+
+For new submissions, KisBrokerPort supplies the earliest of the decision expiry,
+quote timestamp + 5 seconds and session close. The adapter rechecks this deadline
+and authorization after the priority queue, immediately before transport. A local
+`NOT_SENT` submission becomes `INVALIDATED`, releasing its reservation and
+recording `ORDER_NOT_SENT`. An unsent cancellation restores the existing order
+state/reservation and records `CANCEL_NOT_SENT`. Actual transport uncertainty
+continues to require reconciliation.

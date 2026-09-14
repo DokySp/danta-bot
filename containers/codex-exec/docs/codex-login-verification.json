@@ -1,0 +1,215 @@
+{
+  "scope": "CODEX_LOGIN_AND_MODEL_CONNECTIVITY_VERIFICATION",
+  "tests": {
+    "codex_exec": 153,
+    "gateway": 28,
+    "repo_scripts": 15,
+    "total": 196,
+    "result": "PASS"
+  },
+  "credential_storage": {
+    "checked_at": "2026-09-14T06:56:15.696540+00:00",
+    "image_id": "sha256:9cfa905c3fc4912c9effdeb0704af5c519dd9ca92d5a92f04016795bcb9d7ffa",
+    "result": "PASS",
+    "scope": "SYNTHETIC_OFFLINE_CREDENTIAL_STORAGE",
+    "compose_login_independent": true,
+    "shared_volume_and_home": true,
+    "existing_bind_override": true,
+    "fresh_volume_owner": 10001,
+    "auth_directory_mode": "0700",
+    "auth_file_mode": "0600",
+    "native_cli_wrote_synthetic_credential": true,
+    "new_container_reused_credential": true,
+    "writable_after_restart": true,
+    "network": "none",
+    "real_authentication": false,
+    "model_called": false
+  },
+  "offline_engine": {
+    "result": "PASS",
+    "evidence": "/tmp/danta-service-image-validation-stdin-kjz8z5a3",
+    "tested_at": "2026-09-14T06:56:16.671533+00:00",
+    "uid": 10001,
+    "image_code_id": "9e193a78a2f7cc06e1d918966c7b3f1df37e9fc001870cac5841c2342f89aca9",
+    "doctor": {
+      "code_id": "9e193a78a2f7cc06e1d918966c7b3f1df37e9fc001870cac5841c2342f89aca9",
+      "config_hash": "19fbc857232ef3bc8755f4a9f0720dbabb8936052d9cbe7c9bc6732092376034",
+      "configuration": "VALID",
+      "default_network": "BLOCKED",
+      "external_integration": "EXTERNAL_INTEGRATION_UNVERIFIED",
+      "live": "LIVE_NOT_AUTHORIZED",
+      "mode": "offline",
+      "strategy": "STRATEGY_UNPROVEN",
+      "strategy_hash": "5a171ec89b351cd12dfa55acf087f4cb71c105c0cfad7a58c62cde6a47d5ee2c"
+    },
+    "synthetic_run_status": "COMPLETE",
+    "synthetic_order_status": "FIXTURE_FILLED",
+    "same_request_reused": true,
+    "holdings_count": 1,
+    "service_default_no_socket": true,
+    "readme_sha256": "26d74f328784dcd461dc3aedf0f58d7e60855e41ee9179b0cc6fe8ec51be7006",
+    "design_heading_count": 92,
+    "image_tag": "danta-codex-exec:login-20260914",
+    "image_id": "sha256:9cfa905c3fc4912c9effdeb0704af5c519dd9ca92d5a92f04016795bcb9d7ffa",
+    "isolation": "nonroot_readonly_network_none_no_capabilities_no_new_privileges"
+  },
+  "container_cli_isolation": {
+    "created_at": "2026-09-14T06:56:52.313635+00:00",
+    "cli_version": "codex-cli 0.153.4",
+    "launcher_sha256": "56ef98ab4032d317ab26e9b5e5a175650717351edb16ed9cde0cb6d1734d62da",
+    "market_tools": [
+      "get_bars",
+      "get_candidate",
+      "get_event",
+      "get_fact",
+      "get_position_thesis",
+      "search_official_evidence"
+    ],
+    "remaining_builtin_tools": [
+      "list_mcp_resource_templates",
+      "list_mcp_resources",
+      "read_mcp_resource",
+      "request_user_input"
+    ],
+    "shell_call_refused": true,
+    "patch_call_refused": true,
+    "auth_canary_not_read": true,
+    "environment_keys": [
+      "CODEX_HOME",
+      "HOME",
+      "LANG",
+      "PATH"
+    ],
+    "provider": "local_loopback_fixture",
+    "real_model_or_auth_used": false,
+    "runtime_authorization": false,
+    "operational_auth_mount_verified": false
+  },
+  "real_login_completed": true,
+  "real_model_called": true,
+  "live_authorized": false,
+  "production_deployed": false,
+  "independent_review": {
+    "model": "gpt-5.6-luna",
+    "reasoning_effort": "max",
+    "read_only": true,
+    "scope": "login workflow changes only",
+    "material_defects": 0
+  },
+  "actual_login": {
+    "authenticated": true,
+    "auth_mode": "chatgpt",
+    "method": "native codex login status",
+    "shared_volume": "codex-exec-auth"
+  },
+  "initial_model_connection": {
+    "checked_at": "2026-09-14T08:17:03.831187+00:00",
+    "scope": "USER_AUTHORIZED_MODEL_CONNECTIVITY_PROBE",
+    "status": "PROCESS_FAILED",
+    "adapter_status": "PROCESS_FAILED",
+    "attempts": 1,
+    "auth_mode": "chatgpt",
+    "model_id": "gpt-5.6-sol",
+    "reasoning_effort": "xhigh",
+    "source": "CodexAdapter with real runner and ChatGPT login",
+    "synthetic_input": true,
+    "read_tool_verified": false,
+    "schema_and_semantics_verified": false,
+    "usage": {
+      "input_tokens": 26180,
+      "cached_input_tokens": 8576,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 1029,
+      "reasoning_output_tokens": 701
+    },
+    "reset_at": null,
+    "cli_sha256": "56ef98ab4032d317ab26e9b5e5a175650717351edb16ed9cde0cb6d1734d62da",
+    "uid": 10001,
+    "auth_home": "/app/auth",
+    "durable_probe_state": "connectivity.sqlite",
+    "runtime_manifest_created": false,
+    "trading_enabled": false,
+    "broker_called": false,
+    "image_id": "sha256:9cfa905c3fc4912c9effdeb0704af5c519dd9ca92d5a92f04016795bcb9d7ffa",
+    "cause": "Configured model requires Code Mode; previous adapter disabled the host."
+  },
+  "current_cli_isolation": {
+    "created_at": "2026-09-14T08:38:54.722908+00:00",
+    "cli_version": "codex-cli 0.153.4",
+    "launcher_sha256": "56ef98ab4032d317ab26e9b5e5a175650717351edb16ed9cde0cb6d1734d62da",
+    "code_mode_host_sha256": "3e85d67471825f73d02ff5f7e047ca1f6ca8caa3f59e4c6e8d9ca6ca7302cb45",
+    "model_id": "gpt-5.6-sol",
+    "market_tools": [
+      "get_bars",
+      "get_candidate",
+      "get_event",
+      "get_fact",
+      "get_position_thesis",
+      "search_official_evidence"
+    ],
+    "remaining_builtin_tools": [
+      "exec",
+      "request_user_input",
+      "wait"
+    ],
+    "read_tool_verified": true,
+    "code_mode_no_filesystem_or_network": true,
+    "subagent_call_refused": true,
+    "auth_read_denial": "SANDBOX_SETUP_REJECTED",
+    "filesystem_profile": "minimal_and_attempt_read_only_auth_denied",
+    "shell_call_refused": true,
+    "patch_call_refused": true,
+    "auth_canary_not_read": true,
+    "environment_keys": [
+      "CODEX_HOME",
+      "HOME",
+      "LANG",
+      "PATH"
+    ],
+    "provider": "local_loopback_fixture",
+    "real_model_or_auth_used": false,
+    "runtime_authorization": false,
+    "operational_auth_mount_verified": false
+  },
+  "model_connection": {
+    "checked_at": "2026-09-14T08:39:43.026861+00:00",
+    "scope": "USER_AUTHORIZED_MODEL_CONNECTIVITY_PROBE",
+    "status": "SUCCESS",
+    "adapter_status": "SUCCESS",
+    "attempts": 1,
+    "auth_mode": "chatgpt",
+    "model_id": "gpt-5.6-sol",
+    "reasoning_effort": "xhigh",
+    "source": "CodexAdapter with real runner and ChatGPT login",
+    "synthetic_input": true,
+    "read_tool_verified": true,
+    "schema_and_semantics_verified": true,
+    "usage": {
+      "input_tokens": 13814,
+      "cached_input_tokens": 6400,
+      "cache_write_input_tokens": 0,
+      "output_tokens": 381,
+      "reasoning_output_tokens": 182
+    },
+    "reset_at": null,
+    "cli_sha256": "56ef98ab4032d317ab26e9b5e5a175650717351edb16ed9cde0cb6d1734d62da",
+    "code_mode_host_sha256": "3e85d67471825f73d02ff5f7e047ca1f6ca8caa3f59e4c6e8d9ca6ca7302cb45",
+    "uid": 10001,
+    "auth_home": "/app/auth",
+    "durable_probe_state": "connectivity.sqlite",
+    "runtime_manifest_created": false,
+    "trading_enabled": false,
+    "broker_called": false
+  },
+  "verified_image": {
+    "tag": "danta-codex-exec:login-20260914-verified",
+    "id": "sha256:62392bdb8af3e893f9b0b493470fe48ddbd2f8a8056f758bcf1e8df96e83a7ee"
+  },
+  "code_mode_review": {
+    "model": "gpt-5.6-luna",
+    "reasoning_effort": "max",
+    "read_only": true,
+    "scope": "Code Mode adapter, permission profile and isolation probe",
+    "material_defects": 0
+  }
+}

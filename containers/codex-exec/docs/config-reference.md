@@ -1,7 +1,6 @@
 # 설정 참조
 
-기준은 [README §12](../README.md)와 배포 밖에 두는 세 YAML이다. 이 문서는 설정을
-추가하지 않는다. 전체 키·기본값은 [app.yaml](../config/app.yaml),
+기준은 [README §12](../README.md)와 배포 밖에 두는 세 YAML이다. 비밀값은 사용자 요청에 따라 별도 `secrets.yaml`로 읽는다. 전체 키·기본값은 [app.yaml](../config/app.yaml),
 [strategy.yaml](../config/strategy.yaml), [schedules.yaml](../config/schedules.yaml)에 있다.
 현재 기본값은 `offline` / `research`이며 실제 연결·운용 승인은 포함하지 않는다.
 
@@ -35,10 +34,10 @@ hash를 고정한다. 파일이 바뀐 진행 실행은 기존 hash로 새 권�
 | 영역 | 기본값 / 의미 | 외부 실행에서 필요한 확인 |
 |---|---|---|
 | app | `offline`, `Asia/Seoul`, 계좌 별칭 null, `127.0.0.1:8080` | 실제 모드/계좌와 bind/수신 경계 |
-| model | `codex_cli`, ID/effort/auth null, timeout 180초 | 실제 실행 파일·모델·인증·격리 증거·모델 사용 승인 |
+| model | `codex_cli`, `gpt-5.6-sol`/`xhigh`/`chatgpt`, timeout 180초 | 기존 모델 설정을 재사용. 실제 로그인·모델 접근·격리 증거·모델 사용 승인 검증 |
 | model 재시도 | transient 1회/5초, schema 교정 1회, fallback false | quota reset 미확인은 운영자 확인, 다른 모델 자동 교체 없음 |
 | broker | `kis`, 환경/manifest/rate-limit null | 모의/실전 endpoint, 계좌 귀속, 제공자 필드·한도 검증 |
-| broker 비밀 참조 | `KIS_ACCOUNT_REF`, `KIS_APP_KEY`, `KIS_APP_SECRET` 이름 | 값은 환경/배포 참조에서만 읽으며 YAML·image에 넣지 않음 |
+| broker 비밀 참조 | `KIS_ACCOUNT_REF`, `KIS_APP_KEY`, `KIS_APP_SECRET` 이름 | 값은 private secrets.yaml에서만 읽으며 정책 YAML·image에는 넣지 않음 |
 | market | OpenDART, 공식 IR 목록 빈 값, calendar/corporate action null | DART 권한, 승인 도메인, 실제 세션·기업행위 출처 |
 | execution | enabled false, single writer true | 실행 활성화와 승인 capability가 함께 필요 |
 | monitoring | enabled false, 호가/활성주문 5초, idle계좌 60초 | 최신성/호출량/보호 실행 가능성 검증 |
@@ -51,8 +50,7 @@ hash를 고정한다. 파일이 바뀐 진행 실행은 기존 hash로 새 권�
 transport도 이 경우에만 내부 `FIXTURE_ONLY` 표지를 사용한다. 외부 분기에는 적용하지 않는다.
 
 실제 adapter 구성과 manifest 필드는 [runtime-contract.md](runtime-contract.md), gateway
-인증과 mount 절차는 [runbook.md](runbook.md)를 따른다. 기본 image는 실제 Codex 인증/
-런타임이나 외부 egress를 준비하지 않는다.
+인증과 mount 절차는 [runbook.md](runbook.md)를 따른다. image에는 고정 Codex CLI가 포함되며, 실제 인증과 외부 egress는 별도 운영 설정이다.
 
 ## strategy.yaml
 
@@ -120,3 +118,22 @@ PYTHONPATH=src python -m danta.safety src schemas migrations prompts README.md s
 
 검사는 임의 비밀 문자열·압축/암호화된 모든 값을 알아내는 도구가 아니다. image의 명시적
 파일 allowlist, 설정/인증의 image 밖 보관, 모델의 권한 격리를 함께 유지한다.
+
+## secrets.yaml
+
+[secrets.yaml.example](../config/secrets.yaml.example)을 같은 디렉터리의 `secrets.yaml`로
+복사하고 문자열 값을 채운다. 권한은 0600 또는 읽기 전용 0400이어야 한다. 환경변수 자동
+fallback은 없다. 기존 `*_env` 필드는 이 파일의 키 이름을 가리킨다.
+
+- `KIS_ACCOUNT_REF`: 계좌번호 8자리와 상품코드 2자리를 하이픈으로 연결한 문자열.
+- `KIS_APP_KEY`, `KIS_APP_SECRET`: 승인된 KIS 환경의 앱 인증 정보.
+- `DART_API_KEY`: OpenDART 인증 정보.
+- `TELEGRAM_GATEWAY_URL`, `DANTA_TELEGRAM_PEER_SECRET`: 사용 승인된 gateway 연결 정보.
+- `DANTA_CODEX_AUTH_HOME`: 전용 Codex 인증 디렉터리 경로. 로그인/runtime Compose 모두 `/app/auth`.
+  `compose.auth.yaml`의 `codex login`이 공유 Docker volume에 인증을 생성·갱신한다.
+
+공백 값은 미설정이다. 파일 누락/형식 오류 메시지에는 입력값을 넣지 않는다. offline
+명령은 이 파일을 읽지 않는다. 실제 값은 Git/Docker context/정책 snapshot/보고서에서 제외한다.
+파일을 변경하면 서비스를 재시작하여 반영한다. 발급 access token은 수동 설정하지 않으며
+`app.state_dir/kis-token.json`에 만료시각과 함께 0600으로 저장된다. 조회 단계에서 갱신하고,
+주문/취소 단계에는 준비된 캐시만 대기 없이 읽는다. 갱신 필요·잠금 경합이면 전송 전에 차단한다.

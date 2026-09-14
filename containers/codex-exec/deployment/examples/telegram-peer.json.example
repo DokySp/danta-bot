@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "identity": "telegram-gateway",
+  "allowed_source_ips": [],
+  "secret_env": "DANTA_TELEGRAM_PEER_SECRET",
+  "verified": false,
+  "evidence_id": null,
+  "expires_at": null,
+  "config_hash": null
+}

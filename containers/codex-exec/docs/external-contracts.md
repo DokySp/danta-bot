@@ -1,6 +1,6 @@
 # 외부 어댑터 계약 확인
 
-확인일: 2026-09-13. **실제 계좌·KIS/DART 인증·실제 모델·배포 gateway 연결은 실행하지 않았다.** 아래 공식 문서와 신규 합성 wire fixture로 구현했다. `EXTERNAL_INTEGRATION_UNVERIFIED`, `LIVE_NOT_AUTHORIZED` 상태다. 구 프로젝트 소스/로그/프롬프트는 입력으로 사용하지 않았다.
+초기 구현 확인일: 2026-09-13. 당시 공식 문서와 신규 합성 wire fixture로 구현했다. 2026-09-14에 사용자가 허용한 **DART 인증·목록·기업 코드·원문 단독 조회**와 **ChatGPT 로그인**을 확인했다. 실제 모델 연결의 결과는 아래 Codex 절과 개별 증적에 구분한다. 전체 시스템은 `EXTERNAL_INTEGRATION_UNVERIFIED`, `LIVE_NOT_AUTHORIZED` 상태다.
 
 ## KIS REST
 
@@ -32,15 +32,25 @@
 
 `ord_tmd`는 주문시각이며 첫 체결시각으로 바꾸지 않는다. `read_fills`는 주문별 누적 수량/금액이며 개별 fill ID를 만들지 않는다. 이 endpoint의 주문별 실제 체결 수수료·세금 및 first-fill 정확시각은 이번 문서 확인으로 확정하지 못했다. 추정 제비용/주문시각을 실제 비용/체결시각으로 승격하지 않는다. [공식 응답 필드](https://github.com/koreainvestment/open-trading-api/blob/main/examples_llm/domestic_stock/inquire_daily_ccld/chk_inquire_daily_ccld.py)
 
-인증은 별도 명시적 `issue_token()`으로 `/oauth2/tokenP`에 `grant_type=client_credentials/appkey/appsecret`를 보내며 반환 token은 repr에서 숨긴다. 자동 호출되지 않으며 `broker_auth` 승인과 환경 확인이 필요하다. [공식 인증 sample](https://github.com/koreainvestment/open-trading-api/blob/main/examples_llm/kis_auth.py)
+인증은 별도 명시적 `issue_token()`으로 `/oauth2/tokenP`에 `grant_type=client_credentials/appkey/appsecret`를 보내며 반환 token은 repr에서 숨긴다. `broker_auth` 승인과 환경 확인 후 `KisTokenCache`가 최초 조회/만료 60초 전 발급을 호출한다. 캐시는 환경과 앱 키/시크릿에 결합하며 재시작 시 재사용한다. 주문 POST는 준비된 캐시만 대기 없이 읽으며, 캐시가 없거나 갱신 중이면 NOT_SENT로 차단한다. 주문 HTTP 실패 뒤 갱신·재전송하지 않는다. [공식 인증 sample](https://github.com/koreainvestment/open-trading-api/blob/main/examples_llm/kis_auth.py)
 
 WebSocket `subscribe_quotes`는 검증된 운영 capability가 없어 명시적으로 거부한다. 구현된 fallback은 승인된 REST polling이다. 스트림/native stop/보호 체결 가능성이 검증됐다고 보고하지 않는다. 현재 호가의 제공자 시각과 세션 날짜, 수정주가의 과거 시점 조정 정의, API 속도 한도, 실제 계좌 귀속·비용은 운영 capability manifest와 별도 연결 검증 대상이다.
+
+2026-09-14 사용자 제공 기존 키로 실전 token 발급과 잔고 조회를 각각 1회 실행해
+`COMPLETE`를 확인했다. 저장한 0600 token 캐시를 새 인스턴스에서 외부 호출 없이
+재사용했다. 호스트 Python 3.12의 단독 adapter 검사이며, 종목별 주문 가능 자원·주문·체결·
+비용·전략 귀속·Docker 운영 연결은 검사하지 않았다. [조회 증적](kis-read-verification.json)
 
 ## OpenDART와 공식 IR
 
 `list.json`은 날짜/기업/page_no/page_count=100으로 전체 페이지를 조회한다. `last_reprt_at=N`으로 원보고서와 정정을 보존한다. 전체기업 조회는 공식 3개월 제한보다 보수적인 최대 89일로 분할한다. `013`은 첫 페이지의 빈 기간일 때만 `COMPLETE_NO_EVENT`; 인증 오류/한도/중간 누락은 실패/부분 결과다. 페이지 중 total_count 변동·중복 접수번호는 완료가 아니다. 목록에서 확인되는 일자를 정확한 장중 공개시각으로 만들지 않는다. [공식 목록 규격](https://opendart.fss.or.kr/guide/detail.do?apiGrpCd=DS001&apiId=2019001)
 
 `document.xml`은 접수번호별 ZIP 원본을 읽어 원문 hash와 수집시각을 남긴다. ZIP 내부 경로를 filesystem에 추출하지 않는다. `corpCode.xml`은 종목 코드와 회사 고유번호의 중복/형식을 검증한다. 공시 제목만으로 수치/정정의 부모 관계를 확정하지 않는다. [원문 규격](https://opendart.fss.or.kr/guide/detail.do?apiGrpCd=DS001&apiId=2019003), [고유번호 규격](https://opendart.fss.or.kr/guide/detail.do?apiGrpCd=DS001&apiId=2019018)
+
+2026-09-14 실제 키의 `000` 응답, 기업 코드 3,990건, 2026-09-11 진단 목록 683건/7페이지,
+원문 1건을 확인했다. 실제 pagination 숫자는 JSON int였다. 계약 원문 `20260911800002`의
+병합 셀을 해석하고 금액·기간·지급조건·추가 주석을 원문과 대조했다. 다른 양식의
+지원이나 장중 최초 공개시각은 이 검사로 증명하지 않는다. [조회 증적](dart-read-verification.json)
 
 공식 IR은 승인 목록의 정확한 HTTPS hostname만 허용하고 리다이렉트를 따라가지 않는다. 원문 hash를 보존하지만 공개시각의 검증은 별도 증거가 필요하다. 신규 유료 데이터 서비스는 추가하지 않았다.
 
@@ -50,15 +60,36 @@ WebSocket `subscribe_quotes`는 검증된 운영 capability가 없어 명시적�
 
 실제 model ID/effort/auth mode가 없으면 호출하지 않는다. `forced_login_method`는 승인된 `chatgpt/api`로 명시한다. 모델 fallback은 없다. quota는 제공자/모델별 회로에 저장하고 reset 시각이 없으면 운영자 확인 전 재호출하지 않는다. transient는 5초 뒤 한 번, schema 오류는 같은 사실 입력으로 한 번만 교정한다. timeout/semantic 거부는 재시도하지 않는다. [공식 설정 계약](https://learn.chatgpt.com/docs/config-file/config-reference)
 
-판단 subprocess는 PATH/LANG/HOME/CODEX_HOME만 받으며 KIS/DART/Telegram 환경변수를 상속하지 않는다. 별도 auth home을 사용하고 shell/unified_exec/apps/plugins/browser/computer/code-mode/subagent/hooks/memory/image/workspace-dependency 기능을 비활성화한다. 읽기 MCP 프로세스는 지정된 frozen JSON 파일만 로드하며 모델 도구 인자로 파일 경로나 외부 HTTP를 받지 않는다. read-only sandbox만으로 인증정보가 격리된다고 가정하지 않는다. [공식 보안 경계](https://learn.chatgpt.com/docs/security)
+판단 subprocess는 PATH/LANG/HOME/CODEX_HOME만 받으며 KIS/DART/Telegram 환경변수를 상속하지 않는다. 별도 auth home을 사용하고 shell/unified_exec/apps/plugins/browser/computer/subagent/hooks/memory/image/workspace-dependency 기능을 비활성화한다. `gpt-5.6-sol`의 실제 모델 정보는 Code Mode를 요구하므로 이미지에 포함된 V8 host를 사용한다. `features.code_mode.excluded_tool_namespaces=["functions"]`로 일반 내장 도구를 제외하고 `agents.enabled=false`로 협업 도구도 끈다. 읽기 MCP 프로세스는 지정된 frozen JSON 파일만 로드하며 모델 도구 인자로 파일 경로나 외부 HTTP를 받지 않는다. [공식 설정](https://learn.chatgpt.com/docs/config-file/config-reference)
+
+모델 도구의 파일 권한은 `:read-only`를 상속하는 `danta_model` profile이다. 기본 root 읽기를 거부하고 최소 실행 경로와 이번 attempt만 읽기 허용하며, auth home은 명시적으로 거부한다. 도구 네트워크는 꺼둔다. CLI 자체의 로그인·토큰 갱신·결과 저장과 모델 도구의 파일 접근 권한은 구분한다. [공식 권한 profile](https://learn.chatgpt.com/docs/permissions)
 
 명세의 6개 도구 `get_event/get_fact/get_bars/get_candidate/get_position_thesis/search_official_evidence`만 market namespace에 등록한다. 기업/기간/공식 도메인/페이지/응답 크기를 검사한다. 부속 자료는 `tool_records`, 범위는 `tool_scope`로 제공하며 조회 결과·새 available_at·원문 hash·입력 snapshot ID를 attempt의 `lookup-manifest.jsonl`에 기록한다. 큰 원문 부속을 제외한 frozen 입력 전체는 첫 prompt에 들어간다.
 
-재현용 `tests/fixtures/adapters_cli_probe.py --run`은 **임시 loopback mock provider와 가짜 응답만** 사용한다. 실제 CLI로 tool inventory를 관측하고, 서버가 강제로 반환한 `exec_command/apply_patch`가 거부되고 auth canary가 노출되지 않는지 확인한다. 결과는 `adapters_cli_probe_result.json`이다. CLI에는 MCP resource enumeration/읽기와 request_user_input builtin도 남으나, 연결된 MCP는 market 한 개이며 그 서버는 임의 resource/path를 제공하지 않는다. 이 probe는 실제 운영 auth mount/승인/배포 환경 검증을 대체하지 않는다. runtime은 승인된 isolation probe가 없으면 `SPEC_GAP_MODEL_ISOLATION_UNVERIFIED`로 차단한다.
+재현용 `tests/fixtures/adapters_cli_probe.py --run`은 **임시 loopback mock provider와 가짜 응답만** 사용한다. 기본 model ID는 실제 설정과 같은 `gpt-5.6-sol`이며 `--model-id`로 검증 대상을 지정한다. Code Mode의 호출 가능한 목록이 market 6개와 정확히 같은지, 파일/프로세스/네트워크 전역 객체 및 모듈 import가 차단되는지, 실제 frozen 읽기와 조회 기록이 남는지 확인한다. 외부에 노출되는 wrapper는 `exec/wait/request_user_input`이며 일반 내장 도구와 협업 도구는 노출하지 않는다.
+
+강제로 반환한 직접 shell/patch/resource 호출도 별도로 검사한다. 숨겨진 patch handler의 파일 생성은 read-only로 거부되고, auth canary 수정 시도도 내용을 읽거나 바꾸지 못해야 한다. 이번 Docker에서는 후자의 파일 읽기용 sandbox 시작 자체가 거부되어 `SANDBOX_SETUP_REJECTED`로 기록했다. 이를 다른 운영 환경에서 동일한 차단 경로가 검증된 것으로 표시하지 않는다. 과거 `fixture-probe` 모델만 사용한 증적은 현재 모델의 Code Mode 호환성 증거가 아니다. runtime은 승인된 isolation probe가 없으면 `SPEC_GAP_MODEL_ISOLATION_UNVERIFIED`로 차단한다.
+
+2026-09-14 공유 인증 volume의 ChatGPT 로그인을 확인하고, 수정된 Docker 어댑터로
+`gpt-5.6-sol`/`xhigh`를 실제 호출했다. 값이 prompt에 없는 합성 사실을 `get_fact`로 1회
+조회하고 JSON schema와 반환 값까지 검증하여 `SUCCESS`였다. 투자 판단·전략 성과나
+전체 운영 runtime의 승인 검증은 별개다. [로그인·호출 증적](codex-login-verification.json)
 
 ## Telegram과 스케줄
 
 gateway 통신은 제공 명세 §11.3을 사용한다. 기본 ingress off이며 신뢰 transport가 제공한 peer ID와 sender/chat allowlist가 모두 맞아야 수신한다. body의 route/sender는 인증 증거로 쓰지 않는다. `(peer,route,update_id)`와 본문 hash를 SQLite에 저장한 뒤 즉시 접수 응답을 반환한다. 같은 ID/다른 본문은 거부하며 raw_message는 실행하지 않는다. controller callback의 별도 승인이 없는 변경 명령은 거부한다.
+
+gateway는 별도 0400/0600 `codex-peer.secret`의 64자리 16진 문자열을 읽고,
+`X-Danta-Timestamp`와 `X-Danta-Signature`를 보낸다. 정확한 body bytes와 timestamp,
+`POST /telegram`을 HMAC-SHA256으로 묶으며 수신기는 ±30초, 실제 TCP IP와 profile을 검사한다.
+로컬 HTTP에서 정상/중복/SQLite 재시작 후 중복은 202, 서명·시각·IP·profile·JSON 거부는 403을
+확인했다. 합성 키·승인 fixture를 사용한 검증이며 배포 네트워크와 운영 profile의 증거는 아니다.
+[로컬 검증 결과](gateway-signing-verification.json)
+
+2026-09-15 두 이미지에 포함된 코드를 별도 internal Docker network로 연결해 정상·중복·
+수신기 재시작 후 동일 접수 202, 서명 누락/변조·미허용 컨테이너 IP 403을 확인했다.
+root 소유 profile을 UID10001 수신기가 읽고 변경할 수 없는 조건도 통과했다.
+합성 키·FakeApp 승인 fixture를 사용했으며 운영 gateway poller·외부 송신 worker는 시작하지 않았다.
 
 송신은 `/sendMessage|/notify`에 `route/chat_id/text/parse_mode=""/escape=true`, 문서는 secret_scan 통과 후 `/sendDocument`에 base64를 보낸다. `ok:true`를 확인한다. 전송 불명의 outbox 재시도는 application 소유이며 어댑터가 거래를 재실행하지 않는다. 배포 gateway 실응답·peer 인증은 미검증이다.
 

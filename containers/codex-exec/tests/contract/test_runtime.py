@@ -14,6 +14,7 @@ from unittest.mock import patch
 from urllib.parse import urlsplit
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import yaml
 
@@ -39,6 +40,10 @@ class FixtureTransport:
     def __call__(self,method,url,headers=None,body=None,timeout=15):
         self.calls.append((method,urlsplit(url).path))
         path = urlsplit(url).path
+        if path.endswith("/oauth2/tokenP"):
+            return HttpResponse(200,json.dumps({"access_token":"FAKE_TOKEN_NOT_A_CREDENTIAL",
+                "access_token_token_expired":(self.now + timedelta(hours=12)).astimezone(
+                    ZoneInfo('Asia/Seoul')).strftime('%Y-%m-%d %H:%M:%S')}).encode())
         if path.endswith("list.json"):
             return HttpResponse(200,json.dumps({"status":"013"}).encode())
         if path.endswith("inquire-daily-itemchartprice"):
@@ -63,7 +68,7 @@ class ExternalRuntimeContracts(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.base = Path(self.temp.name)
         self.config_dir = self.base/"config"
-        shutil.copytree(ROOT/"config",self.config_dir)
+        shutil.copytree(ROOT/"config",self.config_dir,ignore=shutil.ignore_patterns("secrets.yaml"))
         self.case = helpers.synthetic_case()
         profile,calendar,ticks,self.now,self.bars,self.index_bars,candidate,quote,event,costs,snapshot = self.case
         self.transport = FixtureTransport(self.now,self.bars,self.index_bars)
@@ -77,7 +82,7 @@ class ExternalRuntimeContracts(unittest.TestCase):
         self.manifest = {
             "schema_version":1,"source":"FAKE_CONTRACT_FIXTURE_NEVER_A_LIVE_APPROVAL","verified":True,
             "account_alias":"FAKE_ACCOUNT_ALIAS","environment":"demo","effective_at":"2025-01-01T00:00:00+00:00","expires_at":"2099-01-01T00:00:00+00:00",
-            "credentials":{"token_env":"FAKE_KIS_TOKEN"},
+            "credentials":{"managed_token":True},
             "calendar":{"source":"FAKE_WEEKDAY_CALENDAR","verified":True,"sessions":[s.model_dump(mode="json") for s in calendar.sessions]},
             "ticks":{"source":"FAKE_TICKS","verified":True,"bands":[["0","1"]],"effective_at":"2025-01-01T00:00:00+00:00","expires_at":"2099-01-01T00:00:00+00:00"},
             "costs":costs.model_copy(update={"account_alias":"FAKE_ACCOUNT_ALIAS","synthetic":False,"expires_at":calendar.sessions[-1].closes_at}).model_dump(mode="json"),
@@ -95,10 +100,10 @@ class ExternalRuntimeContracts(unittest.TestCase):
             "disclosures":{"start_date":self.now.date().isoformat(),"instrument_by_corp_code":{},"verified_events_path":None},
             "rate_limit":{"source":"FAKE_RATE_CONTRACT","verified":True,"minimum_interval_seconds":"0.0001","maximum_queue_seconds":"1"}}
         self._save_manifest()
-        self.approval = {"config_hash":self.config.config_hash,"capabilities":["account_read","market_read","disclosure_read","model_call","demo_orders"],
+        self.approval = {"config_hash":self.config.config_hash,"capabilities":["account_read","market_read","disclosure_read","model_call","demo_orders","broker_auth"],
                          "expires_at":"2099-01-01T00:00:00+00:00","operational_evidence":{"runtime_manifest_sha256":hashlib.sha256((self.base/"manifest.json").read_bytes()).hexdigest()}}
         self.env = {"KIS_ACCOUNT_REF":"00000000-00","KIS_APP_KEY":"FAKE_KEY_NOT_A_CREDENTIAL","KIS_APP_SECRET":"FAKE_SECRET_NOT_A_CREDENTIAL",
-                    "FAKE_KIS_TOKEN":"FAKE_TOKEN_NOT_A_CREDENTIAL","DART_API_KEY":"FAKE_DART_NOT_A_CREDENTIAL","FAKE_AUTH_HOME":str(self.base/"fake-empty-auth")}
+                    "DART_API_KEY":"FAKE_DART_NOT_A_CREDENTIAL","FAKE_AUTH_HOME":str(self.base/"fake-empty-auth")}
 
     def tearDown(self):
         self.temp.cleanup()
@@ -121,6 +126,27 @@ class ExternalRuntimeContracts(unittest.TestCase):
             build_external_runtime(config,None,kis_transport=self.transport,dart_transport=self.transport,env={})
         self.assertEqual(self.transport.calls,[])
 
+    def test_file_credentials_and_managed_token_survive_runtime_restart(self):
+        path = self.config_dir/"secrets.yaml"
+        path.write_text(yaml.safe_dump(self.env))
+        path.chmod(0o600)
+        self.env = None  # Exercise the production file loader, not injected values.
+        first = self._factory()
+        first[3].__self__.state.db.close()
+        second = self._factory()
+        self.assertEqual(sum(path == "/oauth2/tokenP" for _,path in self.transport.calls),1)
+        self.assertTrue((self.config.state_dir/"kis-token.json").is_file())
+        self.assertEqual(second[0].total_universe,1)
+        second[3].__self__.state.db.close()
+
+    def test_broker_auth_required_before_private_file_or_network(self):
+        self.approval['capabilities'].remove('broker_auth')
+        with patch('danta.runtime.load_secrets', side_effect=AssertionError('private read forbidden')):
+            self.env = None
+            with self.assertRaises(HumanRequired):
+                self._factory()
+        self.assertEqual(self.transport.calls,[])
+
     def test_factory_collects_whole_universe_features_and_explicit_no_event(self):
         bundle,broker,decide,refresh = self._factory()
         self.assertEqual(broker.environment,"paper")
@@ -129,7 +155,8 @@ class ExternalRuntimeContracts(unittest.TestCase):
         self.assertEqual(bundle.data["coverage"]["KRX:000001"],"COMPLETE_NO_EVENT")
         self.assertEqual(bundle.candidates,[])
         self.assertTrue(callable(decide) and callable(refresh))
-        self.assertTrue(all(method == "GET" for method,_path in self.transport.calls))
+        self.assertTrue(all(method == "GET" or path == "/oauth2/tokenP" for method,path in self.transport.calls))
+        self.assertEqual(sum(path == "/oauth2/tokenP" for _,path in self.transport.calls),1)
         self.assertTrue((self.config.state_dir/"state.sqlite").exists())
         self.assertFalse((self.config.state_dir/"runtime-state.json").exists())
         before = len([path for _method,path in self.transport.calls if "chartprice" in path])

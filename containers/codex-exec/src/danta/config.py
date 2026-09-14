@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -234,6 +235,29 @@ def load_config(directory: str | Path | None = None) -> Config:
     strategy = data["strategy"]["strategy"]
     policy = strategy["research_profile"] if strategy["active_profile"] == "research" else strategy["live_mandate"]["accepted_risk_policy"]
     return Config(canonical(data), digest(data), digest({"id": strategy["id"], "policy": policy}), directory)
+
+
+def load_secrets(directory: str | Path) -> dict[str, str]:
+    """Read private runtime values separately from policy snapshots and hashes."""
+    try:
+        descriptor = os.open(Path(directory) / "secrets.yaml", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) not in {0o400, 0o600}:
+                raise ValueError
+            content = stream.read(65537)
+            if len(content) > 65536:
+                raise ValueError
+            values = yaml.load(content, Loader=StrictLoader)
+        if not isinstance(values, dict) or any(
+            not isinstance(key, str) or not re.fullmatch(r"[A-Z][A-Z0-9_]*", key)
+            or not isinstance(value, str) for key, value in values.items()
+        ):
+            raise ValueError
+        return values
+    except (OSError, UnicodeError, ValueError, yaml.YAMLError):
+        # YAML exceptions can contain source lines; never propagate their text.
+        raise HumanRequired("Private config/secrets.yaml is missing, invalid, or requires mode 0400/0600") from None
 
 
 def trusted_approval(path: Path, config: Config, expected_id: str, now: datetime | None = None) -> dict:

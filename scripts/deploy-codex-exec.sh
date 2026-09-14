@@ -5,8 +5,9 @@ usage() {
   cat >&2 <<'EOF'
 Usage: scripts/deploy-codex-exec.sh <dockerhub-namespace> [version]
 
-Builds codex-exec with the base profile and pushes it to the given Docker Hub namespace.
+Builds codex-exec and pushes it to the given Docker Hub namespace.
 If version is omitted, the Docker image tag is latest and APP_VERSION is resolved from git.
+Set PYTHON_BIN to an interpreter with containers/codex-exec/requirements.lock installed.
 EOF
 }
 
@@ -15,25 +16,10 @@ if [ "$#" -gt 2 ] || [ -z "${1:-}" ]; then
   exit 64
 fi
 
-resolve_latest_codex_version() {
-  local release_url release_tag
-
-  release_url="$(curl -fsSL -o /dev/null -w '%{url_effective}' https://github.com/openai/codex/releases/latest)"
-  release_tag="${release_url##*/}"
-  case "${release_tag}" in
-    rust-v?*) printf '%s\n' "${release_tag#rust-v}" ;;
-    *)
-      echo "Unexpected latest Codex release URL: ${release_url}" >&2
-      return 1
-      ;;
-  esac
-}
-
 dockerhub_namespace="$1"
-image_name="codex-exec"
+image_name="${CODEX_EXEC_IMAGE_NAME:-codex-exec}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
-codex_version="$(resolve_latest_codex_version)"
 if [ -n "${2:-}" ]; then
   app_version="$2"
   image_tag="$2"
@@ -45,7 +31,7 @@ local_image="${image_name}:${image_tag}"
 remote_image="${dockerhub_namespace}/${image_name}:${image_tag}"
 
 echo "Running repo-wide regression suite before build..." >&2
-if ! python3 "${repo_root}/scripts/run_tests.py"; then
+if ! "${PYTHON_BIN:-python3}" "${repo_root}/scripts/run_tests.py"; then
   echo "Regression suite failed; aborting deploy." >&2
   exit 1
 fi
@@ -53,11 +39,8 @@ fi
 docker build \
   -f "${repo_root}/containers/codex-exec/Dockerfile" \
   --build-arg "APP_VERSION=${app_version}" \
-  --build-arg "CODEX_VERSION=${codex_version}" \
-  --build-arg "CODEX_EXEC_PROFILE=base" \
-  --build-arg "IMAGE_TITLE=${image_name}" \
   -t "${local_image}" \
   -t "${remote_image}" \
-  "${repo_root}/containers"
+  "${repo_root}/containers/codex-exec"
 
 docker push "${remote_image}"

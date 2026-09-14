@@ -127,7 +127,11 @@ class Executor:
                 self._unknown(intent.id, type(error).__name__)
                 return self.store.order(intent.id)
             with self.store.transaction():
-                if response.get("status") == "REJECTED":
+                if response.get("status") == "NOT_SENT":
+                    self.store.db.execute("UPDATE intents SET state='INVALIDATED',reserve_cash='0',reserve_risk='0' WHERE id=?", (intent.id,))
+                    self.store.bump_version()
+                    self.store.event(intent.run_id, "ORDER_NOT_SENT", {"intent_id": intent.id, "reason": response.get("reason", "LOCAL_PRE_SEND_FAILURE")}, notify=True)
+                elif response.get("status") == "REJECTED":
                     self.store.db.execute("UPDATE intents SET state='REJECTED',reserve_cash='0',reserve_risk='0' WHERE id=?", (intent.id,))
                     self.store.event(intent.run_id, "ORDER_REJECTED", {"intent_id": intent.id, "reason": response.get("reason", "BROKER_REJECTED")}, notify=True)
                 elif response.get("status") == "ACKNOWLEDGED" and response.get("broker_id") and response.get("namespace"):
@@ -170,9 +174,13 @@ class Executor:
                     self.store.event(intent.run_id, "CANCEL_NOT_SENT", {"intent_id": intent_id, "reason": type(error).__name__}, notify=True)
                 raise
             try:
-                self.broker.cancel({"broker_id": order["broker_id"], "namespace": order["broker_namespace"],
+                response = self.broker.cancel({"broker_id": order["broker_id"], "namespace": order["broker_namespace"],
                                     "metadata": json.loads(order["broker_metadata"]),
                                     "remaining_quantity": order["quantity"] - order["cumulative_quantity"]})
+                if response.get("status") == "NOT_SENT":
+                    with self.store.transaction():
+                        self.store.db.execute("UPDATE intents SET state=? WHERE id=?", (order["state"], intent_id))
+                        self.store.event(intent.run_id, "CANCEL_NOT_SENT", {"intent_id": intent_id, "reason": response.get("reason", "LOCAL_PRE_SEND_FAILURE")}, notify=True)
             except Exception as error:
                 with self.store.transaction():
                     self.store.set("reconciled", False)

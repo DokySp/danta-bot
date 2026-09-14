@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 from .adapters import AdapterError, http_transport
 from .adapters.scheduler import SchedulePlanner
 from .adapters.telegram import READ_COMMANDS, TelegramAdapter
-from .config import HumanRequired, aware_time, canonical, utcnow
+from .config import HumanRequired, aware_time, canonical, load_secrets, utcnow
 from .reporting import write_report
 
 
@@ -94,10 +94,11 @@ class Service:
             if not tg['enabled'] or not tg['trusted_peer_profile']:
                 raise HumanRequired('Telegram ingress needs enabled adapter and verified transport profile')
             if self.peer_auth is None:
-                self.peer_auth = PeerAuthenticator.from_file(tg['trusted_peer_profile'], self.config.config_hash, clock=clock)
+                self.peer_auth = PeerAuthenticator.from_file(tg['trusted_peer_profile'], self.config.config_hash,
+                    env=load_secrets(self.config.directory), clock=clock)
         if self.telegram is None and tg['enabled']:
             self.config.require_external('telegram_send', self.app.approval)
-            gateway = os.environ.get(tg['gateway_url_env'])
+            gateway = load_secrets(self.config.directory).get(tg['gateway_url_env'])
             if not gateway:
                 raise HumanRequired('Telegram gateway URL is unresolved')
             self.telegram = TelegramAdapter(self.store.db, enabled=tg['ingress_enabled'],

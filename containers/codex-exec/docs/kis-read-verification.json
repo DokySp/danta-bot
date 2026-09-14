@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "probe": "kis_balance_read_only",
+  "environment": "real",
+  "mode": "shadow",
+  "status": "COMPLETE",
+  "auth": "ISSUED",
+  "auth_post_requests": 1,
+  "balance_get_requests": 1,
+  "pagination_followup_requests": 0,
+  "adapter_contract_quality": "COMPLETE",
+  "resources_quality": "NOT_QUERIED",
+  "private_result_saved": true,
+  "checked_at": "2026-09-14T08:40:53.015919+00:00",
+  "execution_environment": "host_python_3.12",
+  "trading_enabled": false,
+  "order_endpoints_called": false,
+  "production_deployed": false,
+  "new_cache_instance_reused_token": true,
+  "cache_verification_network_calls": 0,
+  "token_file_mode": "0o600"
+}

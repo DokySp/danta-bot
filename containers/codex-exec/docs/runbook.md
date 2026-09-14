@@ -48,8 +48,30 @@ WAL 파일만 복사하거나 활성 DB 파일을 덮어쓰지 않는다. 재시
 설정의 `enabled`, `ingress_enabled`, allowed sender/chat, route 외에도 trusted approval의
 `telegram_ingress`, `telegram_send`, 제어에는 `telegram_control` capability가 필요하다.
 JSON의 sender/route/peer 선언만으로 인증하지 않는다. `trusted_peer_profile`은 root 소유,
-app이 변경 불가한 경로의 별도 JSON이다. 현재 gateway가 아래 선택적 인증 헤더를 만든다는
-검증은 수행하지 않았다. 기존 gateway/proxy 변경·배포는 별도 승인 대상이다.
+app이 변경 불가한 경로의 별도 JSON이다. gateway 서명 구현, 로컬 HTTP와 별도 internal
+Docker network의 이미지 간 수신·재시작 후 중복 방지를 검증했다. root 소유 profile의
+비root 읽기도 확인했다. 실제 운영 Docker/NAS 연결·Telegram 송수신·배포는 아직 검증하지 않았다.
+
+gateway의 `config/codex-peer.secret.example`을 `config/codex-peer.secret`으로 복사하고,
+placeholder 대신 새 64자리 16진 문자열 한 줄을 넣는다. 예를 들어 로컬 Python의
+`secrets.token_hex(32)`로 생성할 수 있다. 파일은 0400/0600인 일반 파일이어야 하며,
+symlink·잘못된 형식·128 bytes 초과 파일은 거부한다. 실제 키는 Git·이미지에 넣지 않는다.
+같은 문자열을 엔진 private `config/secrets.yaml`의 `DANTA_TELEGRAM_PEER_SECRET`에 넣는다.
+16진 문자열을 binary로 변환하지 않고 ASCII bytes 그대로 HMAC 키로 사용한다.
+
+gateway Compose는 `DANTA_TELEGRAM_PEER_SECRET_FILE=/app/config/codex-peer.secret`을 항상 설정하고
+읽기 전용 config mount에서 파일을 읽는다. 파일을 읽을 수 없으면 시작이 실패한다.
+서명 경로를 생략하는 별도 client 사용은 기존 코드 호환용이며 이 배포 Compose는 사용하지 않는다.
+키는 프로세스 시작 때만 읽으므로 교체할 때 양쪽 서비스에 같은 키를 반영하고 재생성한다.
+signed route URL은 credentials/query/fragment 없는 HTTP(S)의 정확한 `/telegram` 경로여야 한다.
+서명된 요청은 리다이렉트와 환경 proxy를 사용하지 않는다.
+
+기본 Compose의 엔진은 `isolated` 네트워크와 HTTP listen `127.0.0.1`을 유지한다.
+runtime override는 gateway와 같은 외부 네트워크 `DANTA_GATEWAY_NETWORK`에 추가로 연결한다.
+배포 생성기의 shadow example은 listen `0.0.0.0`, 고정 gateway IP 및 profile 경로를 준비한다.
+운영 전환 시 공통 네트워크와 컨테이너 수신 주소, 수신기가 보는 실제 gateway IP를 대조해
+아래 profile 및 sender/chat allowlist에 반영해야 한다. root 소유 profile·승인 경로와
+설정 hash/유효기간 검증도 충족해야 한다. 로컬 합성 검증 결과를 운영 승인 파일로 사용하지 않는다.
 
 프로파일 계약:
 
@@ -69,7 +91,8 @@ app이 변경 불가한 경로의 별도 JSON이다. 현재 gateway가 아래 �
 이 예시는 유효한 승인 파일이 아니다. 운영자가 실제 증거·유효기간·hash를 넣어야 한다.
 요청의 실제 TCP peer IP와 profile을 검사하고, `X-Danta-Timestamp`의 ±30초 시각과
 `X-Danta-Signature`의 HMAC-SHA256 16진 문자열을 확인한다. 서명 입력은 정확한 UTF-8
-timestamp + `\nPOST\n/telegram\n` + 원본 요청 bytes이다. 비밀값은 최소 32자이며 image,
+timestamp + `\nPOST\n/telegram\n` + 원본 요청 bytes이다. 수신기는 최소 32자를 요구하며
+현재 gateway 파일 형식은 64자리 16진 문자열이다. 비밀값은 image,
 설정 snapshot, 로그, 응답에 쓰지 않는다. `X-Forwarded-For`나 본문의 peer는 신뢰하지 않는다.
 
 일반 대화는 별도 세션 ID와 안내 응답만 만들고 모델·주문·설정 변경을 호출하지 않는다.
@@ -115,18 +138,51 @@ README 렌더링을 확인한다. 실제 API·모델·Telegram 송신은 실행�
 검증 대상을 식별한다. 이후 소스가 변경되면 새로 빌드한 이미지에 같은 명령을 실행한다.
 이 스크립트는 호스트 검증용이며 image에는 포함하지 않는다.
 
-image는 Python 3.12, 고정 Python 의존성, 새 application 코드·schema·migration·prompt와
+image는 Python 3.12, 고정 Python 의존성, Codex CLI 0.153.4와 새 application 코드·schema·migration·prompt와
 명시된 합성 snapshot만 포함한다. 기본 명령은 `doctor`이며 자동 재시작하지 않는다.
 실제 configuration/state/secret/approval을 image에 복사하지 않는다.
 README와 렌더러도 포함한다. 읽기 전용 컨테이너에서는
 `python scripts/render_report.py --output /app/var/design-report.html`처럼 결과를 상태 mount에
 쓴다. `danta report --design`의 기본 /app/report.html 출력은 호스트 개발 환경용이다.
 
-Codex 실행 파일·인증은 기본 image에 없다. 실제 모델 실행 시 운영자가 **컨테이너 안에서
-실행됨을 검증한 Codex CLI 0.153.4 실행 파일과 필요한 런타임 디렉터리**를 별도 읽기 전용
-mount로 제공하고, `model.executable`에 그 경로를 설정해야 한다. 인증 디렉터리와 격리
-도구도 승인된 별도 mount/구성으로 검증한다. 임의 다른 CLI 버전을 자동 다운로드하거나
-현재 image에 실제 모델 실행 환경이 완성됐다고 표시하지 않는다.
+Codex CLI는 image에 포함하며 기본 `model.executable: codex`를 사용한다. 기존처럼
+`codex login`으로 인증을 생성한다. `auth.json`을 직접 작성하거나 미리 가져올 필요는 없다.
+로그인과 runtime은 같은 Docker volume `codex-exec-auth`를 `/app/auth`에 mount한다.
+새 volume의 디렉터리는 image에서 UID 10001·0700으로 초기화하며, Codex가 인증을
+저장·갱신한다. `secrets.yaml`의 `DANTA_CODEX_AUTH_HOME`도 `/app/auth`로 둔다.
+인증은 image 및 브로커 비밀값·정책·승인 디렉터리와 분리한다.
+[공식 인증 저장·갱신 설명](https://learn.chatgpt.com/docs/auth).
+
+엔진 이미지를 준비한 뒤 아래 명령을 실행한다. 로그인 전용 Compose는 거래 설정·DB·
+승인 파일 없이 실행되며, 표시된 URL과 일회용 코드를 사용자가 브라우저에서 완료한다.
+Docker/NAS에서 localhost callback을 연결할 필요가 없는 기기 코드 로그인이다.
+
+```sh
+cd containers/codex-exec  # 저장소 루트에서 실행할 때
+export DANTA_IMAGE=danta-codex-exec:local  # 배포한 이미지 이름으로 맞춘다
+docker compose -f compose.auth.yaml run --rm codex-login
+
+# 저장된 로그인 상태만 확인
+docker compose -f compose.auth.yaml run --rm codex-login login status
+```
+
+기본 model/effort는 기존 env의 `gpt-5.6-sol`/`xhigh`, 인증 방식은 `chatgpt`이다.
+로그인과 판단 subprocess는 모두 file 저장 방식을 사용한다. 실제 모델 호출은 운영
+설정·격리 증거·승인 검증을 계속 거친다. 로그인 성공이 거래 권한을 부여하지 않는다.
+
+2026-09-14에는 `danta-codex-exec:login-20260914-verified`에서 실제 ChatGPT 로그인,
+읽기 도구 호출과 JSON 결과 검증을 완료했다. 이 이미지에는 실제 모델이 요구하는
+Code Mode host와 market 도구 제한, auth 읽기를 차단하는 권한 profile이 반영되어 있다.
+[단독 연결 검증 결과](codex-login-verification.json)를 운영 승인으로 대신 사용하지 않는다.
+
+여러 운영 프로필은 `DANTA_AUTH_VOLUME`을 다르게 지정한다. 로그인과 runtime 명령에
+같은 값을 사용해야 한다. 기존 호스트 인증 디렉터리를 쓰려면 양쪽에 같은 `DANTA_AUTH_DIR`
+절대 경로를 지정할 수 있다. 이 경우 UID 10001의 읽기/쓰기 권한을 운영자가 준비한다.
+기존 volume/디렉터리의 권한과 내용은 자동으로 변경하지 않는다. 인증 보존을 위해
+`docker compose down -v`로 이 volume을 삭제하지 않는다.
+
+컨테이너 안에서 사용하는 실행 파일의 SHA-256과 제한 도구 probe 결과를 manifest에
+연결한다. 호스트의 npm launcher hash를 컨테이너 native binary 증거로 사용하지 않는다.
 
 compose 사용 전에 다음 **외부 위치 참조**를 준비한다. 실제 경로 생성/권한 변경과 운영
 서비스 시작은 운영자가 승인한 전환 절차에 포함되어야 한다.
@@ -134,7 +190,11 @@ compose 사용 전에 다음 **외부 위치 참조**를 준비한다. 실제 �
 | 환경 참조 | 조건 |
 |---|---|
 | DANTA_CONFIG_DIR | app.yaml/strategy.yaml/schedules.yaml이 있는 읽기 전용 디렉터리 |
-| DANTA_SECRETS_FILE | 실제 연결에만 필요한 Git/image 밖 환경 파일. 기본 offline에는 생략 가능 |
+| config/secrets.yaml | config 디렉터리 안의 실제 비밀 파일. UID 10001이 읽을 수 있는 0400/0600; Git/image 제외 |
+| DANTA_IMAGE | 빌드/푸시한 정확한 이미지 이름·태그 |
+| DANTA_AUTH_VOLUME | 선택 사항. 기본 `codex-exec-auth`; 로그인/runtime이 공유하며 프로필별로 구분 |
+| DANTA_AUTH_DIR | 선택 사항. named volume 대신 기존 전용 디렉터리를 쓸 때 지정, UID 10001 소유 0700 |
+| DANTA_APPROVAL_DIR | root 소유 읽기 전용 승인 디렉터리, runtime.json 포함 |
 | DANTA_STATE_DIR | 로컬 파일시스템, UID/GID 10001이 쓸 수 있는 상태 디렉터리 |
 | DANTA_LOCK_DIR | 같은 계좌를 구동할 모든 컨테이너가 공유하는 UID 10001 소유 mode 0700 디렉터리 |
 
@@ -143,3 +203,27 @@ compose 사용 전에 다음 **외부 위치 참조**를 준비한다. 실제 �
 Docker socket은 연결하지 않는다. 기본 internal network는 외부 API egress를 허용하지 않는다.
 실제 계좌·모델·gateway 연결에 필요한 네트워크·인증 volume·trusted approval mount는
 검증과 별도 운영 승인을 거쳐야 하며, 이 compose가 이미 live 운용을 제공한다고 해석하지 않는다.
+
+## 비밀값 이전과 runtime Compose
+
+`config/secrets.yaml.example`을 복사하여 실제 비밀값을 채운다. 기존 env는 런타임이
+자동 로딩하지 않는다. 레거시의 계좌번호가 8자리이면 기존 코드의 상품코드 규칙
+`KIS_PROD_TYPE`, 미설정 시 `01`을 적용하여 `KIS_ACCOUNT_REF`로 이전한다. 이전 결과를
+출력하거나 Git에 올리지 않는다. 예전 cache는 복사하지 않으며 새 cache가 만료시각을 관리한다.
+비밀값 변경은 다음 프로세스 시작에 적용된다.
+
+아래 명령은 설정·인증·운영 증거·신뢰 승인을 준비한 운영 호스트에서만 실행한다.
+설정의 `state_dir`는 `/app/var/<mode>/<account-alias>`처럼 모드와 계좌별로 분리한다.
+
+```sh
+# 1회 검증: 외부 egress 차단, doctor
+docker compose -f compose.yaml run --rm codex-exec
+# 지속 실행: 명시적으로 egress를 허용하고 승인 파일을 읽어 serve 시작
+docker compose -f compose.yaml -f compose.runtime.yaml up -d
+```
+
+운영 override는 `on-failure:3`, 전용 auth mount, 읽기 전용 approval mount를 추가한다.
+기본 ingress는 꺼져 있으며 host port는 열지 않는다. 기존 gateway에서 접근하려면
+검증한 공용 Docker network와 listen_host/route/peer 서명을 준비해야 한다. 운영 증거
+없이 모드를 live로 바꾸거나 빈 승인을 생성하지 않는다. 이미지 빌드·푸시 스크립트는
+NAS 파일 복사, 로그인, 기존 계좌 인수, 운영 컨테이너 재시작을 실행하지 않는다.

@@ -19,7 +19,7 @@ from . import AdapterError
 from .market_tools import TOOLS, validate_snapshot
 
 DISABLED_FEATURES = ("shell_tool", "unified_exec", "shell_snapshot", "apps", "plugins", "remote_plugin", "browser_use", "browser_use_external",
-    "computer_use", "code_mode", "code_mode_host", "multi_agent", "multi_agent_v2", "hooks", "memories", "image_generation", "view_image",
+    "computer_use", "multi_agent", "multi_agent_v2", "hooks", "memories", "image_generation", "view_image",
     "workspace_dependencies", "auth_elicitation", "in_app_browser", "in_app_local_automation", "skill_mcp_dependency_install", "skill_search", "tool_suggest")
 REQUIRED_FLAGS = ("--json", "--output-schema", "--output-last-message", "--ignore-user-config", "--ignore-rules", "--strict-config", "--ephemeral")
 
@@ -99,13 +99,19 @@ def restricted_command(executable, *, model_id, reasoning_effort, auth_home, att
     resolved_executable = shutil.which(executable)
     if not resolved_executable:
         raise AdapterError("CODEX_EXECUTABLE_NOT_FOUND")
-    command = [resolved_executable, "exec", "--json", "--sandbox", "read-only", "--output-schema", str(schema_path),
+    command = [resolved_executable, "exec", "--json", "--output-schema", str(schema_path),
                "--output-last-message", str(attempt / "final.json"), "--ignore-user-config", "--ignore-rules", "--strict-config",
                "--ephemeral", "--skip-git-repo-check", "--color", "never", "--model", model_id, "--cd", str(attempt)]
     for feature in DISABLED_FEATURES:
         command += ["--disable", feature]
     overrides = {
         "approval_policy": "never", "model_reasoning_effort": reasoning_effort,
+        "cli_auth_credentials_store": "file",
+        # Some model catalogs require Code Mode. Its V8 host gets only market tools.
+        "features.code_mode.enabled": False, "features.code_mode_host": True,
+        "features.code_mode.excluded_tool_namespaces": ["functions"], "agents.enabled": False,
+        "default_permissions": "danta_model", "permissions.danta_model.extends": ":read-only",
+        "permissions.danta_model.network.enabled": False,
         "web_search": "disabled", "shell_environment_policy.inherit": "none", "project_doc_max_bytes": 0,
         "mcp_servers.market.command": sys.executable,
         "mcp_servers.market.args": ["-m", "danta.adapters.market_tools", str(snapshot_path), str(attempt / "lookup-manifest.jsonl")],
@@ -119,6 +125,9 @@ def restricted_command(executable, *, model_id, reasoning_effort, auth_home, att
         overrides["forced_login_method"] = auth_mode
     for key, value in overrides.items():
         command += ["-c", key + "=" + json.dumps(value)]
+    # Native hidden handlers must not read auth, application config, or the DB either.
+    filesystem = {":root": "deny", ":minimal": "read", str(attempt): "read", str(Path(auth_home).resolve()): "deny"}
+    command += ["-c", "permissions.danta_model.filesystem={" + ",".join(json.dumps(key) + "=" + json.dumps(value) for key, value in filesystem.items()) + "}"]
     command.append("-")
     # No arbitrary parent environment, including KIS/DART/Telegram or API credentials.
     env = {"PATH": str(Path(resolved_executable).parent) + os.pathsep + os.defpath, "LANG": "C.UTF-8", "HOME": str(attempt), "CODEX_HOME": str(Path(auth_home).resolve())}
@@ -137,7 +146,7 @@ def probe_cli(executable="codex"):
         features = subprocess.run([resolved, "features", "list"], **options)
         version = subprocess.run([resolved, "--version"], **options)
     names = {line.split()[0] for line in features.stdout.splitlines() if line.split()}
-    missing = [flag for flag in REQUIRED_FLAGS if flag not in help_result.stdout] + [name for name in DISABLED_FEATURES if name not in names]
+    missing = [flag for flag in REQUIRED_FLAGS if flag not in help_result.stdout] + [name for name in (*DISABLED_FEATURES, "code_mode", "code_mode_host") if name not in names]
     return {"cli_version": version.stdout.strip(), "supported": not missing and not (help_result.returncode or features.returncode or version.returncode),
             "missing": missing, "tool_isolation_verified": False}
 

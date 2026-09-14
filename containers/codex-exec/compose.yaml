@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: danta-codex-exec:local
+    image: ${DANTA_IMAGE:-danta-codex-exec:local}
     user: "10001:10001"
     command: ["doctor"]
     restart: "no"
@@ -13,9 +13,6 @@ services:
     security_opt: ["no-new-privileges:true"]
     pids_limit: 128
     # Configuration, secrets, approvals, database and host-wide writer lock are external.
-    env_file:
-      - path: ${DANTA_SECRETS_FILE:-./secrets.env}
-        required: false
     volumes:
       - ${DANTA_CONFIG_DIR:?Set an external config directory}:/app/config:ro
       - ${DANTA_STATE_DIR:?Set a local state directory}:/app/var:rw

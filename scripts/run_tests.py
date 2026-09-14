@@ -3,8 +3,9 @@
 
 Runs every tracked unittest suite as an independent `unittest discover`
 invocation and reports a per-suite summary. Exits non-zero if any suite
-fails, errors, or discovers zero tests. Stdlib only, no network access,
-no bytecode/cache files written.
+fails, errors, or discovers zero tests. The runner uses only stdlib;
+suites require containers/codex-exec/requirements.lock. No external network
+access or bytecode/cache files are needed.
 
 Usage (from repository root):
     python3 scripts/run_tests.py
@@ -33,30 +34,15 @@ class Suite:
 
 SUITES: list[Suite] = [
     Suite(
-        name="codex-exec/service",
-        start_dir="containers/codex-exec/service",
+        name="codex-exec",
+        start_dir="containers/codex-exec/tests",
         top_level_dir="containers/codex-exec",
-        extra_pythonpath="containers/codex-exec",
+        extra_pythonpath="containers/codex-exec/src",
     ),
     Suite(
         name="telegram-gateway",
         start_dir="containers/telegram-gateway/tests",
         top_level_dir="containers/telegram-gateway",
-    ),
-    Suite(
-        name="skill:check-portfolio",
-        start_dir="containers/codex-exec/profiles/base/skills/check-portfolio/tests",
-        top_level_dir="containers/codex-exec/profiles/base/skills/check-portfolio",
-    ),
-    Suite(
-        name="skill:show-touch-point",
-        start_dir="containers/codex-exec/profiles/base/skills/show-touch-point/tests",
-        top_level_dir="containers/codex-exec/profiles/base/skills/show-touch-point",
-    ),
-    Suite(
-        name="shared-skill:collect-financial-information",
-        start_dir="containers/codex-exec/shared-skills/collect-financial-information/tests",
-        top_level_dir="containers/codex-exec/shared-skills/collect-financial-information",
     ),
     Suite(
         name="repo-tools:run_tests",
