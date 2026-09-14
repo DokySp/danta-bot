@@ -1,5 +1,9 @@
 # 결정 및 중단 기록
 
+2026-09-15 사용자 요청에 따라 프로젝트를 `trading-engine`으로 이름 변경한다.
+기존 검증 이미지·로그·비공개 백업은 과거 기록으로 유지하며 Docker 자원을 자동 전환하지 않는다.
+이후 HTML 텔레그램 첨부 작업은 별도 변경과 커밋으로 처리한다.
+
 ## 2026-09-13T01:59:02.413549+00:00 — Docker 검증 중단
 
 **Fact:** 현재 설정된 Docker endpoint에 연결하지 못했다. 오류는 `Cannot connect to the Docker daemon at unix:///home/uhug/.docker/desktop/docker.sock. Is the docker daemon running?`이다. 따라서 이미지 빌드/실행 검증을 완료할 수 없다. 사용자 요청과 README §17.2에 따라 구현·위임을 중단했으며 이 중단 기록만 작성했다.

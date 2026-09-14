@@ -13,15 +13,15 @@ import unittest
 SCRIPTS = Path(__file__).resolve().parents[1]
 
 
-class DeployCodexExecTest(unittest.TestCase):
+class DeployTradingEngineTest(unittest.TestCase):
     def test_tags_context_alias_and_fail_closed_gate(self):
         cases = [
-            ("deploy-codex-exec.sh", ["example", "v1"], 0, 0, 0, "codex-exec", "v1"),
-            ("deploy-codex-exec.sh", ["example"], 0, 0, 0, "codex-exec", "latest"),
-            ("deploy-codex-exec-experimental.sh", ["example", "v2"], 0, 0, 0, "codex-exec-experimental", "v2"),
-            ("deploy-codex-exec.sh", ["example", "v1"], 1, 0, 1, "codex-exec", "v1"),
-            ("deploy-codex-exec.sh", ["example", "v1"], 0, 1, 1, "codex-exec", "v1"),
-            ("deploy-codex-exec.sh", [], 0, 0, 64, "codex-exec", "latest"),
+            ("deploy-trading-engine.sh", ["example", "v1"], 0, 0, 0, "trading-engine", "v1"),
+            ("deploy-trading-engine.sh", ["example"], 0, 0, 0, "trading-engine", "latest"),
+            ("deploy-trading-engine-experimental.sh", ["example", "v2"], 0, 0, 0, "trading-engine-experimental", "v2"),
+            ("deploy-trading-engine.sh", ["example", "v1"], 1, 0, 1, "trading-engine", "v1"),
+            ("deploy-trading-engine.sh", ["example", "v1"], 0, 1, 1, "trading-engine", "v1"),
+            ("deploy-trading-engine.sh", [], 0, 0, 64, "trading-engine", "latest"),
         ]
         for script, args, test_exit, build_exit, exit_code, image_name, tag in cases:
             with self.subTest(script=script, args=args, test_exit=test_exit, build_exit=build_exit):
@@ -30,7 +30,7 @@ class DeployCodexExecTest(unittest.TestCase):
                     (root / "scripts").mkdir()
                     commands = root / "commands"
                     commands.mkdir()
-                    for name in ("deploy-codex-exec.sh", "deploy-codex-exec-experimental.sh"):
+                    for name in ("deploy-trading-engine.sh", "deploy-trading-engine-experimental.sh"):
                         shutil.copy2(SCRIPTS / name, root / "scripts" / name)
                     for name in ("test-python", "git", "docker", "curl"):
                         command = commands / name
@@ -74,7 +74,7 @@ if name == "curl":
                         next(i for i, call in enumerate(calls) if call[0] == "test-python"),
                         calls.index(build),
                     )
-                    self.assertEqual(build[-1], str(root / "containers" / "codex-exec"))
+                    self.assertEqual(build[-1], str(root / "containers" / "trading-engine"))
                     self.assertIn(f"example/{image_name}:{tag}", build)
                     self.assertIn(f"{image_name}:{tag}", build)
                     version = args[1] if len(args) == 2 else "git-fixture-version"

@@ -108,6 +108,6 @@ def render_readme(source, output, *, generated_at: datetime | None = None) -> di
               '실제 투자 성과, 검증 완료 또는 실거래 승인이 아닙니다.</p>')
     body = metadata + notice + toc + renderer.renderer.render(tokens, renderer.options, {})
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(_document('codex-exec 투자 전략과 거래 시스템 명세', body), encoding='utf-8')
+    output.write_text(_document('trading-engine 투자 전략과 거래 시스템 명세', body), encoding='utf-8')
     return {"source": str(source), "output": str(output), "source_sha256": digest,
             "created_at": created.astimezone(timezone.utc).isoformat(), "heading_count": len(headings)}

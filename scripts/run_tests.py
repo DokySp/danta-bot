@@ -4,7 +4,7 @@
 Runs every tracked unittest suite as an independent `unittest discover`
 invocation and reports a per-suite summary. Exits non-zero if any suite
 fails, errors, or discovers zero tests. The runner uses only stdlib;
-suites require containers/codex-exec/requirements.lock. No external network
+suites require containers/trading-engine/requirements.lock. No external network
 access or bytecode/cache files are needed.
 
 Usage (from repository root):
@@ -34,10 +34,10 @@ class Suite:
 
 SUITES: list[Suite] = [
     Suite(
-        name="codex-exec",
-        start_dir="containers/codex-exec/tests",
-        top_level_dir="containers/codex-exec",
-        extra_pythonpath="containers/codex-exec/src",
+        name="trading-engine",
+        start_dir="containers/trading-engine/tests",
+        top_level_dir="containers/trading-engine",
+        extra_pythonpath="containers/trading-engine/src",
     ),
     Suite(
         name="telegram-gateway",

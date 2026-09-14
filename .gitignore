@@ -1,4 +1,4 @@
-containers/codex-exec/legacy/*
+containers/trading-engine/legacy/*
 
 # Local environment files
 containers/telegram-gateway/config/routes.yaml

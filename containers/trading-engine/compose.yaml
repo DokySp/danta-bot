@@ -1,9 +1,9 @@
 services:
-  codex-exec:
+  trading-engine:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ${DANTA_IMAGE:-danta-codex-exec:local}
+    image: ${DANTA_IMAGE:-danta-trading-engine:local}
     user: "10001:10001"
     command: ["doctor"]
     restart: "no"

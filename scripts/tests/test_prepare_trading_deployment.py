@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import yaml
 
-SCRIPT = Path(__file__).resolve().parents[1] / "prepare-codex-deployment.py"
+SCRIPT = Path(__file__).resolve().parents[1] / "prepare-trading-deployment.py"
 spec = importlib.util.spec_from_file_location("prepare_deployment", SCRIPT)
 deployment = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(deployment)
@@ -21,22 +21,22 @@ class PrepareDeploymentTest(unittest.TestCase):
             result = deployment.prepare(target, "example", "test-release",
                                         gateway_subnet="172.29.84.0/24", gateway_ip="172.29.84.9")
             self.assertEqual(result["status"], "PREPARED_NOT_AUTHORIZED")
-            base = yaml.safe_load((target / "codex-exec/compose.yaml").read_text())
-            self.assertNotIn("build", base["services"]["codex-exec"])
-            self.assertEqual(deployment.load_config(target / "codex-exec/config").mode, "offline")
-            shadow = yaml.safe_load((target / "codex-exec/config/app.shadow.yaml.example").read_text())
+            base = yaml.safe_load((target / "trading-engine/compose.yaml").read_text())
+            self.assertNotIn("build", base["services"]["trading-engine"])
+            self.assertEqual(deployment.load_config(target / "trading-engine/config").mode, "offline")
+            shadow = yaml.safe_load((target / "trading-engine/config/app.shadow.yaml.example").read_text())
             self.assertEqual(shadow["app"]["mode"], "shadow")
             self.assertEqual(shadow["telegram"]["allowed_sender_ids"], [])
             self.assertFalse(shadow["execution"]["enabled"])
-            self.assertFalse((target / "codex-exec/config/secrets.yaml").exists())
-            self.assertIn("example/codex-exec:test-release", (target / "codex-exec/.env").read_text())
+            self.assertFalse((target / "trading-engine/config/secrets.yaml").exists())
+            self.assertIn("example/trading-engine:test-release", (target / "trading-engine/.env").read_text())
             self.assertIn("example/telegram-gateway:test-release", (target / "telegram-gateway/.env").read_text())
-            approval = json.loads((target / "codex-exec/approvals/runtime.json.example").read_text())
+            approval = json.loads((target / "trading-engine/approvals/runtime.json.example").read_text())
             self.assertEqual(approval["capabilities"], [])
-            manifest = json.loads((target / "codex-exec/approvals/runtime-manifest.json.example").read_text())
+            manifest = json.loads((target / "trading-engine/approvals/runtime-manifest.json.example").read_text())
             self.assertFalse(manifest["verified"])
             self.assertFalse(manifest["bootstrap"]["ownership_verified"])
-            peer = json.loads((target / "codex-exec/approvals/telegram-peer.json.example").read_text())
+            peer = json.loads((target / "trading-engine/approvals/telegram-peer.json.example").read_text())
             self.assertFalse(peer["verified"])
             self.assertEqual(peer["allowed_source_ips"], ["172.29.84.9"])
             self.assertIn("DANTA_GATEWAY_SUBNET=172.29.84.0/24", (target / "telegram-gateway/.env").read_text())
@@ -80,15 +80,15 @@ class PrepareDeploymentTest(unittest.TestCase):
             with patch.object(deployment, "ENGINE", engine), patch.object(deployment, "GATEWAY", gateway):
                 target = base / "release"
                 deployment.prepare(target, "example", "test", include_secrets=True, sender_ids=["12345"])
-                for relative in ("codex-exec/config/secrets.yaml", "telegram-gateway/config/telegram-v1.env", "telegram-gateway/config/codex-peer.secret"):
+                for relative in ("trading-engine/config/secrets.yaml", "telegram-gateway/config/telegram-v1.env", "telegram-gateway/config/codex-peer.secret"):
                     self.assertEqual((target / relative).stat().st_mode & 0o777, 0o600)
-                copied = deployment.load_secrets(target / "codex-exec/config")
+                copied = deployment.load_secrets(target / "trading-engine/config")
                 self.assertEqual(copied["KIS_APP_KEY"], values["KIS_APP_KEY"])
                 self.assertEqual(copied["TELEGRAM_GATEWAY_URL"], "http://telegram-gateway:8080")
                 self.assertEqual(copied["DANTA_CODEX_AUTH_HOME"], "/app/auth")
                 self.assertEqual(source.read_bytes(), original)
-                self.assertFalse((target / "codex-exec/config/do-not-copy.json").exists())
-                shadow = yaml.safe_load((target / "codex-exec/config/app.shadow.yaml.example").read_text())
+                self.assertFalse((target / "trading-engine/config/do-not-copy.json").exists())
+                shadow = yaml.safe_load((target / "trading-engine/config/app.shadow.yaml.example").read_text())
                 self.assertEqual(shadow["telegram"]["allowed_sender_ids"], ["12345"])
                 self.assertEqual(shadow["telegram"]["allowed_chat_ids"], ["-12345"])
                 (gateway / "config/codex-peer.secret").write_text("cd" * 32)

@@ -1,7 +1,7 @@
 # Explicit operational override; does not create an approval or enable trading.
 # docker compose -f compose.yaml -f compose.runtime.yaml up -d
 services:
-  codex-exec:
+  trading-engine:
     command: ["--approval-file", "/app/approvals/runtime.json", "serve"]
     restart: "on-failure:3"
     environment:
@@ -16,7 +16,7 @@ services:
 
 volumes:
   codex-auth:
-    name: ${DANTA_AUTH_VOLUME:-codex-exec-auth}
+    name: ${DANTA_AUTH_VOLUME:-trading-engine-auth}
 
 # Only the runtime joins the operator-created gateway/egress network.
 networks:

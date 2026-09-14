@@ -1,6 +1,6 @@
 # kis-trade-mcp
 
-공용 KIS MCP 서버 compose입니다. v1과 v2의 codex-exec는 같은 Docker 네트워크에서
+공용 KIS MCP 서버 compose입니다. v1과 v2의 trading-engine는 같은 Docker 네트워크에서
 `http://kis-trade-mcp:3000/sse`로 이 서버에 접속합니다.
 
 ## Runtime Env
@@ -19,7 +19,7 @@ cp config/kis-trade-mcp.env.example config/kis-trade-mcp.env
 
 ## Trading Env
 
-codex-exec의 `CODEX_MCP_TRADING_ENV`와 이 파일의 값은 직접 연결되지는 않습니다.
+trading-engine의 `CODEX_MCP_TRADING_ENV`와 이 파일의 값은 직접 연결되지는 않습니다.
 다만 `CODEX_MCP_TRADING_ENV=paper`는 MCP 호출에 `env_dv="demo"`를 강제하므로
 `KIS_PAPER_*` 값이 필요하고, `CODEX_MCP_TRADING_ENV=acct`는 `env_dv="real"`을
 강제하므로 `KIS_APP_KEY`, `KIS_APP_SECRET`, `KIS_ACCT_STOCK` 값이 필요합니다.

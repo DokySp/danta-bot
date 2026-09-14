@@ -12,7 +12,7 @@ import sys
 import yaml
 
 REPO = Path(__file__).resolve().parents[1]
-ENGINE = REPO / "containers/codex-exec"
+ENGINE = REPO / "containers/trading-engine"
 GATEWAY = REPO / "containers/telegram-gateway"
 sys.path.insert(0, str(ENGINE / "src"))
 from danta.application import code_identity
@@ -65,22 +65,22 @@ def prepare(output, namespace, version, *, include_secrets=False,
         write(name, source.read_bytes())
 
     for name in ("compose.yaml", "compose.runtime.yaml", "compose.auth.yaml"):
-        copy(ENGINE / name, "codex-exec/" + name)
+        copy(ENGINE / name, "trading-engine/" + name)
     # Runtime host only pulls published images; it needs no source checkout or Dockerfile.
-    base = yaml.safe_load((output / "codex-exec/compose.yaml").read_text())
-    base["services"]["codex-exec"].pop("build")
-    (output / "codex-exec/compose.yaml").write_text(yaml.safe_dump(base, sort_keys=False))
+    base = yaml.safe_load((output / "trading-engine/compose.yaml").read_text())
+    base["services"]["trading-engine"].pop("build")
+    (output / "trading-engine/compose.yaml").write_text(yaml.safe_dump(base, sort_keys=False))
     copy(GATEWAY / "compose.yaml", "telegram-gateway/compose.yaml")
     if private:
-        routes["routes"]["v1"].update(url="http://codex-exec:8080/telegram", env_file="/app/config/telegram-v1.env")
+        routes["routes"]["v1"].update(url="http://trading-engine:8080/telegram", env_file="/app/config/telegram-v1.env")
         write("telegram-gateway/config/routes.yaml", yaml.safe_dump(routes, sort_keys=False, allow_unicode=True), 0o600)
     else:
         copy(GATEWAY / "config/routes.example.yaml", "telegram-gateway/config/routes.yaml")
     copy(GATEWAY / "config/telegram.env.example", "telegram-gateway/config/telegram-v1.env.example")
     copy(GATEWAY / "config/codex-peer.secret.example", "telegram-gateway/config/codex-peer.secret.example")
-    copy(ENGINE / "config/secrets.yaml.example", "codex-exec/config/secrets.yaml.example")
+    copy(ENGINE / "config/secrets.yaml.example", "trading-engine/config/secrets.yaml.example")
     for name in ("app", "strategy", "schedules"):
-        copy(ENGINE / "config" / (name + ".yaml"), "codex-exec/config/" + name + ".yaml")
+        copy(ENGINE / "config" / (name + ".yaml"), "trading-engine/config/" + name + ".yaml")
 
     app = load_config(ENGINE / "config").app
     app["app"].update(mode="shadow", account_alias="kis-primary", state_dir="/app/var/shadow/kis-primary", listen_host="0.0.0.0")
@@ -88,13 +88,13 @@ def prepare(output, namespace, version, *, include_secrets=False,
     app["market"]["calendar_manifest"] = "/app/approvals/runtime-manifest.json"
     app["telegram"].update(enabled=True, ingress_enabled=True, route="v1", allowed_sender_ids=list(sender_ids),
         allowed_chat_ids=chat_ids if private else [], trusted_peer_profile="/app/approvals/telegram-peer.json")
-    write("codex-exec/config/app.shadow.yaml.example", yaml.safe_dump(app, sort_keys=False, allow_unicode=True), 0o600)
+    write("trading-engine/config/app.shadow.yaml.example", yaml.safe_dump(app, sort_keys=False, allow_unicode=True), 0o600)
 
-    for kind in ("codex", "gateway"):
+    for kind in ("engine", "gateway"):
         body = (ENGINE / "deployment" / (kind + ".env.example")).read_text()
         body = body.replace("dokysp/", namespace + "/").replace("SET_RELEASE_TAG", version)
         body = body.replace("172.30.85.0/24", str(subnet)).replace("172.30.85.3", str(address))
-        write(("codex-exec" if kind == "codex" else "telegram-gateway") + "/.env", body, 0o600)
+        write(("trading-engine" if kind == "engine" else "telegram-gateway") + "/.env", body, 0o600)
     for path in sorted((ENGINE / "deployment/examples").glob("*.json.example")):
         value = json.loads(path.read_text())
         if "account_alias" in value:
@@ -104,12 +104,12 @@ def prepare(output, namespace, version, *, include_secrets=False,
         if path.name == "runtime.json.example":
             value.update(code_id=code_identity(), model_id=app["model"]["model_id"],
                 prompt_hash=hashlib.sha256((ENGINE / "prompts/portfolio_decision.md").read_bytes()).hexdigest())
-        write("codex-exec/approvals/" + path.name, json.dumps(value, ensure_ascii=False, indent=2) + "\n", 0o600)
+        write("trading-engine/approvals/" + path.name, json.dumps(value, ensure_ascii=False, indent=2) + "\n", 0o600)
     if private:
-        write("codex-exec/config/secrets.yaml", yaml.safe_dump(private, sort_keys=False, default_style='"'), 0o600)
+        write("trading-engine/config/secrets.yaml", yaml.safe_dump(private, sort_keys=False, default_style='"'), 0o600)
         write("telegram-gateway/config/telegram-v1.env", env_body, 0o600)
         write("telegram-gateway/config/codex-peer.secret", key + "\n", 0o600)
-    for name in ("codex-exec/var", "codex-exec/locks", "telegram-gateway/memory"):
+    for name in ("trading-engine/var", "trading-engine/locks", "telegram-gateway/memory"):
         (output / name).mkdir(mode=0o700)
     guide = (ENGINE / "deployment/README.md").read_text()
     write("README.md", guide.replace("172.30.85.0/24", str(subnet)).replace("172.30.85.3", str(address)))

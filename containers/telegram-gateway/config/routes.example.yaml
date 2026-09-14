@@ -1,8 +1,8 @@
 routes:
-  # New codex-exec service; controls still require trusted runtime approval.
+  # New trading-engine service; controls still require trusted runtime approval.
   v1:
     env_file: /app/config/telegram-v1.env
-    url: http://codex-exec:8080/telegram
+    url: http://trading-engine:8080/telegram
     bot_commands:
       - command: status
         description: 엔진 상태와 계좌 대사 상태 확인

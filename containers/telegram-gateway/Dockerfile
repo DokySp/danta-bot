@@ -5,7 +5,7 @@ RUN test -n "$APP_VERSION" || (echo "APP_VERSION build arg is required" >&2; exi
 
 LABEL org.opencontainers.image.title="telegram-gateway"
 LABEL org.opencontainers.image.version="${APP_VERSION}"
-LABEL org.opencontainers.image.description="Telegram polling and send gateway for codex-exec instances"
+LABEL org.opencontainers.image.description="Telegram polling and send gateway for trading-engine instances"
 
 ENV APP_VERSION=${APP_VERSION}
 ENV PYTHONUNBUFFERED=1

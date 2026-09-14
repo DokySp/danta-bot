@@ -12,13 +12,13 @@
 
 ```sh
 RELEASE=$(git rev-parse --short HEAD)
-mkdir -p containers/codex-exec/var
-.venv/bin/python scripts/prepare-codex-deployment.py \
+mkdir -p containers/trading-engine/var
+.venv/bin/python scripts/prepare-trading-deployment.py \
   --namespace dokysp --version "$RELEASE" \
-  --output "containers/codex-exec/var/deployment-$RELEASE" --include-secrets
+  --output "containers/trading-engine/var/deployment-$RELEASE" --include-secrets
 
 # 이미지 배포 단계에서 실행한다.
-PYTHON_BIN="$PWD/.venv/bin/python" ./scripts/deploy-codex-exec.sh dokysp "$RELEASE"
+PYTHON_BIN="$PWD/.venv/bin/python" ./scripts/deploy-trading-engine.sh dokysp "$RELEASE"
 PATH="$PWD/.venv/bin:$PATH" ./scripts/deploy-telegram-gateway.sh dokysp "$RELEASE"
 ```
 
@@ -34,7 +34,7 @@ PATH="$PWD/.venv/bin:$PATH" ./scripts/deploy-telegram-gateway.sh dokysp "$RELEAS
 ```text
 <배포폴더>/
   README.md
-  codex-exec/
+  trading-engine/
     .env                         # 운영 PC 상대 경로와 게시할 이미지 태그
     compose.yaml                 # build 항목 없이 image pull만 사용
     compose.runtime.yaml         # 승인 후 serve 및 gateway 네트워크 연결
@@ -75,13 +75,13 @@ DB는 운영 PC 자체의 로컬 디스크에 둔다. 개발 PC에서 SMB로 보
 
 ```sh
 cd <배포폴더>
-sudo chown -R root:root codex-exec/config codex-exec/approvals telegram-gateway/config
-sudo chmod 755 codex-exec/config codex-exec/approvals
-sudo chmod 644 codex-exec/config/app.yaml codex-exec/config/strategy.yaml codex-exec/config/schedules.yaml
-sudo chown 10001:10001 codex-exec/config/secrets.yaml
-sudo chmod 400 codex-exec/config/secrets.yaml
-sudo chown -R 10001:10001 codex-exec/var codex-exec/locks
-sudo chmod 700 codex-exec/var codex-exec/locks telegram-gateway/config
+sudo chown -R root:root trading-engine/config trading-engine/approvals telegram-gateway/config
+sudo chmod 755 trading-engine/config trading-engine/approvals
+sudo chmod 644 trading-engine/config/app.yaml trading-engine/config/strategy.yaml trading-engine/config/schedules.yaml
+sudo chown 10001:10001 trading-engine/config/secrets.yaml
+sudo chmod 400 trading-engine/config/secrets.yaml
+sudo chown -R 10001:10001 trading-engine/var trading-engine/locks
+sudo chmod 700 trading-engine/var trading-engine/locks telegram-gateway/config
 sudo chmod 600 telegram-gateway/config/telegram-v1.env telegram-gateway/config/codex-peer.secret
 ```
 
@@ -96,20 +96,20 @@ docker network create --subnet 172.30.85.0/24 danta-catalyst-net
 cd telegram-gateway
 docker compose config --quiet
 docker compose pull
-cd ../codex-exec
+cd ../trading-engine
 docker compose -f compose.yaml -f compose.runtime.yaml config --quiet
 docker compose pull
-docker compose run --rm codex-exec doctor
+docker compose run --rm trading-engine doctor
 ```
 
 이미 같은 이름의 네트워크가 있으면 삭제하거나 다시 만들지 말고 `docker network inspect`로
 이름·대역을 대조한다. 기존 gateway와 같은 컨테이너 이름/봇을 쓰므로 기존 poller와 동시에 시작하지 않는다.
-공통 네트워크의 서비스 DNS는 `codex-exec`, `telegram-gateway`이며 호스트 IP를 secrets.yaml에 넣지 않는다.
+공통 네트워크의 서비스 DNS는 `trading-engine`, `telegram-gateway`이며 호스트 IP를 secrets.yaml에 넣지 않는다.
 
 ## 3. 운영 컴퓨터: Codex 로그인
 
 ```sh
-cd <배포폴더>/codex-exec
+cd <배포폴더>/trading-engine
 docker compose -f compose.auth.yaml pull
 docker compose -f compose.auth.yaml run --rm codex-login login status
 # 인증이 없으면 아래 명령의 URL/코드를 브라우저에서 완료한다.
@@ -150,8 +150,8 @@ auth 디렉터리로 초기화된다. 기존 로그인 상태가 유효하면 �
 운영 검증 기록에 대조한다. 초기 example의 코드 hash도 실제 pull한 이미지와 반드시 대조한다.
 
 ```sh
-docker compose run --rm codex-exec doctor
-docker compose run --rm --entrypoint sha256sum codex-exec /opt/codex/bin/codex /app/prompts/portfolio_decision.md
+docker compose run --rm trading-engine doctor
+docker compose run --rm --entrypoint sha256sum trading-engine /opt/codex/bin/codex /app/prompts/portfolio_decision.md
 sha256sum approvals/runtime-manifest.json
 sudo chown root:root approvals/*.json
 sudo chmod 444 approvals/*.json
@@ -161,14 +161,21 @@ sudo chmod 444 approvals/*.json
 Telegram 메뉴의 일반 문장을 모델·주문 실행으로 해석하지 않는다. `/review`가 심사 요청이다.
 
 ```sh
-cd <배포폴더>/codex-exec
+cd <배포폴더>/trading-engine
 docker compose -f compose.yaml -f compose.runtime.yaml up -d --no-build
-docker compose -f compose.yaml -f compose.runtime.yaml logs --tail 100 codex-exec
+docker compose -f compose.yaml -f compose.runtime.yaml logs --tail 100 trading-engine
 cd ../telegram-gateway
 docker compose up -d --no-build
 ```
 
 ## 5. 업데이트와 복구
+
+기존 `codex-exec` 배포를 전환할 때는 기존 서비스를 먼저 정상 종료한 뒤 새 `trading-engine`
+서비스를 시작한다. 폴더와 Compose 서비스 이름 변경만으로 기존 컨테이너가 중지되지는 않는다.
+이미지 이름은 `trading-engine`, gateway 목적지는 `http://trading-engine:8080/telegram`로 맞춘다.
+Codex 로그인 volume은 자동으로 이름을 바꾸거나 삭제하지 않는다. 기존 인증을 재사용하려면
+새 엔진 `.env`의 `DANTA_AUTH_VOLUME`을 기존 volume 이름(예: `codex-exec-auth`)으로 지정한다.
+DB·잠금·비밀값 경로를 유지하고, app 이름 변경으로 달라진 config hash의 승인을 재검증한다.
 
 새 릴리스마다 개발 PC에서 같은 태그의 두 이미지를 게시하고 새로운 준비 폴더를 만든다.
 운영 PC에는 변경된 Compose/메뉴 파일을 검토해 반영하고 양쪽 `.env`의 이미지 태그를 바꾼다.
@@ -179,8 +186,8 @@ docker compose up -d --no-build
 운영 PC의 `var/backups`에 새 파일로 보관하며 원본을 바꾸지 않는다. 인증/설정은 별도로 비공개 백업한다.
 
 ```sh
-cd <배포폴더>/codex-exec
-docker compose -f compose.yaml -f compose.runtime.yaml exec -T codex-exec python - <<'PY'
+cd <배포폴더>/trading-engine
+docker compose -f compose.yaml -f compose.runtime.yaml exec -T trading-engine python - <<'PY'
 from pathlib import Path
 from datetime import datetime, timezone
 import os, sqlite3

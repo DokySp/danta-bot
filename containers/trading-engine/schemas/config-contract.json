@@ -2,7 +2,7 @@
   "app": {
     "schema_version": 1,
     "app": {
-      "name": "codex-exec",
+      "name": "trading-engine",
       "timezone": "Asia/Seoul",
       "mode": "offline",
       "account_alias": null,

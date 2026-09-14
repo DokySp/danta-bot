@@ -6,7 +6,7 @@ RUN npm install --global --omit=dev --no-audit --no-fund "@openai/codex@${CODEX_
 
 FROM python:3.12-slim
 ARG APP_VERSION=dev
-LABEL org.opencontainers.image.title="codex-exec" \
+LABEL org.opencontainers.image.title="trading-engine" \
       org.opencontainers.image.version="${APP_VERSION}"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \

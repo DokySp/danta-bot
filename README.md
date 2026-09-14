@@ -10,13 +10,13 @@
 
 ## Docker 구성
 
-- `codex-exec`: 명세에 따른 투자 연구·실행 엔진. 기본 설정은 offline이며 실제 거래는 별도 승인과 운영 설정이 필요합니다.
+- `trading-engine`: 명세에 따른 투자 연구·실행 엔진. 기본 설정은 offline이며 실제 거래는 별도 승인과 운영 설정이 필요합니다.
 - `telegram-gateway`: 텔레그램 송수신 컨테이너.
 - `kis-trade-mcp`: 한국투자증권 MCP 컨테이너. 새 엔진의 KIS 어댑터는 직접 API를 호출합니다.
 
-명세는 [codex-exec README](containers/codex-exec/README.md), 현재 검증 범위는
-[구현 상태](containers/codex-exec/docs/status.md), 실행·복구 절차는
-[runbook](containers/codex-exec/docs/runbook.md)에 있습니다.
+명세는 [trading-engine README](containers/trading-engine/README.md), 현재 검증 범위는
+[구현 상태](containers/trading-engine/docs/status.md), 실행·복구 절차는
+[runbook](containers/trading-engine/docs/runbook.md)에 있습니다.
 
 ## 테스트
 
@@ -24,11 +24,11 @@
 
 ```bash
 python3 -m venv .venv
-.venv/bin/python -m pip install -r containers/codex-exec/requirements.lock
+.venv/bin/python -m pip install -r containers/trading-engine/requirements.lock
 .venv/bin/python scripts/run_tests.py
 ```
 
-이 명령은 새 `codex-exec/tests`, `telegram-gateway/tests`, `scripts/tests`를 각각
+이 명령은 새 `trading-engine/tests`, `telegram-gateway/tests`, `scripts/tests`를 각각
 독립된 `unittest discover`로 실행합니다. 어느 스위트든 실패하거나 테스트를 0개 발견하면
 실패하며, 레거시 스킬 테스트는 실행하지 않습니다. 외부 API·실제 계좌·모델 연결 없이
 검증합니다. 실제 연결과 거래 승인은 테스트 통과와 별개입니다.
@@ -39,18 +39,18 @@ python3 -m venv .venv
 
 ```bash
 docker login -u YOUR_NAMESPACE
-PYTHON_BIN="$PWD/.venv/bin/python" ./scripts/deploy-codex-exec.sh YOUR_NAMESPACE v1.2.1
+PYTHON_BIN="$PWD/.venv/bin/python" ./scripts/deploy-trading-engine.sh YOUR_NAMESPACE v1.2.1
 # 버전 생략: latest 태그, APP_VERSION은 git describe 결과
-PYTHON_BIN="$PWD/.venv/bin/python" ./scripts/deploy-codex-exec.sh YOUR_NAMESPACE
+PYTHON_BIN="$PWD/.venv/bin/python" ./scripts/deploy-trading-engine.sh YOUR_NAMESPACE
 ```
 
 `PYTHON_BIN`을 생략하면 `python3`를 사용합니다. 스크립트는 전체 회귀 검증을 통과한 뒤
-`containers/codex-exec`만 빌드 컨텍스트로 보내고 이미지를 푸시합니다. 버전을 직접 넘기면
+`containers/trading-engine`만 빌드 컨텍스트로 보내고 이미지를 푸시합니다. 버전을 직접 넘기면
 이미지 태그와 `APP_VERSION`에 같은 값이 들어갑니다. `APP_VERSION`은 OCI 버전 라벨과
 이미지 환경변수이며, Codex CLI 버전은 Dockerfile에 고정되어 있습니다.
 
-`deploy-codex-exec-experimental.sh`도 같은 인자를 받으며, 동일 엔진을
-`codex-exec-experimental` 이미지 이름으로 푸시하는 호환 진입점입니다. 이전 base/experimental
+`deploy-trading-engine-experimental.sh`도 같은 인자를 받으며, 동일 엔진을
+`trading-engine-experimental` 이미지 이름으로 푸시하는 호환 진입점입니다. 이전 base/experimental
 스킬 프로필은 포함하지 않습니다. 정책과 모드는 외부 설정 파일로 구분합니다.
 
 이 스크립트가 끝나도 NAS 파일 동기화나 컨테이너 재시작은 수행되지 않습니다.
@@ -59,8 +59,8 @@ PYTHON_BIN="$PWD/.venv/bin/python" ./scripts/deploy-codex-exec.sh YOUR_NAMESPACE
 로컬 이미지 검증은 푸시 없이 실행할 수 있습니다.
 
 ```bash
-docker build --build-arg APP_VERSION=local -t danta-codex-exec:local ./containers/codex-exec
-PYTHONPATH=containers/codex-exec/src .venv/bin/python containers/codex-exec/scripts/verify_offline_image.py --image danta-codex-exec:local
+docker build --build-arg APP_VERSION=local -t danta-trading-engine:local ./containers/trading-engine
+PYTHONPATH=containers/trading-engine/src .venv/bin/python containers/trading-engine/scripts/verify_offline_image.py --image danta-trading-engine:local
 ```
 
 검증은 네트워크가 없는 임시 컨테이너에서 합성 데이터만 사용합니다.
@@ -75,14 +75,14 @@ source .venv/bin/activate
 
 ## Docker Compose와 설정
 
-새 엔진은 `containers/codex-exec/compose.yaml`을 사용합니다. 기본 명령은 `doctor`이며
+새 엔진은 `containers/trading-engine/compose.yaml`을 사용합니다. 기본 명령은 `doctor`이며
 외부 네트워크가 차단됩니다. 지속 실행용 `compose.runtime.yaml`은 `serve`와 재시작 정책을
 추가하며, 실제 계좌·모델·Telegram 연결에는 검증된 설정과 별도 승인 파일이 필요합니다.
 이미지 이름은 `DANTA_IMAGE`로 지정합니다. 구체적인 마운트·권한·실행 명령은
-[runbook](containers/codex-exec/docs/runbook.md)을 따릅니다.
+[runbook](containers/trading-engine/docs/runbook.md)을 따릅니다.
 
 ```text
-containers/codex-exec/
+containers/trading-engine/
   Dockerfile
   compose.yaml
   compose.auth.yaml
@@ -106,21 +106,21 @@ Codex 인증은 기존처럼 로그인으로 생성합니다. 이미지를 준�
 표시된 URL과 일회용 코드를 브라우저에서 완료합니다. `auth.json`을 직접 만들 필요는 없습니다.
 
 ```bash
-DANTA_IMAGE=danta-codex-exec:local docker compose -f containers/codex-exec/compose.auth.yaml run --rm codex-login
+DANTA_IMAGE=danta-trading-engine:local docker compose -f containers/trading-engine/compose.auth.yaml run --rm codex-login
 ```
 
-로그인과 서비스는 기본 Docker volume `codex-exec-auth`를 공유합니다. 프로필별 저장소는
+로그인과 서비스는 기본 Docker volume `trading-engine-auth`를 공유합니다. 프로필별 저장소는
 `DANTA_AUTH_VOLUME`으로 구분하고 양쪽 실행에 같은 값을 사용합니다. 상태 확인은 위
 명령 뒤에 `login status`를 붙입니다. 비밀 설정의 `DANTA_CODEX_AUTH_HOME`은 `/app/auth`입니다.
 
-운영은 다른 컴퓨터에서 수행합니다. [원격 설치·업데이트 절차](containers/codex-exec/deployment/README.md)에
+운영은 다른 컴퓨터에서 수행합니다. [원격 설치·업데이트 절차](containers/trading-engine/deployment/README.md)에
 전달 파일, 운영 PC 권한·네트워크, Codex 로그인, 승인 준비, 실행·백업 명령을 정리했습니다.
 
 ```bash
-mkdir -p containers/codex-exec/var
-.venv/bin/python scripts/prepare-codex-deployment.py \
+mkdir -p containers/trading-engine/var
+.venv/bin/python scripts/prepare-trading-deployment.py \
   --namespace dokysp --version YOUR_RELEASE \
-  --output containers/codex-exec/var/YOUR_RELEASE --include-secrets
+  --output containers/trading-engine/var/YOUR_RELEASE --include-secrets
 ```
 
 이 명령은 새 배포 폴더만 생성합니다. 이미지 push·원격 실행은 수행하지 않습니다.
@@ -133,7 +133,7 @@ gateway Compose는 `config/codex-peer.secret`의 64자리 16진 문자열로 항
 엔진 `secrets.yaml`의 `DANTA_TELEGRAM_PEER_SECRET`과 같아야 하며 Git·이미지에서 제외됩니다.
 두 서비스는 `.env`의 공통 외부 네트워크에 연결하고, gateway의 고정 IP를 신뢰 peer profile과
 맞춥니다. 실제 달력·수수료·계좌 귀속·허용 sender/chat·승인 검증은 운영 연결 단계에서 확정합니다.
-기존 `codex-exec/profiles/*/compose.yaml` 경로는 사용하지 않습니다.
+기존 `trading-engine/profiles/*/compose.yaml` 경로는 사용하지 않습니다.
 
 ## Codex CLI
 

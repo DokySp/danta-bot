@@ -113,7 +113,7 @@ class TelegramGatewayHtmlSplitTest(unittest.TestCase):
 
 class GatewayMenuContractTest(unittest.TestCase):
     def test_example_menu_matches_receiver_commands_without_aliases(self) -> None:
-        receiver_source = MODULE_PATH.parents[1] / "codex-exec" / "src"
+        receiver_source = MODULE_PATH.parents[1] / "trading-engine" / "src"
         with patch.object(sys, "path", [str(receiver_source), *sys.path]):
             from danta.adapters.telegram import COMMANDS
 
@@ -121,7 +121,7 @@ class GatewayMenuContractTest(unittest.TestCase):
         routes = telegram_gateway.yaml.safe_load(example.read_text())["routes"]
         self.assertEqual(set(routes), {"v1"})
         route = routes["v1"]
-        self.assertEqual(route["url"], "http://codex-exec:8080/telegram")
+        self.assertEqual(route["url"], "http://trading-engine:8080/telegram")
         commands = telegram_gateway.route_bot_commands(route, "v1")
         self.assertEqual({item.command for item in commands}, COMMANDS)
         self.assertEqual(len(commands), len(COMMANDS))
@@ -154,7 +154,7 @@ class GatewaySigningTest(unittest.TestCase):
         os.mkfifo(fifo, 0o600)
         for bad_path in (link, fifo, self.path.parent, self.path.with_name("missing")):
             with self.subTest(path=bad_path.name), self.assertRaises(ValueError):
-                telegram_gateway.CodexExecClient(1, signing_secret_file=bad_path)
+                telegram_gateway.TradingEngineClient(1, signing_secret_file=bad_path)
         self.path.chmod(0o644)
         with self.assertRaises(ValueError):
             telegram_gateway.read_peer_secret(self.path)
@@ -166,7 +166,7 @@ class GatewaySigningTest(unittest.TestCase):
             self.assertNotIn(content.decode(), str(raised.exception))
 
     def test_signature_covers_exact_bytes_and_restricts_target(self) -> None:
-        client = telegram_gateway.CodexExecClient(2, signing_secret_file=self.path)
+        client = telegram_gateway.TradingEngineClient(2, signing_secret_file=self.path)
         client._opener = Mock()
         client._opener.open.return_value = io.BytesIO(b'{"accepted":true}')
         payload = {"text": "/status 한글", "chat_id": "synthetic"}
@@ -186,7 +186,7 @@ class GatewaySigningTest(unittest.TestCase):
         self.assertEqual(client._opener.open.call_count, 1)
 
     def test_unconfigured_client_preserves_unsigned_legacy_behavior(self) -> None:
-        client = telegram_gateway.CodexExecClient(2)
+        client = telegram_gateway.TradingEngineClient(2)
         with patch.object(telegram_gateway, "urlopen", return_value=io.BytesIO(b"legacy reply")) as opened:
             self.assertEqual(client.post_message("http://legacy/old-path", {}), {"reply_text": "legacy reply"})
         self.assertFalse(any(key.lower().startswith("x-danta-") for key, _ in opened.call_args.args[0].header_items()))
@@ -214,7 +214,7 @@ class GatewaySigningTest(unittest.TestCase):
         thread.start()
         try:
             with patch.dict(os.environ, {"http_proxy": "http://127.0.0.1:1"}, clear=True):
-                client = telegram_gateway.CodexExecClient(2, signing_secret_file=self.path)
+                client = telegram_gateway.TradingEngineClient(2, signing_secret_file=self.path)
                 with self.assertRaisesRegex(RuntimeError, "HTTP 302"):
                     client.post_message(f"http://127.0.0.1:{server.server_port}/telegram", {})
             self.assertEqual(received, ["/telegram"])
@@ -617,7 +617,7 @@ class GatewayAttachmentFlowTest(unittest.TestCase):
     def app() -> object:
         app = telegram_gateway.GatewayApp.__new__(telegram_gateway.GatewayApp)
         app.config = SimpleNamespace(version="test")
-        app.codex = Mock()
+        app.engine = Mock()
         app.router = Mock()
         app.attachment_cache = Mock()
         app.attachment_cache.max_file_bytes = 20
@@ -673,7 +673,7 @@ class GatewayAttachmentFlowTest(unittest.TestCase):
 
         client.download_file.assert_called_once_with("file-1", 20)
         app.attachment_cache.store.assert_called_once()
-        app.codex.post_message.assert_not_called()
+        app.engine.post_message.assert_not_called()
         app.attachment_cache.list_pending.assert_not_called()
         self.assertIn("저장했습니다", client.send_message.call_args.args[1])
 
@@ -694,7 +694,7 @@ class GatewayAttachmentFlowTest(unittest.TestCase):
             url="http://codex.test/telegram",
             text="두 파일을 비교해줘",
         )
-        app.codex.post_message.return_value = None
+        app.engine.post_message.return_value = None
         client = Mock()
         client.download_file.return_value = b"pdf"
         update = {
@@ -716,7 +716,7 @@ class GatewayAttachmentFlowTest(unittest.TestCase):
         with patch.object(telegram_gateway, "TelegramClient", return_value=client):
             app.handle_update(self.route(), update)
 
-        payload = app.codex.post_message.call_args.args[1]
+        payload = app.engine.post_message.call_args.args[1]
         self.assertIn("/host/inbox/v2/9/9-previous.pdf", payload["text"])
         self.assertIn("/host/inbox/v2/9/10-abc.pdf", payload["text"])
         self.assertIn("두 파일을 비교해줘", payload["text"])
@@ -739,7 +739,7 @@ class GatewayAttachmentFlowTest(unittest.TestCase):
             url="http://codex.test/telegram",
             text="두 파일을 비교해줘",
         )
-        app.codex.post_message.side_effect = RuntimeError("bridge unavailable")
+        app.engine.post_message.side_effect = RuntimeError("bridge unavailable")
         client = Mock()
         client.download_file.return_value = b"pdf"
         update = {
@@ -773,7 +773,7 @@ class GatewayAttachmentFlowTest(unittest.TestCase):
             url="http://codex.test/telegram",
             text="이 보고서를 요약해줘",
         )
-        app.codex.post_message.return_value = None
+        app.engine.post_message.return_value = None
         update = {
             "update_id": 2,
             "message": {
@@ -788,7 +788,7 @@ class GatewayAttachmentFlowTest(unittest.TestCase):
         with patch.object(telegram_gateway, "TelegramClient"):
             app.handle_update(self.route(), update)
 
-        payload = app.codex.post_message.call_args.args[1]
+        payload = app.engine.post_message.call_args.args[1]
         self.assertIn("<telegram_attachments>", payload["text"])
         self.assertIn("/host/inbox/v2/9/10-abc.pdf", payload["text"])
         self.assertIn("이 보고서를 요약해줘", payload["text"])
@@ -801,7 +801,7 @@ class GatewayAttachmentFlowTest(unittest.TestCase):
             url="http://codex.test/telegram",
             text="/session",
         )
-        app.codex.post_message.return_value = None
+        app.engine.post_message.return_value = None
         update = {
             "message": {
                 "message_id": 12,
@@ -816,7 +816,7 @@ class GatewayAttachmentFlowTest(unittest.TestCase):
 
         app.attachment_cache.list_pending.assert_not_called()
         app.attachment_cache.mark_consumed.assert_not_called()
-        payload = app.codex.post_message.call_args.args[1]
+        payload = app.engine.post_message.call_args.args[1]
         self.assertNotIn("<telegram_attachments>", payload["text"])
 
     def test_failed_codex_submission_keeps_attachment_pending(self) -> None:
@@ -828,7 +828,7 @@ class GatewayAttachmentFlowTest(unittest.TestCase):
             url="http://codex.test/telegram",
             text="분석해줘",
         )
-        app.codex.post_message.side_effect = RuntimeError("bridge unavailable")
+        app.engine.post_message.side_effect = RuntimeError("bridge unavailable")
         update = {
             "message": {
                 "message_id": 13,

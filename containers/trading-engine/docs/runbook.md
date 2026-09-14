@@ -118,12 +118,12 @@ SQLite와 journal에 `APPROVAL_REQUIRED`로 보존한다. 실제 모델의 지�
 
 ## Docker 경계
 
-`containers/codex-exec` 디렉터리에서 위 Python 의존성을 설치한 환경으로 실행한다.
+`containers/trading-engine` 디렉터리에서 위 Python 의존성을 설치한 환경으로 실행한다.
 Docker daemon은 로컬에서 실행 중이어야 한다.
 
 ```sh
-docker build -t danta-codex-exec:local .
-PYTHONPATH=src python scripts/verify_offline_image.py --image danta-codex-exec:local
+docker build -t danta-trading-engine:local .
+PYTHONPATH=src python scripts/verify_offline_image.py --image danta-trading-engine:local
 ```
 
 검증 스크립트는 자신의 위치에서 저장소 루트를 찾는다. 기본 offline 설정 3개를 민감정보
@@ -147,7 +147,7 @@ README와 렌더러도 포함한다. 읽기 전용 컨테이너에서는
 
 Codex CLI는 image에 포함하며 기본 `model.executable: codex`를 사용한다. 기존처럼
 `codex login`으로 인증을 생성한다. `auth.json`을 직접 작성하거나 미리 가져올 필요는 없다.
-로그인과 runtime은 같은 Docker volume `codex-exec-auth`를 `/app/auth`에 mount한다.
+로그인과 runtime은 같은 Docker volume `trading-engine-auth`를 `/app/auth`에 mount한다.
 새 volume의 디렉터리는 image에서 UID 10001·0700으로 초기화하며, Codex가 인증을
 저장·갱신한다. `secrets.yaml`의 `DANTA_CODEX_AUTH_HOME`도 `/app/auth`로 둔다.
 인증은 image 및 브로커 비밀값·정책·승인 디렉터리와 분리한다.
@@ -158,8 +158,8 @@ Codex CLI는 image에 포함하며 기본 `model.executable: codex`를 사용한
 Docker/NAS에서 localhost callback을 연결할 필요가 없는 기기 코드 로그인이다.
 
 ```sh
-cd containers/codex-exec  # 저장소 루트에서 실행할 때
-export DANTA_IMAGE=danta-codex-exec:local  # 배포한 이미지 이름으로 맞춘다
+cd containers/trading-engine  # 저장소 루트에서 실행할 때
+export DANTA_IMAGE=danta-trading-engine:local  # 배포한 이미지 이름으로 맞춘다
 docker compose -f compose.auth.yaml run --rm codex-login
 
 # 저장된 로그인 상태만 확인
@@ -192,7 +192,7 @@ compose 사용 전에 다음 **외부 위치 참조**를 준비한다. 실제 �
 | DANTA_CONFIG_DIR | app.yaml/strategy.yaml/schedules.yaml이 있는 읽기 전용 디렉터리 |
 | config/secrets.yaml | config 디렉터리 안의 실제 비밀 파일. UID 10001이 읽을 수 있는 0400/0600; Git/image 제외 |
 | DANTA_IMAGE | 빌드/푸시한 정확한 이미지 이름·태그 |
-| DANTA_AUTH_VOLUME | 선택 사항. 기본 `codex-exec-auth`; 로그인/runtime이 공유하며 프로필별로 구분 |
+| DANTA_AUTH_VOLUME | 선택 사항. 기본 `trading-engine-auth`; 로그인/runtime이 공유하며 프로필별로 구분 |
 | DANTA_AUTH_DIR | 선택 사항. named volume 대신 기존 전용 디렉터리를 쓸 때 지정, UID 10001 소유 0700 |
 | DANTA_APPROVAL_DIR | root 소유 읽기 전용 승인 디렉터리, runtime.json 포함 |
 | DANTA_STATE_DIR | 로컬 파일시스템, UID/GID 10001이 쓸 수 있는 상태 디렉터리 |
@@ -217,7 +217,7 @@ Docker socket은 연결하지 않는다. 기본 internal network는 외부 API e
 
 ```sh
 # 1회 검증: 외부 egress 차단, doctor
-docker compose -f compose.yaml run --rm codex-exec
+docker compose -f compose.yaml run --rm trading-engine
 # 지속 실행: 명시적으로 egress를 허용하고 승인 파일을 읽어 serve 시작
 docker compose -f compose.yaml -f compose.runtime.yaml up -d
 ```

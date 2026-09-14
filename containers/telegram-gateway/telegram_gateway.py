@@ -1481,7 +1481,7 @@ class NoSignedRedirect(HTTPRedirectHandler):
         return None
 
 
-class CodexExecClient:
+class TradingEngineClient:
     def __init__(self, timeout: int, *, signing_secret_file: Path | None = None) -> None:
         self.timeout = timeout
         self._signing_secret = read_peer_secret(signing_secret_file) if signing_secret_file is not None else None
@@ -1511,9 +1511,9 @@ class CodexExecClient:
                 raw = response.read().decode("utf-8")
         except HTTPError as exc:
             raw = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"codex-exec route failed: HTTP {exc.code}: {raw}") from exc
+            raise RuntimeError(f"trading-engine route failed: HTTP {exc.code}: {raw}") from exc
         except URLError as exc:
-            raise RuntimeError(f"codex-exec route failed: {exc}") from exc
+            raise RuntimeError(f"trading-engine route failed: {exc}") from exc
 
         if not raw.strip():
             return None
@@ -1547,7 +1547,7 @@ class GatewayApp:
     def __init__(self, config: Config) -> None:
         self.config = config
         self.routing_store = RoutingConfigStore(config.gateway_routes_file)
-        self.codex = CodexExecClient(config.http_timeout, signing_secret_file=config.peer_secret_file)
+        self.engine = TradingEngineClient(config.http_timeout, signing_secret_file=config.peer_secret_file)
         self.router = Router(self.routing_store)
         self.stop_event = threading.Event()
         self.offsets: dict[str, int | None] = {}
@@ -1974,7 +1974,7 @@ class GatewayApp:
                     resolved.url,
                     len(pending_attachments),
                 )
-                response = self.codex.post_message(resolved.url, payload)
+                response = self.engine.post_message(resolved.url, payload)
             except (OSError, RuntimeError):
                 logging.exception(
                     "failed to submit cached Telegram attachment caption route=%s chat_id=%s",
@@ -2060,7 +2060,7 @@ class GatewayApp:
             chat_id,
             resolved.url,
         )
-        response = self.codex.post_message(resolved.url, payload)
+        response = self.engine.post_message(resolved.url, payload)
         if pending_attachments:
             self.attachment_cache.mark_consumed(pending_attachments)
 

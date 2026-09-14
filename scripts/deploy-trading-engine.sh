@@ -3,11 +3,11 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'EOF'
-Usage: scripts/deploy-codex-exec.sh <dockerhub-namespace> [version]
+Usage: scripts/deploy-trading-engine.sh <dockerhub-namespace> [version]
 
-Builds codex-exec and pushes it to the given Docker Hub namespace.
+Builds trading-engine and pushes it to the given Docker Hub namespace.
 If version is omitted, the Docker image tag is latest and APP_VERSION is resolved from git.
-Set PYTHON_BIN to an interpreter with containers/codex-exec/requirements.lock installed.
+Set PYTHON_BIN to an interpreter with containers/trading-engine/requirements.lock installed.
 EOF
 }
 
@@ -17,7 +17,7 @@ if [ "$#" -gt 2 ] || [ -z "${1:-}" ]; then
 fi
 
 dockerhub_namespace="$1"
-image_name="${CODEX_EXEC_IMAGE_NAME:-codex-exec}"
+image_name="${TRADING_ENGINE_IMAGE_NAME:-trading-engine}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 if [ -n "${2:-}" ]; then
@@ -37,10 +37,10 @@ if ! "${PYTHON_BIN:-python3}" "${repo_root}/scripts/run_tests.py"; then
 fi
 
 docker build \
-  -f "${repo_root}/containers/codex-exec/Dockerfile" \
+  -f "${repo_root}/containers/trading-engine/Dockerfile" \
   --build-arg "APP_VERSION=${app_version}" \
   -t "${local_image}" \
   -t "${remote_image}" \
-  "${repo_root}/containers/codex-exec"
+  "${repo_root}/containers/trading-engine"
 
 docker push "${remote_image}"

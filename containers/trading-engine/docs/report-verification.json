@@ -15,5 +15,12 @@
   "external_script_or_stylesheet_count": 0,
   "code_overflow": "local horizontal scroll, document does not overflow",
   "viewport_override_reset": true,
-  "scope": "README design report only; not live execution or profitability evidence"
+  "scope": "README design report only; not live execution or profitability evidence",
+  "rename_validation": {
+    "source_sha256": "8f44c5d0554643f52019b278ac4f976db961c812e7b9f4f51e70b3a463622d10",
+    "same_as_user_document_except_project_name": true,
+    "html_regenerated": true,
+    "heading_count": 92,
+    "scope": "Original fields describe the pre-rename visual validation; no new visual validation claim"
+  }
 }
