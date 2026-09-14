@@ -64,8 +64,19 @@ class EngineCase(unittest.TestCase):
                 self.assertEqual(result["performance_status"], "STRATEGY_UNPROVEN")
                 self.assertGreater(app.store.quantity("TEST:AAA"), 0)
                 held = app.store.quantity("TEST:AAA")
+                document_rows = app.store.db.execute("SELECT payload FROM outbox WHERE event_key=?",
+                    ("report:" + result["run_id"],)).fetchall()
+                self.assertEqual(len(document_rows), 1)
+                document = json.loads(document_rows[0][0])["document"]
+                date = self.bundle.now.date().isoformat()
+                summary = self.config.state_dir / "runs" / date / result["run_id"] / "summary.html"
+                self.assertEqual(document["filename"], f"summary-{date}-{result['run_id']}.html")
+                self.assertEqual(document["content"].encode(), summary.read_bytes())
+                self.assertIn("FIXTURE_ONLY", document["content"])
                 repeat = app.review(request_key="full-review-1")
                 self.assertEqual(repeat["run_id"], result["run_id"])
+                self.assertEqual(app.store.db.execute("SELECT COUNT(*) FROM outbox WHERE event_key=?",
+                    ("report:" + result["run_id"],)).fetchone()[0], 1)
                 app.review(request_key="full-review-2")
                 self.assertEqual(app.store.quantity("TEST:AAA"), held)
                 self.assertEqual(app.broker.submissions, 1)

@@ -8,7 +8,7 @@ routes:
         description: 엔진 상태와 계좌 대사 상태 확인
         instruction: /status
       - command: report
-        description: 거래·판단 기록 보고서 조회
+        description: 일일 거래·판단 HTML 보고서 받기
         instruction: /report
       - command: usage
         description: 기록된 모델 호출 내역 조회

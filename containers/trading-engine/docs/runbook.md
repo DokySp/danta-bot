@@ -97,6 +97,19 @@ timestamp + `\nPOST\n/telegram\n` + 원본 요청 bytes이다. 수신기는 최�
 
 일반 대화는 별도 세션 ID와 안내 응답만 만들고 모델·주문·설정 변경을 호출하지 않는다.
 `/status`, `/report`, `/usage`, `/version`, `/session`, `/show_touch_point`는 기록을 읽는다.
+`/report`는 요청한 채팅에 일일 `daily-<날짜>.html` 파일을 첨부한다. 승인된 스케줄의
+`finalize_and_report`도 일일 HTML을 보내며, 각 심사 실행은 `summary-<날짜>-<실행 ID>.html`을 보낸다.
+예약·실행 알림은 기존 규칙대로 설정된 route와 단 하나의 허용 chat을 사용한다. 허용 chat이
+여러 개라 목적지가 불명확하면 자동으로 대상을 추정하지 않는다. 로컬 CLI `report`는 파일만 생성한다.
+
+첨부 내용은 생성 시 SQLite outbox에 보관하므로 원본 daily.html이 갱신되거나 서비스가 재시작돼도
+같은 내용을 재시도한다. 텍스트와 파일은 별도 작업이며 실패한 파일 때문에 심사·주문을 다시 실행하지 않는다.
+송신 때마다 `telegram_send` 승인, 허용 chat, 민감정보 형식과 현재 secrets.yaml의 알려진 비밀값을 검사한다.
+문서 형식·민감정보·수신 대상 검증에 실패한 첨부는 `BLOCKED`로 보관하고 후속 알림을 처리한다.
+해당 outbox 행의 `outbox_last_outcome:<id>`에 값 노출 없는 거부 사유를 기록한다. 원인을 수정한 뒤
+새 `/report`로 다시 요청한다. 일시적인 통신 실패는 `PENDING`으로 남겨 같은 첨부를 재시도한다.
+Telegram 송신 성공 후 응답이 유실되면 재시도 첨부가 중복될 수 있다. 기본 offline·스케줄 비활성 설정은 유지한다.
+
 `/new`는 채팅 세션만 바꾼다. `/review`는 기존 권한 범위의 동일 심사 workflow만 요청한다.
 네 종목 목록 명령은 ticker 인자 한 개와 `telegram_control` 승인이 필요하다. 현재 universe에
 있는 종목의 후보 포함·제외만 변경하며, 보유 수량·전략 진입 기준·보호 청산을 우회하지 않는다.

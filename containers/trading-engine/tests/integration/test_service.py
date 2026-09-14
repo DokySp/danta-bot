@@ -1,8 +1,10 @@
 """Service integration uses real SQLite/adapters and fake app/transport; no sockets."""
 from datetime import timedelta
 from decimal import Decimal
+import base64
 import hashlib
 import hmac
+import html
 import json
 from pathlib import Path
 import tempfile
@@ -18,6 +20,7 @@ from danta.adapters.telegram import TelegramAdapter
 from danta.config import HumanRequired, ROOT, canonical, load_config, utcnow
 from danta.market import SessionCalendar
 from danta.models import Session
+from danta.safety import CredentialError
 from danta.service import PeerAuthenticator, Service, serve
 from danta.store import Store
 
@@ -106,9 +109,13 @@ class ServiceIntegrationTests(unittest.TestCase):
         self.directory.mkdir()
         for key, value in data.items():
             (self.directory / (key + '.yaml')).write_text(yaml.safe_dump(value, allow_unicode=True))
+        secrets_file = self.directory / 'secrets.yaml'
+        secrets_file.write_text('{}\n')
+        secrets_file.chmod(0o600)
         self.config = load_config(self.directory)
         self.app = FakeApp(self.config, self.now)
         self.sent = []
+        self.sent_urls = []
         self.fail_send = False
         self.adapter = TelegramAdapter(self.app.store.db, enabled=True, trusted_peers=['verified-peer'],
             allowed_senders=['user-1'], allowed_chats=['chat-1'], transport=self.transport,
@@ -130,6 +137,7 @@ class ServiceIntegrationTests(unittest.TestCase):
 
     def transport(self, method, url, headers, body, timeout):
         self.sent.append(json.loads(body))
+        self.sent_urls.append(url)
         if self.fail_send:
             raise AdapterError('SYNTHETIC_TIMEOUT')
         return HttpResponse(200, b'{"ok":true}')
@@ -214,6 +222,112 @@ class ServiceIntegrationTests(unittest.TestCase):
         self.assertEqual(self.app.review_calls, 1)
         self.assertEqual(self.sent[0], self.sent[1])
         self.assertEqual(self.app.store.db.execute('SELECT attempts FROM outbox').fetchone()[0], 2)
+
+    def test_report_document_survives_overwrite_retry_and_restart_without_duplicate_text(self):
+        app_file = self.directory / 'app.yaml'
+        settings = yaml.safe_load(app_file.read_text())
+        settings['telegram']['allowed_chat_ids'].append('chat-2')
+        app_file.write_text(yaml.safe_dump(settings, allow_unicode=True))
+        self.config = self.app.config = load_config(self.directory)
+        self.app.approval['config_hash'] = self.config.config_hash
+        self.adapter.chats.add('chat-2')
+        self.service.close()
+        self.service = Service(self.app, telegram=self.adapter, peer_auth=self.auth, clock=lambda: self.now)
+
+        self.receive('/report', chat_id='chat-2')
+        self.assertTrue(self.service.run_once())
+        result = self.last_result()
+        original = Path(result['paths']['html']).read_bytes()
+        self.assertNotIn('_document', result)
+        self.assertNotIn('<!doctype', canonical(result))
+        self.receive('/report', chat_id='chat-2')
+        self.assertFalse(self.service.run_once())
+        self.assertEqual(self.app.store.db.execute('SELECT COUNT(*) FROM outbox').fetchone()[0], 2)
+
+        self.assertTrue(self.service.outbox_once())
+        self.assertTrue(self.sent_urls[-1].endswith('/sendMessage'))
+        self.assertEqual(self.sent[-1]['chat_id'], 'chat-2')
+        self.assertNotIn('<!doctype', self.sent[-1]['text'])
+        Path(result['paths']['html']).write_text('<html>later report</html>')
+        self.fail_send = True
+        self.assertFalse(self.service.outbox_once())
+        self.assertTrue(self.sent_urls[-1].endswith('/sendDocument'))
+        self.assertEqual(base64.b64decode(self.sent[-1]['content_base64']), original)
+
+        with self.app.store.transaction():
+            self.app.store.db.execute("UPDATE outbox SET state='SENDING' WHERE state='PENDING'")
+        self.service.close()
+        self.service = Service(self.app, telegram=self.adapter, peer_auth=self.auth, clock=lambda: self.now)
+        self.fail_send = False
+        self.assertTrue(self.service.outbox_once())
+        self.assertFalse(self.service.outbox_once())
+        self.assertEqual(self.sent[1], self.sent[2])
+        self.assertEqual(self.sent[2]['route'], 'v1')
+        self.assertEqual(self.sent[2]['chat_id'], 'chat-2')
+        self.assertEqual(self.sent[2]['filename'], 'daily-' + result['report']['date'] + '.html')
+        self.assertEqual(sum(url.endswith('/sendMessage') for url in self.sent_urls), 1)
+        self.assertEqual([tuple(row) for row in self.app.store.db.execute('SELECT state,attempts FROM outbox ORDER BY id')],
+                         [('DELIVERED', 1), ('DELIVERED', 2)])
+        self.assertEqual(self.app.review_calls, 0)
+        self.assertEqual(self.app.store.db.execute('SELECT COUNT(*) FROM intents').fetchone()[0], 0)
+
+    def test_scheduled_daily_report_queues_document_for_default_chat(self):
+        request_id, _ = self.app.store.accept_request('service:schedule:daily-report',
+            {'source': 'scheduler', 'kind': 'finalize_and_report'})
+        with self.app.store.transaction():
+            self.app.store.set('service_deadline:' + request_id, (self.now + timedelta(minutes=1)).isoformat())
+        self.assertTrue(self.service.run_once(review=True))
+        result = self.last_result()
+        self.assertEqual(result['status'], 'REPORT_READY')
+        self.assertEqual(self.app.store.db.execute('SELECT COUNT(*) FROM outbox').fetchone()[0], 1)
+        self.assertTrue(self.service.outbox_once())
+        self.assertTrue(self.sent_urls[0].endswith('/sendDocument'))
+        self.assertEqual((self.sent[0]['route'], self.sent[0]['chat_id']), ('v1', 'chat-1'))
+        self.assertEqual(base64.b64decode(self.sent[0]['content_base64']), Path(result['paths']['html']).read_bytes())
+        self.assertFalse(self.service.run_once(review=True))
+        self.assertFalse(self.service.outbox_once())
+
+    def test_document_delivery_rechecks_destination_approval_and_secret_content(self):
+        synthetic_value = 'synthetic-private<&>value-for-document-test'
+        secrets_file = self.directory / 'secrets.yaml'
+        secrets_file.write_text(yaml.safe_dump({'KIS_APP_SECRET': synthetic_value}))
+        for identity, chat, content in (
+            ('wrong-chat', 'unapproved-chat', '<html>safe report</html>'),
+            ('credential-pattern', 'chat-1', '<html>' + 'sk-' + 'x' * 30 + '</html>'),
+            ('configured-secret', 'chat-1', '<html>' + html.escape(synthetic_value) + '</html>'),
+        ):
+            with self.subTest(identity=identity):
+                with self.app.store.transaction():
+                    self.app.store.db.execute('DELETE FROM outbox')
+                    if identity == 'credential-pattern':
+                        with self.assertRaises(CredentialError):
+                            self.app.store.queue_document(identity, 'report.html', content, route='v1', chat_id=chat)
+                        self.app.store.db.execute('INSERT INTO outbox(event_key,payload) VALUES (?,?)',
+                            (identity, canonical({'route': 'v1', 'chat_id': chat,
+                                'document': {'filename': 'report.html', 'content': content}})))
+                    else:
+                        self.app.store.queue_document(identity, 'report.html', content, route='v1', chat_id=chat)
+                self.assertFalse(self.service.outbox_once())
+                self.assertEqual(self.sent, [])
+                self.assertEqual(self.app.store.db.execute('SELECT state FROM outbox').fetchone()[0], 'BLOCKED')
+                with self.app.store.transaction():
+                    self.app.store.event('service', 'SAFE_LATER_NOTIFICATION', {'status': 'safe later notification'}, notify=True)
+                self.service._recover()
+                self.assertTrue(self.service.outbox_once())
+                self.assertEqual(len(self.sent), 1)
+                self.assertTrue(self.sent_urls[-1].endswith('/sendMessage'))
+                self.assertEqual(self.app.store.db.execute('SELECT state FROM outbox ORDER BY id LIMIT 1').fetchone()[0], 'BLOCKED')
+                self.sent.clear()
+                self.sent_urls.clear()
+        with self.app.store.transaction():
+            self.app.store.db.execute('DELETE FROM outbox')
+            self.app.store.queue_document('expired-approval', 'report.html', '<html>safe report</html>',
+                                          route='v1', chat_id='chat-1')
+        self.app.approval['expires_at'] = (utcnow() - timedelta(seconds=1)).isoformat()
+        with self.assertRaises(HumanRequired):
+            self.service.outbox_once()
+        self.assertEqual(self.sent, [])
+        self.assertEqual(self.app.store.db.execute('SELECT attempts FROM outbox').fetchone()[0], 0)
 
     def test_restart_recovers_result_and_never_reexecutes_interrupted_trade(self):
         self.receive('/review')

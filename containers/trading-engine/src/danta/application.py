@@ -522,6 +522,8 @@ class Application:
             with self.store.transaction():
                 self.store.db.execute("UPDATE requests SET status=?,result=? WHERE request_id=?", (result["run_status"], canonical(result), run_id))
                 self.store.event(run_id, "RUN_OUTCOME", result, notify=True)
+                self.store.queue_document("report:" + run_id,
+                    f"summary-{directory.parent.name}-{run_id}.html", (directory / "summary.html").read_text(encoding="utf-8"))
 
     def pause(self) -> dict:
         with self.store.transaction():

@@ -135,6 +135,10 @@ gateway Compose는 `config/codex-peer.secret`의 64자리 16진 문자열로 항
 맞춥니다. 실제 달력·수수료·계좌 귀속·허용 sender/chat·승인 검증은 운영 연결 단계에서 확정합니다.
 기존 `trading-engine/profiles/*/compose.yaml` 경로는 사용하지 않습니다.
 
+운영 연결 후 `/report`로 일일 HTML 파일을 텔레그램에서 받을 수 있습니다. 승인된 장 마감 작업과
+심사 실행도 HTML을 첨부하며, 전달 실패는 거래 재실행 없이 별도로 재시도합니다.
+자세한 수신 대상·권한 조건은 [runbook](containers/trading-engine/docs/runbook.md)을 참고하세요.
+
 ## Codex CLI
 
 ### 개요

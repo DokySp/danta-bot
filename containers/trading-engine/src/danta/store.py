@@ -130,6 +130,14 @@ class Store:
             self.db.execute("INSERT INTO outbox(event_key,payload) VALUES (?,?)", (str(cursor.lastrowid), canonical({"kind": kind, **payload})))
         return cursor.lastrowid
 
+    def queue_document(self, event_key, filename, content, *, route=None, chat_id=None):
+        """Snapshot generated HTML in the caller's transaction; never follow queued paths."""
+        from .safety import reject_credentials
+        document = {"filename": filename, "content": content}
+        reject_credentials(document)
+        self.db.execute("INSERT OR IGNORE INTO outbox(event_key,payload) VALUES (?,?)",
+            (event_key, canonical({"route": route, "chat_id": chat_id, "document": document})))
+
     def accept_request(self, key: str, payload: dict) -> tuple[str, bool]:
         body_hash = digest(payload)
         with self.transaction():

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import html
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
 import json
@@ -230,6 +231,7 @@ class Service:
             result = {'status': getattr(error, 'state', 'FAILED'), 'error_type': type(error).__name__}
             if isinstance(error, HumanRequired):
                 result['reason'] = str(error)
+        document = result.pop('_document', None)
         with self.store.transaction():
             self.store.db.execute('UPDATE requests SET status=?,result=? WHERE request_id=?',
                 ('COMPLETE', canonical(result), row['request_id']))
@@ -239,6 +241,9 @@ class Service:
                 notification = {'route': payload['route'], 'chat_id': payload['chat_id'], 'text': canonical(result)}
                 self.store.db.execute('INSERT OR IGNORE INTO outbox(event_key,payload) VALUES (?,?)',
                     ('service:' + row['request_id'], canonical(notification)))
+            if document:
+                self.store.queue_document('report:' + row['request_id'], **document,
+                    route=payload.get('route'), chat_id=payload.get('chat_id'))
         return True
 
     def _dispatch(self, payload, request_id):
@@ -341,12 +346,19 @@ class Service:
         with self.store.lock:
             outcomes = [json.loads(row[0]) for row in self.store.db.execute(
                 "SELECT payload FROM journal WHERE kind='RUN_OUTCOME' AND substr(created_at,1,10)=?", (date,))]
-        data = {'schema_version': 1, 'created_at': self.clock().isoformat(), 'date': date,
-                'config_hash': self.config.config_hash, 'strategy_hash': self.config.strategy_hash,
-                'code_id': self.app.code_id, 'status': self.app.status(), 'runs': outcomes}
-        directory = self.config.state_dir / 'reports' / date
-        paths = write_report(data, directory / 'daily.json', directory / 'daily.html', '일일 판단·성과')
-        return {'status': 'REPORT_READY', 'report': data, 'paths': paths}
+            data = {'schema_version': 1, 'created_at': self.clock().isoformat(), 'date': date,
+                    'config_hash': self.config.config_hash, 'strategy_hash': self.config.strategy_hash,
+                    'code_id': self.app.code_id, 'status': self.app.status(), 'runs': outcomes}
+            directory = self.config.state_dir / 'reports' / date
+            paths = write_report(data, directory / 'daily.json', directory / 'daily.html', '일일 판단·성과')
+            document = {'filename': f'daily-{date}.html', 'content': Path(paths['html']).read_text(encoding='utf-8')}
+        return {'status': 'REPORT_READY', 'report': data, 'paths': paths, '_document': document}
+
+    def _document_secret_scan(self, content):
+        text = html.unescape(content.decode('utf-8'))
+        secrets = load_secrets(self.config.directory)
+        return not any(value and value in text for name, value in secrets.items()
+            if name in {'KIS_ACCOUNT_REF', 'KIS_APP_KEY', 'KIS_APP_SECRET', 'DART_API_KEY', 'DANTA_TELEGRAM_PEER_SECRET'})
 
     def outbox_once(self):
         if self.telegram is None or not self.config.app['telegram']['enabled']:
@@ -367,17 +379,27 @@ class Service:
             chat = tg['allowed_chat_ids'][0]
         try:
             if not route or str(chat) not in set(map(str, tg['allowed_chat_ids'])):
+                if 'document' in payload:
+                    raise AdapterError('DOCUMENT_DESTINATION_UNRESOLVED')
                 raise HumanRequired('Notification destination is unresolved')
-            text = payload.get('text') or canonical(payload)
-            if len(text) > 3500:
-                text = text[:3400] + '\n… 전체 결과는 저장된 보고서에서 확인하세요.'
-            self.telegram.send_message(route, chat, text)
+            if 'document' in payload:
+                document = payload['document']
+                self.telegram.send_document(route, chat, document['filename'], document['content'].encode('utf-8'),
+                    secret_scan=self._document_secret_scan)
+            else:
+                text = payload.get('text') or canonical(payload)
+                if len(text) > 3500:
+                    text = text[:3400] + '\n… 전체 결과는 저장된 보고서에서 확인하세요.'
+                self.telegram.send_message(route, chat, text)
             state = 'DELIVERED'
         except Exception as error:
-            state = 'PENDING'
+            blocked = ('document' in payload and isinstance(error, AdapterError)
+                and (error.code.startswith('DOCUMENT_') or error.code == 'INVALID_DOCUMENT'))
+            state = 'BLOCKED' if blocked else 'PENDING'
             with self.store.transaction():
                 self.store.set('outbox_last_outcome:' + str(row['id']),
-                    {'status': 'DELIVERY_UNCONFIRMED', 'error_type': type(error).__name__})
+                    {'status': 'DOCUMENT_BLOCKED' if blocked else 'DELIVERY_UNCONFIRMED',
+                     'error_type': type(error).__name__, 'reason': error.code if blocked else None})
         with self.store.transaction():
             self.store.db.execute('UPDATE outbox SET state=? WHERE id=?', (state, row['id']))
         return state == 'DELIVERED'
