@@ -1,0 +1,284 @@
+{
+  "app": {
+    "schema_version": 1,
+    "app": {
+      "name": "codex-exec",
+      "timezone": "Asia/Seoul",
+      "mode": "offline",
+      "account_alias": null,
+      "state_dir": "./var/offline/research",
+      "listen_host": "127.0.0.1",
+      "listen_port": 8080
+    },
+    "model": {
+      "provider": "codex_cli",
+      "executable": "codex",
+      "model_id": null,
+      "reasoning_effort": null,
+      "auth_mode": null,
+      "timeout_seconds": 180,
+      "transient_retries": 1,
+      "retry_delay_seconds": 5,
+      "schema_repair_attempts": 1,
+      "auto_fallback": false,
+      "isolation_profile": "market_tools_only",
+      "quota_unknown_reset": "require_operator"
+    },
+    "broker": {
+      "provider": "kis",
+      "environment": null,
+      "account_ref_env": "KIS_ACCOUNT_REF",
+      "app_key_env": "KIS_APP_KEY",
+      "app_secret_env": "KIS_APP_SECRET",
+      "capability_manifest": null,
+      "rate_limit_profile": null
+    },
+    "market": {
+      "disclosures": "opendart",
+      "dart_key_env": "DART_API_KEY",
+      "official_ir_domains": [],
+      "calendar_manifest": null,
+      "corporate_action_source": null,
+      "require_complete_account": true
+    },
+    "execution": {
+      "enabled": false,
+      "single_writer": true,
+      "unknown_submission": "reconcile_then_human",
+      "live_requires_trusted_approval": true
+    },
+    "monitoring": {
+      "enabled": false,
+      "quote_poll_fallback_seconds": 5,
+      "order_poll_active_seconds": 5,
+      "account_poll_idle_seconds": 60,
+      "degraded_action": "block_new_risk_and_alert"
+    },
+    "telegram": {
+      "enabled": false,
+      "gateway_url_env": "TELEGRAM_GATEWAY_URL",
+      "route": null,
+      "allowed_sender_ids": [],
+      "allowed_chat_ids": [],
+      "trusted_peer_profile": null,
+      "ingress_enabled": false
+    },
+    "storage": {
+      "backend": "sqlite",
+      "require_local_filesystem": true,
+      "raw_log_retention_days": null
+    },
+    "observability": {
+      "redact_secrets": true,
+      "record_attempt_usage": true,
+      "emit_structured_events": true
+    }
+  },
+  "strategy": {
+    "schema_version": 1,
+    "strategy": {
+      "id": "catalyst_trend_swing",
+      "active_profile": "research",
+      "research_profile": {
+        "status": "unproven_hypothesis",
+        "objective": "positive_net_value_over_preregistered_baselines",
+        "capital_krw": "10000000",
+        "universe": {
+          "boards": [
+            "KOSPI",
+            "KOSDAQ"
+          ],
+          "instrument_kind": "common_stock",
+          "venue": "KRX",
+          "session": "regular_continuous",
+          "leverage": false,
+          "short_selling": false,
+          "overnight": true,
+          "weekend_holding": true,
+          "minimum_completed_bars": 120,
+          "adtv_window": 20,
+          "adtv_statistic": "median",
+          "minimum_adtv_krw": "5000000000",
+          "maximum_spread_bps": "30",
+          "watchlist": [],
+          "excluded_instruments": []
+        },
+        "signal": {
+          "event_families": [
+            "earnings_quality",
+            "official_guidance",
+            "material_contract"
+          ],
+          "max_event_age_sessions": 5,
+          "primary_source_required": true,
+          "fast_sma": 20,
+          "slow_sma": 60,
+          "sma_slope_lookback": 5,
+          "relative_return_intervals": 20,
+          "relative_strength_min_exclusive": "0",
+          "atr_bars": 14,
+          "atr_method": "simple_mean_true_range",
+          "index_entry_gate": "close_at_or_above_sma60",
+          "chase_above_previous_close_atr": "0.75",
+          "chase_above_sma20_atr": "2.0",
+          "opportunity_horizon_sessions": [
+            3,
+            20
+          ]
+        },
+        "portfolio": {
+          "max_issuers": 5,
+          "entry_risk_fraction": "0.0025",
+          "aggregate_planned_risk_fraction": "0.0100",
+          "entry_position_weight": "0.20",
+          "entry_sector_weight": "0.40",
+          "entry_gross_weight": "0.80",
+          "trim_position_trigger": "0.25",
+          "trim_sector_trigger": "0.50",
+          "trim_gross_trigger": "0.90",
+          "trim_confirmation_observations": 2,
+          "trim_min_observation_gap_seconds": 5,
+          "max_plan_adtv_fraction": "0.0005",
+          "gap_buffer_atr": "0.50",
+          "pyramiding": false,
+          "averaging_down": false,
+          "price_drift_rebalance": false
+        },
+        "exits": {
+          "initial_stop_low_window": 5,
+          "initial_stop_atr_cap": "2.0",
+          "minimum_stop_distance_atr": "0.75",
+          "trail_activation_initial_r": "1.0",
+          "trail_atr": "2.0",
+          "stop_can_move_down": false,
+          "trend_exit_consecutive_closes": 2,
+          "max_holding_sessions": 20,
+          "same_event_reentry_completed_sessions": 1,
+          "reentry_requires_close_above_previous_entry": true,
+          "drawdown_pause_fraction": "0.10",
+          "drawdown_action": "cancel_entries_pause_new_risk_keep_protection",
+          "auto_resume_after_drawdown": false
+        },
+        "orders": {
+          "entry_type": "limit_at_verified_ask",
+          "entry_expiry_seconds": 120,
+          "entry_auto_reprice": false,
+          "exit_type": "market_in_valid_session",
+          "decision_max_age_seconds": 120,
+          "quote_max_age_seconds": 5,
+          "maximum_roundtrip_friction_to_initial_r": "0.15",
+          "respect_pending_orders": true
+        },
+        "costs": {
+          "commission_schedule": null,
+          "tax_schedule": null,
+          "simulation_slippage_bps_per_side": "10",
+          "operating_cost_allocation": null,
+          "unknown_cost_is_zero": false
+        },
+        "evaluation": {
+          "primary_baseline": "technical_only",
+          "secondary_baselines": [
+            "cash",
+            "event_flag_no_ai"
+          ],
+          "optional_diagnostic": "full_strategy_scheduled_only",
+          "discovery_completed_sessions": 60,
+          "minimum_closed_theses": 30,
+          "confirmation_completed_sessions": 20,
+          "block_bootstrap_block_sessions": 5,
+          "block_bootstrap_resamples": 2000,
+          "paired_return_confidence_level": "0.95",
+          "slippage_stress_multiplier": "2.0",
+          "automatic_live_promotion": false
+        }
+      },
+      "live_mandate": {
+        "status": "pending_user",
+        "capital_krw": null,
+        "capital_required_by": null,
+        "account_ownership_policy": null,
+        "inherited_positions_policy": null,
+        "inherited_orders_policy": null,
+        "accepted_strategy_hash": null,
+        "accepted_risk_policy": null,
+        "overnight_permission": null,
+        "permitted_order_types": null,
+        "approved_cost_allocation": null,
+        "trusted_approval_id": null
+      }
+    }
+  },
+  "schedules": {
+    "schema_version": 1,
+    "scheduler": {
+      "enabled": false,
+      "timezone": "Asia/Seoul",
+      "calendar_ref": "app.market.calendar_manifest",
+      "missed_run_policy": "skip_expired_reconcile_and_check_protection",
+      "jobs": [
+        {
+          "id": "finalize_day",
+          "kind": "finalize_and_report",
+          "trigger": {
+            "type": "session_offset",
+            "anchor": "continuous_close",
+            "minutes": 30
+          }
+        },
+        {
+          "id": "portfolio_review",
+          "kind": "full_review",
+          "trigger": {
+            "type": "session_offset",
+            "anchor": "continuous_open",
+            "minutes": 20
+          }
+        },
+        {
+          "id": "disclosures",
+          "kind": "collect_disclosures",
+          "trigger": {
+            "type": "interval_in_session",
+            "seconds": 180
+          }
+        },
+        {
+          "id": "material_event",
+          "kind": "event_review",
+          "trigger": {
+            "type": "verified_event",
+            "coalesce_seconds": 30
+          }
+        },
+        {
+          "id": "risk_monitor",
+          "kind": "risk_monitor",
+          "trigger": {
+            "type": "market_event_with_poll_fallback"
+          }
+        },
+        {
+          "id": "reconcile",
+          "kind": "reconcile",
+          "trigger": {
+            "type": "order_event_with_poll_fallback"
+          }
+        },
+        {
+          "id": "holding_deadline",
+          "kind": "time_limit_exit",
+          "trigger": {
+            "type": "session_offset",
+            "anchor": "continuous_close",
+            "minutes": -10
+          }
+        }
+      ],
+      "discretionary_entry_window": {
+        "start_minutes_after_continuous_open": 20,
+        "end_minutes_before_continuous_close": 30
+      }
+    }
+  }
+}

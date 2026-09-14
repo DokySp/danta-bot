@@ -1,0 +1,70 @@
+# 결정 및 중단 기록
+
+## 2026-09-13T01:59:02.413549+00:00 — Docker 검증 중단
+
+**Fact:** 현재 설정된 Docker endpoint에 연결하지 못했다. 오류는 `Cannot connect to the Docker daemon at unix:///home/uhug/.docker/desktop/docker.sock. Is the docker daemon running?`이다. 따라서 이미지 빌드/실행 검증을 완료할 수 없다. 사용자 요청과 README §17.2에 따라 구현·위임을 중단했으며 이 중단 기록만 작성했다.
+
+**미결정:** 현재 Docker Desktop을 사용할지, 사용자가 지정하는 다른 실행 가능한 Docker context를 사용할지 확인이 필요하다.
+
+**영향:** 컨테이너 검증 및 전체 완료 판정이 보류된다. 이미 생성한 소스와 합성 테스트 결과는 보존되지만 최종 결과로 승인되지 않았다. 현재 로컬 개발 작업 중단은 기존 운영 서버나 계좌 상태 변경을 뜻하지 않는다.
+
+**추천:** 현재 Docker Desktop/daemon을 시작한 뒤 재개한다. 대체 context가 의도된 환경이면 정확한 context를 지정한다. 추천은 아직 적용하지 않았다.
+
+**재개 조건:** Docker 사용 가능 상태에 대한 사용자 응답과 재개 요청. 이후 실제 연결 상태를 확인한다. 실운용 승인·자격 증명 설정·외부 서비스 호출은 별도 범위로 남는다.
+
+## 독립 검토에서 반환된 미판정 지적
+
+**Fact:** 읽기 전용 검토 에이전트가 아래 8개 항목을 보고했다. 메인은 중단 시점까지 이를 채택하거나 기각하지 않았다. 검토 에이전트의 61개 테스트 통과 보고는 지정된 동결 파일 범위의 결과다.
+
+**Guess:** 아래 문제와 우선순위는 검토 에이전트의 가설이다. 재개 후 메인이 실제 호출 경로·명세·공식 가격 규칙을 확인하여 실재 여부, 수정 필요성, 승인 범위를 각각 판정해야 한다. 특히 경계 가격의 이전 유효 호가와 외부 흐름 전후 NAV의 시간 관계는 재현 예만으로 결함이라고 단정하지 않는다.
+
+1. `adapters/codex_cli.py`, `adapters/disclosures.py`: offline fixture adapter 경로가 외부 모델 설정 또는 DART key를 요구한다는 지적. 실제 offline application 호출 여부까지 판정 필요.
+2. `adapters/market_tools.py`: ID 기반 조회가 `tool_scope.instrument_ids`를 적용하지 않는다는 지적.
+3. `adapters/market_tools.py`: snapshot secret 검사가 일부 정확한 키 이름만 차단하고 별칭/값을 놓친다는 지적.
+4. `market.py`: 같은 normalized key, 새 official ID인 정정 공시의 변경 facts가 갱신되지 않는다는 지적.
+5. `strategy.py`, `models.py`: 미래의 received_at이 있는 quote가 fresh로 승인된다는 지적.
+6. `accounting.py`: 외부 흐름의 before NAV와 직전 관측 NAV의 연결이 불충분한데 EXACT TWR로 판정한다는 지적.
+7. `market.py`: 변수 호가단위 previous()의 최소 tick 처리에 문제가 있다는 지적. 검토 예 `(0,1),(2000,5), previous(2000)=1999`는 실제 이전 유효 호가 규칙과 대조해야 한다.
+8. `evaluation.py`, `risk.py`: quote 이벤트가 없는 보유 기한 세션에서 청산/기한 초과 판정이 생략된다는 지적.
+
+이 목록은 수정을 완료했다는 뜻이 아니다. 재개 전에는 코드 변경·추가 검증을 진행하지 않는다.
+
+
+## 2026-09-13 재개 및 1차 검토 판정
+
+Fact: 사용자가 Docker Desktop 실행을 알렸고, 메인이 Docker CLI 29.8.0 / Server 29.7.2 연결을 확인했다. 로컬 검증을 재개했다. 임시 경로 bind가 Desktop daemon에서 보이지 않아 합성 설정을 stdin으로 전달하는 동등한 검증 방법을 사용했다. 다른 daemon/host 또는 기존 컨테이너를 변경하지 않았다.
+
+- 지적 1: 기본 offline workflow는 fixture_decision을 직접 사용하여 전체 offline 불가 주장은 오탐. 개별 fixture 전용 adapter에서도 외부 인증 없이 동작하도록 보완 채택.
+- 지적 2, 3: 실제 모델 최초 입력과 ID 도구의 범위·credential 경계를 보완. 모든 임의 문자열의 비밀값 판별을 보장하지 않는다.
+- 지적 4: 새 official ID인 정정은 원본을 보존한 별도 증거로 등록하고 correction_of로 연결한다. 동일 원문 반복은 심사를 재발생시키지 않는다.
+- 지적 5: 미래 received_at quote를 진입·보호·dispatch에서 거부한다. 원시 체결시각도 수신 이후일 수 없다.
+- 지적 6 기각: 서로 다른 시점인 직전 NAV와 외부흐름 직전 NAV는 투자손익으로 달라질 수 있다. README §13.2 식에 따라 100→50, 입금100→150, 이후220의 TWR은 (50/100)*(220/150)-1 = -26.6667%다. before+flow=after와 같은 시각 snapshot 일치 검사는 유지한다. 두 값의 무조건적 동등성 검사는 정상 손익을 거부하므로 추가하지 않는다.
+- 지적 7 기각: 가격대 (0,1),(2000,5)에서 2000보다 작은 가장 가까운 유효호가는1999다. 2000의 현재 tick5를 단순 차감한1995보다 가까운 유효가격이 존재한다. 현재 previous()가 반환하는1999를 결함으로 수정하지 않는다. 제공된 합성 band 계약과 기존 경계 테스트로 대조했다. 이번 재개 시 공개 KRX 페이지 직접 조회는 404여서 현재 공식 호가표의 외부 연결 검증으로 주장하지 않는다. 실운용은 별도로 검증된 현재 tick manifest가 필요하다.
+- 지적 8: 관측된 timeline 범위 안의 독립 deadline/close timer를 추가. 호가가 없으면 MONITOR_DEGRADED/EXIT_OVERDUE이며 새로운 가격이나 가짜 체결은 만들지 않는다. 후속 실제 호가와 전송 지연 뒤에만 청산 가능하다.
+
+통합 보완: valuation 시각과 원시 가격 관측시각을 구분하고, stale/missing 시 정확 NAV와 신규 위험을 차단한다. 계좌 수량이 알려진 보유의 감시·기한 판단은 계속한다. 집중 축소 목표와 관측상태를 SQLite에 보존하고, 주문 제출 직전 현재 수량 한도·매도가능 수량을 다시 검사한다.
+
+현재 중간 aggregate: 109 tests PASS. 이후 변경·최종 검토 결과는 acceptance.md/status.md에 따로 기록한다.
+
+## 2026-09-13 통합 검토 판정 및 보완
+
+Fact: gpt-5.6-luna/max의 읽기 전용 통합 검토가 7개 연결 문제를 보고했다. 메인은 실제 application/service/runtime/execution 경로와 README를 대조하여 아래처럼 판정했다.
+
+- 결정 시각: README §6.3은 **모델 완료 후120초**다. 모델 실행180초만으로 stale이라는 해석은 기각했다. 완료 후 자료 재조회/계획/dispatch 지연을 포함하지 못한 구현 문제는 채택했다. Application에서 완료시각을 별도 보존하고 이후 현재시각과 비교하며, 주문 만료에도 이 deadline을 적용한다. 180초 모델+즉시 후처리 성공, 완료 후121초 지연 차단, dispatch 중 refresh 후 만료 차단을 검사했다.
+- 실행 권한: demo/live의 모든 mutation에서 execution.enabled를 재확인한다. 영속 activation은 단순 bool 대신 config/code/approval ID와 결합하므로 오래된 activation으로 현재 설정의 권한을 얻지 못한다.
+- 완료 주문 보정: 실제 snapshot에 다시 나타난 terminal 주문도 누적 체결/평균가/비용 revision을 반영한다. 제한된 과거 조회에서 보이지 않는 terminal 주문을 새 UNKNOWN으로 바꾸지 않는다.
+- 공시 trigger: README §6.1의 실제 최초 수집시각을 가진 FIRST_COLLECTED를 허용한다. UNCERTAIN, 미완성 원문, 비공식, 미래시각은 여전히 제외한다.
+- 사용량: 실제 model attempt 결과와 최종 outcome을 동일 Store journal에 연결한다. 실패/재시도와 미제공 usage=null을 보존하고 최종 usage가 마지막 attempt의 중복 요약임을 표시한다.
+- shadow: 판단/수량 계획 artifact는 정상 완료하며 주문 의도, 신규 thesis, 가상 체결을 만들지 않는다. 보호 판단도 broker mutation으로 보내지 않는다.
+- Telegram/CLI: 네 목록 명령은 같은 Application 후보 범위 변경을 호출한다. 기존 universe 안에서만 후보 포함/제외를 바꾸며 실제 보유·전략 게이트는 바꾸지 않는다. SQLite 범위/hash와 계좌 version/journal에 남기고 외부 모드는 candidate_control 권한을 요구한다. Telegram은 추가로 telegram_control을 검사한다. resume도 같은 계좌/귀속/승인/낙폭 검사를 사용한다. reasoning_effort 변경은 실제 설정을 바꾸지 않고 승인 필요 요청으로 보존한다.
+
+외부 API·모델·메신저·실계좌를 호출하거나 승인 파일을 생성한 것은 아니다. 위 경로는 주입된 어댑터와 합성 원장으로 검사한다. 최종 변경 후 독립 검토와 전체/컨테이너 검증 결과는 status.md에 기록한다.
+
+## 최종 재검토 및 종료 판정
+
+Fact: 같은 gpt-5.6-luna/max의 새 읽기 전용 재검토에서 위7개 보완을 한정하여 검사했다. 나머지5개에서 중요한 미해결 문제는 발견하지 않았고, 권한 재확인과 프로세스 시작 실패 기록의 두 경계를 추가 보고했다. 메인도 실제 Application+합성 demo broker에서 refresh 중 execution.enabled 변경 후 전송되는 문제를 재현하여 채택했다.
+
+- execution의 submit/cancel은 영속 상태 저장 후 broker 전송 직전 권한을 다시 검사한다. 제출 거부는 아직 전송하지 않았으므로 INVALIDATED와 예약 해제로 기록한다. 취소 거부는 기존 주문 상태와 예약을 복원한다. 이를 접수불명 UNKNOWN 또는 취소확정으로 오인하지 않는다.
+- Codex runner의 OSError는 오류 원문을 보존하지 않고 PROCESS_FAILED로 변환한다. 공통 attempt result와 MODEL_ATTEMPT/MODEL_OUTCOME journal에 usage=null로 남기며 자동 재시도하지 않는다.
+
+추가 회귀: 실제 application 임시 정책 변경 후 broker0/예약0/INVALIDATED, 취소 두 번째 권한검사 실패 시 cancel0/기존 예약 유지, 주입 OSError 시 호출1/시도결과1/journal2/원문 미노출. 최종 전체 **133개 테스트 PASS**다. 독립 검토는 총3회(초기 계약, 통합 경로, 채택 보완의 재검토)이며, 마지막 두 국소 수정은 메인이 직접 회귀와 전체 검증으로 확인했다. 새 전략 정책이나 외부 연결을 추가하지 않았으므로 추가 전역 검토는 수행하지 않는다. 최종 image 재검증 증거는 container-verification.json에 기록한다.

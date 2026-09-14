@@ -1,0 +1,19 @@
+{
+  "source": "README.md",
+  "source_sha256": "26d74f328784dcd461dc3aedf0f58d7e60855e41ee9179b0cc6fe8ec51be7006",
+  "heading_count": 92,
+  "source_matches_user_document": true,
+  "browser": "Codex in-app browser",
+  "desktop_visual_check": "PASS",
+  "mobile_viewport": {
+    "width": 390,
+    "height": 844
+  },
+  "mobile_document_width": 375,
+  "mobile_visual_check": "PASS",
+  "toc_expand_and_anchor": "PASS: section-15 / 4.1 초기 보호 가격",
+  "external_script_or_stylesheet_count": 0,
+  "code_overflow": "local horizontal scroll, document does not overflow",
+  "viewport_override_reset": true,
+  "scope": "README design report only; not live execution or profitability evidence"
+}

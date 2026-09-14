@@ -1,0 +1,195 @@
+{
+  "$defs": {
+    "CandidateReview": {
+      "additionalProperties": false,
+      "properties": {
+        "instrument_id": {
+          "title": "Instrument Id",
+          "type": "string"
+        },
+        "verdict": {
+          "enum": [
+            "ACCEPT",
+            "VETO",
+            "WATCH",
+            "INSUFFICIENT_DATA"
+          ],
+          "title": "Verdict",
+          "type": "string"
+        },
+        "priority": {
+          "exclusiveMinimum": 0,
+          "title": "Priority",
+          "type": "integer"
+        },
+        "event_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Event Ids",
+          "type": "array"
+        },
+        "supporting_fact_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Supporting Fact Ids",
+          "type": "array"
+        },
+        "counterevidence_fact_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Counterevidence Fact Ids",
+          "type": "array"
+        },
+        "economic_path": {
+          "title": "Economic Path",
+          "type": "string"
+        },
+        "horizon_case": {
+          "title": "Horizon Case",
+          "type": "string"
+        },
+        "priced_in_case": {
+          "title": "Priced In Case",
+          "type": "string"
+        },
+        "invalidation_case": {
+          "title": "Invalidation Case",
+          "type": "string"
+        },
+        "uncertainties": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Uncertainties",
+          "type": "array"
+        }
+      },
+      "required": [
+        "instrument_id",
+        "verdict",
+        "priority",
+        "event_ids",
+        "supporting_fact_ids",
+        "counterevidence_fact_ids",
+        "economic_path",
+        "horizon_case",
+        "priced_in_case",
+        "invalidation_case",
+        "uncertainties"
+      ],
+      "title": "CandidateReview",
+      "type": "object"
+    },
+    "PositionReview": {
+      "additionalProperties": false,
+      "properties": {
+        "instrument_id": {
+          "title": "Instrument Id",
+          "type": "string"
+        },
+        "thesis_id": {
+          "title": "Thesis Id",
+          "type": "string"
+        },
+        "action": {
+          "enum": [
+            "KEEP",
+            "EXIT_THESIS_INVALID",
+            "ABSTAIN"
+          ],
+          "title": "Action",
+          "type": "string"
+        },
+        "changed_event_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Changed Event Ids",
+          "type": "array"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "instrument_id",
+        "thesis_id",
+        "action",
+        "changed_event_ids",
+        "reason"
+      ],
+      "title": "PositionReview",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "input_snapshot_id": {
+      "title": "Input Snapshot Id",
+      "type": "string"
+    },
+    "account_state_version": {
+      "minimum": 0,
+      "title": "Account State Version",
+      "type": "integer"
+    },
+    "review_scope": {
+      "enum": [
+        "FULL",
+        "PARTIAL"
+      ],
+      "title": "Review Scope",
+      "type": "string"
+    },
+    "candidate_reviews": {
+      "items": {
+        "$ref": "#/$defs/CandidateReview"
+      },
+      "title": "Candidate Reviews",
+      "type": "array"
+    },
+    "position_reviews": {
+      "items": {
+        "$ref": "#/$defs/PositionReview"
+      },
+      "title": "Position Reviews",
+      "type": "array"
+    },
+    "human_question": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Human Question"
+    }
+  },
+  "required": [
+    "schema_version",
+    "run_id",
+    "input_snapshot_id",
+    "account_state_version",
+    "review_scope",
+    "candidate_reviews",
+    "position_reviews",
+    "human_question"
+  ],
+  "title": "DecisionProposal",
+  "type": "object"
+}

@@ -1,0 +1,1662 @@
+{
+  "schema_version": "1",
+  "experiment_id": "synthetic-evaluation-engine-v1",
+  "run_id": "synthetic-evaluation-run",
+  "created_at": "2026-06-21T22:30:00Z",
+  "frozen_at": "2026-06-21T23:30:00Z",
+  "starts_at": "2026-06-22T00:29:59Z",
+  "code_id": "synthetic-test-code",
+  "config_hash": "synthetic-test-config",
+  "strategy_hash": "synthetic-test-strategy",
+  "prompt_hash": "synthetic-test-prompt",
+  "tools_hash": "synthetic-test-tools",
+  "data_hash": "f4f702139efc3adea8b8cb2b2d9b89af8f1c08c28bc57c4a7d4b75a451462712",
+  "universe_hash": "69c7a6eed0c29bd97c9f5091573911de7157509ebce1b8eedde43d75f1e7a617",
+  "sector_classification_source": "synthetic-fixture",
+  "evidence_status": "FIXTURE_ONLY",
+  "precision": "QUOTE_EVENTS",
+  "population_point_in_time": true,
+  "publication_versions_point_in_time": true,
+  "research_profile": {
+    "status": "unproven_hypothesis",
+    "objective": "positive_net_value_over_preregistered_baselines",
+    "capital_krw": "10000000",
+    "universe": {
+      "boards": [
+        "KOSPI",
+        "KOSDAQ"
+      ],
+      "instrument_kind": "common_stock",
+      "venue": "KRX",
+      "session": "regular_continuous",
+      "leverage": false,
+      "short_selling": false,
+      "overnight": true,
+      "weekend_holding": true,
+      "minimum_completed_bars": 120,
+      "adtv_window": 20,
+      "adtv_statistic": "median",
+      "minimum_adtv_krw": "5000000000",
+      "maximum_spread_bps": "30",
+      "watchlist": [],
+      "excluded_instruments": []
+    },
+    "signal": {
+      "event_families": [
+        "earnings_quality",
+        "official_guidance",
+        "material_contract"
+      ],
+      "max_event_age_sessions": 5,
+      "primary_source_required": true,
+      "fast_sma": 20,
+      "slow_sma": 60,
+      "sma_slope_lookback": 5,
+      "relative_return_intervals": 20,
+      "relative_strength_min_exclusive": "0",
+      "atr_bars": 14,
+      "atr_method": "simple_mean_true_range",
+      "index_entry_gate": "close_at_or_above_sma60",
+      "chase_above_previous_close_atr": "0.75",
+      "chase_above_sma20_atr": "2.0",
+      "opportunity_horizon_sessions": [
+        3,
+        20
+      ]
+    },
+    "portfolio": {
+      "max_issuers": 5,
+      "entry_risk_fraction": "0.0025",
+      "aggregate_planned_risk_fraction": "0.0100",
+      "entry_position_weight": "0.20",
+      "entry_sector_weight": "0.40",
+      "entry_gross_weight": "0.80",
+      "trim_position_trigger": "0.25",
+      "trim_sector_trigger": "0.50",
+      "trim_gross_trigger": "0.90",
+      "trim_confirmation_observations": 2,
+      "trim_min_observation_gap_seconds": 5,
+      "max_plan_adtv_fraction": "0.0005",
+      "gap_buffer_atr": "0.50",
+      "pyramiding": false,
+      "averaging_down": false,
+      "price_drift_rebalance": false
+    },
+    "exits": {
+      "initial_stop_low_window": 5,
+      "initial_stop_atr_cap": "2.0",
+      "minimum_stop_distance_atr": "0.75",
+      "trail_activation_initial_r": "1.0",
+      "trail_atr": "2.0",
+      "stop_can_move_down": false,
+      "trend_exit_consecutive_closes": 2,
+      "max_holding_sessions": 20,
+      "same_event_reentry_completed_sessions": 1,
+      "reentry_requires_close_above_previous_entry": true,
+      "drawdown_pause_fraction": "0.10",
+      "drawdown_action": "cancel_entries_pause_new_risk_keep_protection",
+      "auto_resume_after_drawdown": false
+    },
+    "orders": {
+      "entry_type": "limit_at_verified_ask",
+      "entry_expiry_seconds": 120,
+      "entry_auto_reprice": false,
+      "exit_type": "market_in_valid_session",
+      "decision_max_age_seconds": 120,
+      "quote_max_age_seconds": 5,
+      "maximum_roundtrip_friction_to_initial_r": "0.15",
+      "respect_pending_orders": true
+    },
+    "costs": {
+      "commission_schedule": null,
+      "tax_schedule": null,
+      "simulation_slippage_bps_per_side": "10",
+      "operating_cost_allocation": null,
+      "unknown_cost_is_zero": false
+    },
+    "evaluation": {
+      "primary_baseline": "technical_only",
+      "secondary_baselines": [
+        "cash",
+        "event_flag_no_ai"
+      ],
+      "optional_diagnostic": "full_strategy_scheduled_only",
+      "discovery_completed_sessions": 60,
+      "minimum_closed_theses": 30,
+      "confirmation_completed_sessions": 20,
+      "block_bootstrap_block_sessions": 5,
+      "block_bootstrap_resamples": 2000,
+      "paired_return_confidence_level": "0.95",
+      "slippage_stress_multiplier": "2.0",
+      "automatic_live_promotion": false
+    }
+  },
+  "model_id": "synthetic-decision-fixture-no-model-called",
+  "model_effort": "fixture",
+  "initial_capital_krw": "10000000",
+  "costs": {
+    "source": "synthetic nonzero cost fixture, not an account tariff",
+    "account_alias": "synthetic",
+    "venue": "KRX",
+    "effective_at": "2026-01-05T09:00:00+09:00",
+    "expires_at": "2026-08-21T15:30:00+09:00",
+    "verified": true,
+    "synthetic": true,
+    "buy_commission_rate": "0.0001",
+    "sell_commission_rate": "0.0001",
+    "sell_tax_rate": "0.0001",
+    "minimum_buy_commission": "0",
+    "minimum_sell_commission": "0",
+    "buy_slippage_bps": "10",
+    "sell_slippage_bps": "10"
+  },
+  "transmission_delay_ms": 500,
+  "cancel_ack_delay_ms": 1000,
+  "random_seed": 20260913,
+  "operating_cost_krw": null,
+  "confirmation_operating_cost_krw": null,
+  "experiment_attempt_count": 1,
+  "selected_best_experiment": false,
+  "calendar_source": "synthetic weekday calendar, not official exchange data",
+  "calendar_verified": true,
+  "sessions": [
+    {
+      "session_id": "2026-01-05",
+      "ordinal": 0,
+      "opens_at": "2026-01-05T09:00:00+09:00",
+      "closes_at": "2026-01-05T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-01-06",
+      "ordinal": 1,
+      "opens_at": "2026-01-06T09:00:00+09:00",
+      "closes_at": "2026-01-06T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-01-07",
+      "ordinal": 2,
+      "opens_at": "2026-01-07T09:00:00+09:00",
+      "closes_at": "2026-01-07T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-01-08",
+      "ordinal": 3,
+      "opens_at": "2026-01-08T09:00:00+09:00",
+      "closes_at": "2026-01-08T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-01-09",
+      "ordinal": 4,
+      "opens_at": "2026-01-09T09:00:00+09:00",
+      "closes_at": "2026-01-09T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-01-12",
+      "ordinal": 5,
+      "opens_at": "2026-01-12T09:00:00+09:00",
+      "closes_at": "2026-01-12T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-01-13",
+      "ordinal": 6,
+      "opens_at": "2026-01-13T09:00:00+09:00",
+      "closes_at": "2026-01-13T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-01-14",
+      "ordinal": 7,
+      "opens_at": "2026-01-14T09:00:00+09:00",
+      "closes_at": "2026-01-14T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-01-15",
+      "ordinal": 8,
+      "opens_at": "2026-01-15T09:00:00+09:00",
+      "closes_at": "2026-01-15T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-01-16",
+      "ordinal": 9,
+      "opens_at": "2026-01-16T09:00:00+09:00",
+      "closes_at": "2026-01-16T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-01-19",
+      "ordinal": 10,
+      "opens_at": "2026-01-19T09:00:00+09:00",
+      "closes_at": "2026-01-19T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-01-20",
+      "ordinal": 11,
+      "opens_at": "2026-01-20T09:00:00+09:00",
+      "closes_at": "2026-01-20T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-01-21",
+      "ordinal": 12,
+      "opens_at": "2026-01-21T09:00:00+09:00",
+      "closes_at": "2026-01-21T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-01-22",
+      "ordinal": 13,
+      "opens_at": "2026-01-22T09:00:00+09:00",
+      "closes_at": "2026-01-22T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-01-23",
+      "ordinal": 14,
+      "opens_at": "2026-01-23T09:00:00+09:00",
+      "closes_at": "2026-01-23T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-01-26",
+      "ordinal": 15,
+      "opens_at": "2026-01-26T09:00:00+09:00",
+      "closes_at": "2026-01-26T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-01-27",
+      "ordinal": 16,
+      "opens_at": "2026-01-27T09:00:00+09:00",
+      "closes_at": "2026-01-27T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-01-28",
+      "ordinal": 17,
+      "opens_at": "2026-01-28T09:00:00+09:00",
+      "closes_at": "2026-01-28T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-01-29",
+      "ordinal": 18,
+      "opens_at": "2026-01-29T09:00:00+09:00",
+      "closes_at": "2026-01-29T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-01-30",
+      "ordinal": 19,
+      "opens_at": "2026-01-30T09:00:00+09:00",
+      "closes_at": "2026-01-30T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-02-02",
+      "ordinal": 20,
+      "opens_at": "2026-02-02T09:00:00+09:00",
+      "closes_at": "2026-02-02T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-02-03",
+      "ordinal": 21,
+      "opens_at": "2026-02-03T09:00:00+09:00",
+      "closes_at": "2026-02-03T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-02-04",
+      "ordinal": 22,
+      "opens_at": "2026-02-04T09:00:00+09:00",
+      "closes_at": "2026-02-04T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-02-05",
+      "ordinal": 23,
+      "opens_at": "2026-02-05T09:00:00+09:00",
+      "closes_at": "2026-02-05T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-02-06",
+      "ordinal": 24,
+      "opens_at": "2026-02-06T09:00:00+09:00",
+      "closes_at": "2026-02-06T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-02-09",
+      "ordinal": 25,
+      "opens_at": "2026-02-09T09:00:00+09:00",
+      "closes_at": "2026-02-09T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-02-10",
+      "ordinal": 26,
+      "opens_at": "2026-02-10T09:00:00+09:00",
+      "closes_at": "2026-02-10T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-02-11",
+      "ordinal": 27,
+      "opens_at": "2026-02-11T09:00:00+09:00",
+      "closes_at": "2026-02-11T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-02-12",
+      "ordinal": 28,
+      "opens_at": "2026-02-12T09:00:00+09:00",
+      "closes_at": "2026-02-12T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-02-13",
+      "ordinal": 29,
+      "opens_at": "2026-02-13T09:00:00+09:00",
+      "closes_at": "2026-02-13T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-02-16",
+      "ordinal": 30,
+      "opens_at": "2026-02-16T09:00:00+09:00",
+      "closes_at": "2026-02-16T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-02-17",
+      "ordinal": 31,
+      "opens_at": "2026-02-17T09:00:00+09:00",
+      "closes_at": "2026-02-17T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-02-18",
+      "ordinal": 32,
+      "opens_at": "2026-02-18T09:00:00+09:00",
+      "closes_at": "2026-02-18T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-02-19",
+      "ordinal": 33,
+      "opens_at": "2026-02-19T09:00:00+09:00",
+      "closes_at": "2026-02-19T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-02-20",
+      "ordinal": 34,
+      "opens_at": "2026-02-20T09:00:00+09:00",
+      "closes_at": "2026-02-20T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-02-23",
+      "ordinal": 35,
+      "opens_at": "2026-02-23T09:00:00+09:00",
+      "closes_at": "2026-02-23T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-02-24",
+      "ordinal": 36,
+      "opens_at": "2026-02-24T09:00:00+09:00",
+      "closes_at": "2026-02-24T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-02-25",
+      "ordinal": 37,
+      "opens_at": "2026-02-25T09:00:00+09:00",
+      "closes_at": "2026-02-25T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-02-26",
+      "ordinal": 38,
+      "opens_at": "2026-02-26T09:00:00+09:00",
+      "closes_at": "2026-02-26T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-02-27",
+      "ordinal": 39,
+      "opens_at": "2026-02-27T09:00:00+09:00",
+      "closes_at": "2026-02-27T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-03-02",
+      "ordinal": 40,
+      "opens_at": "2026-03-02T09:00:00+09:00",
+      "closes_at": "2026-03-02T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-03-03",
+      "ordinal": 41,
+      "opens_at": "2026-03-03T09:00:00+09:00",
+      "closes_at": "2026-03-03T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-03-04",
+      "ordinal": 42,
+      "opens_at": "2026-03-04T09:00:00+09:00",
+      "closes_at": "2026-03-04T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-03-05",
+      "ordinal": 43,
+      "opens_at": "2026-03-05T09:00:00+09:00",
+      "closes_at": "2026-03-05T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-03-06",
+      "ordinal": 44,
+      "opens_at": "2026-03-06T09:00:00+09:00",
+      "closes_at": "2026-03-06T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-03-09",
+      "ordinal": 45,
+      "opens_at": "2026-03-09T09:00:00+09:00",
+      "closes_at": "2026-03-09T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-03-10",
+      "ordinal": 46,
+      "opens_at": "2026-03-10T09:00:00+09:00",
+      "closes_at": "2026-03-10T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-03-11",
+      "ordinal": 47,
+      "opens_at": "2026-03-11T09:00:00+09:00",
+      "closes_at": "2026-03-11T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-03-12",
+      "ordinal": 48,
+      "opens_at": "2026-03-12T09:00:00+09:00",
+      "closes_at": "2026-03-12T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-03-13",
+      "ordinal": 49,
+      "opens_at": "2026-03-13T09:00:00+09:00",
+      "closes_at": "2026-03-13T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-03-16",
+      "ordinal": 50,
+      "opens_at": "2026-03-16T09:00:00+09:00",
+      "closes_at": "2026-03-16T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-03-17",
+      "ordinal": 51,
+      "opens_at": "2026-03-17T09:00:00+09:00",
+      "closes_at": "2026-03-17T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-03-18",
+      "ordinal": 52,
+      "opens_at": "2026-03-18T09:00:00+09:00",
+      "closes_at": "2026-03-18T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-03-19",
+      "ordinal": 53,
+      "opens_at": "2026-03-19T09:00:00+09:00",
+      "closes_at": "2026-03-19T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-03-20",
+      "ordinal": 54,
+      "opens_at": "2026-03-20T09:00:00+09:00",
+      "closes_at": "2026-03-20T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-03-23",
+      "ordinal": 55,
+      "opens_at": "2026-03-23T09:00:00+09:00",
+      "closes_at": "2026-03-23T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-03-24",
+      "ordinal": 56,
+      "opens_at": "2026-03-24T09:00:00+09:00",
+      "closes_at": "2026-03-24T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-03-25",
+      "ordinal": 57,
+      "opens_at": "2026-03-25T09:00:00+09:00",
+      "closes_at": "2026-03-25T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-03-26",
+      "ordinal": 58,
+      "opens_at": "2026-03-26T09:00:00+09:00",
+      "closes_at": "2026-03-26T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-03-27",
+      "ordinal": 59,
+      "opens_at": "2026-03-27T09:00:00+09:00",
+      "closes_at": "2026-03-27T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-03-30",
+      "ordinal": 60,
+      "opens_at": "2026-03-30T09:00:00+09:00",
+      "closes_at": "2026-03-30T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-03-31",
+      "ordinal": 61,
+      "opens_at": "2026-03-31T09:00:00+09:00",
+      "closes_at": "2026-03-31T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-04-01",
+      "ordinal": 62,
+      "opens_at": "2026-04-01T09:00:00+09:00",
+      "closes_at": "2026-04-01T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-04-02",
+      "ordinal": 63,
+      "opens_at": "2026-04-02T09:00:00+09:00",
+      "closes_at": "2026-04-02T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-04-03",
+      "ordinal": 64,
+      "opens_at": "2026-04-03T09:00:00+09:00",
+      "closes_at": "2026-04-03T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-04-06",
+      "ordinal": 65,
+      "opens_at": "2026-04-06T09:00:00+09:00",
+      "closes_at": "2026-04-06T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-04-07",
+      "ordinal": 66,
+      "opens_at": "2026-04-07T09:00:00+09:00",
+      "closes_at": "2026-04-07T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-04-08",
+      "ordinal": 67,
+      "opens_at": "2026-04-08T09:00:00+09:00",
+      "closes_at": "2026-04-08T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-04-09",
+      "ordinal": 68,
+      "opens_at": "2026-04-09T09:00:00+09:00",
+      "closes_at": "2026-04-09T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-04-10",
+      "ordinal": 69,
+      "opens_at": "2026-04-10T09:00:00+09:00",
+      "closes_at": "2026-04-10T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-04-13",
+      "ordinal": 70,
+      "opens_at": "2026-04-13T09:00:00+09:00",
+      "closes_at": "2026-04-13T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-04-14",
+      "ordinal": 71,
+      "opens_at": "2026-04-14T09:00:00+09:00",
+      "closes_at": "2026-04-14T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-04-15",
+      "ordinal": 72,
+      "opens_at": "2026-04-15T09:00:00+09:00",
+      "closes_at": "2026-04-15T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-04-16",
+      "ordinal": 73,
+      "opens_at": "2026-04-16T09:00:00+09:00",
+      "closes_at": "2026-04-16T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-04-17",
+      "ordinal": 74,
+      "opens_at": "2026-04-17T09:00:00+09:00",
+      "closes_at": "2026-04-17T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-04-20",
+      "ordinal": 75,
+      "opens_at": "2026-04-20T09:00:00+09:00",
+      "closes_at": "2026-04-20T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-04-21",
+      "ordinal": 76,
+      "opens_at": "2026-04-21T09:00:00+09:00",
+      "closes_at": "2026-04-21T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-04-22",
+      "ordinal": 77,
+      "opens_at": "2026-04-22T09:00:00+09:00",
+      "closes_at": "2026-04-22T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-04-23",
+      "ordinal": 78,
+      "opens_at": "2026-04-23T09:00:00+09:00",
+      "closes_at": "2026-04-23T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-04-24",
+      "ordinal": 79,
+      "opens_at": "2026-04-24T09:00:00+09:00",
+      "closes_at": "2026-04-24T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-04-27",
+      "ordinal": 80,
+      "opens_at": "2026-04-27T09:00:00+09:00",
+      "closes_at": "2026-04-27T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-04-28",
+      "ordinal": 81,
+      "opens_at": "2026-04-28T09:00:00+09:00",
+      "closes_at": "2026-04-28T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-04-29",
+      "ordinal": 82,
+      "opens_at": "2026-04-29T09:00:00+09:00",
+      "closes_at": "2026-04-29T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-04-30",
+      "ordinal": 83,
+      "opens_at": "2026-04-30T09:00:00+09:00",
+      "closes_at": "2026-04-30T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-05-01",
+      "ordinal": 84,
+      "opens_at": "2026-05-01T09:00:00+09:00",
+      "closes_at": "2026-05-01T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-05-04",
+      "ordinal": 85,
+      "opens_at": "2026-05-04T09:00:00+09:00",
+      "closes_at": "2026-05-04T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-05-05",
+      "ordinal": 86,
+      "opens_at": "2026-05-05T09:00:00+09:00",
+      "closes_at": "2026-05-05T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-05-06",
+      "ordinal": 87,
+      "opens_at": "2026-05-06T09:00:00+09:00",
+      "closes_at": "2026-05-06T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-05-07",
+      "ordinal": 88,
+      "opens_at": "2026-05-07T09:00:00+09:00",
+      "closes_at": "2026-05-07T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-05-08",
+      "ordinal": 89,
+      "opens_at": "2026-05-08T09:00:00+09:00",
+      "closes_at": "2026-05-08T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-05-11",
+      "ordinal": 90,
+      "opens_at": "2026-05-11T09:00:00+09:00",
+      "closes_at": "2026-05-11T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-05-12",
+      "ordinal": 91,
+      "opens_at": "2026-05-12T09:00:00+09:00",
+      "closes_at": "2026-05-12T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-05-13",
+      "ordinal": 92,
+      "opens_at": "2026-05-13T09:00:00+09:00",
+      "closes_at": "2026-05-13T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-05-14",
+      "ordinal": 93,
+      "opens_at": "2026-05-14T09:00:00+09:00",
+      "closes_at": "2026-05-14T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-05-15",
+      "ordinal": 94,
+      "opens_at": "2026-05-15T09:00:00+09:00",
+      "closes_at": "2026-05-15T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-05-18",
+      "ordinal": 95,
+      "opens_at": "2026-05-18T09:00:00+09:00",
+      "closes_at": "2026-05-18T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-05-19",
+      "ordinal": 96,
+      "opens_at": "2026-05-19T09:00:00+09:00",
+      "closes_at": "2026-05-19T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-05-20",
+      "ordinal": 97,
+      "opens_at": "2026-05-20T09:00:00+09:00",
+      "closes_at": "2026-05-20T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-05-21",
+      "ordinal": 98,
+      "opens_at": "2026-05-21T09:00:00+09:00",
+      "closes_at": "2026-05-21T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-05-22",
+      "ordinal": 99,
+      "opens_at": "2026-05-22T09:00:00+09:00",
+      "closes_at": "2026-05-22T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-05-25",
+      "ordinal": 100,
+      "opens_at": "2026-05-25T09:00:00+09:00",
+      "closes_at": "2026-05-25T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-05-26",
+      "ordinal": 101,
+      "opens_at": "2026-05-26T09:00:00+09:00",
+      "closes_at": "2026-05-26T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-05-27",
+      "ordinal": 102,
+      "opens_at": "2026-05-27T09:00:00+09:00",
+      "closes_at": "2026-05-27T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-05-28",
+      "ordinal": 103,
+      "opens_at": "2026-05-28T09:00:00+09:00",
+      "closes_at": "2026-05-28T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-05-29",
+      "ordinal": 104,
+      "opens_at": "2026-05-29T09:00:00+09:00",
+      "closes_at": "2026-05-29T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-06-01",
+      "ordinal": 105,
+      "opens_at": "2026-06-01T09:00:00+09:00",
+      "closes_at": "2026-06-01T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-06-02",
+      "ordinal": 106,
+      "opens_at": "2026-06-02T09:00:00+09:00",
+      "closes_at": "2026-06-02T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-06-03",
+      "ordinal": 107,
+      "opens_at": "2026-06-03T09:00:00+09:00",
+      "closes_at": "2026-06-03T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-06-04",
+      "ordinal": 108,
+      "opens_at": "2026-06-04T09:00:00+09:00",
+      "closes_at": "2026-06-04T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-06-05",
+      "ordinal": 109,
+      "opens_at": "2026-06-05T09:00:00+09:00",
+      "closes_at": "2026-06-05T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-06-08",
+      "ordinal": 110,
+      "opens_at": "2026-06-08T09:00:00+09:00",
+      "closes_at": "2026-06-08T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-06-09",
+      "ordinal": 111,
+      "opens_at": "2026-06-09T09:00:00+09:00",
+      "closes_at": "2026-06-09T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-06-10",
+      "ordinal": 112,
+      "opens_at": "2026-06-10T09:00:00+09:00",
+      "closes_at": "2026-06-10T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-06-11",
+      "ordinal": 113,
+      "opens_at": "2026-06-11T09:00:00+09:00",
+      "closes_at": "2026-06-11T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-06-12",
+      "ordinal": 114,
+      "opens_at": "2026-06-12T09:00:00+09:00",
+      "closes_at": "2026-06-12T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-06-15",
+      "ordinal": 115,
+      "opens_at": "2026-06-15T09:00:00+09:00",
+      "closes_at": "2026-06-15T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-06-16",
+      "ordinal": 116,
+      "opens_at": "2026-06-16T09:00:00+09:00",
+      "closes_at": "2026-06-16T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-06-17",
+      "ordinal": 117,
+      "opens_at": "2026-06-17T09:00:00+09:00",
+      "closes_at": "2026-06-17T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-06-18",
+      "ordinal": 118,
+      "opens_at": "2026-06-18T09:00:00+09:00",
+      "closes_at": "2026-06-18T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-06-19",
+      "ordinal": 119,
+      "opens_at": "2026-06-19T09:00:00+09:00",
+      "closes_at": "2026-06-19T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-06-22",
+      "ordinal": 120,
+      "opens_at": "2026-06-22T09:00:00+09:00",
+      "closes_at": "2026-06-22T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-06-23",
+      "ordinal": 121,
+      "opens_at": "2026-06-23T09:00:00+09:00",
+      "closes_at": "2026-06-23T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-06-24",
+      "ordinal": 122,
+      "opens_at": "2026-06-24T09:00:00+09:00",
+      "closes_at": "2026-06-24T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-06-25",
+      "ordinal": 123,
+      "opens_at": "2026-06-25T09:00:00+09:00",
+      "closes_at": "2026-06-25T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-06-26",
+      "ordinal": 124,
+      "opens_at": "2026-06-26T09:00:00+09:00",
+      "closes_at": "2026-06-26T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-06-29",
+      "ordinal": 125,
+      "opens_at": "2026-06-29T09:00:00+09:00",
+      "closes_at": "2026-06-29T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-06-30",
+      "ordinal": 126,
+      "opens_at": "2026-06-30T09:00:00+09:00",
+      "closes_at": "2026-06-30T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-07-01",
+      "ordinal": 127,
+      "opens_at": "2026-07-01T09:00:00+09:00",
+      "closes_at": "2026-07-01T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-07-02",
+      "ordinal": 128,
+      "opens_at": "2026-07-02T09:00:00+09:00",
+      "closes_at": "2026-07-02T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-07-03",
+      "ordinal": 129,
+      "opens_at": "2026-07-03T09:00:00+09:00",
+      "closes_at": "2026-07-03T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-07-06",
+      "ordinal": 130,
+      "opens_at": "2026-07-06T09:00:00+09:00",
+      "closes_at": "2026-07-06T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-07-07",
+      "ordinal": 131,
+      "opens_at": "2026-07-07T09:00:00+09:00",
+      "closes_at": "2026-07-07T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-07-08",
+      "ordinal": 132,
+      "opens_at": "2026-07-08T09:00:00+09:00",
+      "closes_at": "2026-07-08T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-07-09",
+      "ordinal": 133,
+      "opens_at": "2026-07-09T09:00:00+09:00",
+      "closes_at": "2026-07-09T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-07-10",
+      "ordinal": 134,
+      "opens_at": "2026-07-10T09:00:00+09:00",
+      "closes_at": "2026-07-10T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-07-13",
+      "ordinal": 135,
+      "opens_at": "2026-07-13T09:00:00+09:00",
+      "closes_at": "2026-07-13T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-07-14",
+      "ordinal": 136,
+      "opens_at": "2026-07-14T09:00:00+09:00",
+      "closes_at": "2026-07-14T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-07-15",
+      "ordinal": 137,
+      "opens_at": "2026-07-15T09:00:00+09:00",
+      "closes_at": "2026-07-15T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-07-16",
+      "ordinal": 138,
+      "opens_at": "2026-07-16T09:00:00+09:00",
+      "closes_at": "2026-07-16T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-07-17",
+      "ordinal": 139,
+      "opens_at": "2026-07-17T09:00:00+09:00",
+      "closes_at": "2026-07-17T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-07-20",
+      "ordinal": 140,
+      "opens_at": "2026-07-20T09:00:00+09:00",
+      "closes_at": "2026-07-20T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-07-21",
+      "ordinal": 141,
+      "opens_at": "2026-07-21T09:00:00+09:00",
+      "closes_at": "2026-07-21T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-07-22",
+      "ordinal": 142,
+      "opens_at": "2026-07-22T09:00:00+09:00",
+      "closes_at": "2026-07-22T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-07-23",
+      "ordinal": 143,
+      "opens_at": "2026-07-23T09:00:00+09:00",
+      "closes_at": "2026-07-23T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-07-24",
+      "ordinal": 144,
+      "opens_at": "2026-07-24T09:00:00+09:00",
+      "closes_at": "2026-07-24T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-07-27",
+      "ordinal": 145,
+      "opens_at": "2026-07-27T09:00:00+09:00",
+      "closes_at": "2026-07-27T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-07-28",
+      "ordinal": 146,
+      "opens_at": "2026-07-28T09:00:00+09:00",
+      "closes_at": "2026-07-28T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-07-29",
+      "ordinal": 147,
+      "opens_at": "2026-07-29T09:00:00+09:00",
+      "closes_at": "2026-07-29T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-07-30",
+      "ordinal": 148,
+      "opens_at": "2026-07-30T09:00:00+09:00",
+      "closes_at": "2026-07-30T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-07-31",
+      "ordinal": 149,
+      "opens_at": "2026-07-31T09:00:00+09:00",
+      "closes_at": "2026-07-31T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-08-03",
+      "ordinal": 150,
+      "opens_at": "2026-08-03T09:00:00+09:00",
+      "closes_at": "2026-08-03T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-08-04",
+      "ordinal": 151,
+      "opens_at": "2026-08-04T09:00:00+09:00",
+      "closes_at": "2026-08-04T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-08-05",
+      "ordinal": 152,
+      "opens_at": "2026-08-05T09:00:00+09:00",
+      "closes_at": "2026-08-05T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-08-06",
+      "ordinal": 153,
+      "opens_at": "2026-08-06T09:00:00+09:00",
+      "closes_at": "2026-08-06T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-08-07",
+      "ordinal": 154,
+      "opens_at": "2026-08-07T09:00:00+09:00",
+      "closes_at": "2026-08-07T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-08-10",
+      "ordinal": 155,
+      "opens_at": "2026-08-10T09:00:00+09:00",
+      "closes_at": "2026-08-10T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-08-11",
+      "ordinal": 156,
+      "opens_at": "2026-08-11T09:00:00+09:00",
+      "closes_at": "2026-08-11T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-08-12",
+      "ordinal": 157,
+      "opens_at": "2026-08-12T09:00:00+09:00",
+      "closes_at": "2026-08-12T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-08-13",
+      "ordinal": 158,
+      "opens_at": "2026-08-13T09:00:00+09:00",
+      "closes_at": "2026-08-13T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-08-14",
+      "ordinal": 159,
+      "opens_at": "2026-08-14T09:00:00+09:00",
+      "closes_at": "2026-08-14T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-08-17",
+      "ordinal": 160,
+      "opens_at": "2026-08-17T09:00:00+09:00",
+      "closes_at": "2026-08-17T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-08-18",
+      "ordinal": 161,
+      "opens_at": "2026-08-18T09:00:00+09:00",
+      "closes_at": "2026-08-18T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-08-19",
+      "ordinal": 162,
+      "opens_at": "2026-08-19T09:00:00+09:00",
+      "closes_at": "2026-08-19T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-08-20",
+      "ordinal": 163,
+      "opens_at": "2026-08-20T09:00:00+09:00",
+      "closes_at": "2026-08-20T15:30:00+09:00",
+      "venue": "KRX"
+    },
+    {
+      "session_id": "2026-08-21",
+      "ordinal": 164,
+      "opens_at": "2026-08-21T09:00:00+09:00",
+      "closes_at": "2026-08-21T15:30:00+09:00",
+      "venue": "KRX"
+    }
+  ],
+  "tick_source": "synthetic-unit-tick",
+  "tick_verified": true,
+  "tick_bands": [
+    [
+      "0",
+      "1"
+    ]
+  ],
+  "timeline": [
+    {
+      "at": "2026-06-22T00:30:00Z",
+      "kind": "review",
+      "data": {
+        "pool_stage": "UNIVERSE_PRE_AI",
+        "pre_ai_candidate_ids": [
+          "TEST:AAA",
+          "TEST:BBB"
+        ],
+        "candidates": [
+          {
+            "instrument": {
+              "instrument_id": "TEST:AAA",
+              "issuer_id": "issuer-AAA",
+              "board": "KOSPI",
+              "kind": "common_stock",
+              "venue": "KRX",
+              "sector": "synthetic-sector",
+              "status": "NORMAL",
+              "status_verified": true,
+              "classification_source": "synthetic",
+              "effective_at": "2026-01-05T09:00:00+09:00"
+            },
+            "features": {
+              "instrument_id": "TEST:AAA",
+              "board": "KOSPI",
+              "as_of": "2026-06-22T09:30:00+09:00",
+              "window_start": "2026-01-05T09:00:00+09:00",
+              "window_end": "2026-06-19T15:30:00+09:00",
+              "last_session_id": "2026-06-19",
+              "bars": 120,
+              "bar_interval": "regular_session",
+              "completed": true,
+              "formula_id": "sma-arithmetic_atr-simple_rs20-price_v1",
+              "adjustment_basis": "synthetic-consistent-price-v1",
+              "index_adjustment_basis": "synthetic-consistent-price-v1",
+              "price_return_basis": "price_only",
+              "close": "10595",
+              "sma20": "10547.5",
+              "sma20_five_sessions_ago": "10522.5",
+              "sma60": "10447.5",
+              "return20": "0.009528346831824678418294426",
+              "index_return20": "0",
+              "rs20": "0.009528346831824678418294426",
+              "atr14": "300",
+              "adtv20": "5000000000",
+              "low5": "10375",
+              "index_close": "3000",
+              "index_sma60": "3000",
+              "last_two_closes": [
+                "10590",
+                "10595"
+              ],
+              "last_two_sma20": [
+                "10542.5",
+                "10547.5"
+              ]
+            },
+            "event_ids": [
+              "event-AAA"
+            ],
+            "coverage": "COMPLETE",
+            "counterevidence_event_ids": [],
+            "priority": 1
+          },
+          {
+            "instrument": {
+              "instrument_id": "TEST:BBB",
+              "issuer_id": "issuer-BBB",
+              "board": "KOSPI",
+              "kind": "common_stock",
+              "venue": "KRX",
+              "sector": "synthetic-sector",
+              "status": "NORMAL",
+              "status_verified": true,
+              "classification_source": "synthetic",
+              "effective_at": "2026-01-05T09:00:00+09:00"
+            },
+            "features": {
+              "instrument_id": "TEST:BBB",
+              "board": "KOSPI",
+              "as_of": "2026-06-22T09:30:00+09:00",
+              "window_start": "2026-01-05T09:00:00+09:00",
+              "window_end": "2026-06-19T15:30:00+09:00",
+              "last_session_id": "2026-06-19",
+              "bars": 120,
+              "bar_interval": "regular_session",
+              "completed": true,
+              "formula_id": "sma-arithmetic_atr-simple_rs20-price_v1",
+              "adjustment_basis": "synthetic-consistent-price-v1",
+              "index_adjustment_basis": "synthetic-consistent-price-v1",
+              "price_return_basis": "price_only",
+              "close": "10595",
+              "sma20": "10547.5",
+              "sma20_five_sessions_ago": "10522.5",
+              "sma60": "10447.5",
+              "return20": "0.009528346831824678418294426",
+              "index_return20": "0",
+              "rs20": "0.009528346831824678418294426",
+              "atr14": "300",
+              "adtv20": "5000000000",
+              "low5": "10375",
+              "index_close": "3000",
+              "index_sma60": "3000",
+              "last_two_closes": [
+                "10590",
+                "10595"
+              ],
+              "last_two_sma20": [
+                "10542.5",
+                "10547.5"
+              ]
+            },
+            "event_ids": [],
+            "coverage": "COMPLETE_NO_EVENT",
+            "counterevidence_event_ids": [],
+            "priority": 1
+          }
+        ],
+        "quotes": [
+          {
+            "instrument_id": "TEST:AAA",
+            "venue": "KRX",
+            "observed_at": "2026-06-22T09:30:00+09:00",
+            "received_at": "2026-06-22T09:30:00+09:00",
+            "bid": "10599",
+            "ask": "10600",
+            "last": null,
+            "last_observed_at": null,
+            "valid": true,
+            "source": "synthetic"
+          },
+          {
+            "instrument_id": "TEST:BBB",
+            "venue": "KRX",
+            "observed_at": "2026-06-22T09:30:00+09:00",
+            "received_at": "2026-06-22T09:30:00+09:00",
+            "bid": "10599",
+            "ask": "10600",
+            "last": null,
+            "last_observed_at": null,
+            "valid": true,
+            "source": "synthetic"
+          }
+        ],
+        "events": [
+          {
+            "event_id": "event-AAA",
+            "instrument_id": "TEST:AAA",
+            "official_id": "synthetic-official-1",
+            "normalized_key": "issuer-AAA:earnings:2026Q1",
+            "family": "earnings_quality",
+            "source_uri": "https://example.invalid/official/earnings",
+            "source_hash": "synthetic-hash",
+            "fact_ids": [
+              "revenue",
+              "operating-profit"
+            ],
+            "facts": {
+              "revenue": "120",
+              "operating_profit": "15"
+            },
+            "comparison_basis": "synthetic consolidated previous-year same quarter",
+            "available_at": "2026-06-22T08:30:00+09:00",
+            "observed_at": "2026-06-22T08:30:00+09:00",
+            "published_at": "2026-06-22T08:30:00+09:00",
+            "official": true,
+            "primary_source_complete": true,
+            "timing_quality": "EXACT",
+            "polarity": "POSITIVE",
+            "correction_of": null,
+            "resolves_event_ids": [],
+            "aliases": [],
+            "withdrawn": false,
+            "interpretation": null
+          }
+        ],
+        "completed_at": "2026-06-22T09:30:02+09:00",
+        "decisions": {
+          "TEST:AAA": {
+            "verdict": "ACCEPT",
+            "rank": 1,
+            "economic_path": "synthetic positive official earnings",
+            "counterevidence": "synthetic one-off factor",
+            "invalidation_case": "official correction",
+            "horizon_case": "synthetic earnings reassessment over 3-20 sessions",
+            "priced_in_case": "synthetic uncertain prior price reflection"
+          },
+          "TEST:BBB": {
+            "verdict": "VETO",
+            "rank": 2
+          }
+        }
+      }
+    },
+    {
+      "at": "2026-06-22T00:30:01Z",
+      "kind": "quote",
+      "data": {
+        "quote": {
+          "instrument_id": "TEST:AAA",
+          "venue": "KRX",
+          "observed_at": "2026-06-22T09:30:01+09:00",
+          "received_at": "2026-06-22T09:30:01+09:00",
+          "bid": "10579",
+          "ask": "10580",
+          "last": null,
+          "last_observed_at": null,
+          "valid": true,
+          "source": "synthetic"
+        },
+        "ask_quantity": 2,
+        "bid_quantity": 100,
+        "event_id": "quote-1"
+      }
+    },
+    {
+      "at": "2026-06-22T00:30:02Z",
+      "kind": "quote",
+      "data": {
+        "quote": {
+          "instrument_id": "TEST:AAA",
+          "venue": "KRX",
+          "observed_at": "2026-06-22T09:30:02+09:00",
+          "received_at": "2026-06-22T09:30:02+09:00",
+          "bid": "10599",
+          "ask": "10600",
+          "last": null,
+          "last_observed_at": null,
+          "valid": true,
+          "source": "synthetic"
+        },
+        "ask_quantity": 0,
+        "bid_quantity": 100,
+        "event_id": "quote-2"
+      }
+    },
+    {
+      "at": "2026-06-22T00:30:03Z",
+      "kind": "quote",
+      "data": {
+        "quote": {
+          "instrument_id": "TEST:AAA",
+          "venue": "KRX",
+          "observed_at": "2026-06-22T09:30:03+09:00",
+          "received_at": "2026-06-22T09:30:03+09:00",
+          "bid": "10559",
+          "ask": "10560",
+          "last": null,
+          "last_observed_at": null,
+          "valid": true,
+          "source": "synthetic"
+        },
+        "ask_quantity": 1,
+        "bid_quantity": 100,
+        "event_id": "quote-3"
+      }
+    },
+    {
+      "at": "2026-06-22T00:30:06Z",
+      "kind": "quote",
+      "data": {
+        "quote": {
+          "instrument_id": "TEST:AAA",
+          "venue": "KRX",
+          "observed_at": "2026-06-22T09:30:06+09:00",
+          "received_at": "2026-06-22T09:30:06+09:00",
+          "bid": "9899",
+          "ask": "9900",
+          "last": null,
+          "last_observed_at": null,
+          "valid": true,
+          "source": "synthetic"
+        },
+        "ask_quantity": 0,
+        "bid_quantity": 100,
+        "event_id": "quote-6"
+      }
+    },
+    {
+      "at": "2026-06-22T00:30:07Z",
+      "kind": "quote",
+      "data": {
+        "quote": {
+          "instrument_id": "TEST:AAA",
+          "venue": "KRX",
+          "observed_at": "2026-06-22T09:30:07+09:00",
+          "received_at": "2026-06-22T09:30:07+09:00",
+          "bid": "9889",
+          "ask": "9890",
+          "last": null,
+          "last_observed_at": null,
+          "valid": true,
+          "source": "synthetic"
+        },
+        "ask_quantity": 0,
+        "bid_quantity": 100,
+        "event_id": "quote-7"
+      }
+    },
+    {
+      "at": "2026-06-22T00:30:08Z",
+      "kind": "quote",
+      "data": {
+        "quote": {
+          "instrument_id": "TEST:AAA",
+          "venue": "KRX",
+          "observed_at": "2026-06-22T09:30:08+09:00",
+          "received_at": "2026-06-22T09:30:08+09:00",
+          "bid": "9879",
+          "ask": "9880",
+          "last": null,
+          "last_observed_at": null,
+          "valid": true,
+          "source": "synthetic"
+        },
+        "ask_quantity": 0,
+        "bid_quantity": 1000,
+        "event_id": "quote-8"
+      }
+    },
+    {
+      "at": "2026-06-22T06:30:00Z",
+      "kind": "session_close",
+      "data": {
+        "session_id": "2026-06-22",
+        "marks_verified": true,
+        "marks": {
+          "TEST:AAA": "9879",
+          "TEST:BBB": "10600"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,798 @@
+"""Approved external adapters and explicit provider-to-domain normalization.
+
+Importing this module reads no environment, authentication, account or network.
+See docs/runtime-contract.md for the required, hash-bound capability manifest.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import shutil
+import sqlite3
+import threading
+import time
+from datetime import date, datetime, timedelta
+from decimal import Decimal
+from pathlib import Path
+from zoneinfo import ZoneInfo
+from uuid import uuid4
+
+from .adapters import AdapterError, http_transport
+from .adapters.codex_cli import CodexAdapter
+from .adapters.disclosures import DartAdapter, ORIGIN
+from .adapters.kis import BASE_URLS, MASTER_ORIGIN, KisAdapter, KisCredentials
+from .application import MarketBundle
+from .config import HumanRequired, ROOT, aware_time, canonical, digest, utcnow
+from .decision import DecisionProposal, validate_proposal
+from .market import SessionCalendar, calculate_features
+from .models import CostSchedule, DailyBar, EventRecord, Instrument, MarketFact, Quote, Session
+from .portfolio import buy_commission, sell_cost, slippage
+
+SEOUL = ZoneInfo("Asia/Seoul")
+
+
+def _decimal(value):
+    if isinstance(value, bool):
+        raise ValueError("BOOLEAN_NOT_MONEY")
+    number = Decimal(str(value))
+    if not number.is_finite() or number < 0:
+        raise ValueError("INVALID_PROVIDER_AMOUNT")
+    return number
+
+
+def _quantity(value):
+    if isinstance(value, bool) or not re.fullmatch(r"\d+", str(value)):
+        raise ValueError("INVALID_PROVIDER_QUANTITY")
+    return int(value)
+
+
+def _field(record, path):
+    if not isinstance(path, str) or not path or any(not part for part in path.split(".")):
+        raise ValueError("MISSING_VERIFIED_FIELD_MAPPING")
+    result = record
+    for part in path.split("."):
+        result = result[part]
+    return result
+
+
+def _timestamp(day, hour):
+    day = date.fromisoformat(str(day))
+    text = str(hour).replace(":", "")
+    if not re.fullmatch(r"\d{6}", text):
+        raise ValueError("PROVIDER_OBSERVATION_TIME_UNVERIFIED")
+    return datetime(day.year, day.month, day.day, int(text[:2]), int(text[2:4]), int(text[4:]), tzinfo=SEOUL)
+
+
+def _json(path):
+    def pairs(items):
+        value = {}
+        for key, item in items:
+            if key in value:
+                raise ValueError("DUPLICATE_MANIFEST_KEY")
+            value[key] = item
+        return value
+    return json.loads(Path(path).read_text(), object_pairs_hook=pairs,
+                      parse_constant=lambda _value: (_ for _ in ()).throw(ValueError("NONFINITE_JSON")))
+
+
+class RuntimeState:
+    def __init__(self, path):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True,exist_ok=True)
+        self.lock = threading.RLock()
+        self.db = sqlite3.connect(self.path,timeout=30,isolation_level=None,check_same_thread=False)
+        self.db.row_factory = sqlite3.Row
+        self.db.execute("CREATE TABLE IF NOT EXISTS runtime_cache(namespace TEXT PRIMARY KEY,payload TEXT NOT NULL)")
+        self.data = {row["namespace"]:json.loads(row["payload"]) for row in self.db.execute("SELECT namespace,payload FROM runtime_cache")}
+        for namespace in ("observations","events","circuit"):
+            self.data.setdefault(namespace,{})
+
+    def save(self):
+        with self.lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                self.db.executemany("INSERT INTO runtime_cache VALUES (?,?) ON CONFLICT(namespace) DO UPDATE SET payload=excluded.payload",
+                                    [(key,canonical(value)) for key,value in self.data.items()])
+                self.db.execute("COMMIT")
+            except Exception:
+                self.db.execute("ROLLBACK")
+                raise
+
+    def known_order(self,namespace,broker_id):
+        if not self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='intents'").fetchone():
+            return None
+        row = self.db.execute("SELECT * FROM intents WHERE broker_namespace=? AND broker_id=?",(namespace,broker_id)).fetchone()
+        return dict(row) if row else None
+
+
+class PriorityTransport:
+    """One account-wide request budget; trading/quotes precede bulk market reads."""
+    def __init__(self, transport, *, minimum_interval_seconds, maximum_queue_seconds):
+        self.transport = transport
+        self.interval = float(_decimal(minimum_interval_seconds))
+        self.maximum_wait = float(_decimal(maximum_queue_seconds))
+        if self.interval <= 0 or not 0 < self.maximum_wait <= 5:
+            raise HumanRequired("Approved rate/monitor budget is required")
+        self.condition = threading.Condition()
+        self.queue, self.sequence, self.next_at = [], 0, 0.0
+        self.fixture_only = getattr(transport, "fixture_only", False)
+
+    def __call__(self, method, url, headers=None, body=None, timeout=15):
+        priority = 0 if "/trading/" in url or "inquire-asking-price" in url or "inquire-price?" in url else 1
+        with self.condition:
+            self.sequence += 1
+            ticket = (priority, self.sequence)
+            self.queue.append(ticket)
+            deadline = time.monotonic()+self.maximum_wait
+            while min(self.queue) != ticket or time.monotonic() < self.next_at:
+                remaining = deadline-time.monotonic()
+                if remaining <= 0:
+                    self.queue.remove(ticket)
+                    self.condition.notify_all()
+                    raise AdapterError("MONITOR_DEGRADED_RATE_BUDGET")
+                self.condition.wait(min(remaining, max(self.next_at-time.monotonic(), 0.01)))
+            self.queue.remove(ticket)
+            self.next_at = time.monotonic()+self.interval
+            self.condition.notify_all()
+        return self.transport(method, url, headers, body, timeout)
+
+
+class KisBrokerPort:
+    def __init__(self, adapter, manifest, state, *, clock=utcnow):
+        self.adapter, self.manifest, self.state, self.clock = adapter, manifest, state, clock
+        self.environment = "live" if adapter.environment == "real" else "demo"
+        self.last_resources = None
+        self.last_sellable = {}
+        self.store = None
+
+    def bind_store(self,store):
+        self.store = store
+
+    def _namespace(self, session_date):
+        return f"{self.adapter.environment}:{self.manifest['account_alias']}:{session_date}:KRX"
+
+    def submit(self, intent):
+        instrument = intent["instrument_id"]
+        ticker = instrument.removeprefix("KRX:")
+        result = self.adapter.submit(ticker, intent["side"], intent["quantity"], limit_price=intent["limit_price"])
+        if result.status != "ACKNOWLEDGED":
+            return {"status": result.status, "reason": result.code}
+        namespace = self._namespace(self.clock().astimezone(SEOUL).date().isoformat())
+        if not result.organization:
+            return {"status": "UNKNOWN", "reason": "ORDER_ORGANIZATION_UNVERIFIED"}
+        return {"status": "ACKNOWLEDGED", "broker_id": result.order_id, "namespace": namespace,
+                "metadata":{"organization":result.organization}}
+
+    def cancel(self, request):
+        known = self.state.known_order(request["namespace"],request["broker_id"])
+        if known is None:
+            raise HumanRequired("Order organization/ownership requires reconciliation")
+        quantity = _quantity(request["remaining_quantity"])
+        if not quantity:
+            return {"status": "NO_REMAINING_QUANTITY"}
+        metadata = request.get("metadata") or json.loads(known.get("broker_metadata") or "{}")
+        if not metadata.get("organization"):
+            raise HumanRequired("Broker organization metadata is unverified")
+        result = self.adapter.cancel(request["broker_id"], metadata["organization"], quantity,
+                                     order_type="00" if known["side"] == "BUY" else "01")
+        return {"status": result.status, "reason": result.code}
+
+    def _supplements(self):
+        reference = self.manifest["bootstrap"].get("settled_observations_path")
+        if reference is None:
+            return {}
+        value = _json(reference)
+        if value.get("account_alias") != self.manifest["account_alias"] or value.get("environment") != self.adapter.environment or value.get("verified") is not True:
+            raise HumanRequired("Settlement evidence scope/verification mismatch")
+        return value["orders"]
+
+    def snapshot(self):
+        now = self.clock()
+        mapping = self.manifest["normalization"]
+        account = self.adapter.read_account(resource_symbol=mapping["account"]["resource_symbol"],
+                                            resource_price=mapping["account"]["resource_price"])
+        orders = self.adapter.read_orders(date.fromisoformat(self.manifest["bootstrap"]["orders_since"]), now.astimezone(SEOUL).date())
+        errors, normalized = [], []
+        if account.quality != "COMPLETE" or orders.quality != "COMPLETE":
+            return {"complete": False, "ownership_complete": False, "orders": [], "errors": ["BROKER_PAGINATION_INCOMPLETE"]}
+        try:
+            self.last_resources = _decimal(_field(account.metadata["orderable_resources"], mapping["account"]["available_cash"]))
+            actual = {}
+            self.last_sellable = {}
+            for record in account.records:
+                instrument = "KRX:"+str(_field(record,mapping["account"]["symbol"]))
+                if instrument in actual:
+                    raise ValueError("DUPLICATE_ACCOUNT_POSITION")
+                actual[instrument] = _quantity(_field(record,mapping["account"]["quantity"]))
+                self.last_sellable[instrument] = _quantity(_field(record,mapping["account"]["sellable_quantity"]))
+            supplements = self._supplements()
+            external = {key:_quantity(value) for key,value in self.manifest["bootstrap"]["external_quantities"].items()}
+            strategy = {key:quantity-external.get(key,0) for key,quantity in actual.items()}
+            if any(value < 0 for value in strategy.values()) or any(actual.get(key,0) < value for key,value in external.items()):
+                raise ValueError("OWNERSHIP_CHANGED_OUTSIDE_STRATEGY")
+            owned_symbols = set(self.manifest["bootstrap"]["strategy_quantities"])
+            if self.state.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='intents'").fetchone():
+                owned_symbols.update(row[0] for row in self.state.db.execute("SELECT DISTINCT instrument_id FROM intents"))
+            ownership_complete = not any(quantity and instrument not in owned_symbols for instrument,quantity in strategy.items())
+            for record in orders.records:
+                fields = mapping["orders"]
+                session_date = date.fromisoformat(str(_field(record,fields["session_date"]))).isoformat()
+                namespace = self._namespace(session_date)
+                broker_id = str(_field(record,fields["broker_id"]))
+                key = namespace+":"+broker_id
+                quantity = _quantity(_field(record,fields["quantity"]))
+                cumulative = _quantity(_field(record,fields["cumulative_quantity"]))
+                notional = _decimal(_field(record,fields["cumulative_notional"]))
+                if cumulative > quantity or (not cumulative and notional):
+                    raise ValueError("INVALID_CUMULATIVE_OBSERVATION")
+                known = self.state.known_order(namespace,broker_id)
+                if known is None:
+                    if key in self.manifest["bootstrap"]["external_order_keys"]:
+                        continue
+                    errors.append("UNALLOCATED_BROKER_ORDER")
+                    continue
+                supplement = supplements.get(key)
+                if cumulative:
+                    fees,first_fill,observed,fill_quality = None,None,orders.retrieved_at,"FIRST_OBSERVED"
+                    if supplement:
+                        if (supplement.get("verified") is not True or not supplement.get("source") or
+                                not supplement.get("source_sha256") or _quantity(supplement["cumulative_quantity"]) != cumulative or
+                                _decimal(supplement["cumulative_notional"]) != notional):
+                            raise ValueError("SETTLEMENT_EVIDENCE_MISMATCH")
+                        fees = _decimal(supplement["actual_cumulative_fees"])
+                        first_fill = aware_time(supplement["first_fill_at"])
+                        observed = aware_time(supplement["observed_at"])
+                        fill_quality = "EXACT"
+                        if not first_fill <= observed <= now:
+                            raise ValueError("INVALID_FILL_TIMESTAMPS")
+                else:
+                    # No executions have occurred. The approved fee contract is trade-based.
+                    fees, first_fill, observed, fill_quality = Decimal(0), None, orders.retrieved_at,"UNKNOWN"
+                side = fields["side_codes"][str(_field(record,fields["side"]))]
+                canceled = _quantity(_field(record,fields["canceled_quantity"]))
+                status = "FILLED" if cumulative == quantity else "CANCELED" if canceled >= quantity-cumulative else "PARTIALLY_FILLED" if cumulative else "ACKNOWLEDGED"
+                item = {"broker_id":broker_id,"namespace":namespace,"instrument_id":"KRX:"+str(_field(record,fields["symbol"])),
+                        "side":side,"quantity":quantity,"cumulative_quantity":cumulative,"cumulative_notional":str(notional),
+                        "cumulative_fees":str(fees) if fees is not None else None,"observed_at":observed.isoformat(),"first_fill_at":first_fill.isoformat() if first_fill else None,
+                        "fill_time_quality":fill_quality,"fill_session_id":session_date if fields["day_order_fill_session_verified"] else None,
+                        "state":status,"correction": bool(supplement and supplement.get("correction") is True)}
+                with self.state.lock:
+                    revision = self.state.data["observations"].setdefault(key,{"revision":0,"last_observation_hash":None})
+                    fingerprint = digest({key:value for key,value in item.items() if key != "observed_at"})
+                    if fingerprint != revision.get("last_observation_hash"):
+                        revision["revision"] += 1
+                        revision["last_observation_hash"] = fingerprint
+                    item["revision"] = revision["revision"]
+                    self.state.save()
+                normalized.append(item)
+            return {"complete": not errors,"ownership_complete": not errors and ownership_complete,"strategy_quantities":strategy,
+                    "strategy_sellable_quantities": {key:min(quantity,self.last_sellable.get(key,0)) for key,quantity in strategy.items()},
+                    "orders":normalized,"errors":errors,"broker_available_cash":str(self.last_resources)}
+        except (ValueError,KeyError,TypeError,AdapterError) as error:
+            return {"complete":False,"ownership_complete":False,"orders":normalized,
+                    "errors":[getattr(error,"code",str(error) if isinstance(error,ValueError) else "PROVIDER_FIELD_UNVERIFIED")]}
+
+
+class ExternalRuntime:
+    def __init__(self, config, approval, manifest, kis, dart, codex, state, *, clock=utcnow):
+        self.config,self.approval,self.manifest = config,approval,manifest
+        self.kis,self.dart,self.codex,self.state,self.clock = kis,dart,codex,state,clock
+        self.profile = config.research if config.mode != "live" else config.data["strategy"]["strategy"]["live_mandate"]["accepted_risk_policy"]
+        self.calendar = SessionCalendar([Session.model_validate_json(canonical(row)) for row in manifest["calendar"]["sessions"]],
+                                       provenance=manifest["calendar"]["source"],verified=True,synthetic=False)
+        self.broker = KisBrokerPort(kis,manifest,state,clock=clock)
+        self.daily_cache = None
+        self.disclosure_cache = None
+        self.latest_bundle = None
+        self.quote_depth = {}
+        self.collect_lock = threading.RLock()
+
+    def _instruments(self, now):
+        mapping = self.manifest["normalization"]["instruments"]
+        instruments, diagnostics = [], []
+        for board in self.profile["universe"]["boards"]:
+            result = self.kis.read_instruments(board)
+            if result.quality != "COMPLETE":
+                raise HumanRequired("FULL_UNIVERSE_COLLECTION_INCOMPLETE")
+            for row in result.records:
+                ticker = row["symbol"]
+                flags = [row.get(key) for key in ("etp","spac","halted","liquidation","managed","preferred")]
+                codes_known = all(value in mapping["true_codes"]+mapping["false_codes"] for value in flags)
+                true = lambda key: row.get(key) in mapping["true_codes"]
+                kind = "common_stock" if row.get("group") in mapping["common_groups"] and not true("etp") and not true("spac") and not true("preferred") else "excluded_instrument"
+                status = "UNKNOWN" if not codes_known else "HALTED" if true("halted") else "DELISTING" if true("liquidation") else "ADMINISTRATIVE" if true("managed") else "NORMAL"
+                issuer = mapping["issuer_by_symbol"].get(ticker)
+                sector = mapping["sector_by_industry"].get(row.get("industry"))
+                instruments.append(Instrument(instrument_id="KRX:"+ticker,issuer_id=issuer or "UNVERIFIED:"+ticker,
+                    board=board,kind=kind,venue="KRX",sector=sector,status=status,status_verified=codes_known and bool(issuer),
+                    classification_source=mapping["source"],effective_at=result.retrieved_at))
+                if kind != "common_stock" or status != "NORMAL" or not issuer or not sector:
+                    diagnostics.append({"instrument_id":"KRX:"+ticker,"reason":"UNIVERSE_STATUS_OR_CLASSIFICATION_EXCLUDED"})
+        return instruments,diagnostics
+
+    def _bars(self, result, *, index=False):
+        basis = self.manifest["normalization"]["bars"]
+        rows = []
+        for raw in result.records:
+            session_id = date.fromisoformat(str(raw["stck_bsop_date"])).isoformat()
+            session = self.calendar.session(session_id)
+            if session.closes_at > result.retrieved_at:
+                continue
+            names = ("bstp_nmix_hgpr","bstp_nmix_lwpr","bstp_nmix_prpr") if index else ("stck_hgpr","stck_lwpr","stck_clpr")
+            rows.append(DailyBar(session_id=session_id,opens_at=session.opens_at,closes_at=session.closes_at,
+                available_at=result.retrieved_at,high=_decimal(raw[names[0]]),low=_decimal(raw[names[1]]),close=_decimal(raw[names[2]]),
+                turnover=_decimal(raw["acml_tr_pbmn"]),complete=True,adjustment_basis=basis["index_basis"] if index else basis["stock_basis"],
+                ohlc_consistently_adjusted=basis["consistent_ohlc_verified"],source=basis["source"]))
+        return sorted(rows,key=lambda bar:bar.closes_at)
+
+    def _quote(self,instrument):
+        result = self.kis.quote(instrument.instrument_id.removeprefix("KRX:"))
+        if result.quality != "COMPLETE" or len(result.records) != 1:
+            raise ValueError("QUOTE_FETCH_INCOMPLETE")
+        fields = self.manifest["normalization"]["quote"]
+        raw = result.records[0]
+        observed = _timestamp(_field(raw,fields["session_date"]),_field(raw,fields["observed_time"]))
+        session = self.calendar.session(observed.date().isoformat())
+        if not session.opens_at <= observed < session.closes_at:
+            raise ValueError("QUOTE_OBSERVATION_OUTSIDE_SESSION")
+        self.quote_depth[instrument.instrument_id] = {
+            "bid":_quantity(_field(raw,fields["bid_quantity"])) if fields.get("bid_quantity") else 0,
+            "ask":_quantity(_field(raw,fields["ask_quantity"])) if fields.get("ask_quantity") else 0}
+        return Quote(instrument_id=instrument.instrument_id,venue="KRX",observed_at=observed,received_at=result.retrieved_at,
+                     bid=_decimal(_field(raw,fields["bid"])),ask=_decimal(_field(raw,fields["ask"])),source=fields["source"])
+
+    def _events(self,instruments,now):
+        settings = self.manifest["disclosures"]
+        cached = self.state.data.setdefault("disclosure_records",{})
+        last_poll = self.state.data.get("disclosure_last_poll")
+        coverage = self.state.data.get("disclosure_coverage",{})
+        poll_due = last_poll is None or (now-aware_time(last_poll)).total_seconds() >= 180
+        if poll_due:
+            with self.state.lock:
+                start = date.fromisoformat(self.state.data.get("disclosure_cursor_date",settings["start_date"]))
+            # A resumed cursor is never silently truncated; DART range requests are split.
+            result_rows, qualities = [],[]
+            upper = now.astimezone(SEOUL).date()
+            while start <= upper:
+                end = min(upper,start+timedelta(days=89))
+                result = self.dart.list_disclosures(start,end)
+                result_rows.extend(result.records)
+                qualities.append(result.quality)
+                start = end+timedelta(days=1)
+            all_complete = all(quality in {"COMPLETE","COMPLETE_NO_EVENT"} for quality in qualities)
+            quality = "COMPLETE" if result_rows and all_complete else "COMPLETE_NO_EVENT" if all_complete else "PARTIAL"
+            coverage = {instrument.instrument_id:quality for instrument in instruments}
+            verified_events = []
+            if settings.get("verified_events_path"):
+                extraction_path = Path(settings["verified_events_path"])
+                if hashlib.sha256(extraction_path.read_bytes()).hexdigest() != settings.get("verified_events_sha256"):
+                    raise HumanRequired("Official extraction file differs from approved evidence hash")
+                verified_events = _json(extraction_path)["events"]
+            by_receipt = {event["official_id"]:event for event in verified_events}
+            corporation_map = settings["instrument_by_corp_code"]
+            for row in result_rows:
+                instrument_id = corporation_map.get(row["corp_code"])
+                if instrument_id not in coverage:
+                    continue
+                receipt = row["rcept_no"]
+                try:
+                    document = self.dart.read_disclosure(receipt)
+                    if document.quality != "COMPLETE" or not document.records:
+                        raise ValueError("PRIMARY_SOURCE_FETCH_FAILED")
+                    document_hashes = sorted(item["sha256"] for item in document.records)
+                    if receipt in cached and cached[receipt]["document_hashes"] == document_hashes:
+                        continue
+                    first_seen = self.state.data["events"].setdefault(receipt,document.retrieved_at.isoformat())
+                    available = aware_time(first_seen)
+                    old_date = row.get("rcept_dt") and date.fromisoformat(str(row["rcept_dt"])) < available.astimezone(SEOUL).date()
+                    timing = "UNCERTAIN" if old_date else "FIRST_COLLECTED"
+                    uri = "https://dart.fss.or.kr/dsaf001/main.do?rcpNo="+receipt
+                    title = MarketFact(fact_id="dart-title:"+receipt,instrument_id=instrument_id,value=row.get("report_nm",""),unit="official_report_title",
+                        source=uri,content_hash=digest(row),published_at=None,observed_at=document.retrieved_at,available_at=available,quality="VERIFIED")
+                    facts = [title]
+                    documents = {"dart-document:"+receipt+":"+item["sha256"]:{
+                        "fact_id":"dart-document:"+receipt+":"+item["sha256"],"instrument_id":instrument_id,
+                        "receipt_id":receipt,"source":uri,"sha256":item["sha256"],"content":item["content"].decode("utf-8",errors="replace"),
+                        "available_at":available.isoformat(),"interpretation_status":"RAW_OFFICIAL_DOCUMENT"} for item in document.records}
+                    normalized = by_receipt.get(receipt)
+                    if normalized and normalized["source_hash"] in document_hashes:
+                        event = EventRecord.model_validate_json(canonical({**normalized,"available_at":available,"observed_at":document.retrieved_at,"timing_quality":timing}))
+                        if event.instrument_id != instrument_id or set(event.fact_ids) != set(event.facts):
+                            raise ValueError("EXPLICIT_INSTRUMENT_FACT_LINKS_REQUIRED")
+                        for fact_id,value in event.facts.items():
+                            facts.append(MarketFact(fact_id=fact_id,instrument_id=instrument_id,value=value,unit=event.comparison_basis,
+                                source=event.source_uri,content_hash=event.source_hash,published_at=event.published_at,
+                                observed_at=document.retrieved_at,available_at=available,quality="VERIFIED"))
+                        reason = "APPROVED_SOURCE_EXTRACTION"
+                    else:
+                        from .disclosure_parser import parse_official_event
+                        event,parsed_facts,reason = parse_official_event(row,list(document.records),instrument_id,available)
+                        facts.extend(parsed_facts)
+                        if event is not None:
+                            event = event.model_copy(update={"timing_quality":timing,"available_at":available})
+                        else:
+                            event = EventRecord(event_id="dart:"+receipt,instrument_id=instrument_id,official_id=receipt,normalized_key="dart:"+receipt,
+                                family="unclassified",source_uri=uri,source_hash=document_hashes[0],fact_ids=[title.fact_id],facts={"report_title":title.value},
+                                comparison_basis="raw original; unsupported primary template",available_at=available,observed_at=document.retrieved_at,
+                                official=True,primary_source_complete=False,timing_quality=timing,polarity="UNKNOWN")
+                    cached[receipt] = {"event":event.model_dump(mode="json"),"facts":[fact.model_dump(mode="json") for fact in facts],
+                                       "documents":documents,"document_hashes":document_hashes,"parse_reason":reason}
+                except (ValueError,KeyError,AdapterError):
+                    coverage[instrument_id] = "PARTIAL"
+                    all_complete = False
+            with self.state.lock:
+                if all_complete:
+                    self.state.data["disclosure_cursor_date"] = upper.isoformat()
+                self.state.data["disclosure_last_poll"] = now.isoformat()
+                self.state.data["disclosure_coverage"] = coverage
+                self.state.save()
+        held = set()
+        if self.state.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='holdings'").fetchone():
+            held = {row[0] for row in self.state.db.execute("SELECT instrument_id FROM holdings WHERE owner='strategy' AND quantity>0")}
+        current = self.calendar.available_session(now)
+        events,facts,documents = [],[],{}
+        for record in cached.values():
+            event = EventRecord.model_validate_json(canonical(record["event"]))
+            age = self.calendar.event_age(event,current.session_id)
+            if event.instrument_id not in held and not 1 <= age <= self.profile["signal"]["max_event_age_sessions"]:
+                continue
+            events.append(event)
+            facts.extend(MarketFact.model_validate_json(canonical(fact)) for fact in record["facts"])
+            documents.update(record["documents"])
+            if coverage.get(event.instrument_id) == "COMPLETE_NO_EVENT":
+                coverage[event.instrument_id] = "COMPLETE"
+            if not event.primary_source_complete or event.timing_quality == "UNCERTAIN":
+                coverage[event.instrument_id] = "PARTIAL"
+        return events,facts,coverage,documents
+
+    def refresh(self):
+        with self.collect_lock:
+            self.config.assert_current()
+            self.config.require_external("market_read",self.approval)
+            now = self.clock()
+            completed = [session for session in self.calendar.sessions if session.closes_at <= now]
+            if len(completed) < self.profile["universe"]["minimum_completed_bars"]:
+                raise HumanRequired("VERIFIED_CALENDAR_HISTORY_INSUFFICIENT")
+            day = completed[-1].session_id
+            if self.daily_cache is None or self.daily_cache[0] != day:
+                instruments,diagnostics = self._instruments(now)
+                bars,index_bars = {},{}
+                start = completed[-self.profile["universe"]["minimum_completed_bars"]].opens_at.date()
+                end = completed[-1].closes_at.date()
+                for board in self.profile["universe"]["boards"]:
+                    index_bars[board] = self._bars(self.kis.read_index_bars(board,start,end),index=True)
+                expected = [session.session_id for session in completed[-self.profile["universe"]["minimum_completed_bars"]:]]
+                for instrument in instruments:
+                    if instrument.kind != "common_stock" or instrument.status != "NORMAL" or not instrument.status_verified or not instrument.sector:
+                        continue
+                    try:
+                        values = self._bars(self.kis.read_bars(instrument.instrument_id.removeprefix("KRX:"),start,end))
+                        if [bar.session_id for bar in values] != expected:
+                            raise ValueError("DAILY_CALENDAR_COVERAGE_INCOMPLETE")
+                        bars[instrument.instrument_id] = values
+                    except (ValueError,KeyError,AdapterError) as error:
+                        diagnostics.append({"instrument_id":instrument.instrument_id,"reason":getattr(error,"code",str(error))})
+                self.daily_cache = (day,instruments,bars,index_bars,diagnostics)
+            _,instruments,bars,index_bars,diagnostics = self.daily_cache
+            events,facts,coverage,documents = self._events(instruments,self.clock())
+            account = self.broker.snapshot()
+            if account.get("complete") is not True:
+                raise HumanRequired("External account observations incomplete: "+",".join(account.get("errors",[])))
+            managed = {key for key,value in account.get("strategy_quantities",{}).items() if value}
+            working = {row["instrument_id"] for row in account.get("orders",[]) if row["state"] not in {"FILLED","CANCELED","REJECTED"}}
+            current = self.calendar.active(self.clock())
+            recent = set()
+            if current:
+                for event in events:
+                    if (event.official and event.primary_source_complete and not event.withdrawn and
+                            event.family in self.profile["signal"]["event_families"] and
+                            1 <= self.calendar.event_age(event,current.session_id) <= self.profile["signal"]["max_event_age_sessions"]):
+                        recent.add(event.instrument_id)
+            quotes = []
+            for instrument in instruments:
+                if instrument.instrument_id not in bars:
+                    continue
+                try:
+                    features = calculate_features(bars[instrument.instrument_id],index_bars[instrument.board],
+                        instrument_id=instrument.instrument_id,board=instrument.board,as_of=self.clock(),research_profile=self.profile)
+                    # All instruments get deterministic screening; only qualified candidates
+                    # and managed/working positions consume the live quote budget.
+                    eligible = (instrument.instrument_id in recent and
+                                features.adtv20 >= Decimal(self.profile["universe"]["minimum_adtv_krw"]) and
+                                features.close > features.sma60 and features.sma20 >= features.sma20_five_sessions_ago and
+                                features.rs20 > 0 and features.index_close >= features.index_sma60)
+                    if not eligible and instrument.instrument_id not in managed|working:
+                        continue
+                    quotes.append(self._quote(instrument))
+                except (ValueError,KeyError,AdapterError) as error:
+                    diagnostics.append({"instrument_id":instrument.instrument_id,"reason":getattr(error,"code",str(error))})
+            now = self.clock()
+            ticks = self.manifest["ticks"]
+            data = {"provenance":"VERIFIED_EXTERNAL_OBSERVATIONS","as_of":now.isoformat(),"account_identity":self.manifest["bootstrap"]["account_identity"],
+                "broker_available_cash":account["broker_available_cash"],"sector_classification_verified":True,
+                "sessions":[session.model_dump(mode="json") for session in self.calendar.sessions],"calendar_source":self.manifest["calendar"]["source"],
+                "calendar_verified":True,"tick_bands":ticks["bands"],"tick_source":ticks["source"],"ticks_verified":True,
+                "tick_effective_at":ticks["effective_at"],"tick_expires_at":ticks["expires_at"],"costs":self.manifest["costs"],
+                "instruments":[item.model_dump(mode="json") for item in instruments],"quotes":[item.model_dump(mode="json") for item in quotes],
+                "bars":{key:[bar.model_dump(mode="json") for bar in values] for key,values in bars.items()},
+                "index_bars":{key:[bar.model_dump(mode="json") for bar in values] for key,values in index_bars.items()},
+                "events":[event.model_dump(mode="json") for event in events],"facts":[fact.model_dump(mode="json") for fact in facts],
+                "coverage":coverage,"runtime_diagnostics":diagnostics,"raw_documents":documents,"account_snapshot":account,
+                "quote_depth":self.quote_depth,"strategy_sellable_quantities":account.get("strategy_sellable_quantities",{})}
+            bundle = MarketBundle(data,self.profile,mode=self.config.mode)
+            quoted = set(bundle.quotes)
+            bundle.candidates = [candidate for candidate in bundle.candidates if candidate.instrument.instrument_id in quoted]
+            bundle.exclusions.extend(diagnostics)
+            self.latest_bundle = bundle
+            if isinstance(self.broker,PaperBrokerPort):
+                paper = self.broker.snapshot()
+                bundle.data.update(account_snapshot=paper,broker_available_cash=paper["broker_available_cash"],
+                                   strategy_sellable_quantities=paper["strategy_sellable_quantities"])
+            return bundle
+
+    def decide(self,frozen):
+        self.config.require_external("model_call",self.approval)
+        store = getattr(self.broker,"store",None)
+        if store is None:
+            raise AdapterError("MODEL_JOURNAL_STORE_UNBOUND")
+        enriched = dict(frozen)
+        ids = sorted({item["instrument"]["instrument_id"] for item in frozen["candidates"]} |
+                     set(frozen["reviewed_positions"]) | {item["instrument_id"] for item in frozen["theses"]} |
+                     {item["instrument_id"] for name in ("holdings","pending_entries") for item in frozen["portfolio"].get(name,[])})
+        documents = self.latest_bundle.data.get("raw_documents",{}) if self.latest_bundle else {}
+        documents = {key:value for key,value in documents.items() if value["instrument_id"] in ids}
+        enriched["tool_records"] = {
+            "events":{event["event_id"]:event for event in frozen["events"]},
+            "facts":{**{fact["fact_id"]:fact for fact in frozen["facts"]},**documents},
+            "candidates":{item["instrument"]["instrument_id"]:item for item in frozen["candidates"]},
+            "theses":{item["thesis_id"]:item for item in frozen["theses"]},"bars":{},"official_evidence":{}}
+        if self.latest_bundle:
+            enriched["tool_records"]["bars"] = {key:[dict(bar.model_dump(mode="json"),date=bar.session_id) for bar in values]
+                                                 for key,values in self.latest_bundle.bars.items() if key in ids}
+        enriched["tool_scope"] = {"instrument_ids":ids,"start":self.calendar.sessions[0].session_id,
+                                  "end":self.clock().date().isoformat(),"official_domains":["dart.fss.or.kr",*self.config.app["market"]["official_ir_domains"]]}
+        started_at = self.clock()
+        call_id = str(uuid4())
+        attempt_root = self.config.state_dir/"model-attempts"/call_id
+        def validate_at_completion(value):
+            completed_at = self.clock()
+            return validate_proposal(value,frozen,current_account_version=frozen["portfolio"]["account_state_version"],
+                current_facts_hash=digest([frozen["events"],frozen["facts"]]),completed_at=completed_at,now=completed_at)
+        result = self.codex.run(enriched,DecisionProposal.model_json_schema(),attempt_root=attempt_root,
+            prompt=(ROOT/"prompts/portfolio_decision.md").read_text(),validate_schema=lambda value:DecisionProposal.model_validate(value),
+            validate_semantic=validate_at_completion,
+            expires_at=started_at+timedelta(seconds=self.config.app["model"]["timeout_seconds"]+self.profile["orders"]["decision_max_age_seconds"]))
+        attempts = []
+        for path in sorted(attempt_root.glob("*/result.json"),key=lambda item:(item.stat().st_mtime_ns,str(item))):
+            record = _json(path)
+            attempts.append({"attempt_id":path.parent.name,"status":record["status"],"usage":record.get("usage"),
+                             "input_sha256":record["input_sha256"],"provenance":record.get("provenance")})
+        metadata = {"call_id":call_id,"input_snapshot_id":frozen["input_snapshot_id"],"model_id":self.codex.model_id,
+                    "provider":"codex_cli","reasoning_effort":self.codex.reasoning_effort}
+        with store.transaction():
+            for index,attempt in enumerate(attempts,1):
+                store.event(frozen["run_id"],"MODEL_ATTEMPT",{**metadata,**attempt,"record_type":"MODEL_ATTEMPT",
+                    "attempt_number":index,"usage_scope":"attempt"})
+            store.event(frozen["run_id"],"MODEL_OUTCOME",{**metadata,"record_type":"MODEL_OUTCOME","status":result.status,
+                "attempt_count":result.attempts,"usage":result.usage,"usage_scope":"last_attempt",
+                "reset_at":result.reset_at.isoformat() if result.reset_at else None,
+                "started_at":started_at.isoformat(),"completed_at":self.clock().isoformat()})
+        if result.status != "SUCCESS":
+            raise AdapterError("MODEL_"+result.status)
+        return result.decision.model_dump(mode="json") if hasattr(result.decision,"model_dump") else result.decision
+
+
+class PaperBrokerPort:
+    """Persisted quote-constrained simulation, using subsequent observations only."""
+    environment = "paper"
+
+    def __init__(self,runtime):
+        self.runtime,self.state = runtime,runtime.state
+        with self.state.lock:
+            self.state.data.setdefault("paper",{"orders":{},"quantities":{},"cash":runtime.profile["capital_krw"]})
+            self.state.save()
+
+    def bind_store(self,store):
+        self.store = store
+
+    def submit(self,intent):
+        now = self.runtime.clock()
+        identifier = digest([intent["plan_id"],intent["side"],intent.get("plan_revision",1)])
+        namespace = "paper:"+self.runtime.manifest["account_alias"]
+        with self.state.lock:
+            self.state.data["paper"]["orders"].setdefault(identifier,{
+                **intent,"broker_id":identifier,"namespace":namespace,"state":"ACKNOWLEDGED",
+                "created_at":now.isoformat(),"cumulative_quantity":0,"cumulative_notional":"0","cumulative_fees":"0",
+                "observed_at":now.isoformat(),"revision":0,"last_quote_at":None,
+                "first_fill_at":None,"fill_time_quality":"UNKNOWN","fill_session_id":None})
+            self.state.save()
+        return {"status":"ACKNOWLEDGED","broker_id":identifier,"namespace":namespace}
+
+    def cancel(self,request):
+        with self.state.lock:
+            order = self.state.data["paper"]["orders"][request["broker_id"]]
+            if order["namespace"] != request["namespace"]:
+                raise ValueError("PAPER_ORDER_NAMESPACE_MISMATCH")
+            order["state"] = "CANCELED"
+            order["revision"] += 1
+            self.state.save()
+        return {"status":"ACKNOWLEDGED"}
+
+    def snapshot(self):
+        bundle,now = self.runtime.latest_bundle,self.runtime.clock()
+        costs = CostSchedule.model_validate_json(canonical(self.runtime.manifest["costs"]))
+        with self.state.lock:
+            ledger = self.state.data["paper"]
+            for order in ledger["orders"].values():
+                if bundle is None or order["state"] not in {"ACKNOWLEDGED","PARTIALLY_FILLED"}:
+                    continue
+                quote = bundle.quotes.get(order["instrument_id"])
+                if (quote is None or not quote.valid or quote.observed_at <= aware_time(order["created_at"]) or
+                        order["last_quote_at"] == quote.observed_at.isoformat() or
+                        not 0 <= (now-quote.observed_at).total_seconds() <= self.runtime.profile["orders"]["quote_max_age_seconds"]):
+                    continue
+                if order["expires_at"] and now >= aware_time(order["expires_at"]):
+                    continue
+                buy = order["side"] == "BUY"
+                raw_price = quote.ask if buy else quote.bid
+                if raw_price is None:
+                    continue
+                price = raw_price+slippage(costs,1,raw_price,"BUY") if buy else raw_price-slippage(costs,1,raw_price,"SELL")
+                if price <= 0 or buy and price > Decimal(order["limit_price"]):
+                    continue
+                available = bundle.data["quote_depth"].get(order["instrument_id"],{}).get("ask" if buy else "bid",0)
+                quantity = min(order["quantity"]-order["cumulative_quantity"],available)
+                if not buy:
+                    quantity = min(quantity,ledger["quantities"].get(order["instrument_id"],0))
+                if not quantity:
+                    continue
+                cumulative = order["cumulative_quantity"]+quantity
+                cumulative_notional = Decimal(order["cumulative_notional"])+quantity*price
+                average = cumulative_notional/cumulative
+                cumulative_fees = buy_commission(costs,cumulative,average) if buy else sell_cost(costs,cumulative,average)
+                fees = cumulative_fees-Decimal(order["cumulative_fees"])
+                cash = Decimal(ledger["cash"])
+                if buy and price*quantity+fees > cash:
+                    continue
+                order.update(cumulative_quantity=cumulative,cumulative_notional=str(cumulative_notional),
+                             cumulative_fees=str(cumulative_fees),revision=order["revision"]+1,
+                             observed_at=quote.observed_at.isoformat(),last_quote_at=quote.observed_at.isoformat(),
+                             state="FILLED" if cumulative == order["quantity"] else "PARTIALLY_FILLED",
+                             first_fill_at=order["first_fill_at"] or quote.observed_at.isoformat(),fill_time_quality="EXACT",
+                             fill_session_id=quote.observed_at.astimezone(SEOUL).date().isoformat())
+                ledger["quantities"][order["instrument_id"]] = ledger["quantities"].get(order["instrument_id"],0)+(quantity if buy else -quantity)
+                ledger["cash"] = str(cash-quantity*price-fees if buy else cash+quantity*price-fees)
+            self.state.save()
+            return {"complete":True,"ownership_complete":True,"orders":list(ledger["orders"].values()),
+                    "strategy_quantities":dict(ledger["quantities"]),"broker_available_cash":ledger["cash"],
+                    "strategy_sellable_quantities":dict(ledger["quantities"]),"provenance":"PAPER_QUOTE_CONSTRAINED_SIMULATION"}
+
+
+class ShadowBrokerPort(KisBrokerPort):
+    environment = None
+
+    def __init__(self,*args,**kwargs):
+        super().__init__(*args,**kwargs)
+        self.environment = None
+
+    def submit(self,_intent):
+        raise HumanRequired("SHADOW_BROKER_MUTATION_FORBIDDEN")
+
+    def cancel(self,_request):
+        raise HumanRequired("SHADOW_BROKER_MUTATION_FORBIDDEN")
+
+
+def build_external_runtime(config,trusted_approval,*,kis_transport=None,dart_transport=None,
+                           model_runner=None,env=None,clock=utcnow):
+    """Return (MarketBundle, broker port, decision callback, refresh callback).
+
+    The optional transports/runner are injection points for contract tests, not
+    authority bypasses. Every injected operation still checks the trusted grant.
+    """
+    for capability in ("account_read","market_read","disclosure_read","model_call"):
+        config.require_external(capability,trusted_approval)
+    path = config.app["broker"]["capability_manifest"]
+    if not path:
+        raise HumanRequired("Verified runtime capability manifest is not configured")
+    path = Path(path)
+    path = path if path.is_absolute() else config.directory/path
+    manifest = _json(path)
+    expected = trusted_approval["operational_evidence"].get("runtime_manifest_sha256")
+    if expected != hashlib.sha256(path.read_bytes()).hexdigest():
+        raise HumanRequired("Runtime manifest is not bound to the trusted approval")
+    required = {"schema_version","source","verified","account_alias","environment","effective_at","expires_at",
+                "credentials","calendar","ticks","costs","normalization","bootstrap","model","disclosures","rate_limit"}
+    if set(manifest) != required or manifest["schema_version"] != 1 or manifest["verified"] is not True or not manifest["source"]:
+        raise HumanRequired("Runtime manifest contract/source is incomplete")
+    now = clock()
+    if (manifest["account_alias"] != config.app["app"]["account_alias"] or
+            manifest["environment"] != config.app["broker"]["environment"] or
+            not aware_time(manifest["effective_at"]) <= now < aware_time(manifest["expires_at"])):
+        raise HumanRequired("Runtime manifest account/environment/validity mismatch")
+    if config.mode == "live" and manifest["environment"] != "real" or config.mode == "broker_demo" and manifest["environment"] != "demo":
+        raise HumanRequired("Runtime mode/environment mismatch")
+    for section in ("calendar","ticks"):
+        if manifest[section].get("verified") is not True or not manifest[section].get("source"):
+            raise HumanRequired("Unverified "+section+" source")
+    calendar_reference = config.app["market"]["calendar_manifest"]
+    if not calendar_reference:
+        raise HumanRequired("Calendar manifest reference is not configured")
+    calendar_path = Path(calendar_reference)
+    calendar_value = _json(calendar_path if calendar_path.is_absolute() else config.directory/calendar_path)
+    if digest(calendar_value.get("calendar",calendar_value)) != digest(manifest["calendar"]):
+        raise HumanRequired("Calendar reference differs from approved runtime calendar")
+    bars = manifest["normalization"]["bars"]
+    if bars.get("consistent_ohlc_verified") is not True or not bars.get("source") or bars.get("price_returns_only") is not True:
+        raise HumanRequired("Point-in-time OHLC/index adjustment basis is unverified")
+    if type(manifest["normalization"]["orders"].get("day_order_fill_session_verified")) is not bool:
+        raise HumanRequired("Day-order fill-session verification must be an explicit boolean")
+    costs = CostSchedule.model_validate_json(canonical(manifest["costs"]))
+    if not costs.verified or costs.synthetic or costs.account_alias != manifest["account_alias"] or not costs.effective_at <= now < costs.expires_at:
+        raise HumanRequired("External cost contract is unverified or out of scope")
+    bootstrap = manifest["bootstrap"]
+    if bootstrap.get("ownership_verified") is not True or not bootstrap.get("source"):
+        raise HumanRequired("Strategy/manual ownership bootstrap is unverified")
+    if bootstrap.get("strategy_quantities") and not (config.state_dir/"state.sqlite").exists():
+        raise HumanRequired("Nonempty strategy bootstrap requires an approved ledger/thesis import")
+    policy = config.research if config.mode != "live" else config.data["strategy"]["strategy"]["live_mandate"]["accepted_risk_policy"]
+    if not policy or _decimal(bootstrap["strategy_cash"]) != _decimal(policy["capital_krw"]):
+        raise HumanRequired("Approved strategy cash and active capital policy do not match")
+    model_settings = config.app["model"]
+    if not all(model_settings.get(key) for key in ("model_id","reasoning_effort","auth_mode")):
+        raise HumanRequired("Approved runtime model/effort/auth mode is unset")
+    executable = shutil.which(model_settings["executable"])
+    if not executable:
+        raise HumanRequired("Approved model executable is missing")
+    executable_hash = hashlib.sha256(Path(executable).read_bytes()).hexdigest()
+    isolation = manifest["model"]
+    if isolation.get("isolation_verified") is not True or isolation.get("executable_sha256") != executable_hash or not isolation.get("source"):
+        raise HumanRequired("Model isolation evidence does not match the executable")
+    environment = os.environ if env is None else env
+    def secret(name):
+        if not isinstance(name,str) or not re.fullmatch(r"[A-Z][A-Z0-9_]*",name) or not environment.get(name):
+            raise HumanRequired("An explicitly named runtime credential is unavailable")
+        return environment[name]
+    # Environment access occurs only after source, policy and authorization checks.
+    account_reference = secret(config.app["broker"]["account_ref_env"])
+    if not re.fullmatch(r"\d{8}-\d{2}",account_reference):
+        raise HumanRequired("Account reference must contain approved account/product components")
+    account,product = account_reference.split("-")
+    credentials = KisCredentials(account=account,product=product,app_key=secret(config.app["broker"]["app_key_env"]),
+        app_secret=secret(config.app["broker"]["app_secret_env"]),token=secret(manifest["credentials"]["token_env"]))
+    def authorize(operation,_environment=None):
+        capability = {"broker_read":"account_read","market_read":"market_read","disclosure_read":"disclosure_read",
+                      "broker_write":"live_orders" if config.mode == "live" else "demo_orders"}[operation]
+        config.require_external(capability,trusted_approval)
+    origins = {BASE_URLS[manifest["environment"]],MASTER_ORIGIN}
+    kis_transport = kis_transport or http_transport(allowed_origins=origins,network_enabled=True)
+    rate = manifest["rate_limit"]
+    if rate.get("verified") is not True or not rate.get("source"):
+        raise HumanRequired("Approved rate/monitor budget is unavailable")
+    kis_transport = PriorityTransport(kis_transport,minimum_interval_seconds=rate["minimum_interval_seconds"],
+                                      maximum_queue_seconds=rate["maximum_queue_seconds"])
+    kis = KisAdapter(environment=manifest["environment"],credentials=credentials,transport=kis_transport,mode=config.mode,authorize=authorize)
+    dart = DartAdapter(api_key=secret(config.app["market"]["dart_key_env"]),mode=config.mode,authorize=authorize,
+        official_ir_domains=config.app["market"]["official_ir_domains"],
+        transport=dart_transport or http_transport(allowed_origins={ORIGIN,*("https://"+host for host in config.app["market"]["official_ir_domains"])},network_enabled=True))
+    state = RuntimeState(config.state_dir/"state.sqlite")
+    def persist_circuit(circuit):
+        with state.lock:
+            state.data["circuit"] = circuit
+            state.save()
+    def model_authorize(_operation,model,effort,auth_mode):
+        config.require_external("model_call",trusted_approval)
+        if (model,effort,auth_mode) != (model_settings["model_id"],model_settings["reasoning_effort"],model_settings["auth_mode"]):
+            raise HumanRequired("Runtime model identity changed")
+    codex = CodexAdapter(executable=executable,model_id=model_settings["model_id"],reasoning_effort=model_settings["reasoning_effort"],
+        auth_mode=model_settings["auth_mode"],auth_home=secret(isolation["auth_home_env"]),mode=config.mode,authorize=model_authorize,
+        timeout_seconds=model_settings["timeout_seconds"],runner=model_runner,circuit_state=state.data["circuit"],persist_circuit=persist_circuit,
+        isolation_probe=lambda current: str(Path(current).resolve()) == str(Path(executable).resolve()) and hashlib.sha256(Path(current).read_bytes()).hexdigest() == executable_hash)
+    runtime = ExternalRuntime(config,trusted_approval,manifest,kis,dart,codex,state,clock=clock)
+    if config.mode == "paper":
+        runtime.broker = PaperBrokerPort(runtime)
+    elif config.mode == "shadow":
+        runtime.broker = ShadowBrokerPort(kis,manifest,state,clock=clock)
+    bundle = runtime.refresh()
+    return bundle,runtime.broker,runtime.decide,runtime.refresh

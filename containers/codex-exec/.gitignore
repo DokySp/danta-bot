@@ -1,0 +1,5 @@
+/secrets.env
+/secrets/
+/var/
+*.sqlite*
+auth.json

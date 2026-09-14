@@ -1,0 +1,14 @@
+{
+  "synthetic": true,
+  "provenance": "Synthetic strategy regression fixture; dates are artificial weekday sessions, prices and zero fee rates are invented. Never a live calendar or fee contract.",
+  "calendar_start": "2026-01-05",
+  "calendar_sessions": 165,
+  "completed_bars": 120,
+  "instrument_id": "TEST:AAA",
+  "initial_price": "10000",
+  "price_increment": "5",
+  "high_above_close": "100",
+  "low_below_close": "200",
+  "daily_turnover": "5000000000",
+  "tick_bands": [["0", "1"]]
+}

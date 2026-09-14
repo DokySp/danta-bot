@@ -1,0 +1,64 @@
+schema_version: 1
+app:
+  name: codex-exec
+  timezone: Asia/Seoul
+  mode: offline
+  account_alias: null
+  state_dir: ./var/offline/research
+  listen_host: 127.0.0.1
+  listen_port: 8080
+model:
+  provider: codex_cli
+  executable: codex
+  model_id: null
+  reasoning_effort: null
+  auth_mode: null
+  timeout_seconds: 180
+  transient_retries: 1
+  retry_delay_seconds: 5
+  schema_repair_attempts: 1
+  auto_fallback: false
+  isolation_profile: market_tools_only
+  quota_unknown_reset: require_operator
+broker:
+  provider: kis
+  environment: null
+  account_ref_env: KIS_ACCOUNT_REF
+  app_key_env: KIS_APP_KEY
+  app_secret_env: KIS_APP_SECRET
+  capability_manifest: null
+  rate_limit_profile: null
+market:
+  disclosures: opendart
+  dart_key_env: DART_API_KEY
+  official_ir_domains: []
+  calendar_manifest: null
+  corporate_action_source: null
+  require_complete_account: true
+execution:
+  enabled: false
+  single_writer: true
+  unknown_submission: reconcile_then_human
+  live_requires_trusted_approval: true
+monitoring:
+  enabled: false
+  quote_poll_fallback_seconds: 5
+  order_poll_active_seconds: 5
+  account_poll_idle_seconds: 60
+  degraded_action: block_new_risk_and_alert
+telegram:
+  enabled: false
+  gateway_url_env: TELEGRAM_GATEWAY_URL
+  route: null
+  allowed_sender_ids: []
+  allowed_chat_ids: []
+  trusted_peer_profile: null
+  ingress_enabled: false
+storage:
+  backend: sqlite
+  require_local_filesystem: true
+  raw_log_retention_days: null
+observability:
+  redact_secrets: true
+  record_attempt_usage: true
+  emit_structured_events: true

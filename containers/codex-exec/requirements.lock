@@ -1,0 +1,9 @@
+annotated-types==0.8.0
+markdown-it-py==4.2.0
+mdurl==0.1.2
+pydantic==2.13.5
+pydantic_core==2.46.5
+PyYAML==6.0.3
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+setuptools==80.9.0
