@@ -7,6 +7,7 @@ import socket
 import tempfile
 import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from decimal import Decimal as D
 from pathlib import Path
@@ -96,6 +97,148 @@ class EngineCase(unittest.TestCase):
         strategy_file.write_text(strategy_file.read_text().replace('entry_risk_fraction: "0.0025"', 'entry_risk_fraction: "1.01"'))
         with self.assertRaises(ConfigurationError):
             load_config(self.config_dir)
+
+    def test_final_dispatch_rechecks_pause_account_cash_and_quote(self):
+        for change, reason in [("pause", "NEW_RISK_PAUSED"), ("version", "STALE_ACCOUNT_VERSION"),
+                               ("cash", "CURRENT_PORTFOLIO_LIMIT"), ("quote", "MONITOR_DEGRADED")]:
+            with self.subTest(change=change):
+                app = Application(self.config, MarketBundle(json.loads(canonical(self.data)), self.config.research, mode="offline"))
+                try:
+                    original, calls = app.executor.authorize, []
+                    def authorize(intent, operation):
+                        calls.append(operation)
+                        if len(calls) == 2:
+                            if change == "pause":
+                                app.pause()
+                            elif change == "version":
+                                with app.store.transaction():
+                                    app.store.bump_version()
+                            elif change == "cash":
+                                app.bundle.data["broker_available_cash"] = "0"
+                            else:
+                                app.bundle.now += timedelta(seconds=app.profile["orders"]["quote_max_age_seconds"] + 1)
+                        original(intent, operation)
+                    app.executor.authorize = authorize
+                    with self.assertRaisesRegex(ValueError, reason):
+                        app.review()
+                    self.assertEqual(app.broker.submissions, 0)
+                    self.assertEqual(app.store.reservation(), 0)
+                    self.assertEqual(app.store.db.execute("SELECT state FROM intents").fetchone()[0], "INVALIDATED")
+                finally:
+                    app.close()
+                    shutil.rmtree(self.config.state_dir)
+
+    def test_protection_retries_known_rejection_with_new_revision_and_fast_refresh(self):
+        app = Application(self.config, self.bundle)
+        try:
+            app.review()
+            held = app.store.quantity("TEST:AAA")
+            quote = app.bundle.quotes["TEST:AAA"]
+            app.bundle.quotes["TEST:AAA"] = quote.model_copy(update={"bid": app.theses()[0].current_stop - 1})
+            app.refresh = lambda: self.fail("Protection must not wait for DART/full collection")
+            fast_calls = []
+            def refresh_protection():
+                fast_calls.append(True)
+                return app.bundle
+            app.protection_refresh = refresh_protection
+            original, attempts = app.broker.submit, []
+            def submit(intent):
+                attempts.append(intent)
+                return {"status": "REJECTED"} if len(attempts) == 1 else original(intent)
+            app.broker.submit = submit
+            app.protect()
+            app.protect()
+            app.protect()
+            self.assertEqual([item["plan_revision"] for item in attempts], [1, 2])
+            self.assertEqual([item["quantity"] for item in attempts], [held, held])
+            self.assertGreaterEqual(len(fast_calls), 5)  # monitor plus SELL preflight
+            pending = app.store.working("TEST:AAA")
+            self.assertEqual(len(pending), 1)
+            app.broker.fill(pending[0]["broker_id"], held, app.bundle.quotes["TEST:AAA"].bid, D(1), app.bundle.now)
+            app.reconcile()
+            self.assertEqual(app.store.quantity("TEST:AAA"), 0)
+        finally:
+            app.close()
+
+    def test_protection_never_retries_unknown_submission(self):
+        app = Application(self.config, self.bundle)
+        try:
+            app.review()
+            app.bundle.quotes["TEST:AAA"] = app.bundle.quotes["TEST:AAA"].model_copy(update={"bid": app.theses()[0].current_stop - 1})
+            with patch.object(app.broker, "submit", return_value={"status": "UNKNOWN"}) as submit:
+                app.protect()
+                app.protect()
+                self.assertEqual(submit.call_count, 1)
+                self.assertEqual(app.store.working("TEST:AAA")[0]["state"], "UNKNOWN")
+        finally:
+            app.close()
+
+    def test_slow_entry_preflight_does_not_block_reconciliation_or_pause(self):
+        ex = self.executor()
+        intent = self.intent(ex)
+        entered, release, done = threading.Event(), threading.Event(), threading.Event()
+        errors = []
+        def preflight(*_):
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError("test preflight was not released")
+        ex.preflight = preflight
+        def submit():
+            try:
+                ex.submit(intent, self.bundle.now)
+            except Exception as error:
+                errors.append(str(error))
+        def protect():
+            ex.reconcile()
+            with ex.store.transaction():
+                ex.store.set("paused", True)
+                ex.store.bump_version()
+            done.set()
+        sender = threading.Thread(target=submit)
+        monitor = threading.Thread(target=protect)
+        try:
+            sender.start()
+            self.assertTrue(entered.wait(2))
+            monitor.start()
+            self.assertTrue(done.wait(2), "Protection/reconciliation waited for entry collection")
+        finally:
+            release.set()
+            sender.join(5)
+            if monitor.ident:
+                monitor.join(5)
+        self.assertFalse(sender.is_alive() or monitor.is_alive())
+        self.assertEqual(errors, ["NEW_RISK_PAUSED"])
+        self.assertEqual(ex.broker.submissions, 0)
+        self.assertEqual(ex.store.reservation(), 0)
+
+    def test_review_summary_uses_persisted_rejected_unknown_and_not_sent_states(self):
+        for response, state in [("REJECTED", "REJECTED"), ("UNKNOWN", "UNKNOWN"), ("NOT_SENT", "INVALIDATED")]:
+            with self.subTest(response=response):
+                app = Application(self.config, self.bundle)
+                try:
+                    with patch.object(app.broker, "submit", return_value={"status": response}):
+                        result = app.review()
+                    self.assertEqual(result["order_status"], state)
+                    self.assertEqual(result["order_states"], {state: 1})
+                    self.assertEqual(app.store.quantity("TEST:AAA"), 0)
+                    self.assertEqual(app.store.db.execute("SELECT state FROM intents").fetchone()[0], state)
+                    report = next(self.config.state_dir.glob("runs/*/*/summary.json"))
+                    self.assertEqual(json.loads(report.read_text())["order_status"], state)
+                finally:
+                    app.close()
+                    shutil.rmtree(self.config.state_dir)
+
+    def test_concurrent_preflights_reserve_and_submit_same_intent_once(self):
+        ex = self.executor()
+        intent = self.intent(ex)
+        gate = threading.Barrier(2)
+        ex.preflight = lambda *_: gate.wait(timeout=3)
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            futures = [workers.submit(ex.submit, intent, self.bundle.now) for _ in range(2)]
+            orders = [future.result(timeout=5) for future in futures]
+        self.assertEqual([order["id"] for order in orders], [intent.id, intent.id])
+        self.assertEqual(ex.broker.submissions, 1)
+        self.assertEqual(ex.store.reservation(), intent.reserve_cash)
 
     def test_stale_and_missing_holding_quote_never_certify_nav_or_disable_clock(self):
         app = Application(self.config, self.bundle)

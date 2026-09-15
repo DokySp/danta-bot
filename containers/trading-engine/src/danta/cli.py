@@ -58,7 +58,8 @@ def make_application(config, args):
     config.require_external("account_read", approval)
     from .runtime import build_external_runtime
     bundle, broker, decide, refresh = build_external_runtime(config, approval)
-    return Application(config, bundle, broker=broker, decide=decide, refresh=refresh, approval=approval)
+    return Application(config, bundle, broker=broker, decide=decide, refresh=refresh,
+                       protection_refresh=refresh.__self__.refresh_protection, approval=approval)
 
 
 def main(argv=None) -> int:

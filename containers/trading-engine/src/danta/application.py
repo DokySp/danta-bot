@@ -100,8 +100,10 @@ class Application:
     def __init__(self, config: Config, bundle: MarketBundle, *, broker=None,
                  decide: Callable[[dict], dict] | None = None, approval: dict | None = None,
                  refresh: Callable[[], MarketBundle] | None = None,
+                 protection_refresh: Callable[[], MarketBundle] | None = None,
                  clock: Callable[[], datetime] | None = None):
         self.config, self.bundle, self.approval, self.refresh = config, bundle, approval, refresh
+        self.protection_refresh = protection_refresh
         self.clock = clock or ((lambda: self.bundle.now) if bundle.synthetic else
                                getattr(getattr(decide, "__self__", None), "clock", utcnow))
         self.profile = config.research if config.mode != "live" else config.data["strategy"]["strategy"]["live_mandate"]["accepted_risk_policy"]
@@ -116,7 +118,8 @@ class Application:
             account_identity=bundle.data["account_identity"], initial_cash=Decimal(self.profile["capital_krw"]))
         if hasattr(self.broker, "bind_store"):
             self.broker.bind_store(self.store)
-        self.executor = Executor(self.store, self.broker, mode=config.mode, authorize=self._authorize, preflight=self._preflight)
+        self.executor = Executor(self.store, self.broker, mode=config.mode, authorize=self._authorize,
+                                 preflight=self._preflight, validate=self._validate_order)
         self.concentration = ConcentrationMonitor(self.store.get("concentration_state", {}))
         self.drawdown = DrawdownCircuit()
         self.monitor_stop = threading.Event()
@@ -145,8 +148,19 @@ class Application:
             raise HumanRequired("Trusted operator activation required")
 
     def _preflight(self, intent: OrderIntent, now: datetime) -> None:
-        if self.refresh is not None:
-            self.bundle = self.refresh()
+        refresh = (self.protection_refresh or self.refresh) if intent.side == "SELL" else self.refresh
+        if refresh is not None:
+            self.bundle = refresh()
+            if "account_snapshot" in self.bundle.data:
+                with self.executor.dispatch_lock:
+                    if self.store.get("account_version") != intent.account_version:
+                        raise ValueError("STALE_ACCOUNT_VERSION")
+                    self.executor.reconcile(self.bundle.data["account_snapshot"])
+                    self._sync_theses()
+        self._validate_order(intent, now)
+
+    def _validate_order(self, intent: OrderIntent, now: datetime) -> None:
+        """Pure current-state checks, also run under the executor's dispatch boundary."""
         now = max(now, self.bundle.now, self.clock())
         if intent.side == "BUY" and now >= intent.expires_at:
             raise ValueError("ENTRY_EXPIRED")
@@ -167,7 +181,7 @@ class Application:
                 raise ValueError("STALE_DECISION:" + gate.reason)
             thesis = next(item for item in self.theses() if item.thesis_id == intent.thesis_id)
             capped_quote = quote.model_copy(update={"ask": intent.limit_price})
-            current_size = size_entry(candidate, capped_quote, thesis.initial_stop, self.portfolio(), self.bundle.costs, now, self.profile)
+            current_size = size_entry(candidate, capped_quote, thesis.initial_stop, self.portfolio(exclude_intent_id=intent.id), self.bundle.costs, now, self.profile)
             if current_size.quantity < intent.quantity:
                 raise ValueError("CURRENT_PORTFOLIO_LIMIT:" + current_size.reason)
         else:
@@ -182,7 +196,7 @@ class Application:
     def theses(self) -> list[InvestmentThesis]:
         return [InvestmentThesis.model_validate_json(row[0]) for row in self.store.db.execute("SELECT payload FROM theses")]
 
-    def portfolio(self) -> PortfolioSnapshot:
+    def portfolio(self, *, exclude_intent_id: str | None = None) -> PortfolioSnapshot:
         bundle = self.bundle
         theses = {thesis.thesis_id: thesis for thesis in self.theses()}
         holdings, market_complete = [], True
@@ -199,7 +213,7 @@ class Application:
                 first_fill_session=thesis.first_fill_session, reduced=thesis.reduced_quantity > 0))
         pending = []
         for row in self.store.working():
-            if row["side"] == "BUY":
+            if row["side"] == "BUY" and row["id"] != exclude_intent_id:
                 instrument = bundle.instruments[row["instrument_id"]]
                 remaining = row["quantity"] - row["cumulative_quantity"]
                 pending.append(PendingEntry(instrument_id=instrument.instrument_id, issuer_id=instrument.issuer_id, sector=instrument.sector,
@@ -254,8 +268,12 @@ class Application:
 
     def protect(self) -> list[dict]:
         """Called independently of the review thread and model quota circuit."""
-        if self.refresh:
-            self.bundle = self.refresh()
+        refresh = self.protection_refresh or self.refresh
+        if refresh:
+            self.bundle = refresh()
+            if "account_snapshot" in self.bundle.data:
+                self.executor.reconcile(self.bundle.data["account_snapshot"])
+                self._sync_theses()
         bundle, results = self.bundle, []
         snapshot = self.portfolio()
         self.record_nav()
@@ -297,14 +315,26 @@ class Application:
                 if opposite:
                     self.reconcile()
             if plan.quantity:
-                if self.store.working(holding.instrument_id):
-                    continue
-                quantity = min(plan.quantity, self.store.quantity(holding.instrument_id))
-                if quantity:
-                    intent = OrderIntent(run_id="protection", plan_id=digest([thesis.thesis_id, plan.action, thesis.reduced_quantity]),
-                        thesis_id=thesis.thesis_id, instrument_id=holding.instrument_id, side="SELL", quantity=quantity,
-                        limit_price=None, expires_at=None, reason=plan.action, account_version=self.store.get("account_version"), policy_hash=self.config.config_hash)
-                    self.executor.submit(intent, bundle.now)
+                with self.executor.dispatch_lock:
+                    if self.store.working(holding.instrument_id):
+                        continue
+                    plan_id = digest([thesis.thesis_id, plan.action, thesis.reduced_quantity])
+                    previous = self.store.db.execute("SELECT * FROM intents WHERE plan_id=? AND side='SELL' ORDER BY rowid DESC LIMIT 1", (plan_id,)).fetchone()
+                    revision = 1
+                    if previous:
+                        if previous["state"] not in {"REJECTED", "CANCELED", "PARTIAL_CANCELED", "EXPIRED", "INVALIDATED"}:
+                            continue
+                        self.reconcile()
+                        if self.store.working(holding.instrument_id) or self.store.quantity(holding.instrument_id) != holding.quantity:
+                            # A late fill changes the exit plan; reevaluate on the next tick.
+                            continue
+                        revision = json.loads(previous["payload"])["plan_revision"] + 1
+                    quantity = min(plan.quantity, self.store.quantity(holding.instrument_id))
+                    if quantity:
+                        intent = OrderIntent(run_id="protection", plan_id=plan_id, plan_revision=revision,
+                            thesis_id=thesis.thesis_id, instrument_id=holding.instrument_id, side="SELL", quantity=quantity,
+                            limit_price=None, expires_at=None, reason=plan.action, account_version=self.store.get("account_version"), policy_hash=self.config.config_hash)
+                        self.executor.submit(intent, bundle.now)
         return results
 
     def record_nav(self) -> dict:
@@ -383,6 +413,8 @@ class Application:
                   "order_status": "NONE", "performance_status": "STRATEGY_UNPROVEN", "live_status": "LIVE_NOT_AUTHORIZED" if self.config.mode != "live" else "OPERATOR_AUTHORIZED"}
         try:
             self.reconcile()
+            if self.protection_refresh and self.refresh:
+                self.bundle = self.refresh()
             protection = self.protect()
             bundle = self.bundle
             if self.store.get("paused") or self.store.get("drawdown_paused", False):
@@ -501,9 +533,20 @@ class Application:
             with self.store.transaction():
                 self.store.set("material_hash", frozen["material_hash"])
             save("plan.json", {"plans": plans, "protection": protection})
-            save("execution.json", {"orders": [self.store.order(order["id"]) for order in orders], "journal": [dict(row) for row in self.store.db.execute("SELECT * FROM journal WHERE run_id=?", (run_id,))]})
-            result.update(run_status="COMPLETE", order_status="SHADOW_PLAN_ONLY" if self.config.mode == "shadow" else "FIXTURE_FILLED" if orders and bundle.synthetic else "SUBMITTED" if orders else "NONE",
-                reason="ENTRY_ACCEPTED" if orders else plans[0]["reason"] if plans else "NO_CANDIDATES", portfolio=self.portfolio().model_dump(mode="json"), performance=self.record_nav())
+            orders = [self.store.order(order["id"]) for order in orders]
+            save("execution.json", {"orders": orders, "journal": [dict(row) for row in self.store.db.execute("SELECT * FROM journal WHERE run_id=?", (run_id,))]})
+            states = {order["state"] for order in orders}
+            order_status = next(iter(states)) if len(states) == 1 else "MIXED" if states else "NONE"
+            if self.config.mode == "shadow":
+                order_status = "SHADOW_PLAN_ONLY"
+            elif bundle.synthetic and states == {"FILLED"}:
+                order_status = "FIXTURE_FILLED"
+            reason = ("ORDER_RECONCILIATION_REQUIRED" if "UNKNOWN" in states else
+                      "ORDER_" + order_status if states and not states <= {"ACKNOWLEDGED", "PARTIALLY_FILLED", "FILLED"} else
+                      "ENTRY_ACCEPTED" if orders else plans[0]["reason"] if plans else "NO_CANDIDATES")
+            result.update(run_status="COMPLETE", order_status=order_status,
+                order_states={state: sum(order["state"] == state for order in orders) for state in sorted(states)},
+                reason=reason, portfolio=self.portfolio().model_dump(mode="json"), performance=self.record_nav())
             return result
         except HumanRequired as error:
             result.update(run_status=error.state, reason=str(error))

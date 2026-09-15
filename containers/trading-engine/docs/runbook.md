@@ -33,6 +33,14 @@ python -m unittest discover -s tests/integration
 `Application.start_monitor`가 별도 실행한다. `/pause`, `/stop`, `/schedule_off`는 보호와
 대사를 끄지 않는다. 단일 writer는 같은 실제 계좌·모드의 공유 파일 잠금으로 보장한다.
 
+보호 감시는 마지막으로 검증한 종목·일봉·달력·공시를 재사용하며 보유/미체결 종목의 계좌와
+호가만 갱신한다. 전체 공시 수집이 지연돼도 이 경로는 기다리지 않는다. 공시 조회 실패는
+PARTIAL로 기록하고, 계좌·호가·거래 상태가 불명확하면 보호를 성공으로 표시하지 않는다.
+확정 거절/취소된 보호 매도는 대사·현재 조건 검사 후 새 revision으로 재시도하지만 UNKNOWN이나
+CANCEL_REQUESTED 주문은 재전송하지 않는다. 주문 요약은 원장의 실제 상태를 표시한다.
+control/review worker 실패는 정리 후 종료 코드 1로 끝나며 runtime Compose의 `on-failure:3`
+재시작 대상이 된다. 정상 stop은 성공 종료다.
+
 SQLite 파일은 검증된 로컬 파일시스템에 둔다. CIFS/NFS에 활성 DB를 두지 않는다. 백업은
 SQLite backup API로 생성·integrity_check하고, 복원은 존재하지 않는 별도 경로에만 한다.
 WAL 파일만 복사하거나 활성 DB 파일을 덮어쓰지 않는다. 재시작 시 불명 주문은 대사하고,

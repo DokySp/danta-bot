@@ -63,13 +63,37 @@ def needed_quantity(actual: int, pending_buys: int, target: int) -> int:
 class Executor:
     def __init__(self, store: Store, broker, *, mode: str,
                  authorize: Callable[[OrderIntent, str], None],
-                 preflight: Callable[[OrderIntent, datetime], None]):
+                 preflight: Callable[[OrderIntent, datetime], None],
+                 validate: Callable[[OrderIntent, datetime], None] | None = None):
         self.store, self.broker, self.mode = store, broker, mode
         self.authorize, self.preflight = authorize, preflight
+        self.validate = validate or preflight
         self.dispatch_lock = threading.RLock()
         expected = {"offline": "fixture", "paper": "paper", "broker_demo": "demo", "live": "live", "shadow": None}[mode]
         if broker.environment != expected:
             raise HumanRequired("Broker environment differs from execution mode")
+
+    def _validate_state(self, intent: OrderIntent, now: datetime) -> None:
+        if not self.store.get("reconciled") or not self.store.get("ownership_complete"):
+            raise HumanRequired("Account/order/ownership reconciliation required")
+        if intent.side == "BUY" and (self.store.get("paused") or self.store.get("drawdown_paused", False)):
+            raise ValueError("NEW_RISK_PAUSED")
+        if self.store.get("account_version") != intent.account_version:
+            raise ValueError("STALE_ACCOUNT_VERSION")
+        if intent.side == "BUY" and not self.store.get("costs_complete", True):
+            raise ValueError("ACTUAL_COST_RECONCILIATION_REQUIRED")
+        if intent.side == "BUY" and now >= intent.expires_at:
+            raise ValueError("ENTRY_EXPIRED")
+        working = [row for row in self.store.working() if row["id"] != intent.id]
+        same = [row for row in working if row["instrument_id"] == intent.instrument_id]
+        if any(row["side"] != intent.side for row in same):
+            raise HumanRequired("Opposite order must be canceled and reconciled first")
+        if intent.side == "SELL":
+            pending = sum(row["quantity"] - row["cumulative_quantity"] for row in same)
+            if intent.quantity > self.store.quantity(intent.instrument_id) - pending:
+                raise ValueError("STRATEGY_SELL_QUANTITY_EXCEEDED")
+        elif intent.reserve_cash > Decimal(self.store.get("cash_krw")) - sum((Decimal(row["reserve_cash"]) for row in working), Decimal(0)):
+            raise ValueError("INSUFFICIENT_UNRESERVED_CASH")
 
     def submit(self, intent: OrderIntent, now: datetime | None = None) -> dict:
         now = now or utcnow()
@@ -77,28 +101,15 @@ class Executor:
             previous = self.store.db.execute("SELECT id FROM intents WHERE idempotency_key=?", (intent.id,)).fetchone()
             if previous:
                 return self.store.order(previous[0])
-            self.authorize(intent, "submit")
-            self.preflight(intent, now)
+        # Provider collection may be slow; protection/reconciliation must keep running.
+        self.authorize(intent, "submit")
+        self.preflight(intent, now)
+        with self.dispatch_lock:
+            previous = self.store.db.execute("SELECT id FROM intents WHERE idempotency_key=?", (intent.id,)).fetchone()
+            if previous:
+                return self.store.order(previous[0])
             with self.store.transaction():
-                if not self.store.get("reconciled") or not self.store.get("ownership_complete"):
-                    raise HumanRequired("Account/order/ownership reconciliation required")
-                if self.store.get("account_version") != intent.account_version:
-                    raise ValueError("STALE_ACCOUNT_VERSION")
-                if intent.side == "BUY" and (self.store.get("paused") or self.store.get("drawdown_paused", False)):
-                    raise ValueError("NEW_RISK_PAUSED")
-                if intent.side == "BUY" and not self.store.get("costs_complete", True):
-                    raise ValueError("ACTUAL_COST_RECONCILIATION_REQUIRED")
-                if intent.side == "BUY" and now >= intent.expires_at:
-                    raise ValueError("ENTRY_EXPIRED")
-                working = self.store.working(intent.instrument_id)
-                if any(row["side"] != intent.side for row in working):
-                    raise HumanRequired("Opposite order must be canceled and reconciled first")
-                if intent.side == "SELL":
-                    pending = sum(row["quantity"] - row["cumulative_quantity"] for row in working if row["side"] == "SELL")
-                    if intent.quantity > self.store.quantity(intent.instrument_id) - pending:
-                        raise ValueError("STRATEGY_SELL_QUANTITY_EXCEEDED")
-                elif intent.reserve_cash > Decimal(self.store.get("cash_krw")) - self.store.reservation():
-                    raise ValueError("INSUFFICIENT_UNRESERVED_CASH")
+                self._validate_state(intent, now)
                 payload = intent.payload()
                 self.store.db.execute("""INSERT INTO intents(
                     id,idempotency_key,plan_id,thesis_id,instrument_id,side,quantity,limit_price,expires_at,
@@ -112,20 +123,26 @@ class Executor:
             # Persist SUBMITTING before the external call. A crash now is ambiguous.
             with self.store.transaction():
                 self.store.db.execute("UPDATE intents SET state='SUBMITTING' WHERE id=?", (intent.id,))
-            try:
-                # Refresh and durable writes may outlive the original approval.
-                self.authorize(intent, "submit")
-            except Exception as error:
-                with self.store.transaction():
-                    self.store.db.execute("UPDATE intents SET state='INVALIDATED',reserve_cash='0',reserve_risk='0' WHERE id=?", (intent.id,))
-                    self.store.bump_version()
-                    self.store.event(intent.run_id, "ORDER_NOT_SENT", {"intent_id": intent.id, "reason": type(error).__name__}, notify=True)
-                raise
-            try:
-                response = self.broker.submit(intent.payload())
-            except Exception as error:
-                self._unknown(intent.id, type(error).__name__)
-                return self.store.order(intent.id)
+            # Serialize the final local check and POST with pause/account writes.
+            # No SQLite transaction spans broker I/O (the runtime has its own connection).
+            with self.store.lock:
+                try:
+                    self.authorize(intent, "submit")
+                    self.validate(intent, now)
+                    self._validate_state(intent, now)
+                    if self.store.order(intent.id)["state"] != "SUBMITTING":
+                        raise ValueError("INTENT_INVALIDATED_BEFORE_SEND")
+                except Exception as error:
+                    with self.store.transaction():
+                        self.store.db.execute("UPDATE intents SET state='INVALIDATED',reserve_cash='0',reserve_risk='0' WHERE id=?", (intent.id,))
+                        self.store.bump_version()
+                        self.store.event(intent.run_id, "ORDER_NOT_SENT", {"intent_id": intent.id, "reason": type(error).__name__}, notify=True)
+                    raise
+                try:
+                    response = self.broker.submit(intent.payload())
+                except Exception as error:
+                    self._unknown(intent.id, type(error).__name__)
+                    return self.store.order(intent.id)
             with self.store.transaction():
                 if response.get("status") == "NOT_SENT":
                     self.store.db.execute("UPDATE intents SET state='INVALIDATED',reserve_cash='0',reserve_risk='0' WHERE id=?", (intent.id,))

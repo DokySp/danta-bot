@@ -191,6 +191,7 @@ class Store:
                 return False
             old_notional = Decimal(order["cumulative_notional"])
             old_fees = Decimal(order["cumulative_fees"])
+            fee_settlement = fees is not None and self.get(f"unconfirmed_cost:{intent_id}", False)
             if fees is None and quantity > 0:
                 self.set("costs_complete", False)
                 self.set(f"unconfirmed_cost:{intent_id}", True)
@@ -198,12 +199,12 @@ class Store:
                 fees = old_fees
             elif fees is None:
                 fees = old_fees
-            elif self.get(f"unconfirmed_cost:{intent_id}", False):
-                correction = True
+            elif fee_settlement:
                 self.set(f"unconfirmed_cost:{intent_id}", False)
                 uncertain = self.db.execute("SELECT value FROM meta WHERE key LIKE 'unconfirmed_cost:%'").fetchall()
                 self.set("costs_complete", not any(json.loads(row[0]) for row in uncertain))
-            if quantity == old_q and (notional != old_notional or fees != old_fees) and not correction:
+            if not correction and (notional < old_notional or quantity == old_q and notional != old_notional or
+                    not fee_settlement and (fees < old_fees or quantity == old_q and fees != old_fees)):
                 raise HumanRequired("Cumulative average/cost changed without broker correction evidence")
             dq, dn, df = quantity - old_q, notional - old_notional, fees - old_fees
             if dq == 0 and dn == 0 and df == 0:

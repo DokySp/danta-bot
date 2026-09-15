@@ -5,9 +5,11 @@ import io
 import json
 import shutil
 import tempfile
+import threading
 import unittest
 import zipfile
 from datetime import timedelta
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
@@ -36,6 +38,8 @@ class FixtureTransport:
     def __init__(self,now,bars,index_bars):
         self.now,self.bars,self.index_bars = now,bars,index_bars
         self.calls = []
+        self.dart_error = self.quote_error = None
+        self.quote_observed_at = now
 
     def __call__(self,method,url,headers=None,body=None,timeout=15):
         self.calls.append((method,urlsplit(url).path))
@@ -45,7 +49,18 @@ class FixtureTransport:
                 "access_token_token_expired":(self.now + timedelta(hours=12)).astimezone(
                     ZoneInfo('Asia/Seoul')).strftime('%Y-%m-%d %H:%M:%S')}).encode())
         if path.endswith("list.json"):
+            if self.dart_error:
+                raise self.dart_error
             return HttpResponse(200,json.dumps({"status":"013"}).encode())
+        if path.endswith("inquire-asking-price-exp-ccn"):
+            if self.quote_error:
+                raise self.quote_error
+            return HttpResponse(200,json.dumps({"rt_cd":"0","output1":{
+                "aspr_acpt_hour":self.quote_observed_at.strftime("%H%M%S"),"bidp1":"9999","askp1":"10000",
+                "bidp_rsqn1":"1","askp_rsqn1":"1"}}).encode())
+        if path.endswith("inquire-price"):
+            return HttpResponse(200,json.dumps({"rt_cd":"0","output":{
+                "stck_bsop_date":self.quote_observed_at.strftime("%Y%m%d")}}).encode())
         if path.endswith("inquire-daily-itemchartprice"):
             data = [{"stck_bsop_date":b.session_id.replace("-",""),"stck_hgpr":str(b.high),"stck_lwpr":str(b.low),
                      "stck_clpr":str(b.close),"acml_tr_pbmn":str(b.turnover)} for b in self.bars]
@@ -178,6 +193,162 @@ class ExternalRuntimeContracts(unittest.TestCase):
             self._factory()
         self.assertEqual(self.transport.calls,[])
 
+    def test_dart_failure_still_bootstraps_partial_bundle_and_price_protection(self):
+        from danta.risk import evaluate_exit
+        from danta.strategy import assess_entry
+
+        state = RuntimeState(self.config.state_dir/"state.sqlite")
+        state.data["paper"] = {"orders":{},"quantities":{"KRX:000001":1},"cash":"9900000"}
+        state.save()
+        state.db.close()
+        self.transport.dart_error = AdapterError("TRANSPORT_FAILED")
+        bundle,_broker,decide,_refresh = self._factory()
+        self.addCleanup(decide.__self__.state.db.close)
+        self.assertEqual(bundle.data["coverage"],{"KRX:000001":"PARTIAL"})
+        self.assertIn({"source":"DART","reason":"TRANSPORT_FAILED"},bundle.data["runtime_diagnostics"])
+        quote = bundle.quotes["KRX:000001"]
+        candidate = bundle.candidates[0]
+        self.assertFalse(assess_entry(candidate,quote,bundle.events,bundle.calendar,bundle.ticks,self.now,bundle.profile).allowed)
+        thesis = helpers.synthetic_thesis(self.case,quantity=1).model_copy(update={"instrument_id":"KRX:000001"})
+        holding = helpers.synthetic_holding(self.case,thesis,quantity=1)
+        self.assertEqual(evaluate_exit(thesis,holding,quote,bundle.calendar,self.now,bundle.profile).action,"EXIT_PROTECTION")
+        with patch("danta.adapters.kis.utcnow",return_value=self.now):
+            protected = decide.__self__.refresh_protection()
+        self.assertEqual(protected.candidates,bundle.candidates)
+        self.assertEqual(protected.candidates[0].coverage,"PARTIAL")
+
+    def test_protection_refresh_finishes_while_disclosure_collection_is_blocked(self):
+        bundle,broker,decide,refresh = self._factory()
+        runtime = decide.__self__
+        self.addCleanup(runtime.state.db.close)
+        runtime.state.data["paper"]["quantities"] = {"KRX:000001":1}
+        previous = self.case[8].model_copy(update={"instrument_id":"KRX:000001","polarity":"NEGATIVE"})
+        bundle.events = [previous]
+        bundle.data["events"] = [previous.model_dump(mode="json")]
+        bundle.candidates = [self.case[6].model_copy(update={"instrument":bundle.instruments["KRX:000001"],
+                                                          "features":bundle.features["KRX:000001"]})]
+        entered,release = threading.Event(),threading.Event()
+        def blocked_events(*_args):
+            entered.set()
+            if not release.wait(3):
+                raise AssertionError("Fixture disclosure gate timed out")
+            return [previous],[],{"KRX:000001":"PARTIAL"},{}
+        with patch.object(runtime,"_events",side_effect=blocked_events), \
+                patch("danta.adapters.kis.utcnow",return_value=self.now), ThreadPoolExecutor(max_workers=2) as pool:
+            full = pool.submit(refresh)
+            try:
+                self.assertTrue(entered.wait(2))
+                calls = len(self.transport.calls)
+                fast = pool.submit(runtime.refresh_protection).result(timeout=2)
+                self.assertFalse(full.done())
+                self.assertEqual(fast.events,[previous])
+                self.assertIs(fast.bars,bundle.bars)
+                self.assertIs(fast.features,bundle.features)
+                self.assertIs(fast.calendar,bundle.calendar)
+                self.assertIn("KRX:000001",fast.quotes)
+                self.assertEqual(fast.candidates,bundle.candidates)
+                self.assertTrue(all("inquire-asking-price" in path or path.endswith("inquire-price")
+                                    for _,path in self.transport.calls[calls:]))
+            finally:
+                release.set()
+            self.assertEqual(full.result(timeout=2).events,[previous])
+
+    def test_protection_stale_and_failed_quotes_keep_published_negative_facts(self):
+        from danta.models import MarketFact
+        from danta.risk import evaluate_exit
+
+        bundle,_broker,decide,_refresh = self._factory()
+        runtime = decide.__self__
+        self.addCleanup(runtime.state.db.close)
+        runtime.state.data["paper"]["quantities"] = {"KRX:000001":1}
+        event = self.case[8].model_copy(update={"instrument_id":"KRX:000001","polarity":"NEGATIVE"})
+        fact = MarketFact(fact_id="negative-fixture",instrument_id="KRX:000001",value="cancelled",unit="status",
+                          source=event.source_uri,content_hash=event.source_hash,published_at=None,
+                          observed_at=self.now,available_at=self.now,quality="VERIFIED")
+        bundle.events,bundle.facts = [event],[fact]
+        bundle.data.update(events=[event.model_dump(mode="json")],facts=[fact.model_dump(mode="json")])
+        thesis = helpers.synthetic_thesis(self.case,quantity=1).model_copy(update={"instrument_id":"KRX:000001","invalidating_event_ids":[event.event_id]})
+        holding = helpers.synthetic_holding(self.case,thesis,quantity=1)
+        self.transport.quote_observed_at = self.now-timedelta(minutes=1)
+        with patch("danta.adapters.kis.utcnow",return_value=self.now):
+            stale = runtime.refresh_protection()
+            self.assertEqual(stale.quotes["KRX:000001"].observed_at,self.transport.quote_observed_at)
+            self.transport.quote_error = AdapterError("TRANSPORT_FAILED")
+            missing = runtime.refresh_protection()
+        self.assertNotIn("KRX:000001",missing.quotes)
+        for observed in (stale,missing):
+            self.assertEqual(observed.events,[event])
+            self.assertEqual(observed.facts,[fact])
+            self.assertTrue(any(row["reason"] == "MONITOR_DEGRADED" for row in observed.data["runtime_diagnostics"]))
+            exit_plan = evaluate_exit(thesis,holding,observed.quotes.get("KRX:000001"),observed.calendar,self.now,
+                                      observed.profile,invalidating_events=observed.events)
+            self.assertEqual(exit_plan.action,"MONITOR_DEGRADED")
+            self.assertIn("EXIT_THESIS_INVALID",exit_plan.reasons)
+
+    def test_protection_publication_retains_new_full_facts_and_matches_paper_quote_depth(self):
+        from copy import copy
+
+        bundle,broker,decide,_refresh = self._factory()
+        runtime = decide.__self__
+        self.addCleanup(runtime.state.db.close)
+        runtime.manifest["normalization"]["quote"].update(bid_quantity="asking.bidp_rsqn1",ask_quantity="asking.askp_rsqn1")
+        broker.submit({"plan_id":"PENDING_PAPER","side":"BUY","quantity":2,"instrument_id":"KRX:000001",
+                       "limit_price":"10000","expires_at":(self.now+timedelta(minutes=2)).isoformat()})
+        self.now += timedelta(seconds=1)
+        self.transport.quote_observed_at = self.now
+        newer = copy(bundle)
+        event = self.case[8].model_copy(update={"instrument_id":"KRX:000001","polarity":"NEGATIVE"})
+        newer.events = [event]
+        newer.data = {**bundle.data,"events":[event.model_dump(mode="json")]}
+        entered,release = threading.Event(),threading.Event()
+        original = runtime._quote
+        def blocked_quote(*args,**kwargs):
+            quote = original(*args,**kwargs)
+            entered.set()
+            if not release.wait(3):
+                raise AssertionError("Fixture quote gate timed out")
+            return quote
+        with patch.object(runtime,"_quote",side_effect=blocked_quote), \
+                patch("danta.adapters.kis.utcnow",side_effect=lambda:self.now), ThreadPoolExecutor(max_workers=1) as pool:
+            fast = pool.submit(runtime.refresh_protection)
+            try:
+                self.assertTrue(entered.wait(2))
+                runtime._publish(newer)
+            finally:
+                release.set()
+            published = fast.result(timeout=2)
+        self.assertEqual(published.events,[event])
+        self.assertEqual(published.data["quote_depth"]["KRX:000001"],{"bid":1,"ask":1})
+        self.assertEqual(published.data["account_snapshot"]["orders"][0]["cumulative_quantity"],1)
+        self.assertEqual(published.data["strategy_sellable_quantities"],{"KRX:000001":1})
+        delayed = copy(published)
+        delayed.quotes = {"KRX:000001":published.quotes["KRX:000001"].model_copy(update={"observed_at":self.now-timedelta(seconds=1)})}
+        delayed.data = {**published.data,"quote_depth":{"KRX:000001":{"bid":9,"ask":9}},
+                        "quote_refresh_order":{"KRX:000001":published.data["quote_refresh_order"]["KRX:000001"]+1}}
+        retained = runtime._publish(delayed)
+        self.assertEqual(retained.quotes,published.quotes)
+        self.assertEqual(retained.data["quote_depth"],published.data["quote_depth"])
+
+    def test_disclosure_and_protection_authorization_failures_are_not_degraded_data(self):
+        _bundle,_broker,decide,refresh = self._factory()
+        runtime = decide.__self__
+        self.addCleanup(runtime.state.db.close)
+        runtime.state.data["disclosure_last_poll"] = None
+        for failure in (HumanRequired("AUTHORIZATION_REVOKED"),AdapterError("AUTH_FAILED")):
+            with self.subTest(failure=type(failure).__name__),patch.object(runtime.dart,"list_disclosures",side_effect=failure):
+                with self.assertRaises(type(failure)):
+                    refresh()
+        with patch.object(runtime.dart,"list_disclosures",return_value=FetchResult((),"FETCH_FAILED",self.now,metadata={"error":"AUTH_FAILED"})):
+            with self.assertRaisesRegex(AdapterError,"AUTH_FAILED"):
+                refresh()
+        with patch.object(type(runtime.config),"require_external",side_effect=HumanRequired("AUTHORIZATION_REVOKED")):
+            with self.assertRaisesRegex(HumanRequired,"AUTHORIZATION_REVOKED"):
+                runtime.refresh_protection()
+        runtime.state.data["paper"]["quantities"] = {"KRX:000001":1}
+        with patch.object(runtime.kis,"quote",side_effect=HumanRequired("AUTHORIZATION_REVOKED")):
+            with self.assertRaisesRegex(HumanRequired,"AUTHORIZATION_REVOKED"):
+                runtime.refresh_protection()
+
     def test_known_fill_with_unknown_fees_is_preserved_for_protection(self):
         state = RuntimeState(self.base/"broker.sqlite")
         state.db.execute("CREATE TABLE intents(broker_namespace TEXT,broker_id TEXT,instrument_id TEXT,side TEXT,broker_metadata TEXT)")
@@ -199,6 +370,41 @@ class ExternalRuntimeContracts(unittest.TestCase):
         self.assertIsNone(snapshot["orders"][0]["cumulative_fees"])
         self.assertEqual(snapshot["orders"][0]["fill_time_quality"],"FIRST_OBSERVED")
         self.assertIsNone(snapshot["orders"][0]["first_fill_at"])
+
+    def test_parallel_broker_snapshots_do_not_mix_cash_or_sellable_quantities(self):
+        state = RuntimeState(self.base/"parallel-broker.sqlite")
+        self.addCleanup(state.db.close)
+        self.manifest["bootstrap"]["strategy_quantities"] = {"KRX:000001":3}
+        quantities,local = iter((3,4)),threading.local()
+        entered,release = threading.Event(),threading.Event()
+        class FakeAdapter:
+            environment = "demo"
+            def read_account(inner,**kwargs):
+                local.quantity = next(quantities)
+                return FetchResult(({"pdno":"000001","hldg_qty":str(local.quantity),"ord_psbl_qty":str(local.quantity-2)},),
+                                   "COMPLETE",self.now,metadata={"orderable_resources":{"ord_psbl_cash":str(local.quantity*1000)}})
+            def read_orders(inner,*args):
+                return FetchResult((),"COMPLETE",self.now)
+        broker = KisBrokerPort(FakeAdapter(),self.manifest,state,clock=lambda:self.now)
+        def supplements():
+            if local.quantity == 3:
+                entered.set()
+                if not release.wait(3):
+                    raise AssertionError("Fixture account gate timed out")
+            return {}
+        with patch.object(broker,"_supplements",side_effect=supplements),ThreadPoolExecutor(max_workers=1) as pool:
+            pending = pool.submit(broker.snapshot)
+            try:
+                self.assertTrue(entered.wait(2))
+                second = broker.snapshot()
+            finally:
+                release.set()
+            first = pending.result(timeout=2)
+        for snapshot,quantity in ((first,3),(second,4)):
+            self.assertTrue(snapshot["complete"] and snapshot["ownership_complete"])
+            self.assertEqual(snapshot["broker_available_cash"],str(quantity*1000))
+            self.assertEqual(snapshot["strategy_quantities"],{"KRX:000001":quantity})
+            self.assertEqual(snapshot["strategy_sellable_quantities"],{"KRX:000001":quantity-2})
 
     def test_unknown_ownership_or_partial_pagination_never_becomes_complete(self):
         state = RuntimeState(self.base/"incomplete.sqlite")
@@ -241,6 +447,11 @@ class ExternalRuntimeContracts(unittest.TestCase):
         self.assertEqual(coverage["KRX:000001"],"COMPLETE")
         restored = RuntimeState(self.config.state_dir/"state.sqlite")
         self.assertEqual(aware_time(restored.data["events"][receipt]),first_available)
+        with patch.object(runtime.dart,"list_disclosures",side_effect=AdapterError("TRANSPORT_FAILED")):
+            preserved,_,coverage,_ = runtime._events(list(bundle.instruments.values()),later+timedelta(seconds=180))
+        self.assertEqual(preserved[0].available_at,first_available)
+        self.assertEqual(coverage["KRX:000001"],"PARTIAL")
+        self.assertIn({"source":"DART","reason":"TRANSPORT_FAILED"},runtime.disclosure_diagnostics)
 
     def test_quote_actual_observation_time_is_not_http_reception_time(self):
         bundle,_broker,decide,_refresh = self._factory()

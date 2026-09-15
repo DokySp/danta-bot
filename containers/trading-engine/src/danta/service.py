@@ -83,6 +83,7 @@ class Service:
         self.app, self.store, self.config, self.clock = app, app.store, app.config, clock
         self.telegram, self.peer_auth = telegram, peer_auth
         self.stop = threading.Event()
+        self.worker_failed = False
         self.threads = []
         self.scheduler = self.config.data['schedules']['scheduler']
         monitoring = self.config.app['monitoring']
@@ -414,6 +415,7 @@ class Service:
                         self.queue_tick()
                     self.run_once(review=review)
                 except Exception as error:
+                    self.worker_failed = True
                     with self.store.transaction():
                         self.store.event('service', 'SERVICE_WORKER_FAILED', {'error_type': type(error).__name__})
                     self.stop.set()
@@ -506,3 +508,5 @@ def serve(config, args=None, *, application_factory=None, stop_event=None):
         if service:
             service.close()
         app.close()
+    if service.worker_failed:
+        raise OSError('SERVICE_WORKER_FAILED')

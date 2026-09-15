@@ -12,6 +12,7 @@ import shutil
 import sqlite3
 import threading
 import time
+from copy import copy
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -28,8 +29,10 @@ from .decision import DecisionProposal, validate_proposal
 from .market import SessionCalendar, calculate_features
 from .models import CostSchedule, DailyBar, EventRecord, Instrument, MarketFact, Quote, Session
 from .portfolio import buy_commission, sell_cost, slippage
+from .strategy import quote_fresh
 
 SEOUL = ZoneInfo("Asia/Seoul")
+AUTH_ERRORS = {"AUTH_FAILED", "AUTHORIZATION_REQUIRED", "AUTH_CREDENTIALS_REQUIRED", "DART_AUTH_REQUIRED", "OFFLINE_NETWORK_BLOCKED"}
 
 
 def _decimal(value):
@@ -146,8 +149,6 @@ class KisBrokerPort:
     def __init__(self, adapter, manifest, state, *, clock=utcnow):
         self.adapter, self.manifest, self.state, self.clock = adapter, manifest, state, clock
         self.environment = "live" if adapter.environment == "real" else "demo"
-        self.last_resources = None
-        self.last_sellable = {}
         self.store = None
         self.latest_bundle = None
 
@@ -209,15 +210,15 @@ class KisBrokerPort:
         if account.quality != "COMPLETE" or orders.quality != "COMPLETE":
             return {"complete": False, "ownership_complete": False, "orders": [], "errors": ["BROKER_PAGINATION_INCOMPLETE"]}
         try:
-            self.last_resources = _decimal(_field(account.metadata["orderable_resources"], mapping["account"]["available_cash"]))
+            resources = _decimal(_field(account.metadata["orderable_resources"], mapping["account"]["available_cash"]))
             actual = {}
-            self.last_sellable = {}
+            sellable = {}
             for record in account.records:
                 instrument = "KRX:"+str(_field(record,mapping["account"]["symbol"]))
                 if instrument in actual:
                     raise ValueError("DUPLICATE_ACCOUNT_POSITION")
                 actual[instrument] = _quantity(_field(record,mapping["account"]["quantity"]))
-                self.last_sellable[instrument] = _quantity(_field(record,mapping["account"]["sellable_quantity"]))
+                sellable[instrument] = _quantity(_field(record,mapping["account"]["sellable_quantity"]))
             supplements = self._supplements()
             external = {key:_quantity(value) for key,value in self.manifest["bootstrap"]["external_quantities"].items()}
             strategy = {key:quantity-external.get(key,0) for key,quantity in actual.items()}
@@ -279,8 +280,8 @@ class KisBrokerPort:
                     self.state.save()
                 normalized.append(item)
             return {"complete": not errors,"ownership_complete": not errors and ownership_complete,"strategy_quantities":strategy,
-                    "strategy_sellable_quantities": {key:min(quantity,self.last_sellable.get(key,0)) for key,quantity in strategy.items()},
-                    "orders":normalized,"errors":errors,"broker_available_cash":str(self.last_resources)}
+                    "strategy_sellable_quantities": {key:min(quantity,sellable.get(key,0)) for key,quantity in strategy.items()},
+                    "orders":normalized,"errors":errors,"broker_available_cash":str(resources)}
         except (ValueError,KeyError,TypeError,AdapterError) as error:
             return {"complete":False,"ownership_complete":False,"orders":normalized,
                     "errors":[getattr(error,"code",str(error) if isinstance(error,ValueError) else "PROVIDER_FIELD_UNVERIFIED")]}
@@ -296,9 +297,11 @@ class ExternalRuntime:
         self.broker = KisBrokerPort(kis,manifest,state,clock=clock)
         self.daily_cache = None
         self.disclosure_cache = None
+        self.disclosure_diagnostics = []
         self.latest_bundle = None
         self.quote_depth = {}
         self.collect_lock = threading.RLock()
+        self.publish_lock = threading.RLock()
 
     def _instruments(self, now):
         mapping = self.manifest["normalization"]["instruments"]
@@ -338,7 +341,7 @@ class ExternalRuntime:
                 ohlc_consistently_adjusted=basis["consistent_ohlc_verified"],source=basis["source"]))
         return sorted(rows,key=lambda bar:bar.closes_at)
 
-    def _quote(self,instrument):
+    def _quote(self,instrument,*,depth=None):
         result = self.kis.quote(instrument.instrument_id.removeprefix("KRX:"))
         if result.quality != "COMPLETE" or len(result.records) != 1:
             raise ValueError("QUOTE_FETCH_INCOMPLETE")
@@ -348,19 +351,21 @@ class ExternalRuntime:
         session = self.calendar.session(observed.date().isoformat())
         if not session.opens_at <= observed < session.closes_at:
             raise ValueError("QUOTE_OBSERVATION_OUTSIDE_SESSION")
-        self.quote_depth[instrument.instrument_id] = {
+        (self.quote_depth if depth is None else depth)[instrument.instrument_id] = {
             "bid":_quantity(_field(raw,fields["bid_quantity"])) if fields.get("bid_quantity") else 0,
             "ask":_quantity(_field(raw,fields["ask_quantity"])) if fields.get("ask_quantity") else 0}
         return Quote(instrument_id=instrument.instrument_id,venue="KRX",observed_at=observed,received_at=result.retrieved_at,
                      bid=_decimal(_field(raw,fields["bid"])),ask=_decimal(_field(raw,fields["ask"])),source=fields["source"])
 
     def _events(self,instruments,now):
+        self.disclosure_diagnostics = list(self.state.data.get("disclosure_diagnostics",[]))
         settings = self.manifest["disclosures"]
         cached = self.state.data.setdefault("disclosure_records",{})
         last_poll = self.state.data.get("disclosure_last_poll")
-        coverage = self.state.data.get("disclosure_coverage",{})
+        coverage = dict(self.state.data.get("disclosure_coverage",{}))
         poll_due = last_poll is None or (now-aware_time(last_poll)).total_seconds() >= 180
         if poll_due:
+            self.disclosure_diagnostics = []
             with self.state.lock:
                 start = date.fromisoformat(self.state.data.get("disclosure_cursor_date",settings["start_date"]))
             # A resumed cursor is never silently truncated; DART range requests are split.
@@ -368,9 +373,19 @@ class ExternalRuntime:
             upper = now.astimezone(SEOUL).date()
             while start <= upper:
                 end = min(upper,start+timedelta(days=89))
-                result = self.dart.list_disclosures(start,end)
-                result_rows.extend(result.records)
-                qualities.append(result.quality)
+                try:
+                    result = self.dart.list_disclosures(start,end)
+                    if result.metadata.get("error") in AUTH_ERRORS:
+                        raise AdapterError(result.metadata["error"])
+                    result_rows.extend(result.records)
+                    qualities.append(result.quality)
+                    if result.quality not in {"COMPLETE","COMPLETE_NO_EVENT"}:
+                        self.disclosure_diagnostics.append({"source":"DART","reason":result.metadata.get("error","DISCLOSURE_FETCH_INCOMPLETE")})
+                except (AdapterError,ValueError,KeyError,TypeError) as error:
+                    if isinstance(error,HumanRequired) or isinstance(error,AdapterError) and error.code in AUTH_ERRORS:
+                        raise
+                    qualities.append("FETCH_FAILED")
+                    self.disclosure_diagnostics.append({"source":"DART","reason":getattr(error,"code","MALFORMED_RESPONSE")})
                 start = end+timedelta(days=1)
             all_complete = all(quality in {"COMPLETE","COMPLETE_NO_EVENT"} for quality in qualities)
             quality = "COMPLETE" if result_rows and all_complete else "COMPLETE_NO_EVENT" if all_complete else "PARTIAL"
@@ -430,14 +445,19 @@ class ExternalRuntime:
                                 official=True,primary_source_complete=False,timing_quality=timing,polarity="UNKNOWN")
                     cached[receipt] = {"event":event.model_dump(mode="json"),"facts":[fact.model_dump(mode="json") for fact in facts],
                                        "documents":documents,"document_hashes":document_hashes,"parse_reason":reason}
-                except (ValueError,KeyError,AdapterError):
+                except (ValueError,KeyError,AdapterError) as error:
+                    if isinstance(error,HumanRequired) or isinstance(error,AdapterError) and error.code in AUTH_ERRORS:
+                        raise
                     coverage[instrument_id] = "PARTIAL"
                     all_complete = False
+                    self.disclosure_diagnostics.append({"source":"DART","instrument_id":instrument_id,
+                                                       "reason":getattr(error,"code","PRIMARY_SOURCE_FETCH_FAILED")})
             with self.state.lock:
                 if all_complete:
                     self.state.data["disclosure_cursor_date"] = upper.isoformat()
                 self.state.data["disclosure_last_poll"] = now.isoformat()
                 self.state.data["disclosure_coverage"] = coverage
+                self.state.data["disclosure_diagnostics"] = self.disclosure_diagnostics
                 self.state.save()
         held = set()
         if self.state.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='holdings'").fetchone():
@@ -457,6 +477,96 @@ class ExternalRuntime:
             if not event.primary_source_complete or event.timing_quality == "UNCERTAIN":
                 coverage[event.instrument_id] = "PARTIAL"
         return events,facts,coverage,documents
+
+    def _account(self):
+        self.config.require_external("account_read",self.approval)
+        account = self.broker.snapshot()
+        if account.get("complete") is not True or account.get("ownership_complete") is not True:
+            raise HumanRequired("External account observations incomplete: "+",".join(account.get("errors",[])))
+        return account,time.monotonic_ns()
+
+    def _protection_symbols(self,account):
+        symbols = {key for key,value in account.get("strategy_quantities",{}).items() if value}
+        symbols.update(row["instrument_id"] for row in account.get("orders",[])
+                       if row["state"] not in {"FILLED","CANCELED","REJECTED"})
+        store = getattr(self.broker,"store",None)
+        if store is not None:
+            symbols.update(row["instrument_id"] for row in store.holdings()+store.working())
+        return symbols
+
+    def _publish(self,bundle,*,protection=False):
+        # Only local publication is serialized; no provider request holds this lock.
+        with self.publish_lock:
+            latest = self.latest_bundle
+            incoming = bundle
+            if protection:
+                bundle = copy(latest)
+                bundle.data = dict(latest.data)
+                bundle.data["runtime_diagnostics"] = [row for row in latest.data["runtime_diagnostics"]
+                                                       if row.get("scope") != "PROTECTION"]+incoming.data["runtime_diagnostics"]
+            observations = [item for item in (latest,incoming) if item is not None]
+            account = max(observations,key=lambda item:item.data.get("account_refresh_order",0))
+            for key in ("account_snapshot","broker_available_cash","strategy_sellable_quantities","account_refresh_order"):
+                bundle.data[key] = account.data[key]
+            quotes,depth,orders = {},{},{}
+            for item in observations:
+                for symbol,order in item.data.get("quote_refresh_order",{}).items():
+                    if order >= orders.get(symbol,0):
+                        if (symbol in quotes and symbol in item.quotes and
+                                item.quotes[symbol].observed_at < quotes[symbol].observed_at):
+                            continue
+                        orders[symbol] = order
+                        quotes.pop(symbol,None)
+                        depth.pop(symbol,None)
+                        if symbol in item.quotes:
+                            quotes[symbol] = item.quotes[symbol]
+                            depth[symbol] = dict(item.data["quote_depth"].get(symbol,{}))
+            bundle.quotes = quotes
+            bundle.now = max(item.now for item in observations)
+            bundle.data.update(as_of=bundle.now.isoformat(),quotes=[item.model_dump(mode="json") for item in quotes.values()],
+                               quote_depth=depth,quote_refresh_order=orders)
+            if not protection:
+                bundle.candidates = [item for item in bundle.candidates if item.instrument.instrument_id in quotes]
+            if isinstance(self.broker,PaperBrokerPort):
+                paper = self.broker.snapshot(bundle=bundle)
+                bundle.data.update(account_snapshot=paper,broker_available_cash=paper["broker_available_cash"],
+                                   strategy_sellable_quantities=paper["strategy_sellable_quantities"],account_refresh_order=time.monotonic_ns())
+            self.latest_bundle = bundle
+            if isinstance(self.broker,KisBrokerPort):
+                self.broker.latest_bundle = bundle
+            return bundle
+
+    def refresh_protection(self):
+        self.config.assert_current()
+        self.config.require_external("market_read",self.approval)
+        with self.publish_lock:
+            previous = self.latest_bundle
+        if previous is None:
+            raise HumanRequired("MONITOR_DEGRADED: VERIFIED_PROTECTION_REFERENCE_UNAVAILABLE")
+        account,account_order = self._account()
+        quotes,depth,orders,diagnostics = {},{},{},[]
+        for symbol in sorted(self._protection_symbols(account)):
+            try:
+                instrument = previous.instruments.get(symbol)
+                if instrument is None:
+                    raise ValueError("VERIFIED_INSTRUMENT_UNAVAILABLE")
+                quotes[symbol] = self._quote(instrument,depth=depth)
+                if not quote_fresh(quotes[symbol],self.clock(),self.profile["orders"]["quote_max_age_seconds"]):
+                    raise ValueError("STALE_QUOTE")
+            except (ValueError,KeyError,AdapterError) as error:
+                if isinstance(error,HumanRequired) or isinstance(error,AdapterError) and error.code in AUTH_ERRORS:
+                    raise
+                diagnostics.append({"scope":"PROTECTION","instrument_id":symbol,"reason":"MONITOR_DEGRADED",
+                                    "detail":getattr(error,"code",str(error))})
+            orders[symbol] = time.monotonic_ns()
+        bundle = copy(previous)
+        bundle.now = self.clock()
+        bundle.quotes = quotes
+        bundle.data = {**previous.data,"account_snapshot":account,"broker_available_cash":account["broker_available_cash"],
+                       "strategy_sellable_quantities":account.get("strategy_sellable_quantities",{}),
+                       "account_refresh_order":account_order,"quote_depth":depth,"quote_refresh_order":orders,
+                       "runtime_diagnostics":diagnostics}
+        return self._publish(bundle,protection=True)
 
     def refresh(self):
         with self.collect_lock:
@@ -484,15 +594,16 @@ class ExternalRuntime:
                             raise ValueError("DAILY_CALENDAR_COVERAGE_INCOMPLETE")
                         bars[instrument.instrument_id] = values
                     except (ValueError,KeyError,AdapterError) as error:
+                        if isinstance(error,HumanRequired) or isinstance(error,AdapterError) and error.code in AUTH_ERRORS:
+                            raise
                         diagnostics.append({"instrument_id":instrument.instrument_id,"reason":getattr(error,"code",str(error))})
                 self.daily_cache = (day,instruments,bars,index_bars,diagnostics)
             _,instruments,bars,index_bars,diagnostics = self.daily_cache
+            diagnostics = list(diagnostics)
             events,facts,coverage,documents = self._events(instruments,self.clock())
-            account = self.broker.snapshot()
-            if account.get("complete") is not True:
-                raise HumanRequired("External account observations incomplete: "+",".join(account.get("errors",[])))
-            managed = {key for key,value in account.get("strategy_quantities",{}).items() if value}
-            working = {row["instrument_id"] for row in account.get("orders",[]) if row["state"] not in {"FILLED","CANCELED","REJECTED"}}
+            diagnostics.extend(self.disclosure_diagnostics)
+            account,account_order = self._account()
+            protected = self._protection_symbols(account)
             current = self.calendar.active(self.clock())
             recent = set()
             if current:
@@ -501,23 +612,26 @@ class ExternalRuntime:
                             event.family in self.profile["signal"]["event_families"] and
                             1 <= self.calendar.event_age(event,current.session_id) <= self.profile["signal"]["max_event_age_sessions"]):
                         recent.add(event.instrument_id)
-            quotes = []
+            quotes,depth,quote_orders = [],{},{}
             for instrument in instruments:
-                if instrument.instrument_id not in bars:
-                    continue
                 try:
-                    features = calculate_features(bars[instrument.instrument_id],index_bars[instrument.board],
-                        instrument_id=instrument.instrument_id,board=instrument.board,as_of=self.clock(),research_profile=self.profile)
-                    # All instruments get deterministic screening; only qualified candidates
-                    # and managed/working positions consume the live quote budget.
-                    eligible = (instrument.instrument_id in recent and
-                                features.adtv20 >= Decimal(self.profile["universe"]["minimum_adtv_krw"]) and
-                                features.close > features.sma60 and features.sma20 >= features.sma20_five_sessions_ago and
-                                features.rs20 > 0 and features.index_close >= features.index_sma60)
-                    if not eligible and instrument.instrument_id not in managed|working:
-                        continue
-                    quotes.append(self._quote(instrument))
+                    if instrument.instrument_id not in protected:
+                        if instrument.instrument_id not in bars:
+                            continue
+                        features = calculate_features(bars[instrument.instrument_id],index_bars[instrument.board],
+                            instrument_id=instrument.instrument_id,board=instrument.board,as_of=self.clock(),research_profile=self.profile)
+                        eligible = (instrument.instrument_id in recent and
+                                    features.adtv20 >= Decimal(self.profile["universe"]["minimum_adtv_krw"]) and
+                                    features.close > features.sma60 and features.sma20 >= features.sma20_five_sessions_ago and
+                                    features.rs20 > 0 and features.index_close >= features.index_sma60)
+                        if not eligible:
+                            continue
+                    quotes.append(self._quote(instrument,depth=depth))
+                    quote_orders[instrument.instrument_id] = time.monotonic_ns()
                 except (ValueError,KeyError,AdapterError) as error:
+                    if isinstance(error,HumanRequired) or isinstance(error,AdapterError) and error.code in AUTH_ERRORS:
+                        raise
+                    quote_orders[instrument.instrument_id] = time.monotonic_ns()
                     diagnostics.append({"instrument_id":instrument.instrument_id,"reason":getattr(error,"code",str(error))})
             now = self.clock()
             ticks = self.manifest["ticks"]
@@ -531,19 +645,13 @@ class ExternalRuntime:
                 "index_bars":{key:[bar.model_dump(mode="json") for bar in values] for key,values in index_bars.items()},
                 "events":[event.model_dump(mode="json") for event in events],"facts":[fact.model_dump(mode="json") for fact in facts],
                 "coverage":coverage,"runtime_diagnostics":diagnostics,"raw_documents":documents,"account_snapshot":account,
-                "quote_depth":self.quote_depth,"strategy_sellable_quantities":account.get("strategy_sellable_quantities",{})}
+                "quote_depth":depth,"quote_refresh_order":quote_orders,"account_refresh_order":account_order,
+                "strategy_sellable_quantities":account.get("strategy_sellable_quantities",{})}
             bundle = MarketBundle(data,self.profile,mode=self.config.mode)
             quoted = set(bundle.quotes)
             bundle.candidates = [candidate for candidate in bundle.candidates if candidate.instrument.instrument_id in quoted]
             bundle.exclusions.extend(diagnostics)
-            self.latest_bundle = bundle
-            if isinstance(self.broker,KisBrokerPort):
-                self.broker.latest_bundle = bundle
-            if isinstance(self.broker,PaperBrokerPort):
-                paper = self.broker.snapshot()
-                bundle.data.update(account_snapshot=paper,broker_available_cash=paper["broker_available_cash"],
-                                   strategy_sellable_quantities=paper["strategy_sellable_quantities"])
-            return bundle
+            return self._publish(bundle)
 
     def decide(self,frozen):
         self.config.require_external("model_call",self.approval)
@@ -633,8 +741,8 @@ class PaperBrokerPort:
             self.state.save()
         return {"status":"ACKNOWLEDGED"}
 
-    def snapshot(self):
-        bundle,now = self.runtime.latest_bundle,self.runtime.clock()
+    def snapshot(self,*,bundle=None):
+        bundle,now = bundle if bundle is not None else self.runtime.latest_bundle,self.runtime.clock()
         costs = CostSchedule.model_validate_json(canonical(self.runtime.manifest["costs"]))
         with self.state.lock:
             ledger = self.state.data["paper"]

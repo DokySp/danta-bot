@@ -7,11 +7,66 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal as D
 from pathlib import Path
 
+from danta.config import HumanRequired
 from danta.execution import Executor, FixtureBroker, OrderIntent
 from danta.store import Store
 
 
 class TerminalCorrections(unittest.TestCase):
+    def test_increasing_quantity_requires_correction_for_decreasing_amounts(self):
+        for notional, fees in ((250,1),(250,5),(500,1)):
+            with self.subTest(notional=notional,fees=fees), tempfile.TemporaryDirectory() as directory:
+                now = datetime.now(timezone.utc)
+                with Store(Path(directory)/"state.sqlite",mode="offline",account_identity=directory,initial_cash=D(10000)) as store:
+                    broker = FixtureBroker()
+                    executor = Executor(store,broker,mode="offline",authorize=lambda *_:None,preflight=lambda *_:None)
+                    intent = OrderIntent(run_id="decreasing-amount",plan_id="plan",thesis_id="thesis",instrument_id="TEST:AAA",side="BUY",quantity=10,
+                        limit_price=D(100),expires_at=now+timedelta(seconds=120),reason="FIXTURE",account_version=store.get("account_version"),
+                        policy_hash="fixture-policy",reserve_cash=D(1000),reserve_risk=D(100))
+                    order = executor.submit(intent,now)
+                    broker.fill(order["broker_id"],3,D(100),D(3),now)
+                    executor.reconcile()
+                    before = list(store.db.iterdump())
+                    revised = broker.orders[order["broker_id"]]
+                    revised.update(cumulative_quantity=5,cumulative_notional=str(notional),cumulative_fees=str(fees),revision=revised["revision"]+1)
+                    with self.assertRaisesRegex(HumanRequired,"without broker correction evidence"):
+                        executor.reconcile()
+                    self.assertEqual(list(store.db.iterdump()),before)
+                    revised["correction"] = True
+                    executor.reconcile()
+                    self.assertEqual(store.quantity("TEST:AAA"),5)
+                    self.assertEqual(D(store.get("cash_krw")),D(10000-notional-fees))
+
+    def test_missing_fees_preserve_last_amount_until_actual_settlement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            now = datetime.now(timezone.utc)
+            with Store(Path(directory)/"state.sqlite",mode="offline",account_identity=directory,initial_cash=D(10000)) as store:
+                broker = FixtureBroker()
+                executor = Executor(store,broker,mode="offline",authorize=lambda *_:None,preflight=lambda *_:None)
+                intent = OrderIntent(run_id="fee-settlement",plan_id="plan",thesis_id="thesis",instrument_id="TEST:AAA",side="BUY",quantity=10,
+                    limit_price=D(100),expires_at=now+timedelta(seconds=120),reason="FIXTURE",account_version=store.get("account_version"),
+                    policy_hash="fixture-policy",reserve_cash=D(1000),reserve_risk=D(100))
+                order = executor.submit(intent,now)
+                broker.fill(order["broker_id"],3,D(100),D(3),now)
+                executor.reconcile()
+                broker.fill(order["broker_id"],5,D(100),D(0),now)
+                broker.orders[order["broker_id"]]["cumulative_fees"] = None
+                executor.reconcile()
+                self.assertEqual(store.get("cash_krw"),"9497")
+                self.assertFalse(store.get("costs_complete"))
+                self.assertTrue(store.get("unconfirmed_cost:"+order["id"]))
+                before = list(store.db.iterdump())
+                with self.assertRaisesRegex(HumanRequired,"without broker correction evidence"):
+                    store.apply_cumulative_fill(order["id"],quantity=6,notional=D(400),fees=D(1),
+                                                revision=100,observed_at=now.isoformat())
+                self.assertEqual(list(store.db.iterdump()),before)
+                broker.fill(order["broker_id"],5,D(100),D(1),now)
+                executor.reconcile()
+                self.assertEqual(store.quantity("TEST:AAA"),5)
+                self.assertEqual(store.get("cash_krw"),"9499")
+                self.assertTrue(store.get("costs_complete"))
+                self.assertFalse(store.get("unconfirmed_cost:"+order["id"]))
+
     def test_closed_confirmed_order_accepts_later_correction_and_missing_history(self):
         for quantity in (10,3):
             with self.subTest(quantity=quantity), tempfile.TemporaryDirectory() as directory:

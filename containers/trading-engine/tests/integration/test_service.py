@@ -1,10 +1,12 @@
 """Service integration uses real SQLite/adapters and fake app/transport; no sockets."""
+from contextlib import redirect_stdout
 from datetime import timedelta
 from decimal import Decimal
 import base64
 import hashlib
 import hmac
 import html
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -17,6 +19,7 @@ import yaml
 
 from danta.adapters import AdapterError, HttpResponse
 from danta.adapters.telegram import TelegramAdapter
+from danta.cli import main
 from danta.config import HumanRequired, ROOT, canonical, load_config, utcnow
 from danta.market import SessionCalendar
 from danta.models import Session
@@ -480,6 +483,39 @@ class ServiceIntegrationTests(unittest.TestCase):
         with patch.object(self.app, 'close') as close:
             serve(configuration, application_factory=lambda config, args: self.app, stop_event=stop)
             close.assert_called_once()
+        with patch('danta.cli.make_application', return_value=self.app), \
+                patch('danta.service.serve', side_effect=lambda *args, **kwargs: serve(*args, **kwargs, stop_event=stop)), \
+                patch.object(self.app, 'close') as close, redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(main(['--config-dir', str(self.directory), 'serve']), 0)
+            self.assertEqual(json.loads(output.getvalue()), {'status': 'STOPPED'})
+            close.assert_called_once()
+
+    def test_worker_failure_reaches_serve_and_cli_after_cleanup_without_error_text(self):
+        data = self.config.data
+        data['app']['telegram']['enabled'] = False
+        data['app']['telegram']['ingress_enabled'] = False
+        for key, value in data.items():
+            (self.directory / (key + '.yaml')).write_text(yaml.safe_dump(value, allow_unicode=True))
+        configuration = load_config(self.directory)
+        self.service.close()
+        self.app.close()
+        self.app = FakeApp(configuration, self.now)
+        for use_cli in (False, True):
+            with self.subTest(use_cli=use_cli), patch.object(self.app, 'close') as close, \
+                    patch.object(Service, 'queue_tick', side_effect=RuntimeError(SECRET)):
+                if use_cli:
+                    with patch('danta.cli.make_application', return_value=self.app), redirect_stdout(io.StringIO()) as output:
+                        self.assertEqual(main(['--config-dir', str(self.directory), 'serve']), 1)
+                    self.assertEqual(json.loads(output.getvalue()),
+                        {'status': 'FAILED', 'error_type': 'OSError', 'reason': 'SERVICE_WORKER_FAILED'})
+                else:
+                    with self.assertRaisesRegex(OSError, '^SERVICE_WORKER_FAILED$'):
+                        serve(configuration, application_factory=lambda config, args: self.app)
+                close.assert_called_once()
+                self.assertFalse(any(thread.name.startswith('danta-') for thread in threading.enumerate()))
+        failures = [json.loads(row[0]) for row in self.app.store.db.execute(
+            "SELECT payload FROM journal WHERE kind='SERVICE_WORKER_FAILED'")]
+        self.assertEqual(failures, [{'error_type': 'RuntimeError'}] * 2)
 
 
 if __name__ == '__main__':
