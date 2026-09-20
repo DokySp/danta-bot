@@ -7,32 +7,33 @@
 
 ## 1. 개발 PC: 이미지 태그와 전달 파일 준비
 
-저장소 루트에서 Python 3.12 이상으로 가상환경을 만들고 기존 lockfile을 설치한다.
-Ubuntu/Debian에서 `venv`가 없다면 먼저 `sudo apt-get install python3-venv`를 실행한다.
-예시의 `RELEASE`는 두 이미지와
-설정 폴더에 동일하게 적용한다. 이미지 빌드/push는 별도 배포 단계이며 준비 스크립트는 실행하지 않는다.
+저장소 루트에서 다음 명령으로 두 이미지를 `latest`로 빌드하고 push한다.
+배포 전 회귀 테스트는 Docker의 Python 3.12와 고정 의존성으로 자동 실행한다.
+호스트 Python의 패키지 설치나 `PYTHON_BIN` 설정은 필요하지 않다.
+
+```sh
+docker login -u dokysp
+./scripts/deploy-trading-engine.sh dokysp
+./scripts/deploy-telegram-gateway.sh dokysp
+```
+
+설정 폴더를 만드는 Python 도구는 별도 의존성 환경이 필요하다. Python 3.12 이상으로
+가상환경을 만들고 기존 lockfile을 설치한다. Ubuntu/Debian에서 `venv`가 없다면
+먼저 `sudo apt-get install python3-venv`를 실행한다.
 
 ```sh
 python3 -m venv .venv
 .venv/bin/python -m pip install -r containers/trading-engine/requirements.lock
-export PYTHON_BIN="$PWD/.venv/bin/python"
-RELEASE=$(git rev-parse --short HEAD)
+DEPLOYMENT_ID=$(date +%Y%m%d-%H%M%S)
 mkdir -p containers/trading-engine/var
-"$PYTHON_BIN" scripts/prepare-trading-deployment.py \
-  --namespace dokysp --version "$RELEASE" \
-  --output "containers/trading-engine/var/deployment-$RELEASE" --include-secrets
-
-# 이미지 배포 단계에서 실행한다.
-./scripts/deploy-trading-engine.sh dokysp "$RELEASE"
-./scripts/deploy-telegram-gateway.sh dokysp "$RELEASE"
+.venv/bin/python scripts/prepare-trading-deployment.py \
+  --namespace dokysp --version latest \
+  --output "containers/trading-engine/var/deployment-$DEPLOYMENT_ID" --include-secrets
 ```
 
-두 배포 스크립트는 회귀 테스트 후 이미지를 한 번 빌드하고 지정한 릴리스 태그를 먼저 push한다.
-그 push가 성공하면 같은 이미지를 `latest`로 태그해 push한다. 버전을 생략하거나 `latest`를
-지정하면 `latest`만 한 번 push한다. 테스트·빌드·push 실패 시 다음 단계는 실행하지 않는다.
-릴리스 push 뒤 `latest` 갱신이 실패하면 릴리스는 이미 게시됐을 수 있으므로 두 태그 상태를 구분한다.
-운영 Compose에는 재게시하지 않는 릴리스 태그를 고정하는 방식을 권장한다. `latest`는 다음 배포에서
-바뀌는 별칭이며, 이미 실행 중인 컨테이너는 push만으로 갱신되지 않는다.
+위 명령은 `latest`만 push한다. 테스트·빌드·push 실패 시 다음 단계는 실행하지 않는다.
+설정 준비 도구는 이미지 push를 실행하지 않는다. `latest`는 다음 배포에서 바뀌는 별칭이며,
+이미 실행 중인 컨테이너는 push만으로 갱신되지 않는다.
 
 `--include-secrets`는 현재 엔진의 private secrets.yaml, gateway의 v1 env와 일치하는 peer 키를
 새 폴더에 0600으로 복사한다. 토큰 캐시·Codex auth·원장·레거시는 복사하지 않는다.

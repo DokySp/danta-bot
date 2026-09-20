@@ -429,14 +429,15 @@ class AdapterContracts(unittest.TestCase):
             tmp = Path(directory)
             marker = tmp / "late-process-final"
             ready = tmp / "process-started"
-            child = "import time; from pathlib import Path; Path(" + repr(str(ready)) + ").write_text('started'); time.sleep(.4); Path(" + repr(str(marker)) + ").write_text('late')"
+            # Cold Python startup in Docker can exceed 200 ms; still kill before the late write.
+            child = "import time; from pathlib import Path; Path(" + repr(str(ready)) + ").write_text('started'); time.sleep(4); Path(" + repr(str(marker)) + ").write_text('late')"
             with patch("danta.adapters.codex_cli.os.killpg", wraps=os.killpg) as killpg:
                 with self.assertRaises(TimeoutError):
-                    CodexAdapter._run_process([sys.executable, "-c", child], env={}, cwd=tmp, input="", timeout=.2)
+                    CodexAdapter._run_process([sys.executable, "-c", child], env={}, cwd=tmp, input="", timeout=2)
                 self.assertTrue(ready.exists())
                 self.assertEqual(killpg.call_count, 1)
                 self.assertEqual(killpg.call_args.args[1], signal.SIGKILL)
-            time.sleep(.3)
+            time.sleep(3)
             self.assertFalse(marker.exists())
             calls = []
             def runner(command, **kwargs):

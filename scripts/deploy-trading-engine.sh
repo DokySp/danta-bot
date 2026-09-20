@@ -8,7 +8,7 @@ Usage: scripts/deploy-trading-engine.sh <dockerhub-namespace> [version]
 Builds trading-engine and pushes it to the given Docker Hub namespace.
 An explicit version is pushed first, then the same image is published as latest.
 If version is omitted, the Docker image tag is latest and APP_VERSION is resolved from git.
-Set PYTHON_BIN to an interpreter with containers/trading-engine/requirements.lock installed.
+Regression tests run in Docker with Python 3.12 and pinned dependencies.
 EOF
 }
 
@@ -18,7 +18,7 @@ if [ "$#" -gt 2 ] || [ -z "${1:-}" ]; then
 fi
 
 dockerhub_namespace="$1"
-image_name="${TRADING_ENGINE_IMAGE_NAME:-trading-engine}"
+image_name="trading-engine"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 if [ -n "${2:-}" ]; then
@@ -31,8 +31,8 @@ fi
 local_image="${image_name}:${image_tag}"
 remote_image="${dockerhub_namespace}/${image_name}:${image_tag}"
 
-echo "Running repo-wide regression suite before build..." >&2
-if ! "${PYTHON_BIN:-python3}" "${repo_root}/scripts/run_tests.py"; then
+echo "Running repo-wide regression suite in Docker before build..." >&2
+if ! "${PYTHON_BIN:-python3}" "${repo_root}/scripts/run_tests.py" --docker; then
   echo "Regression suite failed; aborting deploy." >&2
   exit 1
 fi

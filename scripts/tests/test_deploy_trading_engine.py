@@ -14,10 +14,9 @@ SCRIPTS = Path(__file__).resolve().parents[1]
 
 
 class DeployTradingEngineTest(unittest.TestCase):
-    def test_tags_context_alias_and_fail_closed_gate(self):
+    def test_tags_context_and_fail_closed_docker_test_gate(self):
         scripts = {
             "deploy-trading-engine.sh": ("trading-engine", "trading-engine"),
-            "deploy-trading-engine-experimental.sh": ("trading-engine-experimental", "trading-engine"),
             "deploy-telegram-gateway.sh": ("telegram-gateway", "telegram-gateway"),
         }
         scenarios = [
@@ -81,6 +80,9 @@ if name == "curl":
                     self.assertEqual(result.returncode, exit_code, result.stderr)
                     calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
                     self.assertFalse(any(call[0] == "curl" for call in calls))
+                    if args:
+                        test_call = next(call for call in calls if call[0] == "test-python")
+                        self.assertEqual(test_call[1:], [str(root / "scripts/run_tests.py"), "--docker"])
                     docker_calls = [call for call in calls if call[0] == "docker"]
                     if not args or test_exit:
                         self.assertEqual(docker_calls, [])

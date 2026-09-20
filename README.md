@@ -20,7 +20,16 @@
 
 ## 테스트
 
-저장소 루트에서 Python 3.12 이상과 고정 의존성을 준비합니다.
+Docker가 실행 중이면 로컬 Python에 패키지를 설치하지 않고 테스트할 수 있습니다.
+
+```bash
+python3 scripts/run_tests.py --docker
+```
+
+Python 3.12와 고정 의존성은 테스트 이미지에 자동으로 준비되고 다음 실행부터 Docker
+빌드 캐시를 재사용합니다. Git에서 무시되는 비밀 설정·인증·데이터와 레거시는 테스트
+이미지에 포함하지 않습니다. 테스트 컨테이너는 외부 네트워크 없이 실행합니다.
+로컬 Python 환경에서 직접 테스트하려면 다음 명령을 사용합니다.
 
 ```bash
 python3 -m venv .venv
@@ -38,20 +47,18 @@ python3 -m venv .venv
 기존 명령 형식으로 이미지 빌드와 Docker Hub 푸시를 실행할 수 있습니다.
 
 ```bash
-docker login -u YOUR_NAMESPACE
-PYTHON_BIN="$PWD/.venv/bin/python" ./scripts/deploy-trading-engine.sh YOUR_NAMESPACE v1.2.1
-# 버전 생략: latest 태그, APP_VERSION은 git describe 결과
-PYTHON_BIN="$PWD/.venv/bin/python" ./scripts/deploy-trading-engine.sh YOUR_NAMESPACE
+docker login -u dokysp
+./scripts/deploy-trading-engine.sh dokysp
+./scripts/deploy-telegram-gateway.sh dokysp
 ```
 
-`PYTHON_BIN`을 생략하면 `python3`를 사용합니다. 스크립트는 전체 회귀 검증을 통과한 뒤
+버전을 생략하면 두 이미지 모두 `latest`로 푸시하며 `APP_VERSION`은 git describe 결과입니다.
+로컬 `python3`는 표준 라이브러리만 사용하는 테스트 실행기를 시작하고, 실제 회귀 테스트는
+Docker의 Python 3.12와 고정 의존성으로 실행합니다. 별도 `PYTHON_BIN` 설정이나
+가상환경 활성화는 필요하지 않습니다. 스크립트는 전체 회귀 검증을 통과한 뒤
 `containers/trading-engine`만 빌드 컨텍스트로 보내고 이미지를 푸시합니다. 버전을 직접 넘기면
 이미지 태그와 `APP_VERSION`에 같은 값이 들어갑니다. `APP_VERSION`은 OCI 버전 라벨과
 이미지 환경변수이며, Codex CLI 버전은 Dockerfile에 고정되어 있습니다.
-
-`deploy-trading-engine-experimental.sh`도 같은 인자를 받으며, 동일 엔진을
-`trading-engine-experimental` 이미지 이름으로 푸시하는 호환 진입점입니다. 이전 base/experimental
-스킬 프로필은 포함하지 않습니다. 정책과 모드는 외부 설정 파일로 구분합니다.
 
 이 스크립트가 끝나도 NAS 파일 동기화나 컨테이너 재시작은 수행되지 않습니다.
 운영 대상에서 이미지 pull과 Compose 재생성을 별도로 수행해야 합니다.
@@ -65,13 +72,6 @@ PYTHONPATH=containers/trading-engine/src .venv/bin/python containers/trading-eng
 
 검증은 네트워크가 없는 임시 컨테이너에서 합성 데이터만 사용합니다.
 실제 비밀값·계좌·기존 운영 데이터를 이미지 검증에 마운트하지 않습니다.
-
-Telegram gateway의 기존 배포 명령은 유지됩니다. 같은 의존성 환경을 활성화한 뒤 실행합니다.
-
-```bash
-source .venv/bin/activate
-./scripts/deploy-telegram-gateway.sh YOUR_NAMESPACE v1.2.1
-```
 
 ## Docker Compose와 설정
 

@@ -10,7 +10,9 @@ out through to invoke each real suite's `unittest discover`.
 from __future__ import annotations
 
 import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import run_tests
@@ -171,6 +173,63 @@ class MainAggregationTest(unittest.TestCase):
             exit_code = run_tests.main(self.suites())
 
         self.assertEqual(exit_code, 1)
+
+
+class DockerRunnerTest(unittest.TestCase):
+    def test_snapshot_is_current_and_private_files_are_excluded(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tracked = root / "scripts/run_tests.py"
+            tracked.parent.mkdir()
+            tracked.write_text("CURRENT_WORKING_TREE")
+            new = root / "scripts/test_new.py"
+            new.write_text("NEW_TEST")
+            private = root / "containers/trading-engine/config/secrets.yaml"
+            private.parent.mkdir(parents=True)
+            private.write_text("PRIVATE_CANARY")
+            legacy = root / "containers/trading-engine/legacy/old.py"
+            legacy.parent.mkdir()
+            legacy.write_text("OLD_CODE")
+            selected = "scripts/run_tests.py\0scripts/test_new.py\0scripts/deleted.py\0containers/trading-engine/legacy/old.py\0"
+
+            def run(cmd, **kwargs):
+                if cmd[0] == "git":
+                    self.assertIn("--others", cmd)
+                    self.assertIn("--exclude-standard", cmd)
+                    return fake_completed_process(cmd, stdout=selected)
+                if cmd[1] == "build":
+                    context = Path(cmd[-1])
+                    self.assertEqual((context / "scripts/run_tests.py").read_text(), "CURRENT_WORKING_TREE")
+                    self.assertTrue((context / "scripts/test_new.py").exists())
+                    self.assertFalse((context / private.relative_to(root)).exists())
+                    self.assertFalse((context / legacy.relative_to(root)).exists())
+                    self.assertFalse((context / "scripts/deleted.py").exists())
+                    self.assertIn("requirements.lock", (context / "Dockerfile").read_text())
+                    return fake_completed_process(cmd, stdout="sha256:test-image\n")
+                self.assertEqual(cmd[cmd.index("--network") + 1], "none")
+                self.assertIn("--read-only", cmd)
+                self.assertIn("exec", cmd[cmd.index("--tmpfs") + 1].split(":", 1)[1].split(","))
+                self.assertEqual(cmd[-1], "sha256:test-image")
+                return fake_completed_process(cmd, returncode=7)
+
+            with patch.object(run_tests, "REPO_ROOT", root), patch("run_tests.subprocess.run", side_effect=run):
+                self.assertEqual(run_tests.run_in_docker(), 7)
+
+    def test_failed_setup_does_not_start_tests(self):
+        for fail_at in ("git", "build"):
+            with self.subTest(fail_at=fail_at):
+                calls = []
+
+                def run(cmd, **kwargs):
+                    calls.append(cmd)
+                    if cmd[0] == fail_at or cmd[1] == fail_at:
+                        raise subprocess.CalledProcessError(1, cmd)
+                    return fake_completed_process(cmd, stdout="")
+
+                with patch("run_tests.subprocess.run", side_effect=run):
+                    with self.assertRaises(subprocess.CalledProcessError):
+                        run_tests.run_in_docker()
+                self.assertFalse(any(cmd[:2] == ["docker", "run"] for cmd in calls))
 
 
 if __name__ == "__main__":
