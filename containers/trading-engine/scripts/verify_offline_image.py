@@ -45,15 +45,12 @@ assert again['run_id'] == result['run_id']
 status = command(['status'])
 report = command(['report'])
 design = render_readme('/app/README.md', '/app/var/report.html')
-stop = threading.Event()
-stop.set()
-serve(config, SimpleNamespace(snapshot=pathlib.Path('/app/tests/fixtures/offline-e2e.json'), approval_file=None), application_factory=make_application, stop_event=stop)
 validation = {
     'tested_at': datetime.now(timezone.utc).isoformat(), 'uid': os.getuid(),
     'image_code_id': code_identity(), 'doctor': doctor,
     'synthetic_run_status': result['run_status'], 'synthetic_order_status': result['order_status'],
     'same_request_reused': True, 'holdings_count': len(status['holdings']),
-    'service_default_no_socket': True, 'readme_sha256': design['source_sha256'],
+    'offline_cli_no_socket': True, 'readme_sha256': design['source_sha256'],
     'design_heading_count': design['heading_count'],
 }
 print(json.dumps({'validation': validation, 'artifacts': {

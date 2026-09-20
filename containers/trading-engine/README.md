@@ -744,7 +744,7 @@ app:
   mode: offline
   account_alias: null
   state_dir: ./var/offline/research
-  listen_host: 127.0.0.1
+  listen_host: 0.0.0.0
   listen_port: 8080
 model:
   provider: codex_cli
@@ -804,7 +804,7 @@ observability:
 
 `null`인 모델/인증/실제 계좌/캘린더/수수료 공급 등은 외부 실행에 필요할 때 질문/확인한다. offline fixture는 이 값 없이도 동작하되 결과에 `FIXTURE_ONLY`를 표시한다. 거래 가능한 시세·캘린더를 검증하지 못하면 외부 거래를 실행하지 않는다. 실제 비밀값은 여기 적지 않는다.
 
-`listen_host: 127.0.0.1`은 초기 외부 수신 차단 기본값이다. 다른 컨테이너의 gateway와 연결할 때는 승인된 전용 네트워크와 인증 경계를 구성한 다음 적합한 bind 주소로 바꾼다. localhost 설정 그대로 외부 컨테이너 연결 테스트에 성공했다고 보고하지 않는다.
+2026-09-21 배포 경로 수정: `serve`는 `listen_host: 0.0.0.0`에서 관리용 HTTP를 먼저 시작한다. `GET /version`, `/healthz`, `/readyz`는 계좌·모델 초기화와 독립적이며, offline CLI 연구는 외부 API를 호출하지 않는다. 실제 Telegram 작업 접수와 제어·거래 권한 검사는 유지한다. 엔진 포트는 호스트에 공개하지 않고 신뢰하는 컨테이너만 공유 네트워크에 연결한다. 거래 서비스 미준비 상태를 정상 거래로 표시하지 않는다.
 
 ### 12.3 strategy.yaml
 

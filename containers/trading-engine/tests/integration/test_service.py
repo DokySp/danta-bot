@@ -534,7 +534,7 @@ class ServiceIntegrationTests(unittest.TestCase):
         # A synthetic bundle never enters the recurring queue, even after enabling it in memory.
         self.assertEqual(self.service.queue_tick(), 0)
 
-    def test_default_serve_opens_no_socket(self):
+    def test_unconfigured_serve_keeps_diagnostics_without_creating_a_fixture_worker(self):
         data = self.config.data
         data['app']['telegram']['enabled'] = False
         data['app']['telegram']['ingress_enabled'] = False
@@ -547,15 +547,19 @@ class ServiceIntegrationTests(unittest.TestCase):
         self.app.close()
         self.app = FakeApp(configuration, self.now)
         # serve owns close; replace the app close callback only to keep tearDown single-close.
-        with patch.object(self.app, 'close') as close:
-            serve(configuration, application_factory=lambda config, args: self.app, stop_event=stop)
-            close.assert_called_once()
+        with patch('danta.service.ThreadingHTTPServer') as server, patch('danta.cli.make_application') as factory:
+            server.return_value.server_port = 8080
+            serve(configuration, application_factory=factory, stop_event=stop)
+            server.assert_called_once()
+            factory.assert_not_called()
         with patch('danta.cli.make_application', return_value=self.app), \
+                patch('danta.service.ThreadingHTTPServer', return_value=SimpleNamespace(
+                    server_port=8080, serve_forever=lambda: None, shutdown=lambda: None, server_close=lambda: None)), \
                 patch('danta.service.serve', side_effect=lambda *args, **kwargs: serve(*args, **kwargs, stop_event=stop)), \
                 patch.object(self.app, 'close') as close, redirect_stdout(io.StringIO()) as output:
             self.assertEqual(main(['--config-dir', str(self.directory), 'serve']), 0)
             self.assertEqual(json.loads(output.getvalue()), {'status': 'STOPPED'})
-            close.assert_called_once()
+            close.assert_not_called()
 
     def test_worker_failure_reaches_serve_and_cli_after_cleanup_without_error_text(self):
         data = self.config.data
@@ -569,6 +573,9 @@ class ServiceIntegrationTests(unittest.TestCase):
         self.app = FakeApp(configuration, self.now)
         for use_cli in (False, True):
             with self.subTest(use_cli=use_cli), patch.object(self.app, 'close') as close, \
+                    patch('danta.service.ThreadingHTTPServer', return_value=SimpleNamespace(
+                        server_port=8080, serve_forever=lambda: None, shutdown=lambda: None, server_close=lambda: None)), \
+                    patch('danta.service.RuntimeHost.requirements', return_value=[]), \
                     patch.object(Service, 'queue_tick', side_effect=RuntimeError(SECRET)):
                 if use_cli:
                     with patch('danta.cli.make_application', return_value=self.app), redirect_stdout(io.StringIO()) as output:

@@ -98,6 +98,31 @@ class EngineCase(unittest.TestCase):
         with self.assertRaises(ConfigurationError):
             load_config(self.config_dir)
 
+    def test_startup_activation_never_records_success_after_failed_reconciliation(self):
+        app = Application(self.config, self.bundle)
+        app.approval = {'id': 'synthetic-startup-approval'}
+        try:
+            with patch('danta.application.validate_activation') as validation:
+                with patch.object(app, 'reconcile', side_effect=HumanRequired('synthetic broker mismatch')):
+                    with self.assertRaises(HumanRequired):
+                        app.activate(self.config.config_hash)
+                self.assertIsNone(app.store.get('activation'))
+                app.activate(self.config.config_hash)
+                app.activate(self.config.config_hash)
+                self.assertEqual(app.store.get('activation'), {'config_hash': self.config.config_hash,
+                    'code_id': app.code_id, 'approval_id': app.approval['id']})
+                self.assertEqual(app.store.db.execute("SELECT COUNT(*) FROM journal WHERE kind='ACTIVATED'").fetchone()[0], 1)
+                self.assertEqual(validation.call_count, 3)
+                with app.store.transaction():
+                    app.store.set('cash_krw', '0')
+                with self.assertRaisesRegex(HumanRequired, 'ACCOUNT_ALLOCATION_EMPTY'):
+                    app.activate(self.config.config_hash)
+            # Actual validation still rejects the offline profile even with an existing record.
+            with self.assertRaises(HumanRequired):
+                app.activate(self.config.config_hash)
+        finally:
+            app.close()
+
     def test_final_dispatch_rechecks_pause_account_cash_and_quote(self):
         for change, reason in [("pause", "NEW_RISK_PAUSED"), ("version", "STALE_ACCOUNT_VERSION"),
                                ("cash", "CURRENT_PORTFOLIO_LIMIT"), ("quote", "MONITOR_DEGRADED")]:

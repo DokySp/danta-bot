@@ -56,7 +56,9 @@ docker login -u dokysp
 로컬 `python3`는 표준 라이브러리만 사용하는 테스트 실행기를 시작하고, 실제 회귀 테스트는
 Docker의 Python 3.12와 고정 의존성으로 실행합니다. 별도 `PYTHON_BIN` 설정이나
 가상환경 활성화는 필요하지 않습니다. 스크립트는 전체 회귀 검증을 통과한 뒤
-`containers/trading-engine`만 빌드 컨텍스트로 보내고 이미지를 푸시합니다. 버전을 직접 넘기면
+해당 서비스 폴더만 빌드 컨텍스트로 보냅니다. 이어서 실제 두 이미지를 임시 내부 네트워크에
+연결해 버전·준비 상태·오류 응답을 검사한 뒤 이미지를 푸시합니다. 상대 이미지가 필요하면
+동일 소스에서 검증용으로 빌드하며 별도로 푸시하지 않습니다. 버전을 직접 넘기면
 이미지 태그와 `APP_VERSION`에 같은 값이 들어갑니다. `APP_VERSION`은 OCI 버전 라벨과
 이미지 환경변수이며, Codex CLI 버전은 Dockerfile에 고정되어 있습니다.
 
@@ -101,8 +103,9 @@ telegram-gateway/
 설정과 비밀값은 이미지에 들어가지 않으므로 서버에는 각 `config/`를 전달합니다.
 엔진 컨테이너는 `trading-engine` 하나입니다. 시작 시 내부에서 권한을 준비한 뒤 UID 10001과
 읽기 전용 config로 실행하며, 기본 명령은 `serve`입니다. `runtime.json`은 config에서 자동으로
-찾되 기존 내용·유효기간·권한 검사를 통과해야 사용합니다. 기본 app.yaml은 offline이므로
-Compose 실행만으로 실제 계좌 조회나 주문이 켜지지는 않습니다.
+찾되 기존 내용·유효기간·권한 검사를 통과해야 사용합니다. 관리용 HTTP와 Telegram `/version`은
+거래 설정과 독립적으로 작동합니다. `/status`는 누락된 설정을 표시합니다. 기본 app.yaml은
+offline이며 실제 계좌·모델·주문 준비가 완료되지 않은 상태를 명시합니다.
 
 Codex 인증은 운영 컴퓨터에서 기존처럼 `codex login`으로 생성하며, 로그인과 엔진이
 `trading-engine-auth` Docker volume을 공유합니다. 인증 파일을 직접 작성하거나 옮길 필요는 없습니다.
@@ -116,7 +119,8 @@ Codex 인증은 운영 컴퓨터에서 기존처럼 `codex login`으로 생성�
 설정 묶음을 만드는 `scripts/prepare-trading-deployment.py`는 선택 사항입니다.
 이미 필요한 config가 있으면 직접 복사하면 됩니다. 생성 결과도 각 서비스의 Compose 하나와
 config뿐이며 `.env`나 데이터 디렉터리는 만들지 않습니다. 실제 비밀값은 `--include-secrets`를
-지정했을 때만 복사하고, 운영 승인은 example만 제공합니다.
+지정했을 때만 복사합니다. 실제 runtime 파일이 있으면 내용을 그대로 보존해 함께 복사하며,
+없으면 example만 제공합니다. 검증되지 않은 운영 정보를 자동 승인하지 않습니다.
 
 Telegram은 `trading-engine` route와 `config/telegram.env` 하나를 사용합니다. 두 서비스는
 `danta-bot-net` 네트워크로 연결하며 엔진 포트를 호스트에 공개하지 않습니다.

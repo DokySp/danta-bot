@@ -975,11 +975,11 @@ def build_external_runtime(config,trusted_approval,*,kis_transport=None,dart_tra
     bootstrap = manifest["bootstrap"]
     if bootstrap.get("ownership_verified") is not True or not bootstrap.get("source"):
         raise HumanRequired("Strategy/manual ownership bootstrap is unverified")
-    if bootstrap.get("strategy_quantities") and not (config.state_dir/"state.sqlite").exists():
-        raise HumanRequired("Nonempty strategy bootstrap requires an approved ledger/thesis import")
     policy = config.research if config.mode != "live" else config.data["strategy"]["strategy"]["live_mandate"]["accepted_risk_policy"]
-    if not policy or _decimal(bootstrap["strategy_cash"]) != _decimal(policy["capital_krw"]):
-        raise HumanRequired("Approved strategy cash and active capital policy do not match")
+    if not policy or not 0 <= _decimal(bootstrap["strategy_cash"]) <= _decimal(policy["capital_krw"]):
+        raise HumanRequired("Approved strategy cash exceeds active capital allocation")
+    if _decimal(bootstrap["strategy_cash"]) == 0 and not any(bootstrap["strategy_quantities"].values()):
+        raise HumanRequired("ACCOUNT_ALLOCATION_EMPTY")
     model_settings = config.app["model"]
     if not all(model_settings.get(key) for key in ("model_id","reasoning_effort","auth_mode")):
         raise HumanRequired("Approved runtime model/effort/auth mode is unset")

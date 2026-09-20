@@ -8,11 +8,12 @@ import os
 import sqlite3
 import threading
 from contextlib import contextmanager
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from uuid import uuid4
 
 from .config import ROOT, HumanRequired, aware_time, canonical, digest, utcnow
+from .models import InvestmentThesis, finite_decimal
 
 TERMINAL = {"FILLED", "CANCELED", "REJECTED", "EXPIRED", "PARTIAL_CANCELED", "INVALIDATED"}
 WORKING = {"PLANNED", "VALIDATED", "SUBMITTING", "ACKNOWLEDGED", "PARTIALLY_FILLED", "UNKNOWN", "CANCEL_REQUESTED"}
@@ -157,6 +158,78 @@ class Store:
 
     def holdings(self, owner: str = "strategy") -> list[dict]:
         return [dict(row) for row in self.db.execute("SELECT * FROM holdings WHERE owner=? AND quantity>0", (owner,))]
+
+    def import_positions(self, snapshot_id: str, positions: list[dict], *, cash: Decimal,
+                         observed_at: str, source: str, config_hash: str, strategy_hash: str) -> bool:
+        """Adopt one immutable account snapshot, without inventing trades or fill history."""
+        if any(not isinstance(value, str) or not value.strip()
+               for value in (snapshot_id, source, config_hash, strategy_hash)):
+            raise ValueError("Account adoption requires snapshot, source and policy identities")
+        try:
+            cash = finite_decimal(cash)
+        except InvalidOperation as error:
+            raise ValueError("Invalid account adoption cash") from error
+        if cash < 0 or not isinstance(positions, list):
+            raise ValueError("Invalid account adoption cash or positions")
+        observation_time = aware_time(observed_at)
+        observed_at = observation_time.isoformat()
+        inherited, instruments, thesis_ids = [], set(), set()
+        for position in positions:
+            if not isinstance(position, dict) or set(position) != {"instrument_id", "quantity", "valuation_price", "thesis"}:
+                raise ValueError("Invalid inherited position fields")
+            instrument, quantity = position["instrument_id"], position["quantity"]
+            try:
+                price = finite_decimal(position["valuation_price"])
+            except InvalidOperation as error:
+                raise ValueError("Invalid inherited valuation price") from error
+            if (not isinstance(instrument, str) or not instrument.strip() or instrument in instruments
+                    or type(quantity) is not int or quantity <= 0 or price <= 0):
+                raise ValueError("Invalid or duplicate inherited position")
+            raw_thesis = position["thesis"]
+            # Revalidate models too: model_copy/model_construct can bypass validation.
+            thesis = InvestmentThesis.model_validate(raw_thesis.model_dump()
+                if isinstance(raw_thesis, InvestmentThesis) else raw_thesis)
+            if (not thesis.thesis_id.strip() or thesis.thesis_id in thesis_ids
+                    or thesis.instrument_id != instrument or thesis.policy_hash != config_hash
+                    or thesis.strategy_hash != strategy_hash or thesis.average_entry != price
+                    or thesis.planned_quantity != quantity or thesis.first_fill_at is not None
+                    or thesis.first_fill_session is not None or thesis.first_fill_time_quality != "UNKNOWN"
+                    or thesis.origin != "inherited" or thesis.adopted_at != observation_time):
+                raise ValueError("Inherited thesis does not match account adoption")
+            instruments.add(instrument)
+            thesis_ids.add(thesis.thesis_id)
+            inherited.append({"instrument_id": instrument, "quantity": quantity,
+                              "valuation_price": str(price), "thesis": thesis.model_dump(mode="json")})
+        payload = {"snapshot_id": snapshot_id, "positions": sorted(inherited, key=lambda item: item["instrument_id"]),
+                   "cash_krw": str(cash), "observed_at": observed_at, "source": source,
+                   "config_hash": config_hash, "strategy_hash": strategy_hash}
+        body_hash = digest(payload)
+        with self.transaction():
+            previous = self.get("account_adoption")
+            if previous:
+                if previous["snapshot_id"] == snapshot_id:
+                    if previous["payload_hash"] != body_hash:
+                        raise ValueError("DUPLICATE_SNAPSHOT_DIFFERENT_BODY")
+                    return False
+                raise HumanRequired("ACCOUNT_ALREADY_ADOPTED")
+            if self.db.execute("SELECT 1 FROM intents UNION ALL SELECT 1 FROM holdings UNION ALL SELECT 1 FROM theses LIMIT 1").fetchone():
+                raise HumanRequired("ACCOUNT_ADOPTION_REQUIRES_EMPTY_LEDGER")
+            for position in payload["positions"]:
+                thesis = position["thesis"]
+                basis = Decimal(position["valuation_price"]) * position["quantity"]
+                self.db.execute("INSERT INTO theses VALUES (?,?)", (thesis["thesis_id"], canonical(thesis)))
+                self.db.execute("INSERT INTO holdings VALUES (?,'strategy',?,?,?)",
+                    (position["instrument_id"], thesis["thesis_id"], position["quantity"], str(basis)))
+                self.event(snapshot_id, "INHERITED_POSITION", {**position, "snapshot_id": snapshot_id,
+                    "cost_basis": str(basis), "cost_basis_source": "ADOPTION_VALUATION",
+                    "observed_at": observed_at, "source": source})
+            self.set("cash_krw", str(cash))
+            self.set("reconciled", False)
+            self.set("account_adoption", {key: value for key, value in payload.items() if key not in {"positions", "cash_krw"}}
+                     | {"payload_hash": body_hash})
+            version = self.bump_version()
+            self.event(snapshot_id, "ACCOUNT_ADOPTED", {**payload, "payload_hash": body_hash, "account_version": version})
+            return True
 
     def quantity(self, instrument: str, owner: str = "strategy") -> int:
         return self.db.execute("SELECT COALESCE(SUM(quantity),0) FROM holdings WHERE instrument_id=? AND owner=?", (instrument, owner)).fetchone()[0]

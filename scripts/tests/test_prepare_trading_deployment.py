@@ -88,6 +88,8 @@ class PrepareDeploymentTest(unittest.TestCase):
             shutil.copyfile(gateway / "config/routes.example.yaml", gateway / "config/routes.yaml")
             (engine / "config/do-not-copy.json").write_text("PRIVATE_SENTINEL")
             original = source.read_bytes()
+            runtime = '{"id":"SYNTHETIC_EXISTING_APPROVAL"}\n'
+            (engine / "config/runtime.json").write_text(runtime)
             with patch.object(deployment, "ENGINE", engine), patch.object(deployment, "GATEWAY", gateway):
                 target = base / "release"
                 deployment.prepare(target, "example", "test", include_secrets=True, sender_ids=["12345"])
@@ -100,6 +102,7 @@ class PrepareDeploymentTest(unittest.TestCase):
                 self.assertNotIn("DANTA_TELEGRAM_PEER_SECRET", copied)
                 self.assertFalse((target / "telegram-gateway/config/codex-peer.secret").exists())
                 self.assertEqual(source.read_bytes(), original)
+                self.assertEqual((target / "trading-engine/config/runtime.json").read_text(), runtime)
                 self.assertFalse((target / "trading-engine/config/do-not-copy.json").exists())
                 shadow = yaml.safe_load((target / "trading-engine/config/app.shadow.yaml.example").read_text())
                 self.assertEqual(shadow["telegram"]["allowed_sender_ids"], ["12345"])

@@ -1,7 +1,8 @@
 # kis-trade-mcp
 
-공용 KIS MCP 서버 compose입니다. v1과 v2의 trading-engine는 같은 Docker 네트워크에서
-`http://kis-trade-mcp:3000/sse`로 이 서버에 접속합니다.
+독립적으로 사용하는 KIS MCP 서버 Compose입니다. 같은 Docker 네트워크의 MCP 클라이언트는
+`http://kis-trade-mcp:3000/sse`로 접속할 수 있습니다. 현재 `trading-engine`은 KIS REST API를
+직접 호출하므로 이 서비스가 엔진이나 Telegram 연결의 필수 의존성은 아닙니다.
 
 ## Runtime Env
 
@@ -19,7 +20,6 @@ cp config/kis-trade-mcp.env.example config/kis-trade-mcp.env
 
 ## Trading Env
 
-trading-engine의 `CODEX_MCP_TRADING_ENV`와 이 파일의 값은 직접 연결되지는 않습니다.
-다만 `CODEX_MCP_TRADING_ENV=paper`는 MCP 호출에 `env_dv="demo"`를 강제하므로
-`KIS_PAPER_*` 값이 필요하고, `CODEX_MCP_TRADING_ENV=acct`는 `env_dv="real"`을
-강제하므로 `KIS_APP_KEY`, `KIS_APP_SECRET`, `KIS_ACCT_STOCK` 값이 필요합니다.
+MCP 클라이언트가 `env_dv="demo"`로 호출하면 `KIS_PAPER_*` 값이 필요하고,
+`env_dv="real"`로 호출하면 `KIS_APP_KEY`, `KIS_APP_SECRET`, `KIS_ACCT_STOCK` 값이 필요합니다.
+현재 엔진의 환경과 인증은 엔진 자체 `config/app.yaml`, `config/secrets.yaml`에서 설정합니다.

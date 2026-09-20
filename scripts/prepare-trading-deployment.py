@@ -90,13 +90,23 @@ def prepare(output, namespace, version, *, include_secrets=False, sender_ids=())
             value.update(code_id=code_identity(), model_id=app["model"]["model_id"],
                 prompt_hash=hashlib.sha256((ENGINE / "prompts/portfolio_decision.md").read_bytes()).hexdigest())
         write("trading-engine/config/" + path.name, json.dumps(value, ensure_ascii=False, indent=2) + "\n", 0o600)
+    runtime_files = []
+    for name in ("runtime.json", "runtime-manifest.json"):
+        path = ENGINE / "config" / name
+        if path.is_symlink():
+            raise ValueError("Runtime configuration must be a regular file")
+        if path.is_file():
+            # Preserve hashes and existing authority exactly; never fill verified fields.
+            write("trading-engine/config/" + name, path.read_bytes(), 0o600)
+            runtime_files.append(name)
     if private:
         write("trading-engine/config/secrets.yaml", yaml.safe_dump(private, sort_keys=False, default_style='"'), 0o600)
         write("telegram-gateway/config/telegram.env", env_body, 0o600)
     guide = (ENGINE / "deployment/README.md").read_text()
     write("README.md", guide)
     return {"output": str(output), "status": "PREPARED_NOT_AUTHORIZED", "includes_secrets": include_secrets,
-        "default_mode": "offline", "shadow_settings": "example_only", "sender_allowlist_set": bool(sender_ids),
+        "default_mode": load_config(ENGINE / "config").mode, "runtime_files": runtime_files,
+        "shadow_settings": "example_only", "sender_allowlist_set": bool(sender_ids),
         "images_pushed": False, "remote_host_modified": False}
 
 

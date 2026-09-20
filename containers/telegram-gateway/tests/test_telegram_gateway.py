@@ -13,7 +13,7 @@ from pathlib import Path
 from threading import Thread
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
@@ -145,9 +145,63 @@ class GatewayEngineClientTest(unittest.TestCase):
         self.assertEqual(dict(request.header_items()), {"Content-type": "application/json"})
         for url in ("file:///telegram", "http://user:password@receiver/telegram", "http://receiver/other",
                     "http://receiver/telegram?key=value", "http://receiver/telegram#fragment"):
-            with self.subTest(url=url), self.assertRaises(ValueError):
-                client.post_message(url, payload)
+            for operation in (lambda: client.post_message(url, payload), lambda: client.get_version(url),
+                              lambda: client.get_readiness(url)):
+                with self.subTest(url=url), self.assertRaises(ValueError):
+                    operation()
         self.assertEqual(client._opener.open.call_count, 1)
+
+    def test_version_uses_management_get_when_runtime_is_not_ready(self) -> None:
+        client = telegram_gateway.TradingEngineClient(2)
+        client._opener = Mock()
+        client._opener.open.return_value = io.BytesIO(b'{"version":"v-test","runtime_status":"NOT_READY"}')
+        result = client.get_version("http://receiver:8080/telegram")
+        self.assertEqual(result["version"], "v-test")
+        request = client._opener.open.call_args.args[0]
+        self.assertEqual(request.get_method(), "GET")
+        self.assertEqual(request.full_url, "http://receiver:8080/version")
+        self.assertIsNone(request.data)
+
+    def test_failures_do_not_expose_response_body_or_connection_details(self) -> None:
+        client = telegram_gateway.TradingEngineClient(2)
+        client._opener = Mock()
+        for error in (HTTPError("http://receiver/telegram", 503, "unavailable", {}, io.BytesIO(b"private-body")),
+                      URLError("private-connection-details")):
+            client._opener.open.side_effect = error
+            with self.subTest(error=type(error).__name__), self.assertRaises(RuntimeError) as raised:
+                client.post_message("http://receiver/telegram", {})
+            self.assertNotIn("private", str(raised.exception))
+        self.assertEqual(client._opener.open.call_count, 2)
+
+    def test_readiness_accepts_structured_http_503_only(self) -> None:
+        client = telegram_gateway.TradingEngineClient(2)
+        client._opener = Mock()
+        readiness = {"ready": False, "status": "WAITING_FOR_CONFIGURATION", "issues": ["config/runtime.json: 운영 승인 파일 없음"]}
+        for body, valid in ((json.dumps(readiness).encode(), True), (b"private-body", False),
+                            (b'{"ready":false,"status":"private-status","issues":[]}', False),
+                            (b'{"ready":false,"status":"FAILED","issues":"private-body"}', False)):
+            client._opener.open.side_effect = HTTPError("http://receiver/readyz", 503, "unavailable", {}, io.BytesIO(body))
+            with self.subTest(valid=valid, body_type=type(body).__name__):
+                if valid:
+                    self.assertEqual(client.get_readiness("http://receiver/telegram"), readiness)
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "Invalid engine readiness response"):
+                        client.get_readiness("http://receiver/telegram")
+        request = client._opener.open.call_args.args[0]
+        self.assertEqual(request.get_method(), "GET")
+        self.assertEqual(request.full_url, "http://receiver/readyz")
+        self.assertIsNone(request.data)
+        client._opener.open.side_effect = HTTPError("http://receiver/readyz", 500, "private-error", {}, io.BytesIO(b"private-body"))
+        with self.assertRaisesRegex(RuntimeError, "^trading-engine route failed: HTTP 500$"):
+            client.get_readiness("http://receiver/telegram")
+
+    def test_rejected_response_is_failure_even_with_http_success(self) -> None:
+        client = telegram_gateway.TradingEngineClient(2)
+        client._opener = Mock()
+        client._opener.open.return_value = io.BytesIO(b'{"accepted":false,"reply_text":"private-body"}')
+        with self.assertRaisesRegex(RuntimeError, "Engine request rejected"):
+            client.post_message("http://receiver/telegram", {})
+        client._opener.open.assert_called_once()
 
     def test_preserves_plain_text_reply(self) -> None:
         client = telegram_gateway.TradingEngineClient(2)
@@ -613,13 +667,70 @@ class GatewayAttachmentFlowTest(unittest.TestCase):
 
     def test_unauthorized_chat_cannot_forward_messages_or_attachments(self) -> None:
         app = self.app()
-        for content in ({"text": "/resume"}, {"document": {"file_id": "file-1", "file_size": 3}}):
+        for content in ({"text": "/resume"}, {"text": "/version"}, {"text": "/status"},
+                        {"document": {"file_id": "file-1", "file_size": 3}}):
             update = {"message": {"message_id": 10, "chat": {"id": 8}, "from": {"id": 8}, **content}}
             with self.subTest(content=content), patch.object(telegram_gateway, "TelegramClient") as client:
                 app.handle_update(self.route(), update)
                 client.assert_not_called()
         app.engine.post_message.assert_not_called()
+        app.engine.get_version.assert_not_called()
+        app.engine.get_readiness.assert_not_called()
         app.attachment_cache.store.assert_not_called()
+
+    def test_version_reports_both_services_without_submitting_an_engine_command(self) -> None:
+        for engine_version in ({"version": "engine-test", "runtime_status": "NOT_READY"},
+                               RuntimeError("private engine failure")):
+            app = self.app()
+            app.router.resolve.return_value = telegram_gateway.ResolvedRoute(
+                "trading-engine", "http://receiver/telegram", "/version")
+            if isinstance(engine_version, Exception):
+                app.engine.get_version.side_effect = engine_version
+            else:
+                app.engine.get_version.return_value = engine_version
+            update = {"message": {"chat": {"id": 9}, "from": {"id": 9}, "text": "/version@my_bot"}}
+            with self.subTest(engine_version=type(engine_version).__name__), patch.object(telegram_gateway, "TelegramClient") as client:
+                app.handle_update(self.route(), update)
+                reply = client.return_value.send_message.call_args.args[1]
+                self.assertIn("telegram-gateway: test", reply)
+                self.assertIn("trading-engine:", reply)
+                self.assertNotIn("private", reply)
+                if not isinstance(engine_version, Exception):
+                    self.assertIn("engine-test", reply)
+                    self.assertIn("NOT_READY", reply)
+            app.engine.get_version.assert_called_once_with("http://receiver/telegram")
+            app.engine.post_message.assert_not_called()
+            app.attachment_cache.list_pending.assert_not_called()
+            app.attachment_cache.mark_consumed.assert_not_called()
+
+    def test_status_reports_inactive_runtime_and_keeps_ready_account_status_authorized(self) -> None:
+        for readiness in ({"ready": False, "status": "WAITING_FOR_CONFIGURATION", "issues": ["config/runtime.json: 운영 승인 파일 없음"]},
+                          {"ready": True, "status": "READY", "issues": []}, RuntimeError("private readiness failure")):
+            app = self.app()
+            app.router.resolve.return_value = telegram_gateway.ResolvedRoute(
+                "trading-engine", "http://receiver/telegram", "/status")
+            app.engine.post_message.return_value = {"accepted": True, "reply_text": "요청을 접수했습니다."}
+            if isinstance(readiness, Exception):
+                app.engine.get_readiness.side_effect = readiness
+            else:
+                app.engine.get_readiness.return_value = readiness
+            update = {"message": {"chat": {"id": 9}, "from": {"id": 9}, "text": "/status@my_bot"}}
+            with self.subTest(readiness_type=type(readiness).__name__), patch.object(telegram_gateway, "TelegramClient") as client:
+                app.handle_update(self.route(), update)
+                reply = client.return_value.send_message.call_args.args[1]
+                self.assertNotIn("private", reply)
+                if isinstance(readiness, Exception):
+                    self.assertIn("로그를 확인", reply)
+                elif not readiness["ready"]:
+                    self.assertIn("WAITING_FOR_CONFIGURATION", reply)
+                    self.assertIn("운영 승인 파일 없음", reply)
+                else:
+                    app.engine.post_message.assert_called_once()
+                    self.assertEqual(app.engine.post_message.call_args.args[1]["user_id"], "9")
+            if isinstance(readiness, Exception) or not readiness["ready"]:
+                app.engine.post_message.assert_not_called()
+            app.engine.get_readiness.assert_called_once_with("http://receiver/telegram")
+            app.attachment_cache.mark_consumed.assert_not_called()
 
     def test_media_message_is_cached_without_codex_call(self) -> None:
         app = self.app()
@@ -713,7 +824,7 @@ class GatewayAttachmentFlowTest(unittest.TestCase):
             url="http://codex.test/telegram",
             text="두 파일을 비교해줘",
         )
-        app.engine.post_message.side_effect = RuntimeError("bridge unavailable")
+        app.engine.post_message.side_effect = RuntimeError("private bridge unavailable")
         client = Mock()
         client.download_file.return_value = b"pdf"
         update = {
@@ -802,7 +913,7 @@ class GatewayAttachmentFlowTest(unittest.TestCase):
             url="http://codex.test/telegram",
             text="분석해줘",
         )
-        app.engine.post_message.side_effect = RuntimeError("bridge unavailable")
+        app.engine.post_message.side_effect = RuntimeError("private bridge unavailable")
         update = {
             "message": {
                 "message_id": 13,
@@ -812,10 +923,13 @@ class GatewayAttachmentFlowTest(unittest.TestCase):
             }
         }
 
-        with patch.object(telegram_gateway, "TelegramClient"):
-            with self.assertRaisesRegex(RuntimeError, "bridge unavailable"):
-                app.handle_update(self.route(), update)
+        with patch.object(telegram_gateway, "TelegramClient") as client:
+            app.handle_update(self.route(), update)
+            reply = client.return_value.send_message.call_args.args[1]
+            self.assertIn("자동 재시도하지 않습니다", reply)
+            self.assertNotIn("private", reply)
 
+        app.engine.post_message.assert_called_once()
         app.attachment_cache.mark_consumed.assert_not_called()
 
     def test_periodic_cleanup_runs_without_new_messages(self) -> None:

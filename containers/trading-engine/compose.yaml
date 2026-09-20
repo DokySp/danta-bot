@@ -7,12 +7,19 @@ services:
     user: "0:0"
     command: ["serve"]
     restart: "on-failure:3"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     environment:
       CODEX_HOME: /app/auth
     read_only: true
     init: true
     cap_drop: ["ALL"]
-    cap_add: ["CHOWN", "FOWNER", "DAC_OVERRIDE", "SETUID", "SETGID"]
+    # KILL lets root tini forward stop signals after the engine drops its UID.
+    cap_add: ["CHOWN", "FOWNER", "DAC_OVERRIDE", "SETUID", "SETGID", "KILL"]
     security_opt: ["no-new-privileges:true"]
     pids_limit: 128
     volumes:

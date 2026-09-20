@@ -24,8 +24,13 @@ application's `paper_simulation` grant. Shadow rejects every mutation.
 
 KIS access tokens are issued and refreshed before read requests under `broker_auth`,
 then cached privately in `state_dir/kis-token.json`. No broker request is retried
-after authentication or transport failure. Model fallback and account adoption
-are not automatic. Required values that remain null in the shipped configuration cause
+after authentication or transport failure. Model fallback is not automatic.
+An approved bootstrap is adopted once into an empty ledger by `cli.make_application`;
+the current complete account must match its quantities and have no unresolved orders.
+Cash is distinct from stock value. Inherited holdings record adoption valuation/time,
+not fictional BUY intents or historical fills. Existing ledgers are only reconciled on restart.
+Live/demo service startup runs the same activation checks as the explicit CLI before workers start.
+Required values that remain null in the shipped configuration cause
 `WAITING_FOR_HUMAN` when external startup is requested. They do not prevent the
 authorized offline build and synthetic tests.
 

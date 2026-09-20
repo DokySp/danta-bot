@@ -6,8 +6,11 @@ NAS 관리 화면에는 해당 `compose.yaml` 내용 전체를 넣으면 된다.
 
 ## 1. 개발 PC에서 이미지 올리기
 
-저장소 루트에서 실행한다. 테스트·빌드·push가 모두 성공한 뒤 다음 단계로 간다.
+저장소 루트에서 실행한다. 테스트·빌드·컨테이너 간 HTTP 검증·push가 모두 성공한 뒤 다음 단계로 간다.
 두 이미지 모두 `latest`를 사용하며 테스트 의존성은 Docker에서 준비한다.
+배포 스크립트는 두 이미지를 별도 임시 네트워크에서 연결해 `/version`, 준비 상태 응답,
+미허용 채팅 거부와 정상 종료를 확인한 뒤 push한다. 실제 Telegram 발송만 테스트 대역을 사용한다.
+이 검사는 계좌·모델·주문 연결 검증을 대신하지 않는다.
 
 ```sh
 docker login -u dokysp
@@ -31,7 +34,9 @@ docker login -u dokysp
 `*.example`은 작성 형식 참고용이다. 실제 값이 있는 파일을 예제로 덮어쓰지 않는다.
 `runtime.json.example`과 `runtime-manifest.json.example`도 엔진 `config/`에 있다.
 이 둘은 미승인 예시이므로 이름만 바꾼다고 외부 연결·거래가 가능해지지 않는다.
-기본 `app.yaml`은 offline이다. 설정 정리나 Compose 실행이 운영 승인을 대신하지 않는다.
+기본 `app.yaml`은 offline이다. `/version`과 준비 상태 조회는 이 상태에서도 동작한다.
+계좌별 수수료와 실제 연결 증거를 담은 운영 정보는 아직 확정되지 않았다.
+현재 기본 파일을 복사하는 것만으로 자동매매 준비가 완료되지는 않는다.
 
 서버 구조는 아래와 같다. Compose를 파일로 관리한다면 각 서비스의 `compose.yaml`을 하나씩
 복사한다. NAS 관리 화면으로 관리한다면 파일 복사 대신 같은 내용을 화면에 붙여 넣는다.
@@ -92,12 +97,32 @@ docker compose pull
 docker compose up -d --force-recreate --remove-orphans
 ```
 
-기본 offline 설정에서는 엔진이 기동해도 계좌 조회·매매·Telegram 접수를 하지 않는다.
+`serve`는 먼저 `0.0.0.0:8080`에서 관리용 HTTP를 열고 Docker 로그에
+`HTTP_LISTENING`, `RUNTIME_STATE`를 출력한다. 기존 서버 설정의 `listen_host`가
+`127.0.0.1`이면 `0.0.0.0`으로 변경한다. 엔진 포트를 호스트에 공개할 필요는 없다.
+Telegram `/version`은 두 이미지의 실제 버전, `/status`는 거래 서비스 준비 상태와 부족한 설정을 표시한다.
+기본 offline 설정에서는 실제 계좌 조회·모델 실행·매매를 시작하지 않고
+`WAITING_FOR_CONFIGURATION`으로 대기한다. 합성 데이터를 운영 worker에 넣지 않는다.
 외부 운용에는 기존 검증 절차에 따라 확정된 설정과 `config/runtime.json`,
 `config/runtime-manifest.json`이 필요하다. 승인 내용·유효기간·설정 hash 검사는 유지된다.
 승인 파일 경로는 자동으로 읽으므로 별도 실행 옵션은 필요 없다. gateway에서 엔진으로
 접속할 운영 설정은 listen_host `0.0.0.0`, route `trading-engine`, 허용 sender/chat을 맞춘다.
 `doctor`의 설정 검사 성공은 외부 연결이나 실제 주문 성공의 증거가 아니다.
+
+검증된 manifest의 `bootstrap`은 전략에 배정한 **현금**과 **보유 수량**을 따로 지정한다.
+최초 실행은 현재 계좌와 승인된 수량을 대조해 기존 보유를 한 번만 인수한다.
+과거 매수 가격·시점은 만들지 않으며, 인수 평가액을 성과 기준으로 기록하고 인수 세션부터
+보유 기한과 2 ATR 가격 보호를 적용한다. 재시작은 기존 장부를 보존한다. 미확인 주문,
+수량 불일치, 평가·보호 자료 부족은 초기화를 중단한다.
+live/demo 모드는 작업을 받기 전에 승인 검증과 현재 계좌 대사를 수행하고 자동으로 활성화한다.
+서버에서 별도 `danta activate` 명령을 실행할 필요는 없다. 이 과정은 미확정 승인이나
+검증 정보를 자동으로 만들어 통과시키는 기능이 아니다.
+
+Docker healthcheck의 `/healthz`는 관리 HTTP 생존 상태다. 거래 요청 접수 준비는
+`/readyz`가 HTTP 200 및 `ready: true`인지 확인한다. 설정 누락·초기화 실패·승인 만료는
+HTTP 503이며 `/version`과 `/status`는 계속 확인할 수 있다. 초기화 실패를 고친 뒤에는
+엔진 컨테이너를 재생성한다. live/demo의 `READY`는 승인·대사·활성화 검사를 통과했다는
+뜻이며 실제 주문 체결 성공이나 전략 수익성을 증명하지 않는다.
 
 ## 4. 이후 업데이트
 

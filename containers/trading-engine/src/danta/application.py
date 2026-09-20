@@ -12,7 +12,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from .accounting import ExternalFlow, NavPoint, performance, strategy_nav
-from .config import Config, HumanRequired, ROOT, aware_time, canonical, digest, utcnow
+from .config import Config, HumanRequired, ROOT, aware_time, canonical, digest, utcnow, validate_activation
 from .decision import DecisionProposal, freeze_input, unreviewed_positions, validate_proposal
 from .execution import Executor, FixtureBroker, OrderIntent
 from .market import EventRegistry, SessionCalendar, TickTable, calculate_features
@@ -128,6 +128,76 @@ class Application:
         self.monitor_stop = threading.Event()
         self.monitor_thread = None
         self.review_lock = threading.Lock()
+
+    def adopt_account(self, bootstrap: dict) -> None:
+        """Import approved existing holdings once, using observed values as the new baseline."""
+        self.config.require_external("account_read", self.approval)
+        if self.config.mode == "paper":
+            return  # Paper owns its simulated ledger, never the broker's existing positions.
+        if self.store.get("account_adoption") or self.store.db.execute(
+                "SELECT 1 FROM theses UNION ALL SELECT 1 FROM intents UNION ALL SELECT 1 FROM holdings LIMIT 1").fetchone():
+            return  # Restarts reconcile the existing ledger; they never rebase it.
+        bundle, account = self.bundle, self.bundle.data["account_snapshot"]
+        quantities = {key: value for key, value in bootstrap["strategy_quantities"].items() if value}
+        actual = {key: value for key, value in account.get("strategy_quantities", {}).items() if value}
+        if (bundle.synthetic or not bootstrap.get("ownership_verified") or not bootstrap.get("source") or
+                account.get("complete") is not True or account.get("ownership_complete") is not True or
+                account.get("errors") or account.get("orders") or quantities != actual):
+            raise HumanRequired("ACCOUNT_ADOPTION_REQUIRES_MATCHING_COMPLETE_UNENCUMBERED_SNAPSHOT")
+        cash = Decimal(bootstrap["strategy_cash"])
+        if not cash.is_finite() or cash < 0 or cash > Decimal(account["broker_available_cash"]):
+            raise HumanRequired("ACCOUNT_ADOPTION_CASH_UNAVAILABLE")
+        if cash == 0 and not quantities:
+            raise HumanRequired("ACCOUNT_ALLOCATION_EMPTY")
+        bundle.calendar.require_environment(synthetic=False)
+        bundle.ticks.require_environment(synthetic=False, now=bundle.now)
+        session = bundle.calendar.available_session(bundle.now)
+        completed = [item for item in bundle.calendar.sessions if item.closes_at <= bundle.now]
+        positions = []
+        for symbol, quantity in sorted(quantities.items()):
+            instrument, features = bundle.instruments.get(symbol), bundle.features.get(symbol)
+            if (type(quantity) is not int or quantity <= 0 or not instrument or not features or not completed or
+                    not instrument.status_verified or features.last_session_id != completed[-1].session_id):
+                raise HumanRequired("INHERITED_POSITION_MARKET_DATA_UNAVAILABLE")
+            quote = bundle.quotes.get(symbol)
+            mark = (quote.bid if quote and quote.bid is not None and
+                    quote_fresh(quote, bundle.now, self.profile["orders"]["quote_max_age_seconds"])
+                    else features.close if bundle.calendar.active(bundle.now) is None else None)
+            if mark is None or not bundle.ticks.is_valid(mark):
+                raise HumanRequired("INHERITED_POSITION_VALUATION_UNAVAILABLE")
+            # The old entry price/time is unknown. Protection starts at adoption valuation.
+            stop = bundle.ticks.floor(mark - Decimal(self.profile["exits"]["initial_stop_atr_cap"]) * features.atr14)
+            if not 0 < stop < mark:
+                raise HumanRequired("INHERITED_POSITION_PROTECTION_UNAVAILABLE")
+            thesis = InvestmentThesis(thesis_id="inherited-" + digest([bundle.data["account_identity"], symbol]),
+                instrument_id=symbol, event_ids=[], source_uris=[bootstrap["source"]],
+                economic_path="기존 보유 인수: 새 매수 가설은 미확인", horizon_case="인수 세션부터 보유 기한과 보호 규칙 적용",
+                counterevidence="과거 매수 시점·가격과 최초 매수 근거는 미확인", invalidation_case="가격 보호·추세 훼손·보유 기한",
+                initial_stop=stop, current_stop=stop, initial_r_price=mark-stop, average_entry=mark,
+                planned_quantity=quantity, risk_budget=(mark-stop)*quantity,
+                strategy_hash=self.config.strategy_hash, policy_hash=self.config.config_hash, created_at=bundle.now,
+                origin="inherited", adopted_at=bundle.now, adopted_session=session.session_id, first_fill_time_quality="UNKNOWN",
+                max_holding_sessions=self.profile["exits"]["max_holding_sessions"],
+                trend_exit_consecutive_closes=self.profile["exits"]["trend_exit_consecutive_closes"])
+            positions.append({"instrument_id": symbol, "quantity": quantity, "valuation_price": mark, "thesis": thesis})
+        self.store.import_positions(digest([self.config.config_hash, account, bundle.now]), positions,
+            cash=cash, observed_at=bundle.now.isoformat(), source=bootstrap["source"],
+            config_hash=self.config.config_hash, strategy_hash=self.config.strategy_hash)
+
+    def activate(self, expected_hash: str) -> None:
+        """Use the same approval and current-account checks for Docker startup and CLI."""
+        validate_activation(self.config, self.approval, expected_hash, self.code_id)
+        result = self.reconcile()
+        if (result["status"] != "RECONCILED" or not self.store.get("reconciled") or
+                not self.store.get("ownership_complete")):
+            raise HumanRequired("CURRENT_ACCOUNT_RECONCILIATION_REQUIRED")
+        if Decimal(self.store.get("cash_krw")) <= 0 and not self.store.holdings():
+            raise HumanRequired("ACCOUNT_ALLOCATION_EMPTY")
+        activation = {"config_hash": self.config.config_hash, "code_id": self.code_id, "approval_id": self.approval["id"]}
+        with self.store.transaction():
+            if self.store.get("activation") != activation:
+                self.store.set("activation", activation)
+                self.store.event("operator", "ACTIVATED", {"approval_id": self.approval["id"]})
 
     def _authorize(self, intent: OrderIntent, operation: str) -> None:
         self.config.assert_current()
@@ -251,7 +321,7 @@ class Application:
                         "first_fill_time_quality": evidence.get("time_quality", "UNKNOWN")})
                 reduced = self.store.db.execute("SELECT COALESCE(SUM(cumulative_quantity),0) FROM intents WHERE thesis_id=? AND side='SELL' AND json_extract(payload,'$.reason')='REDUCE_TO_LIMIT'", (thesis.thesis_id,)).fetchone()[0]
                 thesis = thesis.model_copy(update={"reduced_quantity": reduced})
-                if thesis.first_fill_at and self.store.quantity(thesis.instrument_id) == 0 and not self.store.working(thesis.instrument_id):
+                if thesis.protection_started_at and self.store.quantity(thesis.instrument_id) == 0 and not self.store.working(thesis.instrument_id):
                     sells = self.store.db.execute("SELECT payload FROM intents WHERE thesis_id=? AND side='SELL' ORDER BY rowid DESC LIMIT 1", (thesis.thesis_id,)).fetchone()
                     if sells:
                         thesis = thesis.model_copy(update={"exited_at": thesis.exited_at or self.bundle.now, "exit_reason": json.loads(sells[0])["reason"]})
@@ -294,7 +364,7 @@ class Application:
             if features is not None:
                 thesis = update_trailing_stop(thesis, features, bundle.bars.get(holding.instrument_id, []), bundle.ticks,
                     self.profile, observed_price=quote.bid if quote and quote_fresh(quote, bundle.now, self.profile["orders"]["quote_max_age_seconds"]) and
-                        (thesis.first_fill_at is None or quote.observed_at >= thesis.first_fill_at) else None)
+                        (thesis.protection_started_at is None or quote.observed_at >= thesis.protection_started_at) else None)
             with self.store.transaction():
                 self._save_thesis(thesis)
             plan = evaluate_exit(thesis, holding, quote, bundle.calendar, bundle.now, self.profile,

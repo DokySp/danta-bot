@@ -5,7 +5,10 @@ import html
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
 import json
+import os
 from pathlib import Path
+import signal
+import sys
 import threading
 from datetime import timedelta
 from uuid import uuid4
@@ -23,6 +26,11 @@ PORTFOLIO_CONTROLS = frozenset({'add_portfolio_ticker', 'remove_portfolio_ticker
 CONTROLS = frozenset({'pause', 'stop', 'schedule_on', 'schedule_off', 'new', 'resume'}) | PORTFOLIO_CONTROLS
 PROTECTION = frozenset({'risk_monitor', 'reconcile', 'time_limit_exit'})
 REVIEWS = frozenset({'full_review', 'event_review'})
+
+
+def log_event(event, **fields):
+    # Only caller-selected metadata; never exception text, requests or credentials.
+    print(canonical({'event': event, **fields}), file=sys.stderr, flush=True)
 
 
 class Service:
@@ -406,6 +414,7 @@ class Service:
                     self.run_once(review=review)
                 except Exception as error:
                     self.worker_failed = True
+                    log_event('SERVICE_WORKER_FAILED', error_type=type(error).__name__)
                     with self.store.transaction():
                         self.store.event('service', 'SERVICE_WORKER_FAILED', {'error_type': type(error).__name__})
                     self.stop.set()
@@ -429,7 +438,56 @@ class Service:
             raise HumanRequired('Service worker still running; retain writer lock until it exits')
 
 
-def handler_for(service):
+class RuntimeHost:
+    """Keep deployment diagnostics available while the trading runtime is blocked."""
+
+    def __init__(self, config, stop_event=None):
+        from .application import code_identity
+        self.config, self.code_id = config, code_identity()
+        self.service = None
+        self.stop = stop_event or threading.Event()
+        self.status = 'STARTING'
+        self.issues = []
+
+    def health(self):
+        status = self.status
+        if self.stop.is_set():
+            status = 'STOPPING'
+        elif self.service and (self.service.stop.is_set() or self.service.worker_failed):
+            status = 'FAILED'
+        elif self.service:
+            try:
+                self.config.assert_current()
+                self.config.require_external('telegram_ingress', self.service.app.approval)
+            except (HumanRequired, ValueError, OSError):
+                status = 'CONFIGURATION_CHANGED_OR_APPROVAL_EXPIRED'
+        return {'status': status, 'ready': status == 'READY', 'mode': self.config.mode,
+                'issues': self.issues}
+
+    def version(self):
+        return {'version': os.environ.get('APP_VERSION', 'dev'), 'code_id': self.code_id,
+                'config_hash': self.config.config_hash, 'strategy_hash': self.config.strategy_hash,
+                'runtime_status': self.health()['status']}
+
+    def requirements(self, args):
+        app, tg = self.config.app, self.config.app['telegram']
+        issues = []
+        if self.config.mode == 'offline':
+            issues.append('app.yaml: app.mode=offline (계좌·모델·매매 실행 꺼짐)')
+        if not tg['enabled'] or not tg['ingress_enabled']:
+            issues.append('app.yaml: telegram.enabled / ingress_enabled 설정 필요')
+        if not tg['allowed_sender_ids'] or not tg['allowed_chat_ids']:
+            issues.append('app.yaml: Telegram 허용 sender/chat 설정 필요')
+        approval = getattr(args, 'approval_file', None) or self.config.directory / 'runtime.json'
+        if not Path(approval).is_file():
+            issues.append('config/runtime.json: 운영 승인 파일 없음')
+        manifest = app['broker']['capability_manifest']
+        if not manifest or not (self.config.directory / manifest).is_file():
+            issues.append('config/runtime-manifest.json: 검증된 운영 정보 없음')
+        return issues
+
+
+def handler_for(host):
     class Handler(BaseHTTPRequestHandler):
         def setup(self):
             super().setup()
@@ -447,9 +505,13 @@ def handler_for(service):
             self.wfile.write(body)
 
         def do_GET(self):
-            self.respond(200 if self.path == '/healthz' else 404,
-                {'status': 'RUNNING' if not service.stop.is_set() else 'STOPPING', 'strategy': 'STRATEGY_UNPROVEN'}
-                if self.path == '/healthz' else {'status': 'NOT_FOUND'})
+            if self.path == '/version':
+                self.respond(200, host.version())
+            elif self.path in {'/healthz', '/readyz'}:
+                health = host.health()
+                self.respond(200 if self.path == '/healthz' or health['ready'] else 503, health)
+            else:
+                self.respond(404, {'status': 'NOT_FOUND'})
 
         def do_POST(self):
             if self.path != '/telegram':
@@ -464,39 +526,79 @@ def handler_for(service):
                 raw = self.rfile.read(length)
                 if len(raw) != length:
                     raise AdapterError('TRUNCATED_REQUEST')
-                self.respond(202, service.receive_http(raw))
+                health = host.health()
+                if not health['ready']:
+                    self.respond(503, {'accepted': False, 'status': health['status'],
+                        'reply_text': '트레이딩 엔진은 실행 중이지만 거래 서비스가 준비되지 않았습니다.\n'
+                            + '\n'.join(health['issues'] or [health['status']])})
+                    return
+                self.respond(202, host.service.receive_http(raw))
             except (AdapterError, HumanRequired, ValueError, OSError) as error:
-                self.respond(403, {'accepted': False, 'error_type': type(error).__name__})
+                log_event('INGRESS_REJECTED', error_type=type(error).__name__)
+                self.respond(403, {'accepted': False, 'error_type': type(error).__name__,
+                    'reply_text': '요청이 거부되었습니다. 엔진의 허용 sender/chat과 운영 승인 설정을 확인해 주세요.'})
     return Handler
 
 
 def serve(config, args=None, *, application_factory=None, stop_event=None):
-    """Run the same app as the CLI; default config opens no listening socket."""
+    """Start HTTP first; fixture research is CLI-only, never a deployed worker."""
     if application_factory is None:
         from .cli import make_application
         application_factory = make_application
-    app = application_factory(config, args)
-    service, server, http_thread = None, None, None
+    host = RuntimeHost(config, stop_event)
+    address = config.app['app']['listen_host']
+    ipaddress.ip_address(address)
+    server = ThreadingHTTPServer((address, config.app['app']['listen_port']), handler_for(host))
+    server.daemon_threads = True
+    http_thread = threading.Thread(target=server.serve_forever, name='danta-ingress', daemon=True)
+    app, service = None, None
+    previous_signals = {}
     try:
-        service = Service(app)
-        if config.app['telegram']['ingress_enabled']:
-            host = config.app['app']['listen_host']
-            # Compose exposes this endpoint only within the gateway Docker network.
-            ipaddress.ip_address(host)
-            server = ThreadingHTTPServer((host, config.app['app']['listen_port']), handler_for(service))
-            server.daemon_threads = True
-            http_thread = threading.Thread(target=server.serve_forever, name='danta-ingress', daemon=True)
-            http_thread.start()
-        service.start()
-        while not service.stop.wait(.5):
-            if stop_event is not None and stop_event.is_set():
+        if threading.current_thread() is threading.main_thread():
+            for number in (signal.SIGTERM, signal.SIGINT):
+                previous_signals[number] = signal.signal(number, lambda *_: host.stop.set())
+        http_thread.start()
+        log_event('HTTP_LISTENING', host=address, port=server.server_port, mode=config.mode,
+                  version=host.version()['version'])
+        host.issues = host.requirements(args)
+        if host.issues:
+            host.status = 'WAITING_FOR_CONFIGURATION'
+        else:
+            try:
+                app = application_factory(config, args)
+                if not host.stop.is_set() and config.mode in {'live', 'broker_demo'}:
+                    app.activate(config.config_hash)
+                if not host.stop.is_set():
+                    service = Service(app)
+                    if not host.stop.is_set():
+                        service.start()
+                        host.service, host.status = service, 'READY'
+            except Exception as error:
+                if service:
+                    service.close()
+                    service = None
+                if app:
+                    app.close()
+                    app = None
+                host.status = 'INITIALIZATION_FAILED'
+                host.issues = ['운영 초기화 실패: ' + type(error).__name__
+                    + ' (config/runtime.json, runtime-manifest.json, secrets.yaml 및 Codex 로그인 확인 필요)']
+                log_event('RUNTIME_INITIALIZATION_FAILED', error_type=type(error).__name__)
+        log_event('RUNTIME_STATE', **host.health())
+        while not host.stop.wait(.5):
+            if service and service.stop.is_set():
                 break
     finally:
-        if server:
-            server.shutdown()
-            server.server_close()
+        host.stop.set()
+        log_event('SERVICE_STOPPING')
+        server.shutdown()
+        server.server_close()
+        http_thread.join(timeout=5)
         if service:
             service.close()
-        app.close()
-    if service.worker_failed:
+        if app:
+            app.close()
+        for number, previous in previous_signals.items():
+            signal.signal(number, previous)
+    if service and service.worker_failed:
         raise OSError('SERVICE_WORKER_FAILED')

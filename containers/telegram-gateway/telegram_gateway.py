@@ -1462,27 +1462,56 @@ class TradingEngineClient:
         self.timeout = timeout
         self._opener = build_opener(ProxyHandler({}), NoEngineRedirect())
 
-    def post_message(self, url: str, payload: dict[str, Any]) -> dict[str, Any] | None:
-        body = json.dumps(payload).encode("utf-8")
-        headers = {"Content-Type": "application/json"}
+    @staticmethod
+    def route_target(url: str):
         target = urlsplit(url)
         if (target.scheme not in {"http", "https"} or not target.hostname or target.username is not None
                 or target.password is not None or target.path != "/telegram" or target.query or target.fragment):
             raise ValueError("Engine requests require an HTTP(S) /telegram URL without credentials or query")
+        return target
+
+    def get_version(self, url: str) -> dict[str, Any]:
+        target = self.route_target(url)
+        result = self._request(Request(target._replace(path="/version").geturl(), method="GET"))
+        if not result or not isinstance(result.get("version"), str) or not result["version"]:
+            raise RuntimeError("Invalid engine version response")
+        return result
+
+    def get_readiness(self, url: str) -> dict[str, Any]:
+        target = self.route_target(url)
+        result = self._request(Request(target._replace(path="/readyz").geturl(), method="GET"), allow_unready=True)
+        if (not result or type(result.get("ready")) is not bool
+                or not isinstance(result.get("status"), str) or not re.fullmatch(r"[A-Z_]{1,64}", result["status"])
+                or result["ready"] != (result["status"] == "READY")
+                or not isinstance(result.get("issues"), list) or len(result["issues"]) > 20
+                or any(not isinstance(issue, str) or len(issue) > 500 for issue in result["issues"])):
+            raise RuntimeError("Invalid engine readiness response")
+        return {key: result[key] for key in ("ready", "status", "issues")}
+
+    def post_message(self, url: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+        self.route_target(url)
         request = Request(
             url,
-            data=body,
-            headers=headers,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
             method="POST",
         )
+        result = self._request(request)
+        if result and result.get("accepted") is False:
+            raise RuntimeError("Engine request rejected")
+        return result
+
+    def _request(self, request: Request, *, allow_unready=False) -> dict[str, Any] | None:
         try:
             with self._opener.open(request, timeout=self.timeout) as response:
                 raw = response.read().decode("utf-8")
         except HTTPError as exc:
-            raw = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"trading-engine route failed: HTTP {exc.code}: {raw}") from exc
-        except URLError as exc:
-            raise RuntimeError(f"trading-engine route failed: {exc}") from exc
+            with exc:
+                if not allow_unready or exc.code != 503:
+                    raise RuntimeError(f"trading-engine route failed: HTTP {exc.code}") from None
+                raw = exc.read().decode("utf-8")
+        except URLError:
+            raise RuntimeError("trading-engine route unavailable") from None
 
         if not raw.strip():
             return None
@@ -1944,16 +1973,16 @@ class GatewayApp:
                     len(pending_attachments),
                 )
                 response = self.engine.post_message(resolved.url, payload)
-            except (OSError, RuntimeError):
-                logging.exception(
+            except (OSError, RuntimeError, ValueError):
+                logging.warning(
                     "failed to submit cached Telegram attachment caption route=%s chat_id=%s",
                     route.route_id,
                     chat_id,
                 )
                 client.send_message(
                     chat_id,
-                    "파일은 저장했지만 Codex 실행에 실패했습니다. "
-                    "다음 일반 메시지로 다시 지시해 주세요.",
+                    "파일은 저장했지만 엔진 요청 결과를 확인하지 못했습니다. "
+                    "자동 재시도하지 않습니다. /status로 상태를 확인해 주세요.",
                 )
                 return
 
@@ -2003,6 +2032,40 @@ class GatewayApp:
             self.append_outbound_conversation_event(route, chat_id, "sendMessage", text, source_path="echo")
             return
 
+        command = routed_text.split(maxsplit=1)
+        command_name = command[0].split("@", 1)[0] if command else ""
+        if command_name == "/version":
+            reply_text = f"telegram-gateway: {self.config.version}"
+            try:
+                resolved = self.router.resolve(route.route_id, routed_text)
+                version = self.engine.get_version(resolved.url)
+                reply_text += f"\ntrading-engine: {version['version']}"
+                if isinstance(version.get("runtime_status"), str):
+                    reply_text += f"\n엔진 상태: {version['runtime_status']}"
+            except (OSError, RuntimeError, ValueError):
+                logging.warning("engine version unavailable route=%s", route.route_id)
+                reply_text += "\ntrading-engine: 연결 또는 버전 확인 실패"
+            client.send_message(chat_id, reply_text, parse_mode="")
+            self.append_outbound_conversation_event(route, chat_id, "sendMessage", reply_text, source_path="version")
+            return
+
+        if command_name == "/status":
+            reply_text = None
+            try:
+                resolved = self.router.resolve(route.route_id, routed_text)
+                readiness = self.engine.get_readiness(resolved.url)
+                if not readiness["ready"]:
+                    reply_text = f"엔진 상태: {readiness['status']}"
+                    if readiness["issues"]:
+                        reply_text += "\n" + "\n".join(readiness["issues"])
+            except (OSError, RuntimeError, ValueError):
+                logging.warning("engine readiness unavailable route=%s", route.route_id)
+                reply_text = "엔진 준비 상태를 확인할 수 없습니다. 엔진·게이트웨이 로그를 확인해 주세요."
+            if reply_text:
+                client.send_message(chat_id, reply_text, parse_mode="")
+                self.append_outbound_conversation_event(route, chat_id, "sendMessage", reply_text, source_path="readiness")
+                return
+
         pending_attachments: tuple[CachedTelegramAttachment, ...] = ()
         if not routed_text.strip().startswith("/"):
             pending_attachments = self.attachment_cache.list_pending(route.route_id, chat_id)
@@ -2029,7 +2092,14 @@ class GatewayApp:
             chat_id,
             resolved.url,
         )
-        response = self.engine.post_message(resolved.url, payload)
+        try:
+            response = self.engine.post_message(resolved.url, payload)
+        except (OSError, RuntimeError, ValueError):
+            logging.warning("engine request failed route=%s", route.route_id)
+            reply_text = "엔진 요청 결과를 확인하지 못했습니다. 자동 재시도하지 않습니다. /status로 상태를 확인해 주세요."
+            client.send_message(chat_id, reply_text)
+            self.append_outbound_conversation_event(route, chat_id, "sendMessage", reply_text, source_path="engine_error")
+            return
         if pending_attachments:
             self.attachment_cache.mark_consumed(pending_attachments)
 

@@ -44,6 +44,10 @@ docker build \
   -t "${remote_image}" \
   "${repo_root}/containers/trading-engine"
 
+echo "Checking built images over the deployment network before push..." >&2
+"${PYTHON_BIN:-python3}" "${repo_root}/scripts/verify-deployment.py" \
+  --engine-image "${local_image}" --version "${app_version}"
+
 docker push "${remote_image}"
 if [ "${image_tag}" != "latest" ]; then
   latest_image="${dockerhub_namespace}/${image_name}:latest"

@@ -40,6 +40,7 @@ class FixtureTransport:
         self.calls = []
         self.dart_error = self.quote_error = None
         self.quote_observed_at = now
+        self.account_positions = []
 
     def __call__(self,method,url,headers=None,body=None,timeout=15):
         self.calls.append((method,urlsplit(url).path))
@@ -70,7 +71,7 @@ class FixtureTransport:
                      "bstp_nmix_prpr":str(b.close),"acml_tr_pbmn":str(b.turnover)} for b in self.index_bars]
             return HttpResponse(200,json.dumps({"rt_cd":"0","output2":data}).encode())
         if path.endswith("inquire-balance"):
-            return HttpResponse(200,json.dumps({"rt_cd":"0","output1":[],"output2":[{}]}).encode())
+            return HttpResponse(200,json.dumps({"rt_cd":"0","output1":self.account_positions,"output2":[{}]}).encode())
         if path.endswith("inquire-psbl-order"):
             return HttpResponse(200,json.dumps({"rt_cd":"0","output":{"ord_psbl_cash":"10000000"}}).encode())
         if path.endswith("inquire-daily-ccld"):
@@ -162,6 +163,14 @@ class ExternalRuntimeContracts(unittest.TestCase):
                 self._factory()
         self.assertEqual(self.transport.calls,[])
 
+    def test_empty_zero_cash_allocation_is_rejected_before_external_calls(self):
+        self.manifest['bootstrap']['strategy_cash'] = '0'
+        self._save_manifest()
+        self.approval['operational_evidence']['runtime_manifest_sha256'] = hashlib.sha256((self.base/'manifest.json').read_bytes()).hexdigest()
+        with self.assertRaisesRegex(HumanRequired, 'ACCOUNT_ALLOCATION_EMPTY'):
+            self._factory()
+        self.assertEqual(self.transport.calls, [])
+
     def test_factory_collects_whole_universe_features_and_explicit_no_event(self):
         bundle,broker,decide,refresh = self._factory()
         self.assertEqual(broker.environment,"paper")
@@ -192,6 +201,50 @@ class ExternalRuntimeContracts(unittest.TestCase):
         with self.assertRaises(HumanRequired):
             self._factory()
         self.assertEqual(self.transport.calls,[])
+
+    def test_existing_positions_bootstrap_into_ledger_without_fictional_buys(self):
+        app_config = yaml.safe_load((self.config_dir/'app.yaml').read_text())
+        app_config['app']['mode'] = 'shadow'
+        (self.config_dir/'app.yaml').write_text(yaml.safe_dump(app_config))
+        self.config = load_config(self.config_dir)
+        self.approval['config_hash'] = self.config.config_hash
+        self.manifest['bootstrap'].update(strategy_quantities={'KRX:000001': 2}, strategy_cash='9000000')
+        self._save_manifest()
+        self.approval['operational_evidence']['runtime_manifest_sha256'] = hashlib.sha256((self.base/'manifest.json').read_bytes()).hexdigest()
+        self.transport.account_positions = [{'pdno':'000001','hldg_qty':'2','ord_psbl_qty':'2'}]
+        def start():
+            bundle, broker, decide, refresh = self._factory()
+            return Application(self.config, bundle, broker=broker, decide=decide, refresh=refresh, approval=self.approval)
+        app = start()
+        try:
+            # A mismatch must leave the empty ledger untouched.
+            invalid = dict(self.manifest['bootstrap'], strategy_quantities={'KRX:000001': 3})
+            with self.assertRaisesRegex(HumanRequired, 'MATCHING_COMPLETE'):
+                app.adopt_account(invalid)
+            self.assertEqual(app.store.holdings(), [])
+            app.adopt_account(self.manifest['bootstrap'])
+            thesis = app.theses()[0]
+            self.assertEqual(thesis.origin, 'inherited')
+            self.assertIsNone(thesis.first_fill_at)
+            self.assertEqual(thesis.adopted_at, self.now)
+            self.assertEqual(app.store.quantity('KRX:000001'), 2)
+            self.assertEqual(app.store.get('cash_krw'), '9000000')
+            self.assertEqual(app.store.db.execute('SELECT COUNT(*) FROM intents').fetchone()[0], 0)
+            with patch('danta.adapters.kis.utcnow', return_value=self.now):
+                self.assertEqual(app.reconcile()['status'], 'RECONCILED')
+            self.assertEqual(app.portfolio().nav, Decimal(9000000) + thesis.average_entry*2)
+            with app.store.transaction():
+                app.store.set('cash_krw', '8999000')
+            original_thesis = thesis.model_dump()
+        finally:
+            app.close()
+        app = start()
+        try:
+            app.adopt_account(self.manifest['bootstrap'])
+            self.assertEqual(app.store.get('cash_krw'), '8999000')
+            self.assertEqual(app.theses()[0].model_dump(), original_thesis)
+        finally:
+            app.close()
 
     def test_dart_failure_still_bootstraps_partial_bundle_and_price_protection(self):
         from danta.risk import evaluate_exit

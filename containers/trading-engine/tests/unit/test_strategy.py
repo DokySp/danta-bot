@@ -107,6 +107,23 @@ class StrategyContractTests(unittest.TestCase):
                             [self.event] if events is None else events, self.calendar, self.ticks,
                             self.now, self.profile, synthetic=True, **kwargs)
 
+    def test_inherited_protection_uses_adoption_clock_without_fabricated_fill(self):
+        fields = synthetic_thesis(self.case).model_dump()
+        fields.update(origin='inherited', adopted_at=self.now, adopted_session=self.calendar.active(self.now).session_id,
+                      first_fill_at=None, first_fill_session=None, first_fill_time_quality='UNKNOWN')
+        thesis = InvestmentThesis.model_validate(fields)
+        updated = update_trailing_stop(thesis, self.candidate.features, self.bars, self.ticks,
+                                       self.profile, observed_price=thesis.average_entry+1000)
+        self.assertEqual(updated.mfe_price, thesis.average_entry+1000)
+        self.assertIsNone(updated.first_fill_at)
+        self.assertEqual(updated.adopted_at, self.now)
+        due = self.calendar.sessions[self.calendar.active(self.now).ordinal + thesis.max_holding_sessions - 1]
+        after_close = due.closes_at + timedelta(minutes=1)
+        result = evaluate_exit(thesis, synthetic_holding(self.case, thesis), None, self.calendar, after_close, self.profile)
+        self.assertIn('EXIT_TIME_LIMIT', result.reasons)
+        with self.assertRaises(ValidationError):
+            InvestmentThesis.model_validate(dict(fields, first_fill_at=self.now, first_fill_session=due.session_id))
+
     def test_s01_long_term_target_without_event_is_not_entry(self):
         result = self.assess(self.candidate.model_copy(update={"event_ids": []}), events=[])
         self.assertFalse(result.allowed)

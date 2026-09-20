@@ -43,6 +43,10 @@ docker build \
   -t "${remote_image}" \
   "${repo_root}/containers/telegram-gateway"
 
+echo "Checking built images over the deployment network before push..." >&2
+"${PYTHON_BIN:-python3}" "${repo_root}/scripts/verify-deployment.py" \
+  --gateway-image "${local_image}" --version "${app_version}"
+
 docker push "${remote_image}"
 if [ "${image_tag}" != "latest" ]; then
   latest_image="${dockerhub_namespace}/${image_name}:latest"

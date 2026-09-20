@@ -230,7 +230,7 @@ class Holding(StrictModel):
     valuation_at: AwareTime
     price_observed_at: AwareTime | None = None
     valuation_quality: Literal["EXACT", "STALE", "MISSING"] = "EXACT"
-    first_fill_session: str
+    first_fill_session: str | None = None
     source_verified: bool = True
     reduced: bool = False
 
@@ -293,6 +293,9 @@ class InvestmentThesis(StrictModel):
     first_fill_at: AwareTime | None = None
     first_fill_session: str | None = None
     first_fill_time_quality: Literal["EXACT", "FIRST_OBSERVED", "UNKNOWN"] = "EXACT"
+    origin: Literal["strategy_entry", "inherited"] = "strategy_entry"
+    adopted_at: AwareTime | None = None
+    adopted_session: str | None = None
     max_holding_sessions: Annotated[int, Field(strict=True, gt=0)] = 20
     trend_exit_consecutive_closes: Annotated[int, Field(strict=True, gt=0)] = 2
     mfe_price: Positive | None = None
@@ -307,7 +310,21 @@ class InvestmentThesis(StrictModel):
             raise ValueError("stop cannot move below initial protection")
         if (self.first_fill_at is None) != (self.first_fill_session is None):
             raise ValueError("first fill timestamp/session must both exist")
+        if self.origin == "inherited":
+            if (self.adopted_at is None or not self.adopted_session or
+                    self.first_fill_at is not None or self.first_fill_time_quality != "UNKNOWN"):
+                raise ValueError("inherited protection requires an adoption clock, not a fictional fill")
+        elif self.adopted_at is not None or self.adopted_session is not None:
+            raise ValueError("adoption clock is only valid for inherited positions")
         return self
+
+    @property
+    def protection_started_at(self) -> datetime | None:
+        return self.adopted_at if self.origin == "inherited" else self.first_fill_at
+
+    @property
+    def protection_session(self) -> str | None:
+        return self.adopted_session if self.origin == "inherited" else self.first_fill_session
 
 
 class GateResult(StrictModel):

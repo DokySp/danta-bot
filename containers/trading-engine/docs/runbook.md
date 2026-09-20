@@ -21,10 +21,12 @@ python -m unittest discover -s tests/integration
 ```
 
 기본 `run`은 제공 합성 snapshot 한 번을 처리한다. 실제 시장·계좌·모델 결과가 아니다.
-`serve`는 `cli.make_application`으로 동일 application을 구성한다. offline 합성 snapshot을
-반복 스케줄하여 현재 시장 관측처럼 쓰는 설정은 차단한다. 기본 ingress가 false이면 소켓을
-열지 않는다. 승인된 실제/향후 데이터 어댑터와 설정을 갖춘 경우에만 `danta serve`를 명시해
-서비스를 시작한다. 서비스 실행 자체는 외부 권한이나 live 활성화를 부여하지 않는다.
+`serve`는 관리용 HTTP를 먼저 열고 거래 서비스 준비 항목을 검사한다. `/version`은
+계좌·모델 초기화에 의존하지 않는다. `/healthz`는 HTTP 생존 상태이며 `/readyz`는 거래 접수
+준비 여부를 200/503으로 구분한다. offline이나 누락된 설정은 Docker 로그와 Telegram
+`/status`에 표시하며 합성 Application을 운영 worker로 실행하지 않는다. 준비된 설정에서는
+`cli.make_application`으로 동일 application을 구성한다. 서비스 실행 자체는 외부 권한이나
+live 활성화를 부여하지 않는다.
 
 ## 프로세스와 저장소
 
@@ -62,8 +64,8 @@ HMAC 서명, peer profile, 고정 gateway IP 설정은 사용하지 않는다. g
 
 엔진과 gateway는 각자의 `compose.yaml`에서 공통 `danta-bot-net` 네트워크에 연결한다.
 `external`은 사용하지 않으며 없는 네트워크는 Compose가 자동 생성한다.
-기본 app.yaml의 HTTP listen은 `127.0.0.1`이며 ingress가 비활성이다.
-배포 생성기의 shadow example은 listen `0.0.0.0`을 준비한다. 엔진 HTTP 포트를 호스트에
+기본 app.yaml의 HTTP listen은 `0.0.0.0`이며 거래 ingress는 비활성이다.
+버전·준비 상태만 거래 승인과 독립적으로 조회한다. 엔진 HTTP 포트를 호스트에
 공개하지 않으며 공통 네트워크에는 신뢰하는 컨테이너만 연결한다. 이 네트워크의 다른
 클라이언트 요청을 별도 서명으로 구별하지 않으므로 sender/chat 목록만으로 전송 출처가
 인증되는 것은 아니다. 실제 운영 Docker/NAS 연결·Telegram 송수신·배포는 별도로 검증한다.
@@ -76,7 +78,8 @@ peer 키 환경변수·고정 IP 설정은 제거한다. config hash가 바뀌�
 일반 대화는 route·chat·user별 별도 세션에서 승인된 모델을 호출한다. 최근 10회 대화를
 문맥으로 사용하고 `/new`로 초기화한다. 일반 대화에는 매매 도구나 계좌 자료를 제공하지
 않으며 주문·설정 변경을 실행하지 않는다. 모델 호출량·오류도 기존 사용 기록에 남긴다.
-`/status`, `/report`, `/usage`, `/version`, `/session`, `/show_touch_point`는 기록을 읽는다.
+`/version`은 gateway와 engine 이미지 버전을 읽고 `/status`는 미준비 이유 또는 승인된 계좌 상태를 읽는다.
+`/report`, `/usage`, `/session`, `/show_touch_point`는 준비된 런타임의 기록을 읽는다.
 `/report`는 요청한 채팅에 일일 `daily-<날짜>.html` 파일을 첨부한다. 승인된 스케줄의
 `finalize_and_report`도 일일 HTML을 보내며, 각 심사 실행은 `summary-<날짜>-<실행 ID>.html`을 보낸다.
 예약·실행 알림은 기존 규칙대로 설정된 route와 단 하나의 허용 chat을 사용한다. 허용 chat이
@@ -123,7 +126,7 @@ PYTHONPATH=src python scripts/verify_offline_image.py --image danta-trading-engi
 검사 후 stdin으로 전달하며, host 디렉터리 공유나 실제 credential은 필요 없다. 새 임시
 컨테이너를 UID 10001, 읽기 전용 root filesystem, `--network none`, 권한 제거,
 `no-new-privileges`, 임시 상태·잠금 디렉터리로 실행하고 종료 후 제거한다.
-doctor, 합성 심사·체결, 요청 중복 방지, 기본 service의 소켓 미개방, 일일 보고서와
+doctor, 합성 심사·체결, 요청 중복 방지, offline CLI의 소켓 미개방, 일일 보고서와
 README 렌더링을 확인한다. 실제 API·모델·Telegram 송신은 실행하지 않는다.
 
 출력 JSON의 `evidence` 디렉터리에 `validation.json`, `report.html`, `daily.html`,
@@ -165,6 +168,10 @@ trading-engine danta ...`처럼 일반 사용자를 지정한다.
 찾아 검증한다. `--approval-file`을 명시하면 해당 파일을 우선 사용한다. offline 실행은 기본
 승인을 읽지 않으며, `approvals show`는 모드와 관계없이 저장된 승인을 검증해 보여준다.
 승인 파일이 없거나 만료·설정 hash 불일치이면 외부 실행을 허용하지 않는다.
+live/demo 서비스는 시작 시 같은 승인·대사 검사를 거쳐 자동 활성화한다. 별도 컨테이너
+명령은 필요 없다. 승인된 `bootstrap`의 기존 보유는 빈 원장에 한 번만 인수하며,
+재시작 시 수량·현금·보호 기준을 다시 덮어쓰지 않는다. 인수 평가액/시점과 과거 매수/체결을
+구분하여 기록하고, 미확인 주문이나 승인 수량과의 차이는 운영 초기화를 중단한다.
 
 비밀값 작성 형식은 [secrets.yaml.example](../config/secrets.yaml.example)을 참고한다.
 기존 env는 런타임이 자동 로딩하지 않는다. 레거시의 계좌번호가 8자리이면 기존 상품코드

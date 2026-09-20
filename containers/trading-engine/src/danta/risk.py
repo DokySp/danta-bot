@@ -14,12 +14,12 @@ def update_trailing_stop(thesis: InvestmentThesis, features: FeatureSnapshot,
                          completed_since_entry: list[DailyBar], ticks: TickTable,
                          research_profile: dict, *, observed_price: Decimal | None = None) -> InvestmentThesis:
     """Return a new thesis; fill clock/risk budget/initial stop are never replaced."""
-    if thesis.first_fill_at is None:
+    if thesis.protection_started_at is None:
         return thesis.model_copy(deep=True)
     mfe = max(thesis.average_entry, thesis.mfe_price or thesis.average_entry,
               observed_price if observed_price is not None else thesis.average_entry)
     bars = [b for b in completed_since_entry if b.complete and b.available_at <= features.as_of and
-            thesis.first_fill_at < b.closes_at <= features.window_end]
+            thesis.protection_started_at < b.closes_at <= features.window_end]
     if any(not b.ohlc_consistently_adjusted or b.adjustment_basis != features.adjustment_basis for b in bars):
         raise ValueError("TRAILING_ADJUSTMENT_MISMATCH")
     # Completed closes after a fill are known post-fill observations; pre-fill bar highs are not.
@@ -73,8 +73,8 @@ def evaluate_exit(thesis: InvestmentThesis, holding: Holding, quote: Quote | Non
         reasons.append("EXIT_THESIS_INVALID")
     # An expired session remains overdue even after close, during a halt, or on restart.
     deadline = None
-    if thesis.first_fill_session is not None:
-        first = calendar.session(thesis.first_fill_session)
+    if thesis.protection_session is not None:
+        first = calendar.session(thesis.protection_session)
         due = next((s for s in calendar.sessions if s.ordinal == first.ordinal+thesis.max_holding_sessions-1), None)
         if due is not None:
             deadline = due.closes_at-timedelta(minutes=10)

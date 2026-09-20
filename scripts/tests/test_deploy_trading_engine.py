@@ -25,6 +25,7 @@ class DeployTradingEngineTest(unittest.TestCase):
             (["example", "latest"], 0, "", 0),
             (["example", "v1"], 1, "", 1),
             (["example", "v1"], 0, "build", 1),
+            (["example", "v1"], 0, "smoke", 1),
             (["example", "v1"], 0, "push-release", 1),
             (["example", "v1"], 0, "tag", 1),
             (["example", "v1"], 0, "push-latest", 1),
@@ -50,6 +51,8 @@ name = pathlib.Path(sys.argv[0]).name
 with open(os.environ["STUB_LOG"], "a") as stream:
     stream.write(json.dumps([name, *sys.argv[1:]]) + "\\n")
 if name == "test-python":
+    if sys.argv[1].endswith("verify-deployment.py"):
+        sys.exit(1 if os.environ["STUB_DOCKER_FAILURE"] == "smoke" else 0)
     sys.exit(int(os.environ["STUB_TEST_EXIT"]))
 if name == "git":
     print("git-fixture-version")
@@ -101,11 +104,18 @@ if name == "curl":
                     remote_image = f"example/{image_name}:{tag}"
                     latest_image = f"example/{image_name}:latest"
                     expected = [build, ["docker", "push", remote_image]]
+                    if docker_failure != "build":
+                        smoke = next(call for call in calls if call[0] == "test-python" and call[1].endswith("verify-deployment.py"))
+                        flag = "--engine-image" if image_name == "trading-engine" else "--gateway-image"
+                        self.assertEqual(smoke[2:], [flag, f"{image_name}:{tag}", "--version", version])
+                        self.assertLess(calls.index(build), calls.index(smoke))
+                        if not docker_failure:
+                            self.assertLess(calls.index(smoke), calls.index(expected[1]))
                     if tag != "latest":
                         expected.extend([["docker", "tag", remote_image, latest_image],
                                          ["docker", "push", latest_image]])
                     if docker_failure:
-                        count = {"build": 1, "push-release": 2, "tag": 3,
+                        count = {"build": 1, "smoke": 1, "push-release": 2, "tag": 3,
                                  "push-latest": 2 if tag == "latest" else 4}[docker_failure]
                         expected = expected[:count]
                     self.assertEqual(docker_calls, expected)

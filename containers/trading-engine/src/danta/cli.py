@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from .application import Application, MarketBundle, code_identity
-from .config import HumanRequired, ROOT, canonical, load_config, trusted_approval, utcnow, validate_activation
+from .config import HumanRequired, ROOT, canonical, load_config, trusted_approval, utcnow
 from .reporting import render_readme, write_report
 
 
@@ -58,9 +58,19 @@ def make_application(config, args):
     config.require_external("account_read", approval)
     from .runtime import build_external_runtime
     bundle, broker, decide, refresh = build_external_runtime(config, approval)
-    return Application(config, bundle, broker=broker, decide=decide, refresh=refresh,
-                       protection_refresh=refresh.__self__.refresh_protection, approval=approval,
-                       chat=refresh.__self__.chat)
+    app = None
+    try:
+        app = Application(config, bundle, broker=broker, decide=decide, refresh=refresh,
+                          protection_refresh=refresh.__self__.refresh_protection, approval=approval,
+                          chat=refresh.__self__.chat)
+        app.adopt_account(refresh.__self__.manifest["bootstrap"])
+        return app
+    except BaseException:
+        if app:
+            app.close()
+        else:
+            refresh.__self__.close()
+        raise
 
 
 def main(argv=None) -> int:
@@ -140,12 +150,7 @@ def main(argv=None) -> int:
                 if approval is None or approval["id"] != args.approval:
                     raise HumanRequired("Matching trusted operator approval required")
                 if args.command == "activate":
-                    validate_activation(config, approval, args.expected_config, app.code_id)
-                    app.reconcile()
-                    with app.store.transaction():
-                        app.store.set("activation", {"config_hash": config.config_hash, "code_id": app.code_id,
-                                                     "approval_id": approval["id"]})
-                        app.store.event("operator", "ACTIVATED", {"approval_id": approval["id"]})
+                    app.activate(args.expected_config)
                 else:
                     app.resume()
                 result = {"status": args.command.upper(), "approval_id": approval["id"]}
