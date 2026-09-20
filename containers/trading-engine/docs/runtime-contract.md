@@ -82,11 +82,13 @@ completed-session calendar. Missing sessions and incompatible OHLC bases fail
 feature construction. The daily cache is session-based; refreshes in that same
 session reuse the completed history.
 
-`normalization.quote` names paths into the provider's `{asking, price}` record:
-`bid`, `ask`, `session_date`, and `observed_time`, plus provenance. Optional
-`bid_quantity` and `ask_quantity` paths support conservative paper fills.
+`normalization.quote.transport=websocket` uses KIS `H0STCNT0`: `bid=BIDP1`,
+`ask=ASKP1`, `session_date=BSOP_DATE`, `observed_time=STCK_CNTG_HOUR`,
+`bid_quantity=BIDP_RSQN1`, and `ask_quantity=ASKP_RSQN1`. The factory requires
+these exact mappings and source provenance. The default `rest` path retains
+explicit paths into the provider's `{asking, price}` record for recorded contracts.
 An actual exchange observation date and time must be supported by the verified
-provider contract. HTTP retrieval time is kept separately and is never copied
+provider contract. Receipt time is kept separately and is never copied
 onto an old price. Missing date/time fields do not produce a verified quote.
 
 `normalization.account` explicitly maps `symbol`, `quantity`,
@@ -115,9 +117,55 @@ while keeping known holdings protected.
 Optional `bootstrap.settled_observations_path` supplies independently verified
 observations keyed by `environment:account_alias:YYYY-MM-DD:KRX:broker_id`. Each
 record must identify its source/hash, matching cumulative quantity/notional,
-actual cumulative fees, first-fill timestamp and observation timestamp. Mismatched
-supplements are rejected. An exact later observation may correct previously
-unknown costs without replaying fills.
+and observation timestamp. Actual cumulative fees and the exact first-fill
+timestamp are independent evidence: either may be supplied without the other.
+Mismatched supplements are rejected. A later observation may correct previously
+unknown costs or upgrade first-fill time quality without replaying fills. The
+broker's actual first-fill timestamp stays separate from the time it was observed.
+
+### KRX regular session and the September 2026 aftermarket
+
+The active strategy remains `regular_continuous`. KRX introduced a separate
+16:00–20:00 aftermarket on September 14, 2026; it is not an extension of the
+regular continuous session in this runtime's calendar. Do not move the regular
+session close to 20:00. The current KIS order path uses regular-session types
+`00`/`01`; aftermarket types `41`–`47` and an aftermarket exit policy are not
+implemented. In particular, the published aftermarket types do not include
+the market sell used by this strategy.
+
+The KIS notice also adds `MARKET_CLS_CODE` to real-time trade/quote messages:
+`1` premarket, `2` regular, `3` aftermarket, `5` closing. The adapter implements
+the portal's 47-field contract, with `MARKET_CLS_CODE` last, and requires `2`,
+`HOUR_CLS_CODE=0`, `TRHT_YN=N`, and the verified regular calendar interval.
+The upstream GitHub sample still lists 46 fields; that older layout is rejected.
+Provider date/time and the original socket receipt must both be no older than
+five seconds. Invalid, out-of-order or disconnected data cannot become a fresh quote.
+
+One app key opens one background quote session with at most 41 subscriptions.
+Changed subscriptions are removed and acknowledged before additions; common
+symbols retain their subscriptions. Disconnects clear all quotes and ACKs before
+bounded reconnect attempts. Protection reads the cache without waiting for a
+socket. Full collection waits at most five seconds for initial ticks. Managed
+positions and working orders have priority: if adding entry candidates exceeds
+41, all entry candidates are excluded with diagnostics. More than 41 protected
+symbols blocks quote availability rather than silently omitting a holding.
+Do not share the app key with another simultaneously connected quote client.
+Injected contract tests verify these paths; actual provider receipt and sustained
+protection latency still require external operational verification.
+
+The balance query's `AFHR_FLPR_YN=N` now explicitly means KRX regular-session
+closing prices. It is retained for regular-session valuation; it does not
+represent a live aftermarket mark.
+
+This quote/entry window does not filter out already executed broker fills.
+`day_order_fill_session_verified` establishes the execution's exchange business
+day. A source-verified exact fill time may follow the ordinary close (for example,
+an extended closing auction); retain that observation for reconciliation while
+still rejecting future times or a conflicting verified business day.
+
+Source: [KIS announcement, September 9, 2026](https://apiportal.koreainvestment.com/community/10000000-0000-0011-0000-000000000001/post/26dfe350-eb72-48e5-8175-34eb27970f3e).
+Field layout: [KIS H0STCNT0 portal contract](https://apiportal.koreainvestment.com/api/apis/guide/property/714d1437-8f62-43db-a73c-cf509d3f6aa7).
+Limits: [KIS current subscription limits](https://apiportal.koreainvestment.com/community/10000000-0000-0011-0000-000000000001/post/d0d1a83f-6f8d-4437-9700-6d26702fd989).
 
 Terminal order status and previously confirmed fees do not end reconciliation of
 that order. When a new snapshot contains the same broker namespace/order ID,

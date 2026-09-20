@@ -7,3 +7,4 @@ PyYAML==6.0.3
 typing-inspection==0.4.4
 typing_extensions==4.16.0
 setuptools==80.9.0
+websocket-client==1.9.2

@@ -7,20 +7,32 @@
 
 ## 1. 개발 PC: 이미지 태그와 전달 파일 준비
 
-저장소 루트에서 기존 lockfile을 설치한 Python을 사용한다. 예시의 `RELEASE`는 두 이미지와
+저장소 루트에서 Python 3.12 이상으로 가상환경을 만들고 기존 lockfile을 설치한다.
+Ubuntu/Debian에서 `venv`가 없다면 먼저 `sudo apt-get install python3-venv`를 실행한다.
+예시의 `RELEASE`는 두 이미지와
 설정 폴더에 동일하게 적용한다. 이미지 빌드/push는 별도 배포 단계이며 준비 스크립트는 실행하지 않는다.
 
 ```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -r containers/trading-engine/requirements.lock
+export PYTHON_BIN="$PWD/.venv/bin/python"
 RELEASE=$(git rev-parse --short HEAD)
 mkdir -p containers/trading-engine/var
-.venv/bin/python scripts/prepare-trading-deployment.py \
+"$PYTHON_BIN" scripts/prepare-trading-deployment.py \
   --namespace dokysp --version "$RELEASE" \
   --output "containers/trading-engine/var/deployment-$RELEASE" --include-secrets
 
 # 이미지 배포 단계에서 실행한다.
-PYTHON_BIN="$PWD/.venv/bin/python" ./scripts/deploy-trading-engine.sh dokysp "$RELEASE"
-PATH="$PWD/.venv/bin:$PATH" ./scripts/deploy-telegram-gateway.sh dokysp "$RELEASE"
+./scripts/deploy-trading-engine.sh dokysp "$RELEASE"
+./scripts/deploy-telegram-gateway.sh dokysp "$RELEASE"
 ```
+
+두 배포 스크립트는 회귀 테스트 후 이미지를 한 번 빌드하고 지정한 릴리스 태그를 먼저 push한다.
+그 push가 성공하면 같은 이미지를 `latest`로 태그해 push한다. 버전을 생략하거나 `latest`를
+지정하면 `latest`만 한 번 push한다. 테스트·빌드·push 실패 시 다음 단계는 실행하지 않는다.
+릴리스 push 뒤 `latest` 갱신이 실패하면 릴리스는 이미 게시됐을 수 있으므로 두 태그 상태를 구분한다.
+운영 Compose에는 재게시하지 않는 릴리스 태그를 고정하는 방식을 권장한다. `latest`는 다음 배포에서
+바뀌는 별칭이며, 이미 실행 중인 컨테이너는 push만으로 갱신되지 않는다.
 
 `--include-secrets`는 현재 엔진의 private secrets.yaml, gateway의 v1 env와 일치하는 peer 키를
 새 폴더에 0600으로 복사한다. 토큰 캐시·Codex auth·원장·레거시는 복사하지 않는다.
@@ -158,7 +170,9 @@ sudo chmod 444 approvals/*.json
 ```
 
 실제 외부 연결 검증과 Telegram 전송이 허용되고 위 파일이 확정된 뒤에만 서비스 시작 단계로 간다.
-Telegram 메뉴의 일반 문장을 모델·주문 실행으로 해석하지 않는다. `/review`가 심사 요청이다.
+Telegram 메뉴의 일반 문장은 별도 대화 세션에서 모델이 답한다. `/new`는 해당 대화 기록을
+초기화하며, 일반 대화에는 주문 실행 도구를 제공하지 않는다. `/review`가 매매 심사 요청이다.
+일반 대화도 승인된 모델 설정·인증·호출량 제한을 사용한다.
 
 ```sh
 cd <배포폴더>/trading-engine

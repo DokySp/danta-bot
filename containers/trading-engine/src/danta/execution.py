@@ -256,7 +256,8 @@ class Executor:
                 self.store.apply_cumulative_fill(order["id"], quantity=broker["cumulative_quantity"],
                     notional=Decimal(broker["cumulative_notional"]), fees=Decimal(broker["cumulative_fees"]) if broker.get("cumulative_fees") is not None else None,
                     revision=broker["revision"], observed_at=broker["observed_at"], correction=broker.get("correction", False),
-                    fill_session_id=broker.get("fill_session_id"), fill_time_quality=broker.get("fill_time_quality", "UNKNOWN"))
+                    first_fill_at=broker.get("first_fill_at"), fill_session_id=broker.get("fill_session_id"),
+                    fill_time_quality=broker.get("fill_time_quality", "UNKNOWN"))
                 with self.store.transaction():
                     current = self.store.order(order["id"])
                     if broker["state"] in TERMINAL:
@@ -304,7 +305,9 @@ class FixtureBroker:
             raise ValueError("Fixture cannot fill above the limit")
         order.update(cumulative_quantity=quantity, cumulative_notional=str(price * quantity), cumulative_fees=str(fees),
                      revision=order["revision"] + 1, observed_at=observed_at.isoformat(),
-                     state="FILLED" if quantity == order["quantity"] else "PARTIALLY_FILLED")
+                     first_fill_at=(order.get("first_fill_at") or observed_at.isoformat()) if quantity else None,
+                     fill_time_quality="EXACT" if quantity else "UNKNOWN",
+                     state="FILLED" if quantity == order["quantity"] else "PARTIALLY_FILLED" if quantity else "ACKNOWLEDGED")
 
     def cancel(self, request: dict) -> dict:
         self.cancel_requests += 1

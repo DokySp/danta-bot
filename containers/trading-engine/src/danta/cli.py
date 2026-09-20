@@ -59,7 +59,8 @@ def make_application(config, args):
     from .runtime import build_external_runtime
     bundle, broker, decide, refresh = build_external_runtime(config, approval)
     return Application(config, bundle, broker=broker, decide=decide, refresh=refresh,
-                       protection_refresh=refresh.__self__.refresh_protection, approval=approval)
+                       protection_refresh=refresh.__self__.refresh_protection, approval=approval,
+                       chat=refresh.__self__.chat)
 
 
 def main(argv=None) -> int:
@@ -93,7 +94,8 @@ def main(argv=None) -> int:
             from .evaluation import evaluate_manifest, replay_manifest
             if config.mode != "offline":
                 raise HumanRequired("Evaluation CLI uses isolated offline manifests; runtime data approval is separate")
-            result = (replay_manifest if args.command == "replay" else evaluate_manifest)(args.manifest)
+            result = (replay_manifest(args.manifest) if args.command == "replay" else
+                      evaluate_manifest(args.manifest, output_dir=config.state_dir / "evaluations"))
         elif args.command == "serve":
             from .service import serve
             serve(config, args, application_factory=make_application)

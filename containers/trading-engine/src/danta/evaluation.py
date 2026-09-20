@@ -22,7 +22,7 @@ from .market import SessionCalendar, TickTable
 from .models import (AwareTime, Candidate, CostSchedule, EventRecord, Holding,
                      InvestmentThesis, Nonnegative, PendingEntry, PortfolioSnapshot,
                      Positive, Quantity, Quote, Session, StrictModel)
-from .reporting import json_default
+from .reporting import json_default, write_report
 
 
 ARMS = ("cash", "technical_only", "event_flag_no_ai", "full_strategy")
@@ -887,6 +887,18 @@ def evaluate_metrics(manifest: EvaluationManifest, replay: dict, stress: dict) -
         'replay': replay, 'stress_replay': stress}
 
 
-def evaluate_manifest(path) -> dict:
+def evaluate_manifest(path, *, output_dir=None) -> dict:
+    """Evaluate frozen inputs; optionally export once under evaluations/<manifest hash>."""
     manifest = _load_manifest(path)
-    return evaluate_metrics(manifest, _run(manifest), _run(manifest, 2))
+    result = evaluate_metrics(manifest, _run(manifest), _run(manifest, 2))
+    result['evaluation_id'] = result['manifest_hash']
+    result['manifest'] = manifest.model_dump(mode='json')
+    if output_dir is not None:
+        # Manifest identifiers are untrusted labels, never filesystem components.
+        directory = Path(output_dir) / result['evaluation_id']
+        directory.mkdir(parents=True, exist_ok=False)
+        result['artifacts'] = {'json': str(directory / 'result.json'),
+                               'html': str(directory / 'report.html')}
+        write_report(result, result['artifacts']['json'], result['artifacts']['html'],
+                     '독립 paper 전략 평가')
+    return result

@@ -23,13 +23,14 @@ from .adapters import AdapterError, http_transport
 from .adapters.codex_cli import CodexAdapter
 from .adapters.disclosures import DartAdapter, ORIGIN
 from .adapters.kis import BASE_URLS, MASTER_ORIGIN, KisAdapter, KisCredentials, KisTokenCache
-from .application import MarketBundle
+from .application import MarketBundle, code_identity
 from .config import HumanRequired, ROOT, aware_time, canonical, digest, load_secrets, utcnow
 from .decision import DecisionProposal, validate_proposal
 from .market import SessionCalendar, calculate_features
 from .models import CostSchedule, DailyBar, EventRecord, Instrument, MarketFact, Quote, Session
 from .portfolio import buy_commission, sell_cost, slippage
 from .strategy import quote_fresh
+from .safety import reject_credentials
 
 SEOUL = ZoneInfo("Asia/Seoul")
 AUTH_ERRORS = {"AUTH_FAILED", "AUTHORIZATION_REQUIRED", "AUTH_CREDENTIALS_REQUIRED", "DART_AUTH_REQUIRED", "OFFLINE_NETWORK_BLOCKED"}
@@ -253,11 +254,14 @@ class KisBrokerPort:
                                 not supplement.get("source_sha256") or _quantity(supplement["cumulative_quantity"]) != cumulative or
                                 _decimal(supplement["cumulative_notional"]) != notional):
                             raise ValueError("SETTLEMENT_EVIDENCE_MISMATCH")
-                        fees = _decimal(supplement["actual_cumulative_fees"])
-                        first_fill = aware_time(supplement["first_fill_at"])
+                        if supplement.get("actual_cumulative_fees") is not None:
+                            fees = _decimal(supplement["actual_cumulative_fees"])
+                        if supplement.get("first_fill_at") is not None:
+                            first_fill = aware_time(supplement["first_fill_at"])
+                            fill_quality = "EXACT"
                         observed = aware_time(supplement["observed_at"])
-                        fill_quality = "EXACT"
-                        if not first_fill <= observed <= now:
+                        if observed > now or first_fill is not None and (first_fill > observed or
+                                fields["day_order_fill_session_verified"] and first_fill.astimezone(SEOUL).date().isoformat() != session_date):
                             raise ValueError("INVALID_FILL_TIMESTAMPS")
                 else:
                     # No executions have occurred. The approved fee contract is trade-based.
@@ -302,6 +306,8 @@ class ExternalRuntime:
         self.quote_depth = {}
         self.collect_lock = threading.RLock()
         self.publish_lock = threading.RLock()
+        self.quote_subscription_lock = threading.RLock()
+        self.entry_quote_symbols = set()
 
     def _instruments(self, now):
         mapping = self.manifest["normalization"]["instruments"]
@@ -342,11 +348,15 @@ class ExternalRuntime:
         return sorted(rows,key=lambda bar:bar.closes_at)
 
     def _quote(self,instrument,*,depth=None):
-        result = self.kis.quote(instrument.instrument_id.removeprefix("KRX:"))
+        fields = self.manifest["normalization"]["quote"]
+        streaming = fields.get("transport", "rest") == "websocket"
+        read = self.kis.stream_quote if streaming else self.kis.quote
+        result = read(instrument.instrument_id.removeprefix("KRX:"))
         if result.quality != "COMPLETE" or len(result.records) != 1:
             raise ValueError("QUOTE_FETCH_INCOMPLETE")
-        fields = self.manifest["normalization"]["quote"]
         raw = result.records[0]
+        if streaming and raw.get("MARKET_CLS_CODE") != "2":
+            raise ValueError("QUOTE_MARKET_IS_NOT_REGULAR")
         observed = _timestamp(_field(raw,fields["session_date"]),_field(raw,fields["observed_time"]))
         session = self.calendar.session(observed.date().isoformat())
         if not session.opens_at <= observed < session.closes_at:
@@ -356,6 +366,52 @@ class ExternalRuntime:
             "ask":_quantity(_field(raw,fields["ask_quantity"])) if fields.get("ask_quantity") else 0}
         return Quote(instrument_id=instrument.instrument_id,venue="KRX",observed_at=observed,received_at=result.retrieved_at,
                      bid=_decimal(_field(raw,fields["bid"])),ask=_decimal(_field(raw,fields["ask"])),source=fields["source"])
+
+    def _subscribe_quotes(self, account, candidates=None):
+        if self.manifest["normalization"]["quote"].get("transport", "rest") != "websocket":
+            return set()
+        with self.quote_subscription_lock:
+            if candidates is not None:
+                self.entry_quote_symbols = set(candidates)
+            protected = self._protection_symbols(account)
+            targets = protected | self.entry_quote_symbols
+            excluded = set()
+            # One app key supports 41 registrations. Preserve protection rather
+            # than inventing a strategy ranking to discard excess candidates.
+            if len(targets) > 41:
+                excluded = targets - protected
+                targets = protected
+            if len(targets) > 41:
+                excluded |= targets
+                targets = set()
+            if self.calendar.active(self.clock()) is None:
+                targets = set()
+            self.kis.subscribe_quotes(sorted(value.removeprefix("KRX:") for value in targets))
+            return excluded
+
+    def _wait_for_stream_quotes(self, instruments):
+        if (not instruments or self.calendar.active(self.clock()) is None or
+                self.manifest["normalization"]["quote"].get("transport", "rest") != "websocket"):
+            return
+        pending = {item.instrument_id.removeprefix("KRX:") for item in instruments}
+        deadline = time.monotonic() + self.profile["orders"]["quote_max_age_seconds"]
+        # Only full collection waits for initial ticks. Protection reads the
+        # background cache immediately and never waits for a connection.
+        while pending:
+            for ticker in tuple(pending):
+                try:
+                    self.kis.stream_quote(ticker)
+                    pending.remove(ticker)
+                except AdapterError as error:
+                    if isinstance(error, HumanRequired) or error.code in AUTH_ERRORS:
+                        raise
+            if not pending or time.monotonic() >= deadline:
+                return
+            time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+
+    def close(self):
+        self.kis.close()
+        self.state.db.close()
 
     def _events(self,instruments,now):
         self.disclosure_diagnostics = list(self.state.data.get("disclosure_diagnostics",[]))
@@ -544,9 +600,12 @@ class ExternalRuntime:
         if previous is None:
             raise HumanRequired("MONITOR_DEGRADED: VERIFIED_PROTECTION_REFERENCE_UNAVAILABLE")
         account,account_order = self._account()
+        excluded = self._subscribe_quotes(account)
         quotes,depth,orders,diagnostics = {},{},{},[]
         for symbol in sorted(self._protection_symbols(account)):
             try:
+                if symbol in excluded:
+                    raise ValueError("PROTECTED_STREAM_CAPACITY_EXCEEDED")
                 instrument = previous.instruments.get(symbol)
                 if instrument is None:
                     raise ValueError("VERIFIED_INSTRUMENT_UNAVAILABLE")
@@ -613,6 +672,7 @@ class ExternalRuntime:
                             1 <= self.calendar.event_age(event,current.session_id) <= self.profile["signal"]["max_event_age_sessions"]):
                         recent.add(event.instrument_id)
             quotes,depth,quote_orders = [],{},{}
+            quote_instruments = []
             for instrument in instruments:
                 try:
                     if instrument.instrument_id not in protected:
@@ -626,13 +686,26 @@ class ExternalRuntime:
                                     features.rs20 > 0 and features.index_close >= features.index_sma60)
                         if not eligible:
                             continue
-                    quotes.append(self._quote(instrument,depth=depth))
-                    quote_orders[instrument.instrument_id] = time.monotonic_ns()
+                    quote_instruments.append(instrument)
                 except (ValueError,KeyError,AdapterError) as error:
                     if isinstance(error,HumanRequired) or isinstance(error,AdapterError) and error.code in AUTH_ERRORS:
                         raise
                     quote_orders[instrument.instrument_id] = time.monotonic_ns()
                     diagnostics.append({"instrument_id":instrument.instrument_id,"reason":getattr(error,"code",str(error))})
+            excluded = self._subscribe_quotes(account, {item.instrument_id for item in quote_instruments})
+            for instrument_id in sorted(excluded):
+                diagnostics.append({"instrument_id":instrument_id,"reason":"STREAM_SUBSCRIPTION_CAPACITY_EXCEEDED"})
+                quote_orders[instrument_id] = time.monotonic_ns()
+            quote_instruments = [item for item in quote_instruments if item.instrument_id not in excluded]
+            self._wait_for_stream_quotes(quote_instruments)
+            for instrument in quote_instruments:
+                try:
+                    quotes.append(self._quote(instrument,depth=depth))
+                except (ValueError,KeyError,AdapterError) as error:
+                    if isinstance(error,HumanRequired) or isinstance(error,AdapterError) and error.code in AUTH_ERRORS:
+                        raise
+                    diagnostics.append({"instrument_id":instrument.instrument_id,"reason":getattr(error,"code",str(error))})
+                quote_orders[instrument.instrument_id] = time.monotonic_ns()
             now = self.clock()
             ticks = self.manifest["ticks"]
             data = {"provenance":"VERIFIED_EXTERNAL_OBSERVATIONS","as_of":now.isoformat(),"account_identity":self.manifest["bootstrap"]["account_identity"],
@@ -685,13 +758,55 @@ class ExternalRuntime:
             prompt=(ROOT/"prompts/portfolio_decision.md").read_text(),validate_schema=lambda value:DecisionProposal.model_validate(value),
             validate_semantic=validate_at_completion,
             expires_at=started_at+timedelta(seconds=self.config.app["model"]["timeout_seconds"]+self.profile["orders"]["decision_max_age_seconds"]))
+        self._record_model_result(store, frozen, call_id, attempt_root, started_at, result, purpose="review")
+        if result.status != "SUCCESS":
+            raise AdapterError("MODEL_"+result.status)
+        return result.decision.model_dump(mode="json") if hasattr(result.decision,"model_dump") else result.decision
+
+    def chat(self, *, request_id, session_id, messages):
+        """Text-only conversation using the same isolated, metered model runner."""
+        self.config.assert_current()
+        self.config.require_external("model_call", self.approval)
+        store = getattr(self.broker, "store", None)
+        if store is None:
+            raise AdapterError("MODEL_JOURNAL_STORE_UNBOUND")
+        frozen = {"schema_version": 1, "run_id": request_id, "session_id": session_id,
+                  "created_at": self.clock().isoformat(), "strategy_hash": self.config.strategy_hash,
+                  "code_id": code_identity(), "config_hash": self.config.config_hash, "conversation": messages,
+                  "tool_scope": {"instrument_ids": []}, "tool_records": {}}
+        frozen["input_snapshot_id"] = digest(frozen)
+        schema = {"type": "object", "properties": {"reply_text": {"type": "string", "minLength": 1, "maxLength": 3500}},
+                  "required": ["reply_text"], "additionalProperties": False}
+        def validate_reply(value):
+            if (not isinstance(value, dict) or set(value) != {"reply_text"} or
+                    not isinstance(value["reply_text"], str) or not 1 <= len(value["reply_text"].strip()) <= 3500):
+                raise ValueError("INVALID_CHAT_REPLY")
+            reject_credentials(value)
+            return value
+        call_id, started_at = str(uuid4()), self.clock()
+        attempt_root = self.config.state_dir / "model-attempts" / call_id
+        result = self.codex.run(frozen, schema, attempt_root=attempt_root,
+            prompt=(ROOT / "prompts/general_chat.md").read_text(), validate_schema=validate_reply,
+            validate_semantic=lambda _value: True,
+            expires_at=started_at + timedelta(seconds=self.config.app["model"]["timeout_seconds"]))
+        self._record_model_result(store, frozen, call_id, attempt_root, started_at, result, purpose="chat")
+        if result.status != "SUCCESS":
+            return {"status": "MODEL_" + result.status, "session_id": session_id,
+                    "reply_text": "대화 응답을 완료하지 못했습니다. /usage에서 모델 상태를 확인할 수 있습니다.",
+                    "model_called": result.attempts > 0, "orders_created": False}
+        value = validate_reply(result.decision)
+        return {"status": "CHAT_COMPLETE", "session_id": session_id, "reply_text": value["reply_text"],
+                "model_called": result.attempts > 0, "orders_created": False}
+
+    def _record_model_result(self, store, frozen, call_id, attempt_root, started_at, result, *, purpose):
         attempts = []
         for path in sorted(attempt_root.glob("*/result.json"),key=lambda item:(item.stat().st_mtime_ns,str(item))):
             record = _json(path)
             attempts.append({"attempt_id":path.parent.name,"status":record["status"],"usage":record.get("usage"),
                              "input_sha256":record["input_sha256"],"provenance":record.get("provenance")})
         metadata = {"call_id":call_id,"input_snapshot_id":frozen["input_snapshot_id"],"model_id":self.codex.model_id,
-                    "provider":"codex_cli","reasoning_effort":self.codex.reasoning_effort}
+                    "provider":"codex_cli","reasoning_effort":self.codex.reasoning_effort,"purpose":purpose,
+                    **{key: frozen[key] for key in ("created_at", "strategy_hash", "config_hash", "code_id") if key in frozen}}
         with store.transaction():
             for index,attempt in enumerate(attempts,1):
                 store.event(frozen["run_id"],"MODEL_ATTEMPT",{**metadata,**attempt,"record_type":"MODEL_ATTEMPT",
@@ -700,9 +815,6 @@ class ExternalRuntime:
                 "attempt_count":result.attempts,"usage":result.usage,"usage_scope":"last_attempt",
                 "reset_at":result.reset_at.isoformat() if result.reset_at else None,
                 "started_at":started_at.isoformat(),"completed_at":self.clock().isoformat()})
-        if result.status != "SUCCESS":
-            raise AdapterError("MODEL_"+result.status)
-        return result.decision.model_dump(mode="json") if hasattr(result.decision,"model_dump") else result.decision
 
 
 class PaperBrokerPort:
@@ -806,7 +918,7 @@ class ShadowBrokerPort(KisBrokerPort):
 
 
 def build_external_runtime(config,trusted_approval,*,kis_transport=None,dart_transport=None,
-                           model_runner=None,env=None,clock=utcnow):
+                           model_runner=None,env=None,clock=utcnow,ws_connector=None):
     """Return (MarketBundle, broker port, decision callback, refresh callback).
 
     The optional transports/runner are injection points for contract tests, not
@@ -849,6 +961,14 @@ def build_external_runtime(config,trusted_approval,*,kis_transport=None,dart_tra
         raise HumanRequired("Point-in-time OHLC/index adjustment basis is unverified")
     if type(manifest["normalization"]["orders"].get("day_order_fill_session_verified")) is not bool:
         raise HumanRequired("Day-order fill-session verification must be an explicit boolean")
+    quote_fields = manifest["normalization"]["quote"]
+    if quote_fields.get("transport", "rest") not in {"rest", "websocket"}:
+        raise HumanRequired("Unsupported quote transport")
+    if quote_fields.get("transport") == "websocket":
+        expected = {"session_date":"BSOP_DATE", "observed_time":"STCK_CNTG_HOUR",
+                    "bid":"BIDP1", "ask":"ASKP1", "bid_quantity":"BIDP_RSQN1", "ask_quantity":"ASKP_RSQN1"}
+        if not quote_fields.get("source") or any(quote_fields.get(key) != value for key,value in expected.items()):
+            raise HumanRequired("Unverified H0STCNT0 field mapping")
     costs = CostSchedule.model_validate_json(canonical(manifest["costs"]))
     if not costs.verified or costs.synthetic or costs.account_alias != manifest["account_alias"] or not costs.effective_at <= now < costs.expires_at:
         raise HumanRequired("External cost contract is unverified or out of scope")
@@ -900,7 +1020,7 @@ def build_external_runtime(config,trusted_approval,*,kis_transport=None,dart_tra
         app_secret=credentials.app_secret, path=config.state_dir/"kis-token.json", transport=kis_transport,
         mode=config.mode, authorize=authorize, clock=clock)
     kis = KisAdapter(environment=manifest["environment"],credentials=credentials,transport=kis_transport,
-        mode=config.mode,authorize=authorize,token_provider=tokens,clock=clock)
+        mode=config.mode,authorize=authorize,token_provider=tokens,clock=clock,ws_connector=ws_connector)
     dart = DartAdapter(api_key=secret(config.app["market"]["dart_key_env"]),mode=config.mode,authorize=authorize,
         official_ir_domains=config.app["market"]["official_ir_domains"],
         transport=dart_transport or http_transport(allowed_origins={ORIGIN,*("https://"+host for host in config.app["market"]["official_ir_domains"])},network_enabled=True))
@@ -922,5 +1042,9 @@ def build_external_runtime(config,trusted_approval,*,kis_transport=None,dart_tra
         runtime.broker = PaperBrokerPort(runtime)
     elif config.mode == "shadow":
         runtime.broker = ShadowBrokerPort(kis,manifest,state,clock=clock)
-    bundle = runtime.refresh()
+    try:
+        bundle = runtime.refresh()
+    except BaseException:
+        runtime.close()
+        raise
     return bundle,runtime.broker,runtime.decide,runtime.refresh

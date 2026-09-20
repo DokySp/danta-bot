@@ -1,0 +1,105 @@
+"""Synthetic streaming-to-domain contracts; no network or real credentials."""
+import hashlib
+import unittest
+from datetime import timedelta
+from types import SimpleNamespace
+
+from danta.adapters import FetchResult
+from danta.config import HumanRequired
+from danta.runtime import ExternalRuntime, RuntimeState
+from tests.contract import test_runtime as contracts
+
+
+class QuoteCache:
+    environment = "demo"
+
+    def __init__(self, now):
+        self.now = now
+        self.subscriptions = []
+        self.closed = False
+        self.raw = {"BSOP_DATE": now.strftime("%Y%m%d"), "STCK_CNTG_HOUR": now.strftime("%H%M%S"),
+                    "BIDP1": "9999", "ASKP1": "10000", "BIDP_RSQN1": "5", "ASKP_RSQN1": "6",
+                    "MARKET_CLS_CODE": "2"}
+
+    def stream_quote(self, ticker):
+        return FetchResult((dict(self.raw),), "COMPLETE", self.now)
+
+    def subscribe_quotes(self, tickers):
+        self.subscriptions.append(tickers)
+
+    def close(self):
+        self.closed = True
+
+
+class RuntimeStreamContracts(unittest.TestCase):
+    def setUp(self):
+        self.fixture = contracts.ExternalRuntimeContracts(methodName="runTest")
+        self.fixture.setUp()
+        self.now = self.fixture.now
+        self.kis = QuoteCache(self.now)
+        self.fixture.manifest["normalization"]["quote"] = {
+            "transport": "websocket", "source": "SYNTHETIC_CURRENT_KIS_LAYOUT",
+            "session_date": "BSOP_DATE", "observed_time": "STCK_CNTG_HOUR",
+            "bid": "BIDP1", "ask": "ASKP1", "bid_quantity": "BIDP_RSQN1", "ask_quantity": "ASKP_RSQN1"}
+        self.runtime = ExternalRuntime(self.fixture.config, self.fixture.approval, self.fixture.manifest,
+            self.kis, None, None, RuntimeState(self.fixture.base / "stream-state.sqlite"), clock=lambda: self.now)
+        self.instrument = SimpleNamespace(instrument_id="KRX:000001")
+
+    def tearDown(self):
+        self.runtime.close()
+        self.fixture.tearDown()
+
+    def test_provider_date_and_original_reception_time_reach_quote(self):
+        observed = self.now - timedelta(seconds=2)
+        received = self.now - timedelta(seconds=1)
+        self.kis.raw["STCK_CNTG_HOUR"] = observed.strftime("%H%M%S")
+        self.kis.now = received
+        quote = self.runtime._quote(self.instrument)
+        self.assertEqual(quote.observed_at, observed)
+        self.assertEqual(quote.received_at, received)
+        self.assertEqual(self.runtime.quote_depth[self.instrument.instrument_id], {"bid": 5, "ask": 6})
+
+    def test_non_regular_market_rejected_even_with_current_timestamp(self):
+        for market in ("1", "3", "5", None):
+            with self.subTest(market=market):
+                self.kis.raw["MARKET_CLS_CODE"] = market
+                with self.assertRaisesRegex(ValueError, "QUOTE_MARKET_IS_NOT_REGULAR"):
+                    self.runtime._quote(self.instrument)
+
+    def test_aftermarket_time_cannot_extend_regular_calendar(self):
+        self.kis.raw["STCK_CNTG_HOUR"] = "160001"
+        self.now = self.now.replace(hour=16, minute=0, second=2)
+        self.kis.now = self.now
+        with self.assertRaisesRegex(ValueError, "QUOTE_OBSERVATION_OUTSIDE_SESSION"):
+            self.runtime._quote(self.instrument)
+
+    def test_subscription_limit_preserves_protection_and_reports_all_excess_candidates(self):
+        protected = {"KRX:000001": 3}
+        account = {"strategy_quantities": protected, "orders": []}
+        candidates = {f"KRX:{number:06}" for number in range(2, 43)}
+        excluded = self.runtime._subscribe_quotes(account, candidates)
+        self.assertEqual(excluded, candidates)
+        self.assertEqual(self.kis.subscriptions[-1], ["000001"])
+        self.assertEqual(self.runtime.entry_quote_symbols, candidates)
+        excluded = self.runtime._subscribe_quotes(account, {"KRX:000002"})
+        self.assertEqual(excluded, set())
+        self.assertEqual(self.kis.subscriptions[-1], ["000001", "000002"])
+
+    def test_more_than_41_protected_symbols_is_explicitly_unavailable(self):
+        holdings = {f"KRX:{number:06}": 1 for number in range(1, 43)}
+        excluded = self.runtime._subscribe_quotes({"strategy_quantities": holdings, "orders": []})
+        self.assertEqual(excluded, set(holdings))
+        self.assertEqual(self.kis.subscriptions[-1], [])
+
+    def test_closed_market_releases_subscriptions(self):
+        self.now = self.now.replace(hour=16, minute=0)
+        self.runtime._subscribe_quotes({"strategy_quantities": {"KRX:000001": 1}, "orders": []})
+        self.assertEqual(self.kis.subscriptions[-1], [])
+
+    def test_factory_rejects_unverified_mapping_before_network_setup(self):
+        self.fixture.manifest["normalization"]["quote"]["session_date"] = None
+        self.fixture._save_manifest()
+        self.fixture.approval["operational_evidence"]["runtime_manifest_sha256"] = hashlib.sha256(
+            (self.fixture.base / "manifest.json").read_bytes()).hexdigest()
+        with self.assertRaisesRegex(HumanRequired, "H0STCNT0 field mapping"):
+            self.fixture._factory()

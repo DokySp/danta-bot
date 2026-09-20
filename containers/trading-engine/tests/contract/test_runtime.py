@@ -108,7 +108,7 @@ class ExternalRuntimeContracts(unittest.TestCase):
                 "quote":{"source":"FAKE_QUOTE_FIELD_CONTRACT","session_date":"price.stck_bsop_date","observed_time":"asking.aspr_acpt_hour","bid":"asking.bidp1","ask":"asking.askp1"},
                 "account":{"resource_symbol":"000001","resource_price":"10000","available_cash":"ord_psbl_cash","symbol":"pdno","quantity":"hldg_qty","sellable_quantity":"ord_psbl_qty"},
                 "orders":{"symbol":"pdno","session_date":"ord_dt","broker_id":"odno","quantity":"ord_qty","cumulative_quantity":"tot_ccld_qty", "cumulative_notional":"tot_ccld_amt",
-                          "side":"sll_buy_dvsn_cd","side_codes":{"02":"BUY","01":"SELL"},"canceled_quantity":"cncl_cfrm_qty","day_order_fill_session_verified":True}},
+                          "side":"sll_buy_dvsn_cd","side_codes":{"02":"BUY","01":"SELL"},"canceled_quantity":"cnc_cfrm_qty","day_order_fill_session_verified":True}},
             "bootstrap":{"source":"FAKE_EMPTY_BOOTSTRAP","ownership_verified":True,"account_identity":"FAKE_ACCOUNT_OPAQUE_ID","strategy_quantities":{},
                          "strategy_cash":"10000000","external_quantities":{},"external_order_keys":[],"orders_since":self.now.date().isoformat()},
             "model":{"source":"FAKE_ISOLATION_FIXTURE","isolation_verified":True,"executable_sha256":hashlib.sha256(Path("/usr/bin/true").read_bytes()).hexdigest(),"auth_home_env":"FAKE_AUTH_HOME"},
@@ -351,6 +351,7 @@ class ExternalRuntimeContracts(unittest.TestCase):
 
     def test_known_fill_with_unknown_fees_is_preserved_for_protection(self):
         state = RuntimeState(self.base/"broker.sqlite")
+        self.addCleanup(state.db.close)
         state.db.execute("CREATE TABLE intents(broker_namespace TEXT,broker_id TEXT,instrument_id TEXT,side TEXT,broker_metadata TEXT)")
         namespace = "demo:FAKE_ACCOUNT_ALIAS:"+self.now.date().isoformat()+":KRX"
         state.db.execute("INSERT INTO intents VALUES (?,?,?,?,?)",(namespace,"123","KRX:000001","BUY",'{"organization":"999"}'))
@@ -361,7 +362,7 @@ class ExternalRuntimeContracts(unittest.TestCase):
                                    metadata={"orderable_resources":{"ord_psbl_cash":"9000000"}})
             def read_orders(inner,*args):
                 return FetchResult(({"pdno":"000001","ord_dt":self.now.strftime("%Y%m%d"),"odno":"123","ord_qty":"10","tot_ccld_qty":"3",
-                                     "tot_ccld_amt":"30000","sll_buy_dvsn_cd":"02","cncl_cfrm_qty":"0"},),"COMPLETE",self.now)
+                                     "tot_ccld_amt":"30000","sll_buy_dvsn_cd":"02","cnc_cfrm_qty":"0"},),"COMPLETE",self.now)
         broker = KisBrokerPort(FakeAdapter(),self.manifest,state,clock=lambda:self.now)
         snapshot = broker.snapshot()
         self.assertTrue(snapshot["complete"])
@@ -370,6 +371,24 @@ class ExternalRuntimeContracts(unittest.TestCase):
         self.assertIsNone(snapshot["orders"][0]["cumulative_fees"])
         self.assertEqual(snapshot["orders"][0]["fill_time_quality"],"FIRST_OBSERVED")
         self.assertIsNone(snapshot["orders"][0]["first_fill_at"])
+        supplement = {"verified":True,"source":"FAKE_SETTLEMENT","source_sha256":"FAKE_SOURCE_HASH",
+                      "cumulative_quantity":3,"cumulative_notional":"30000","observed_at":self.now.isoformat()}
+        for fees,first_fill in (("5",None),(None,self.now-timedelta(minutes=1)),("5",self.now-timedelta(minutes=1))):
+            with self.subTest(fees=fees,first_fill=first_fill),patch.object(broker,"_supplements",return_value={
+                    namespace+":123":{**supplement,"actual_cumulative_fees":fees,
+                                     "first_fill_at":first_fill.isoformat() if first_fill else None}}):
+                settled = broker.snapshot()
+                self.assertTrue(settled["complete"])
+                item = settled["orders"][0]
+                self.assertEqual(item["cumulative_fees"],fees)
+                self.assertEqual(item["fill_session_id"],self.now.date().isoformat())
+                self.assertEqual(item["observed_at"],aware_time(self.now.isoformat()).isoformat())
+                self.assertEqual(item["first_fill_at"],aware_time(first_fill.isoformat()).isoformat() if first_fill else None)
+                self.assertEqual(item["fill_time_quality"],"EXACT" if first_fill else "FIRST_OBSERVED")
+        for invalid in (self.now+timedelta(minutes=1),self.now-timedelta(days=1)):
+            with self.subTest(invalid=invalid),patch.object(broker,"_supplements",return_value={
+                    namespace+":123":{**supplement,"first_fill_at":invalid.isoformat()}}):
+                self.assertEqual(broker.snapshot()["errors"],["INVALID_FILL_TIMESTAMPS"])
 
     def test_parallel_broker_snapshots_do_not_mix_cash_or_sellable_quantities(self):
         state = RuntimeState(self.base/"parallel-broker.sqlite")

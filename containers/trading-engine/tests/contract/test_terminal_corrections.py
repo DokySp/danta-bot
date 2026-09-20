@@ -6,13 +6,113 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal as D
 from pathlib import Path
+from types import SimpleNamespace
 
-from danta.config import HumanRequired
+from danta.application import Application
+from danta.config import HumanRequired, aware_time
 from danta.execution import Executor, FixtureBroker, OrderIntent
+from danta.risk import evaluate_exit
 from danta.store import Store
+from tests.unit import test_strategy as helpers
 
 
 class TerminalCorrections(unittest.TestCase):
+    def test_zero_fill_has_no_execution_time_and_cost_uncertainty_invalidates_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            now = datetime.now(timezone.utc)
+            with Store(Path(directory)/"state.sqlite", mode="offline", account_identity=directory, initial_cash=D(10000)) as store:
+                broker = FixtureBroker()
+                executor = Executor(store, broker, mode="offline", authorize=lambda *_: None, preflight=lambda *_: None)
+                intent = OrderIntent(run_id="evidence", plan_id="plan", thesis_id="thesis", instrument_id="TEST:AAA", side="BUY",
+                    quantity=2, limit_price=D(100), expires_at=now+timedelta(seconds=120), reason="FIXTURE",
+                    account_version=store.get("account_version"), policy_hash="fixture", reserve_cash=D(200), reserve_risk=D(20))
+                order = executor.submit(intent, now)
+                broker.fill(order["broker_id"], 0, D(100), D(0), now)
+                executor.reconcile()
+                self.assertIsNone(broker.orders[order["broker_id"]]["first_fill_at"])
+                self.assertEqual(store.db.execute("SELECT COUNT(*) FROM observations WHERE kind='FIRST_FILL'").fetchone()[0], 0)
+                first = now+timedelta(seconds=5)
+                broker.fill(order["broker_id"], 2, D(100), D(0), first)
+                executor.reconcile()
+                evidence = json.loads(store.db.execute("SELECT payload FROM observations WHERE kind='FIRST_FILL'").fetchone()[0])
+                self.assertEqual(aware_time(evidence["first_fill_at"]), first)
+                cash, version = store.get("cash_krw"), store.get("account_version")
+                observed = broker.orders[order["broker_id"]]
+                observed.update(cumulative_fees=None, revision=observed["revision"]+1)
+                executor.reconcile()
+                self.assertFalse(store.get("costs_complete"))
+                self.assertGreater(store.get("account_version"), version)
+                self.assertEqual(store.get("cash_krw"), cash)
+                self.assertEqual(store.quantity("TEST:AAA"), 2)
+                self.assertEqual(store.db.execute("SELECT COUNT(*) FROM journal WHERE kind='FILL_EVIDENCE_UPDATED'").fetchone()[0], 1)
+                version = store.get("account_version")
+                executor.reconcile()
+                self.assertEqual(store.get("account_version"), version)
+
+    def test_first_fill_time_can_be_corrected_without_replaying_cash_or_quantity(self):
+        case = helpers.synthetic_case()
+        profile,calendar,_ticks,now,*_ = case
+        first_session = calendar.sessions[119]
+        exact = first_session.opens_at+timedelta(minutes=21)
+        observed = now
+        thesis = helpers.synthetic_thesis(case,quantity=10).model_copy(update={
+            "first_fill_at":None,"first_fill_session":None,"first_fill_time_quality":"UNKNOWN","max_holding_sessions":1})
+        with tempfile.TemporaryDirectory() as directory:
+            with Store(Path(directory)/"state.sqlite",mode="offline",account_identity=directory,initial_cash=D(1000000)) as store:
+                broker = FixtureBroker()
+                executor = Executor(store,broker,mode="offline",authorize=lambda *_:None,preflight=lambda *_:None)
+                app = Application.__new__(Application)
+                app.store,app.bundle = store,SimpleNamespace(now=observed,calendar=calendar)
+                with store.transaction():
+                    app._save_thesis(thesis)
+                intent = OrderIntent(run_id="fill-time",plan_id="plan",thesis_id=thesis.thesis_id,instrument_id=thesis.instrument_id,
+                    side="BUY",quantity=10,limit_price=D(10500),expires_at=exact+timedelta(seconds=60),reason="FIXTURE",
+                    account_version=store.get("account_version"),policy_hash="fixture-policy",reserve_cash=D(105000),reserve_risk=D(5000))
+                order = executor.submit(intent,exact-timedelta(seconds=60))
+                broker.fill(order["broker_id"],10,D(10500),D(0),observed)
+                revision = broker.orders[order["broker_id"]]
+                revision.update(first_fill_at=None,fill_time_quality="FIRST_OBSERVED",cumulative_fees=None,
+                                fill_session_id=first_session.session_id)
+                executor.reconcile()
+                app._sync_theses()
+                provisional = app.theses()[0]
+                self.assertEqual(provisional.first_fill_at,observed)
+                self.assertEqual(provisional.first_fill_time_quality,"FIRST_OBSERVED")
+                self.assertEqual(provisional.first_fill_session,first_session.session_id)
+                self.assertFalse(store.get("costs_complete"))
+                cash,version = store.get("cash_krw"),store.get("account_version")
+                revision.update(first_fill_at=exact.isoformat(),fill_time_quality="EXACT",revision=revision["revision"]+1)
+                executor.reconcile()
+                app._sync_theses()
+                corrected = app.theses()[0]
+                self.assertEqual(corrected.first_fill_at,exact)
+                self.assertEqual(corrected.first_fill_time_quality,"EXACT")
+                self.assertGreater(store.get("account_version"),version)
+                evidence = store.db.execute("SELECT available_at,payload FROM observations WHERE id=?",(f"first-fill:{thesis.thesis_id}",)).fetchone()
+                self.assertEqual(aware_time(evidence[0]),observed)
+                self.assertEqual(aware_time(json.loads(evidence[1])["first_fill_at"]),exact)
+                self.assertFalse(store.get("costs_complete"))
+                # Fee-only confirmation must not discard the previously exact clock.
+                version = store.get("account_version")
+                revision.update(first_fill_at=None,fill_time_quality="FIRST_OBSERVED",cumulative_fees="0",revision=revision["revision"]+1)
+                executor.reconcile()
+                app._sync_theses()
+                self.assertTrue(store.get("costs_complete"))
+                self.assertGreater(store.get("account_version"),version)
+                self.assertEqual(app.theses()[0].first_fill_at,exact)
+                self.assertEqual(app.theses()[0].first_fill_time_quality,"EXACT")
+                quantity,version = store.quantity(thesis.instrument_id),store.get("account_version")
+                executor.reconcile()
+                app._sync_theses()
+                self.assertEqual(store.get("account_version"),version)
+                self.assertEqual(store.get("cash_krw"),cash)
+                self.assertEqual(quantity,10)
+                self.assertEqual(store.quantity(thesis.instrument_id),quantity)
+                self.assertEqual(store.db.execute("SELECT COUNT(*) FROM journal WHERE kind='CUMULATIVE_FILL'").fetchone()[0],1)
+                self.assertEqual(store.db.execute("SELECT COUNT(*) FROM journal WHERE kind='FILL_EVIDENCE_UPDATED'").fetchone()[0],2)
+                holding = helpers.synthetic_holding(case,app.theses()[0],quantity=10)
+                self.assertIn("EXIT_TIME_LIMIT",evaluate_exit(app.theses()[0],holding,case[7],calendar,now,profile).reasons)
+
     def test_increasing_quantity_requires_correction_for_decreasing_amounts(self):
         for notional, fees in ((250,1),(250,5),(500,1)):
             with self.subTest(notional=notional,fees=fees), tempfile.TemporaryDirectory() as directory:

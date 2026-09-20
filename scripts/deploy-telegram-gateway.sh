@@ -6,7 +6,9 @@ usage() {
 Usage: scripts/deploy-telegram-gateway.sh <dockerhub-namespace> [version]
 
 Builds telegram-gateway and pushes it to the given Docker Hub namespace.
+An explicit version is pushed first, then the same image is published as latest.
 If version is omitted, the Docker image tag is latest and APP_VERSION is resolved from git.
+Set PYTHON_BIN to an interpreter with containers/trading-engine/requirements.lock installed.
 EOF
 }
 
@@ -30,7 +32,7 @@ local_image="${image_name}:${image_tag}"
 remote_image="${dockerhub_namespace}/${image_name}:${image_tag}"
 
 echo "Running repo-wide regression suite before build..." >&2
-if ! python3 "${repo_root}/scripts/run_tests.py"; then
+if ! "${PYTHON_BIN:-python3}" "${repo_root}/scripts/run_tests.py"; then
   echo "Regression suite failed; aborting deploy." >&2
   exit 1
 fi
@@ -42,3 +44,8 @@ docker build \
   "${repo_root}/containers/telegram-gateway"
 
 docker push "${remote_image}"
+if [ "${image_tag}" != "latest" ]; then
+  latest_image="${dockerhub_namespace}/${image_name}:latest"
+  docker tag "${remote_image}" "${latest_image}"
+  docker push "${latest_image}"
+fi

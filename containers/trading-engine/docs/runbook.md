@@ -103,7 +103,9 @@ timestamp + `\nPOST\n/telegram\n` + 원본 요청 bytes이다. 수신기는 최�
 현재 gateway 파일 형식은 64자리 16진 문자열이다. 비밀값은 image,
 설정 snapshot, 로그, 응답에 쓰지 않는다. `X-Forwarded-For`나 본문의 peer는 신뢰하지 않는다.
 
-일반 대화는 별도 세션 ID와 안내 응답만 만들고 모델·주문·설정 변경을 호출하지 않는다.
+일반 대화는 route·chat·user별 별도 세션에서 승인된 모델을 호출한다. 최근 10회 대화를
+문맥으로 사용하고 `/new`로 초기화한다. 일반 대화에는 매매 도구나 계좌 자료를 제공하지
+않으며 주문·설정 변경을 실행하지 않는다. 모델 호출량·오류도 기존 사용 기록에 남긴다.
 `/status`, `/report`, `/usage`, `/version`, `/session`, `/show_touch_point`는 기록을 읽는다.
 `/report`는 요청한 채팅에 일일 `daily-<날짜>.html` 파일을 첨부한다. 승인된 스케줄의
 `finalize_and_report`도 일일 HTML을 보내며, 각 심사 실행은 `summary-<날짜>-<실행 ID>.html`을 보낸다.

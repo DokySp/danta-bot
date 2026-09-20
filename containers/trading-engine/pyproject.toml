@@ -7,7 +7,7 @@ name = "danta-trading-engine"
 version = "0.1.0"
 description = "Auditable catalyst trend swing research and execution"
 requires-python = ">=3.12"
-dependencies = ["pydantic==2.13.5", "PyYAML==6.0.3", "markdown-it-py==4.2.0"]
+dependencies = ["pydantic==2.13.5", "PyYAML==6.0.3", "markdown-it-py==4.2.0", "websocket-client==1.9.2"]
 
 [project.scripts]
 danta = "danta.cli:main"

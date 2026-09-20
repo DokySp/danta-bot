@@ -12,7 +12,7 @@ from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
-from .config import ROOT, HumanRequired, canonical, digest, utcnow
+from .config import ROOT, HumanRequired, aware_time, canonical, digest, utcnow
 
 TERMINAL = {"FILLED", "CANCELED", "REJECTED", "EXPIRED", "PARTIAL_CANCELED", "INVALIDATED"}
 WORKING = {"PLANNED", "VALIDATED", "SUBMITTING", "ACKNOWLEDGED", "PARTIALLY_FILLED", "UNKNOWN", "CANCEL_REQUESTED"}
@@ -175,11 +175,18 @@ class Store:
     def apply_cumulative_fill(self, intent_id: str, *, quantity: int, notional: Decimal,
                               fees: Decimal | None, revision: int, observed_at: str,
                               correction: bool = False, fill_session_id: str | None = None,
-                              fill_time_quality: str = "EXACT") -> bool:
+                              fill_time_quality: str = "UNKNOWN", first_fill_at: str | None = None) -> bool:
         if type(quantity) is not int or type(revision) is not int or quantity < 0:
             raise ValueError("Invalid cumulative cursor")
         if any(not value.is_finite() or value < 0 for value in (notional, fees) if value is not None):
             raise ValueError("Invalid cumulative amount")
+        observed_at = aware_time(observed_at).isoformat()
+        if fill_time_quality not in {"EXACT", "FIRST_OBSERVED", "UNKNOWN"} or (first_fill_at is not None) != (fill_time_quality == "EXACT"):
+            raise ValueError("Invalid fill time quality")
+        if first_fill_at is not None:
+            first_fill_at = aware_time(first_fill_at).isoformat()
+            if first_fill_at > observed_at:
+                raise ValueError("First fill cannot follow its observation")
         with self.transaction():
             order = self.order(intent_id)
             if revision <= order["broker_revision"]:
@@ -192,6 +199,8 @@ class Store:
             old_notional = Decimal(order["cumulative_notional"])
             old_fees = Decimal(order["cumulative_fees"])
             fee_settlement = fees is not None and self.get(f"unconfirmed_cost:{intent_id}", False)
+            cost_status_changed = fee_settlement or (fees is None and quantity > 0
+                and not self.get(f"unconfirmed_cost:{intent_id}", False))
             if fees is None and quantity > 0:
                 self.set("costs_complete", False)
                 self.set(f"unconfirmed_cost:{intent_id}", True)
@@ -207,9 +216,34 @@ class Store:
                     not fee_settlement and (fees < old_fees or quantity == old_q and fees != old_fees)):
                 raise HumanRequired("Cumulative average/cost changed without broker correction evidence")
             dq, dn, df = quantity - old_q, notional - old_notional, fees - old_fees
+            time_changed = False
+            if quantity > 0 and order["side"] == "BUY":
+                key = f"first-fill:{order['thesis_id']}"
+                previous = self.db.execute("SELECT payload FROM observations WHERE id=?", (key,)).fetchone()
+                evidence = json.loads(previous[0]) if previous else {
+                    "intent_id": intent_id, "observed_at": observed_at, "first_fill_at": first_fill_at,
+                    "fill_session_id": fill_session_id, "time_quality": fill_time_quality}
+                before = canonical(evidence) if previous else None
+                if evidence["intent_id"] == intent_id:
+                    if first_fill_at is not None:
+                        evidence.update(first_fill_at=first_fill_at, time_quality="EXACT")
+                    elif evidence.get("time_quality") == "UNKNOWN" and fill_time_quality == "FIRST_OBSERVED":
+                        evidence["time_quality"] = fill_time_quality
+                    if fill_session_id is not None and (first_fill_at is not None or evidence.get("fill_session_id") is None):
+                        evidence["fill_session_id"] = fill_session_id
+                time_changed = before != canonical(evidence)
+                if time_changed:
+                    self.db.execute("INSERT INTO observations VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET available_at=excluded.available_at,payload=excluded.payload",
+                        (key, "FIRST_FILL", observed_at, canonical(evidence)))
             if dq == 0 and dn == 0 and df == 0:
                 self.db.execute("UPDATE intents SET broker_revision=? WHERE id=?", (revision, intent_id))
-                return False
+                if time_changed or cost_status_changed:
+                    self.bump_version()
+                    self.event(json.loads(order["payload"])["run_id"], "FILL_EVIDENCE_UPDATED",
+                        {"intent_id": intent_id, "first_fill_at": first_fill_at, "fill_time_quality": fill_time_quality,
+                         "fee_settlement": fee_settlement, "costs_complete": self.get("costs_complete"),
+                         "observed_at": observed_at})
+                return time_changed or cost_status_changed
             sign = 1 if order["side"] == "BUY" else -1
             holding = self.db.execute("SELECT quantity,cost_basis FROM holdings WHERE instrument_id=? AND owner='strategy' AND thesis_id=?", (order["instrument_id"], order["thesis_id"])).fetchone()
             held, basis = (holding[0], Decimal(holding[1])) if holding else (0, Decimal(0))
@@ -232,8 +266,6 @@ class Store:
                 state = "PARTIAL_CANCELED"
             reserve_scale = Decimal(remaining) / Decimal(order["quantity"]) if state in WORKING else Decimal(0)
             self.db.execute("UPDATE intents SET cumulative_quantity=?, cumulative_notional=?,cumulative_fees=?,broker_revision=?,state=?,reserve_cash=?,reserve_risk=? WHERE id=?", (quantity, str(notional), str(fees), revision, state, str(Decimal(payload["reserve_cash"]) * reserve_scale), str(Decimal(payload["reserve_risk"]) * reserve_scale), intent_id))
-            if quantity > 0:
-                self.db.execute("INSERT OR IGNORE INTO observations VALUES (?,?,?,?)", (f"first-fill:{order['thesis_id']}", "FIRST_FILL", observed_at, canonical({"intent_id": intent_id, "observed_at": observed_at, "fill_session_id": fill_session_id, "time_quality": fill_time_quality})))
             self.bump_version()
             self.event(payload["run_id"], "FILL_CORRECTION" if correction else "CUMULATIVE_FILL", {"intent_id": intent_id, "quantity_delta": dq, "notional_delta_krw": str(dn), "fee_delta_krw": str(df), "cumulative_quantity": quantity, "observed_at": observed_at}, notify=True)
             return True

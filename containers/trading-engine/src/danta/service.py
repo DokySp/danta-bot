@@ -122,8 +122,15 @@ class Service:
 
     def _recover(self):
         with self.store.transaction():
-            rows = self.store.db.execute("SELECT request_id FROM requests WHERE request_key LIKE 'service:%' AND status='RUNNING'").fetchall()
+            rows = self.store.db.execute("SELECT request_id,payload FROM requests WHERE request_key LIKE 'service:%' AND status='RUNNING'").fetchall()
             for row in rows:
+                payload = json.loads(row['payload'])
+                if payload.get('source') == 'scheduler' and payload.get('kind') == 'finalize_and_report':
+                    # NAV finalization is idempotent; result and document outbox commit together.
+                    # Resume only this report path, never an interrupted trading request.
+                    self.store.db.execute("UPDATE requests SET status='ACCEPTED' WHERE request_id=?", (row['request_id'],))
+                    self.store.event(row['request_id'], 'SERVICE_REQUEST_RECOVERED', {'status': 'REPORT_REQUEUED'})
+                    continue
                 workflow = self.store.db.execute('SELECT status,result FROM requests WHERE request_key=?',
                     ('workflow:' + row['request_id'],)).fetchone()
                 result = json.loads(workflow['result']) if workflow and workflow['result'] else {
@@ -175,10 +182,21 @@ class Service:
             session = next((s for s in reversed(calendar.sessions) if s.closes_at <= now < s.closes_at + timedelta(hours=12)), None)
         if session is None:
             return 0
-        with self.store.lock:
-            seen = {row[0][len('service:schedule:'):] for row in self.store.db.execute(
-                "SELECT request_key FROM requests WHERE request_key LIKE 'service:schedule:%'")}
+        queued = 0
+        with self.store.transaction():
             discretionary = self.store.get('discretionary_schedule', self.scheduler['enabled']) and not self.store.get('paused', False)
+            scheduled = self.store.db.execute(
+                "SELECT request_id,request_key,status,result FROM requests WHERE request_key LIKE 'service:schedule:%'").fetchall()
+            seen = {row['request_key'][len('service:schedule:'):] for row in scheduled}
+            for row in scheduled:
+                result = json.loads(row['result']) if row['result'] else {}
+                if (self.scheduler['enabled'] and discretionary and row['status'] == 'COMPLETE'
+                        and row['request_key'].startswith('service:schedule:' + session.session_id + ':')
+                        and result.get('status') == 'NAV_NOT_FINALIZED' and result.get('retry_at')
+                        and aware_time(result['retry_at']) <= now
+                        < aware_time(self.store.get('service_deadline:' + row['request_id']))):
+                    self.store.db.execute("UPDATE requests SET status='ACCEPTED' WHERE request_id=?", (row['request_id'],))
+                    queued += 1
         events = [{'event_id': event.event_id, 'verified_at': event.available_at, 'verified': True}
                   for event in self.app.bundle.events if event.official and event.primary_source_complete
                   and event.timing_quality in {'EXACT', 'FIRST_COLLECTED'}
@@ -187,7 +205,6 @@ class Service:
             continuous_open=session.opens_at, continuous_close=session.closes_at,
             enabled=self.scheduler['enabled'], discretionary_enabled=discretionary,
             last_seen=seen, events=events)
-        queued = 0
         for intent in intents:
             # start_monitor owns the regular protection/reconciliation loop.
             if intent.kind in {'risk_monitor', 'reconcile'}:
@@ -205,7 +222,7 @@ class Service:
 
     @staticmethod
     def _review_job(payload):
-        return payload['kind'] in REVIEWS | {'collect_disclosures', 'finalize_and_report'} or payload.get('command') == 'review'
+        return payload['kind'] in REVIEWS | {'collect_disclosures', 'finalize_and_report'} or payload.get('command') in {'review', 'chat'}
 
     def run_once(self, *, review=False):
         row = None
@@ -239,7 +256,8 @@ class Service:
             self.store.event(row['request_id'], 'SERVICE_RESULT', result)
             if payload.get('source') == 'telegram':
                 self.store.db.execute("UPDATE telegram_requests SET status='COMPLETE' WHERE request_id=?", (payload['telegram_request_id'],))
-                notification = {'route': payload['route'], 'chat_id': payload['chat_id'], 'text': canonical(result)}
+                notification = {'route': payload['route'], 'chat_id': payload['chat_id'],
+                                'text': result.get('reply_text') or canonical(result)}
                 self.store.db.execute('INSERT OR IGNORE INTO outbox(event_key,payload) VALUES (?,?)',
                     ('service:' + row['request_id'], canonical(notification)))
             if document:
@@ -272,15 +290,37 @@ class Service:
                     self.store.set('discretionary_schedule', command == 'schedule_on')
                 return {'status': command.upper(), 'protection': 'CONTINUES'}
             if command in {'chat', 'session', 'new'}:
-                key = 'chat_session:' + payload['chat_id'] + ':' + payload['user_id']
+                key = 'chat_session:' + canonical([payload['route'], payload['chat_id'], payload['user_id']])
                 with self.store.transaction():
                     session_id = self.store.get(key)
                     if command == 'new' or session_id is None:
+                        if session_id:
+                            self.store.set('chat_history:' + session_id, [])
                         session_id = str(uuid4())
                         self.store.set(key, session_id)
-                return {'status': 'CHAT_ONLY', 'session_id': session_id,
-                        'reply_text': '일반 대화는 거래·설정 변경 권한이 없습니다. /status /report /usage /session을 사용할 수 있습니다.',
-                        'model_called': False, 'orders_created': False}
+                    history = self.store.get('chat_history:' + session_id, [])
+                if command != 'chat':
+                    return {'status': 'NEW_SESSION' if command == 'new' else 'SESSION', 'session_id': session_id,
+                            'model_called': False, 'orders_created': False}
+                callback = getattr(self.app, 'chat', None)
+                if callback is None:
+                    raise HumanRequired('General conversation model is unavailable in this runtime')
+                self.config.require_external('model_call', self.app.approval)
+                text = payload['text'].strip()
+                if text.startswith('/chat '):
+                    text = text[6:].strip()
+                if not text or len(text) > 4000:
+                    raise ValueError('Chat text must contain 1 to 4000 characters')
+                messages = history + [{'role': 'user', 'content': text}]
+                result = callback(request_id=request_id, session_id=session_id, messages=messages)
+                with self.store.transaction():
+                    if self.store.get(key) != session_id:
+                        return {'status': 'SESSION_CHANGED', 'model_called': result['model_called'], 'orders_created': False}
+                    if result['status'] == 'CHAT_COMPLETE':
+                        messages = messages + [{'role': 'assistant', 'content': result['reply_text']}]
+                        # ponytail: retain 10 recent turns; add explicit archival retrieval if longer context is needed.
+                        self.store.set('chat_history:' + session_id, messages[-20:])
+                return result
             if command == 'version':
                 return {'code_id': self.app.code_id, 'config_hash': self.config.config_hash,
                         'strategy_hash': self.config.strategy_hash}
@@ -337,9 +377,17 @@ class Service:
             self.app.bundle = self.app.refresh()
             return {'status': 'COLLECTED', 'event_count': len(self.app.bundle.events)}
         if kind == 'finalize_and_report':
-            if self.app.refresh:
-                self.app.bundle = self.app.refresh()
-            return self._report()
+            try:
+                finalization = self.app.finalize_nav()
+            except AdapterError as error:
+                if error.code not in {'TRANSPORT_FAILED', 'AUTH_TRANSPORT_FAILED', 'RATE_LIMITED',
+                                      'TRANSIENT_FAILURE', 'MONITOR_DEGRADED_RATE_BUDGET'}:
+                    raise
+                finalization = {'status': 'NAV_NOT_FINALIZED', 'issues': [error.code]}
+            if finalization['status'] == 'NAV_NOT_FINALIZED':
+                return {'status': 'NAV_NOT_FINALIZED', 'finalization': finalization,
+                        'retry_at': (self.clock() + timedelta(minutes=5)).isoformat()}
+            return {**self._report(), 'finalization': finalization}
         raise ValueError('Unknown typed service request')
 
     def _report(self):

@@ -67,6 +67,9 @@ class FakeApp:
         self.protect_calls += 1
         return []
 
+    def finalize_nav(self):
+        return {'status': 'NAV_NOT_FINALIZED', 'issues': ['SYNTHETIC_SERVICE_TEST']}
+
     def pause(self):
         with self.store.transaction():
             self.store.set('paused', True)
@@ -275,6 +278,7 @@ class ServiceIntegrationTests(unittest.TestCase):
         self.assertEqual(self.app.store.db.execute('SELECT COUNT(*) FROM intents').fetchone()[0], 0)
 
     def test_scheduled_daily_report_queues_document_for_default_chat(self):
+        self.app.finalize_nav = lambda: {'status': 'NAV_FINALIZED'}
         request_id, _ = self.app.store.accept_request('service:schedule:daily-report',
             {'source': 'scheduler', 'kind': 'finalize_and_report'})
         with self.app.store.transaction():
@@ -289,6 +293,72 @@ class ServiceIntegrationTests(unittest.TestCase):
         self.assertEqual(base64.b64decode(self.sent[0]['content_base64']), Path(result['paths']['html']).read_bytes())
         self.assertFalse(self.service.run_once(review=True))
         self.assertFalse(self.service.outbox_once())
+
+    def test_daily_finalization_retries_durably_then_queues_one_success_report(self):
+        self.service.scheduler['enabled'] = True
+        session = self.app.bundle.calendar.sessions[0]
+        self.now = session.closes_at + timedelta(minutes=30)
+        self.assertEqual(self.service.queue_tick(), 1)
+        self.assertTrue(self.service.run_once(review=True))
+        self.assertEqual(self.last_result()['status'], 'NAV_NOT_FINALIZED')
+        self.assertEqual(self.app.store.db.execute('SELECT COUNT(*) FROM outbox').fetchone()[0], 0)
+        self.assertEqual(self.service.queue_tick(), 0)
+        self.service.close()
+        self.service = Service(self.app, telegram=self.adapter, peer_auth=self.auth, clock=lambda: self.now)
+        self.service.scheduler['enabled'] = True
+        self.now += timedelta(minutes=5) - timedelta(seconds=1)
+        self.assertEqual(self.service.queue_tick(), 0)
+        self.now += timedelta(seconds=1)
+        self.app.finalize_nav = lambda: {'status': 'NAV_FINALIZED'}
+        self.assertEqual(self.service.queue_tick(), 1)
+        self.assertEqual(self.service.queue_tick(), 0)
+        self.assertTrue(self.service.run_once(review=True))
+        self.assertEqual(self.last_result()['status'], 'REPORT_READY')
+        self.now += timedelta(minutes=5)
+        self.assertEqual(self.service.queue_tick(), 0)
+        self.assertEqual(self.app.store.db.execute('SELECT COUNT(*) FROM requests').fetchone()[0], 1)
+        self.assertEqual(self.app.store.db.execute('SELECT COUNT(*) FROM outbox').fetchone()[0], 1)
+
+    def test_daily_finalization_does_not_retry_after_session_window(self):
+        self.service.scheduler['enabled'] = True
+        session = self.app.bundle.calendar.sessions[0]
+        self.now = session.closes_at + timedelta(hours=12) - timedelta(minutes=1)
+        self.assertEqual(self.service.queue_tick(), 1)
+        self.assertTrue(self.service.run_once(review=True))
+        self.now += timedelta(minutes=5)
+        self.assertEqual(self.service.queue_tick(), 0)
+        self.assertFalse(self.service.run_once(review=True))
+
+    def test_daily_finalization_retries_transport_failure_then_succeeds(self):
+        self.service.scheduler['enabled'] = True
+        self.now = self.app.bundle.calendar.sessions[0].closes_at + timedelta(minutes=30)
+        with patch.object(self.app, 'finalize_nav', side_effect=[AdapterError('TRANSPORT_FAILED'),
+                                                               {'status': 'NAV_FINALIZED'}]) as finalize:
+            self.assertEqual(self.service.queue_tick(), 1)
+            self.assertTrue(self.service.run_once(review=True))
+            self.assertEqual(self.last_result()['finalization']['issues'], ['TRANSPORT_FAILED'])
+            self.assertEqual(self.service.queue_tick(), 0)
+            self.now += timedelta(minutes=5)
+            self.assertEqual(self.service.queue_tick(), 1)
+            self.assertTrue(self.service.run_once(review=True))
+            self.assertEqual(self.last_result()['status'], 'REPORT_READY')
+            self.assertEqual(finalize.call_count, 2)
+        self.assertEqual(self.app.store.db.execute('SELECT COUNT(*) FROM requests').fetchone()[0], 1)
+        self.assertEqual(self.app.store.db.execute('SELECT COUNT(*) FROM outbox').fetchone()[0], 1)
+
+    def test_daily_finalization_does_not_retry_authorization_failure(self):
+        self.service.scheduler['enabled'] = True
+        self.now = self.app.bundle.calendar.sessions[0].closes_at + timedelta(minutes=30)
+        with patch.object(self.app, 'finalize_nav', side_effect=AdapterError('AUTH_FAILED')) as finalize:
+            self.assertEqual(self.service.queue_tick(), 1)
+            self.assertTrue(self.service.run_once(review=True))
+            self.assertEqual(self.last_result()['status'], 'FAILED')
+            self.assertNotIn('retry_at', self.last_result())
+            self.now += timedelta(minutes=5)
+            self.assertEqual(self.service.queue_tick(), 0)
+            self.assertFalse(self.service.run_once(review=True))
+            self.assertEqual(finalize.call_count, 1)
+        self.assertEqual(self.app.store.db.execute('SELECT COUNT(*) FROM outbox').fetchone()[0], 0)
 
     def test_document_delivery_rechecks_destination_approval_and_secret_content(self):
         synthetic_value = 'synthetic-private<&>value-for-document-test'

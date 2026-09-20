@@ -7,6 +7,7 @@ import json
 import os
 import re
 import stat
+import threading
 import zipfile
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -207,7 +208,7 @@ def symbol(value):
 
 
 class KisAdapter:
-    def __init__(self, *, environment, credentials, transport=None, mode="offline", authorize=None, max_pages=100, token_provider=None, clock=utcnow):
+    def __init__(self, *, environment, credentials, transport=None, mode="offline", authorize=None, max_pages=100, token_provider=None, clock=utcnow, ws_connector=None):
         if environment not in BASE_URLS:
             raise AdapterError("BROKER_ENVIRONMENT_UNSET")
         self.environment, self.credentials, self.mode = environment, credentials, mode
@@ -217,6 +218,8 @@ class KisAdapter:
         self.max_pages = max_pages
         self.token_provider = token_provider
         self.clock = clock
+        self.ws_connector, self._stream = ws_connector, None
+        self._stream_lock, self._closed = threading.Lock(), False
 
     def _permit(self, operation):
         if self.mode == "offline" and not getattr(self.transport, "fixture_only", False):
@@ -441,8 +444,60 @@ class KisAdapter:
             "ORD_QTY": str(quantity), "ORD_UNPR": price, "QTY_ALL_ORD_YN": "N", "EXCG_ID_DVSN_CD": "KRX"})
 
     def subscribe_quotes(self, tickers):
-        # Polling is the implemented fallback; no fake stream capability or native stop.
-        raise AdapterError("STREAM_CAPABILITY_UNVERIFIED_USE_APPROVED_POLLING")
+        from .kis_stream import KisQuoteStream
+
+        if not isinstance(tickers, (list, tuple, set, frozenset)):
+            raise AdapterError("STREAM_SYMBOLS_INVALID")
+        targets = {symbol(ticker) for ticker in tickers}
+        if len(targets) > 41:
+            raise AdapterError("STREAM_SUBSCRIPTION_LIMIT")
+        self._permit("market_read")
+        if self.mode == "offline" and not getattr(self.ws_connector, "fixture_only", False):
+            raise AdapterError("OFFLINE_NETWORK_BLOCKED")
+        with self._stream_lock:
+            if self._closed:
+                raise AdapterError("STREAM_CLOSED")
+            if self._stream is None:
+                self._stream = KisQuoteStream(environment=self.environment, approval=self._approval,
+                    permit=lambda: self._permit("market_read"), connector=self.ws_connector, clock=self.clock)
+            self._stream.replace(targets)
+
+    def _approval(self):
+        def before_send():
+            self._permit("broker_auth")
+            if self._closed:
+                raise AdapterError("STREAM_CLOSED")
+        before_send()
+        c = self.credentials
+        args = ("POST", self.base_url + "/oauth2/Approval", {"content-type": "application/json; charset=utf-8"},
+                json.dumps({"grant_type": "client_credentials", "appkey": c.app_key, "secretkey": c.app_secret}).encode(), 3)
+        try:
+            if hasattr(self.transport, "request_checked"):
+                response = self.transport.request_checked(*args, before_send=before_send)
+            else:
+                before_send()
+                response = self.transport(*args)
+            require_http_ok(response)
+            key = response.json()["approval_key"]
+            if not isinstance(key, str) or not re.fullmatch(r"[!-~]{1,16384}", key):
+                raise ValueError
+            return key
+        except Exception:
+            raise AdapterError("STREAM_AUTH_FAILED") from None
+
+    def stream_quote(self, ticker):
+        self._permit("market_read")
+        if self._closed:
+            raise AdapterError("STREAM_CLOSED")
+        if self._stream is None:
+            raise AdapterError("STREAM_NOT_READY")
+        return self._stream.quote(symbol(ticker))
+
+    def close(self):
+        with self._stream_lock:
+            self._closed, stream = True, self._stream
+        if stream is not None:
+            stream.close()
 
 
 _KOSPI_WIDTHS = [2,1,4,4,4,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,9,5,5,1,1,1,2,1,1,1,2,2,2,3,1,3,12,12,8,15,21,2,7,1,1,1,1,1,9,9,9,5,9,8,9,3,1,1,1]

@@ -6,6 +6,7 @@ usage() {
 Usage: scripts/deploy-trading-engine.sh <dockerhub-namespace> [version]
 
 Builds trading-engine and pushes it to the given Docker Hub namespace.
+An explicit version is pushed first, then the same image is published as latest.
 If version is omitted, the Docker image tag is latest and APP_VERSION is resolved from git.
 Set PYTHON_BIN to an interpreter with containers/trading-engine/requirements.lock installed.
 EOF
@@ -44,3 +45,8 @@ docker build \
   "${repo_root}/containers/trading-engine"
 
 docker push "${remote_image}"
+if [ "${image_tag}" != "latest" ]; then
+  latest_image="${dockerhub_namespace}/${image_name}:latest"
+  docker tag "${remote_image}" "${latest_image}"
+  docker push "${latest_image}"
+fi

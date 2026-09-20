@@ -4,11 +4,12 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Callable
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from .accounting import ExternalFlow, NavPoint, performance, strategy_nav
 from .config import Config, HumanRequired, ROOT, aware_time, canonical, digest, utcnow
@@ -101,8 +102,10 @@ class Application:
                  decide: Callable[[dict], dict] | None = None, approval: dict | None = None,
                  refresh: Callable[[], MarketBundle] | None = None,
                  protection_refresh: Callable[[], MarketBundle] | None = None,
+                 chat: Callable[..., dict] | None = None,
                  clock: Callable[[], datetime] | None = None):
         self.config, self.bundle, self.approval, self.refresh = config, bundle, approval, refresh
+        self.chat = chat
         self.protection_refresh = protection_refresh
         self.clock = clock or ((lambda: self.bundle.now) if bundle.synthetic else
                                getattr(getattr(decide, "__self__", None), "clock", utcnow))
@@ -239,13 +242,13 @@ class Application:
                     quantity = sum(row["cumulative_quantity"] for row in buys)
                     average = sum((Decimal(row["cumulative_notional"]) for row in buys), Decimal(0)) / quantity
                     first = self.store.db.execute("SELECT available_at,payload FROM observations WHERE id=?", (f"first-fill:{thesis.thesis_id}",)).fetchone()
-                    when = aware_time(first[0]) if first else self.bundle.now
                     evidence = json.loads(first[1]) if first else {}
+                    when = aware_time(evidence.get("first_fill_at") or evidence.get("observed_at") or first[0]) if first else self.bundle.now
                     session = self.bundle.calendar.session(evidence["fill_session_id"]) if evidence.get("fill_session_id") else self.bundle.calendar.active(when)
                     if session is None:
                         raise HumanRequired("First fill does not belong to a verified session")
-                    thesis = thesis.model_copy(update={"average_entry": average, "first_fill_at": thesis.first_fill_at or when, "first_fill_session": thesis.first_fill_session or session.session_id,
-                        "first_fill_time_quality": thesis.first_fill_time_quality if thesis.first_fill_at else evidence.get("time_quality", "UNKNOWN")})
+                    thesis = thesis.model_copy(update={"average_entry": average, "first_fill_at": when, "first_fill_session": session.session_id,
+                        "first_fill_time_quality": evidence.get("time_quality", "UNKNOWN")})
                 reduced = self.store.db.execute("SELECT COALESCE(SUM(cumulative_quantity),0) FROM intents WHERE thesis_id=? AND side='SELL' AND json_extract(payload,'$.reason')='REDUCE_TO_LIMIT'", (thesis.thesis_id,)).fetchone()[0]
                 thesis = thesis.model_copy(update={"reduced_quantity": reduced})
                 if thesis.first_fill_at and self.store.quantity(thesis.instrument_id) == 0 and not self.store.working(thesis.instrument_id):
@@ -339,21 +342,26 @@ class Application:
 
     def record_nav(self) -> dict:
         snapshot = self.portfolio()
-        existing = self.store.get("nav_points", [])
-        if not existing:
-            # Inception is the approved/synthetic allocation before first activity.
-            from datetime import timedelta
-            existing.append({"at": (self.bundle.now - timedelta(microseconds=1)).isoformat(), "nav": self.profile["capital_krw"],
-                             "session_id": None, "completed": False, "quality": "EXACT"})
         session = self.bundle.calendar.active(self.bundle.now)
         point = {"at": self.bundle.now.isoformat(), "nav": str(snapshot.nav), "session_id": session.session_id if session else None,
                  "completed": False, "quality": "EXACT" if snapshot.complete and snapshot.ownership_verified else "INSUFFICIENT_COVERAGE"}
-        existing = [item for item in existing if aware_time(item["at"]) != self.bundle.now] + [point]
-        flows = [ExternalFlow(at=aware_time(item["at"]), amount=item["amount"], before_nav=item.get("before_nav"), after_nav=item.get("after_nav"), kind=item["kind"])
-                 for item in self.store.get("external_flows", [])]
-        result = performance([NavPoint(at=aware_time(item["at"]), nav=Decimal(item["nav"]), session_id=item["session_id"], completed=item["completed"], quality=item["quality"])
-                              for item in existing], flows, unallocated=not snapshot.ownership_verified)
+        return self._record_nav_point(point, ownership_verified=snapshot.ownership_verified)
+
+    def _record_nav_point(self, point: dict, *, ownership_verified: bool) -> dict:
         with self.store.transaction():
+            existing = self.store.get("nav_points", [])
+            if not existing and self.bundle.synthetic:
+                # Synthetic allocation is a fixture input; external inception needs an observation.
+                existing.append({"at": (aware_time(point["at"]) - timedelta(microseconds=1)).isoformat(),
+                                 "nav": self.profile["capital_krw"], "session_id": None,
+                                 "completed": False, "quality": "EXACT"})
+            same_time = [item for item in existing if aware_time(item["at"]) == aware_time(point["at"])]
+            if not any(item["completed"] for item in same_time):
+                existing = [item for item in existing if item not in same_time] + [point]
+            flows = [ExternalFlow(at=aware_time(item["at"]), amount=item["amount"], before_nav=item.get("before_nav"), after_nav=item.get("after_nav"), kind=item["kind"])
+                     for item in self.store.get("external_flows", [])]
+            result = performance([NavPoint(at=aware_time(item["at"]), nav=Decimal(item["nav"]), session_id=item["session_id"], completed=item["completed"], quality=item["quality"])
+                                  for item in existing], flows, unallocated=not ownership_verified)
             self.store.set("nav_points", existing)
             self.store.set("performance", result)
             if result.get("coverage") == "EXACT":
@@ -369,6 +377,74 @@ class Application:
                 if order["side"] == "BUY":
                     self.executor.cancel(order["id"], self.bundle.now)
         return result
+
+    def finalize_nav(self) -> dict:
+        """Finalize one observed exchange close; incomplete evidence never adds a session."""
+        self.config.assert_current()
+        bundle = self.refresh() if self.refresh else self.bundle
+        self.bundle = bundle
+        now = self.clock()
+        session = next((item for item in reversed(bundle.calendar.sessions)
+                        if item.closes_at <= min(now, bundle.now)
+                        and now < item.closes_at + timedelta(hours=12)), None)
+        issues = []
+        if session is None:
+            issues.append("COMPLETED_SESSION_UNAVAILABLE")
+        if bundle.synthetic and self.config.mode != "offline":
+            issues.append("SYNTHETIC_INPUT_CANNOT_FINALIZE_EXTERNAL_SESSION")
+        with self.executor.dispatch_lock:
+            with self.store.lock:
+                previous = next((point for point in self.store.get("nav_points", [])
+                                 if session and point["session_id"] == session.session_id and point["completed"]), None)
+                if previous and not issues:
+                    return {"status": "ALREADY_FINALIZED", "point": previous}
+            account = bundle.data.get("account_snapshot")
+            if account is None and bundle.synthetic:
+                account = self.broker.snapshot()
+            if not issues:
+                if account is None or account.get("complete") is not True or account.get("errors"):
+                    self.executor.reconcile({"complete": False})
+                    issues.append("ACCOUNT_INCOMPLETE")
+                else:
+                    try:
+                        self.executor.reconcile(account)
+                        self._sync_theses()
+                    except HumanRequired:
+                        issues.append("ACCOUNT_RECONCILIATION_REQUIRED")
+            with self.store.lock:
+                if not self.store.get("reconciled") or not self.store.get("ownership_complete"):
+                    issues.append("ACCOUNT_RECONCILIATION_REQUIRED")
+                if not self.store.get("costs_complete", False):
+                    issues.append("SETTLEMENT_COSTS_UNCONFIRMED")
+                if any(row["state"] in {"SUBMITTING", "UNKNOWN", "CANCEL_REQUESTED"} for row in self.store.working()):
+                    issues.append("ORDER_RECONCILIATION_REQUIRED")
+                quantities, marks, sources = {}, {}, {}
+                if session:
+                    for row in self.store.holdings():
+                        symbol = row["instrument_id"]
+                        quantities[symbol] = quantities.get(symbol, 0) + row["quantity"]
+                        bars = [bar for bar in bundle.bars.get(symbol, []) if bar.session_id == session.session_id]
+                        instrument = bundle.instruments.get(symbol)
+                        if (len(bars) != 1 or not bars[0].complete or not bars[0].source
+                                or bars[0].opens_at != session.opens_at or bars[0].closes_at != session.closes_at
+                                or not session.closes_at <= bars[0].available_at <= min(now, bundle.now)
+                                or not bars[0].ohlc_consistently_adjusted or not bars[0].adjustment_basis
+                                or instrument is None or not instrument.status_verified or instrument.status != "NORMAL"):
+                            issues.append("CLOSING_PRICE_UNVERIFIED:" + symbol)
+                        else:
+                            marks[symbol] = bars[0].close
+                            sources[symbol] = {"source": bars[0].source, "available_at": bars[0].available_at.isoformat()}
+                result = {"status": "NAV_NOT_FINALIZED", "session_id": session.session_id if session else None,
+                          "provenance": bundle.data["provenance"], "issues": sorted(set(issues))}
+                if not issues:
+                    point = {"at": session.closes_at.isoformat(), "nav": str(strategy_nav(self.store.get("cash_krw"), quantities, marks)),
+                             "session_id": session.session_id, "completed": True, "quality": "EXACT",
+                             "observed_at": bundle.now.isoformat(), "provenance": bundle.data["provenance"], "price_sources": sources}
+                    result.update(status="NAV_FINALIZED", point=point,
+                                  performance=self._record_nav_point(point, ownership_verified=True))
+                with self.store.transaction():
+                    self.store.set("nav_finalization", result)
+                return result
 
     def start_monitor(self, interval: float = 5) -> None:
         if self.monitor_thread:
@@ -620,6 +696,7 @@ class Application:
                 "paused": self.store.get("paused"), "reconciled": self.store.get("reconciled"),
                 "cash_krw": self.store.get("cash_krw"), "holdings": self.store.holdings(), "working_orders": self.store.working(),
                 "costs_complete": self.store.get("costs_complete", True), "performance": self.store.get("performance"),
+                "nav_finalization": self.store.get("nav_finalization"),
                 "performance_status": "STRATEGY_UNPROVEN", "provenance": self.bundle.data["provenance"]}
 
     def close(self):
@@ -628,4 +705,7 @@ class Application:
             self.monitor_thread.join(timeout=10)
             if self.monitor_thread.is_alive():
                 raise HumanRequired("Monitor did not stop; retain writer until it exits")
+        runtime = getattr(self.refresh, "__self__", None)
+        if runtime is not None and hasattr(runtime, "close"):
+            runtime.close()
         self.store.close()
