@@ -42,12 +42,16 @@ class Session(StrictModel):
     ordinal: Annotated[int, Field(strict=True)]
     opens_at: AwareTime
     closes_at: AwareTime
+    daily_bar_available_at: AwareTime | None = None
+    hours_verified: bool = True
     venue: Literal["KRX"] = "KRX"
 
     @model_validator(mode="after")
     def valid_window(self) -> Session:
         if self.opens_at >= self.closes_at:
             raise ValueError("session close must follow open")
+        if self.daily_bar_available_at is not None and self.daily_bar_available_at < self.closes_at:
+            raise ValueError("daily bar availability cannot precede the trading cutoff")
         return self
 
 
@@ -195,6 +199,7 @@ class Candidate(StrictModel):
 class CostSchedule(StrictModel):
     """Order-level rates and minimum fees. Explicit zero is allowed; unknown is not."""
     source: str
+    basis: Literal["ACCOUNT_SCHEDULE", "CONSERVATIVE_ESTIMATE"] = "ACCOUNT_SCHEDULE"
     account_alias: str
     venue: str
     effective_at: AwareTime

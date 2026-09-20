@@ -103,7 +103,7 @@ class ServiceIntegrationTests(unittest.TestCase):
         self.no_network.start()
         self.tmp = tempfile.TemporaryDirectory()
         self.now = utcnow()
-        data = load_config(ROOT / 'config').data
+        data = load_config(ROOT / 'tests/fixtures/config').data
         data['app']['app']['mode'] = 'paper'
         data['app']['app']['state_dir'] = str(Path(self.tmp.name) / 'state')
         data['app']['telegram'].update(enabled=True, ingress_enabled=True,

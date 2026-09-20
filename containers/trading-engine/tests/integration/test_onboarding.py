@@ -136,6 +136,7 @@ class AccountAdoptionTests(unittest.TestCase):
             self.assertEqual(self.state(), before)
 
     def test_transaction_failure_rolls_back_holdings_theses_meta_and_events(self):
+        baseline = {"account_identity":"fixture-account", "capital":"1400.50", "bootstrap":{"baseline_orders":{}}}
         original = self.store.event
         def fail_on_account_event(run_id, kind, payload, **kwargs):
             if kind == "ACCOUNT_ADOPTED":
@@ -144,9 +145,13 @@ class AccountAdoptionTests(unittest.TestCase):
         before = self.state()
         with patch.object(self.store, "event", side_effect=fail_on_account_event):
             with self.assertRaisesRegex(RuntimeError, "simulated"):
-                self.adopt([self.position(), self.position("TEST:BBB")])
+                self.adopt([self.position(), self.position("TEST:BBB")], deployment_bootstrap=baseline)
         self.assertEqual(self.state(), before)
-        self.assertTrue(self.adopt())
+        self.assertIsNone(self.store.get("deployment_bootstrap"))
+        self.assertTrue(self.adopt(deployment_bootstrap=baseline))
+        self.store.close()
+        self.store = self.open_store()
+        self.assertEqual(self.store.get("deployment_bootstrap"), baseline)
 
     def test_nonempty_ledger_and_new_snapshot_cannot_be_reset(self):
         with self.store.transaction():

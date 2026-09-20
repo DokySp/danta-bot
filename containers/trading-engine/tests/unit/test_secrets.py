@@ -12,7 +12,7 @@ class SecretsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             for name in ('app', 'strategy', 'schedules'):
-                (root / (name + '.yaml')).write_bytes((ROOT / 'config' / (name + '.yaml')).read_bytes())
+                (root / (name + '.yaml')).write_bytes((ROOT / 'tests/fixtures/config' / (name + '.yaml')).read_bytes())
             before = load_config(root)
             path = root / 'secrets.yaml'
             path.write_text('KIS_APP_KEY: "synthetic private value"\nDART_API_KEY: ""\n')

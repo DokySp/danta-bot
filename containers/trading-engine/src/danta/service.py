@@ -457,8 +457,8 @@ class RuntimeHost:
             status = 'FAILED'
         elif self.service:
             try:
-                self.config.assert_current()
-                self.config.require_external('telegram_ingress', self.service.app.approval)
+                self.service.config.assert_current()
+                self.service.config.require_external('telegram_ingress', self.service.app.approval)
             except (HumanRequired, ValueError, OSError):
                 status = 'CONFIGURATION_CHANGED_OR_APPROVAL_EXPIRED'
         return {'status': status, 'ready': status == 'READY', 'mode': self.config.mode,
@@ -471,6 +471,10 @@ class RuntimeHost:
 
     def requirements(self, args):
         app, tg = self.config.app, self.config.app['telegram']
+        if app['broker']['capability_manifest'] == 'automatic':
+            # Private IDs, login, account census and public source checks are
+            # resolved by startup; they do not require a pre-generated manifest.
+            return []
         issues = []
         if self.config.mode == 'offline':
             issues.append('app.yaml: app.mode=offline (계좌·모델·매매 실행 꺼짐)')
@@ -560,31 +564,43 @@ def serve(config, args=None, *, application_factory=None, stop_event=None):
         http_thread.start()
         log_event('HTTP_LISTENING', host=address, port=server.server_port, mode=config.mode,
                   version=host.version()['version'])
-        host.issues = host.requirements(args)
-        if host.issues:
-            host.status = 'WAITING_FOR_CONFIGURATION'
-        else:
-            try:
-                app = application_factory(config, args)
-                if not host.stop.is_set() and config.mode in {'live', 'broker_demo'}:
-                    app.activate(config.config_hash)
-                if not host.stop.is_set():
-                    service = Service(app)
+        while not host.stop.is_set():
+            host.issues = host.requirements(args)
+            if host.issues:
+                host.status = 'WAITING_FOR_CONFIGURATION'
+            else:
+                try:
+                    app = application_factory(config, args)
+                    if not host.stop.is_set() and config.mode in {'live', 'broker_demo'}:
+                        app.activate(app.config.config_hash)
                     if not host.stop.is_set():
-                        service.start()
-                        host.service, host.status = service, 'READY'
-            except Exception as error:
-                if service:
-                    service.close()
-                    service = None
-                if app:
-                    app.close()
-                    app = None
-                host.status = 'INITIALIZATION_FAILED'
-                host.issues = ['운영 초기화 실패: ' + type(error).__name__
-                    + ' (config/runtime.json, runtime-manifest.json, secrets.yaml 및 Codex 로그인 확인 필요)']
-                log_event('RUNTIME_INITIALIZATION_FAILED', error_type=type(error).__name__)
-        log_event('RUNTIME_STATE', **host.health())
+                        service = Service(app)
+                        if not host.stop.is_set():
+                            service.start()
+                            host.service, host.status = service, 'READY'
+                except Exception as error:
+                    if service:
+                        service.close()
+                        service = None
+                    if app:
+                        app.close()
+                        app = None
+                    host.status = 'INITIALIZATION_FAILED'
+                    # Only short engine-defined codes may cross the diagnostic
+                    # boundary; provider bodies and parser exceptions may be private.
+                    import re
+                    reason = str(error) if isinstance(error, (HumanRequired, AdapterError)) and re.fullmatch(r'[A-Z][A-Z0-9_]{1,100}', str(error)) else type(error).__name__
+                    host.issues = ['운영 초기화 실패: ' + reason]
+                    log_event('RUNTIME_INITIALIZATION_FAILED', error_type=type(error).__name__, reason=reason)
+            log_event('RUNTIME_STATE', **host.health())
+            if service or config.app['broker']['capability_manifest'] != 'automatic' or host.stop.wait(30):
+                break
+            # Login and transient provider failures recover without another
+            # container recreation. A policy edit is loaded only between runs.
+            from .config import load_config
+            config = load_config(config.directory)
+            host.config = config
+            host.status, host.issues = 'STARTING', []
         while not host.stop.wait(.5):
             if service and service.stop.is_set():
                 break

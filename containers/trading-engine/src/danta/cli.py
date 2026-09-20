@@ -48,6 +48,9 @@ def parser() -> argparse.ArgumentParser:
 
 
 def make_application(config, args):
+    if config.app["broker"]["capability_manifest"] == "automatic":
+        from .deployment import prepare_application
+        return prepare_application(config)
     approval = None
     if args.approval_file:
         envelope = json.loads(args.approval_file.read_text())

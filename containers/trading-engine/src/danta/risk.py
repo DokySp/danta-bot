@@ -80,7 +80,8 @@ def evaluate_exit(thesis: InvestmentThesis, holding: Holding, quote: Quote | Non
             deadline = due.closes_at-timedelta(minutes=10)
             if now >= deadline:
                 reasons.append("EXIT_TIME_LIMIT")
-    completed = [s for s in calendar.sessions if s.closes_at <= now]
+    from .deployment_sources import completed_sessions
+    completed = completed_sessions(calendar, now)
     if (features is not None and features.window_end <= now and features.as_of <= now and
             completed and features.last_session_id == completed[-1].session_id):
         if all(close < sma for close, sma in zip(features.last_two_closes, features.last_two_sma20)):

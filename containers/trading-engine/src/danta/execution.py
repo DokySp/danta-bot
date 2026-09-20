@@ -80,7 +80,7 @@ class Executor:
             raise ValueError("NEW_RISK_PAUSED")
         if self.store.get("account_version") != intent.account_version:
             raise ValueError("STALE_ACCOUNT_VERSION")
-        if intent.side == "BUY" and not self.store.get("costs_complete", True):
+        if intent.side == "BUY" and not (self.store.get("costs_complete", True) or self.store.get("account_cash_reconciled", False)):
             raise ValueError("ACTUAL_COST_RECONCILIATION_REQUIRED")
         if intent.side == "BUY" and now >= intent.expires_at:
             raise ValueError("ENTRY_EXPIRED")
@@ -194,12 +194,15 @@ class Executor:
                 response = self.broker.cancel({"broker_id": order["broker_id"], "namespace": order["broker_namespace"],
                                     "metadata": json.loads(order["broker_metadata"]),
                                     "remaining_quantity": order["quantity"] - order["cumulative_quantity"]})
-                if response.get("status") == "NOT_SENT":
+                if response.get("status") in {"NOT_SENT", "REJECTED", "NO_REMAINING_QUANTITY"}:
                     with self.store.transaction():
                         self.store.db.execute("UPDATE intents SET state=? WHERE id=?", (order["state"], intent_id))
-                        self.store.event(intent.run_id, "CANCEL_NOT_SENT", {"intent_id": intent_id, "reason": response.get("reason", "LOCAL_PRE_SEND_FAILURE")}, notify=True)
+                        self.store.event(intent.run_id, "CANCEL_NOT_SENT", {"intent_id": intent_id, "reason": response.get("reason", response["status"])}, notify=True)
+                elif response.get("status") != "ACKNOWLEDGED":
+                    self._unknown(intent_id, "CANCEL_OUTCOME_UNCONFIRMED")
             except Exception as error:
                 with self.store.transaction():
+                    self.store.db.execute("UPDATE intents SET state='UNKNOWN' WHERE id=?", (intent_id,))
                     self.store.set("reconciled", False)
                     self.store.event(intent.run_id, "CANCEL_UNCERTAIN", {"intent_id": intent_id, "reason": type(error).__name__}, notify=True)
             # A cancellation ACK is not proof that a concurrent fill did not occur.
@@ -225,6 +228,7 @@ class Executor:
             if snapshot.get("complete") is not True:
                 with self.store.transaction():
                     self.store.set("reconciled", False)
+                    self.store.set("account_cash_reconciled", False)
                     self.store.event("reconcile", "ACCOUNT_INCOMPLETE", {}, notify=True)
                 return {"status": "DATA_INCOMPLETE"}
             unknown = []
@@ -257,7 +261,8 @@ class Executor:
                     notional=Decimal(broker["cumulative_notional"]), fees=Decimal(broker["cumulative_fees"]) if broker.get("cumulative_fees") is not None else None,
                     revision=broker["revision"], observed_at=broker["observed_at"], correction=broker.get("correction", False),
                     first_fill_at=broker.get("first_fill_at"), fill_session_id=broker.get("fill_session_id"),
-                    fill_time_quality=broker.get("fill_time_quality", "UNKNOWN"))
+                    fill_time_quality=broker.get("fill_time_quality", "UNKNOWN"),
+                    account_cash_managed=snapshot.get("whole_account") is True)
                 with self.store.transaction():
                     current = self.store.order(order["id"])
                     if broker["state"] in TERMINAL:
@@ -274,9 +279,17 @@ class Executor:
             with self.store.transaction():
                 self.store.set("ownership_complete", ownership_ok)
                 self.store.set("reconciled", not unknown and ownership_ok)
+                self.store.set("account_cash_reconciled", False)
                 self.store.event("reconcile", "RECONCILIATION", {"unresolved_intents": unknown, "ownership_complete": ownership_ok}, notify=bool(unknown) or not ownership_ok)
             if unknown or not ownership_ok:
                 raise HumanRequired("UNALLOCATED or UNKNOWN requires broker evidence/operator decision")
+            if snapshot.get("whole_account") is True:
+                try:
+                    self.store.reconcile_account_cash(snapshot["account_cash"])
+                except (KeyError, ValueError, TypeError, ArithmeticError) as error:
+                    with self.store.transaction():
+                        self.store.set("reconciled", False)
+                    raise HumanRequired("ACCOUNT_CASH_RECONCILIATION_REQUIRED") from error
             return {"status": "RECONCILED"}
 
 

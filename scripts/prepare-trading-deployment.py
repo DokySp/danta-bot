@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Prepare a new, private directory for transfer to a separate Docker host."""
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -14,7 +13,6 @@ REPO = Path(__file__).resolve().parents[1]
 ENGINE = REPO / "containers/trading-engine"
 GATEWAY = REPO / "containers/telegram-gateway"
 sys.path.insert(0, str(ENGINE / "src"))
-from danta.application import code_identity
 from danta.config import load_config, load_secrets
 
 
@@ -25,6 +23,9 @@ def prepare(output, namespace, version, *, include_secrets=False, sender_ids=())
         raise ValueError("Invalid image tag")
     if any(not re.fullmatch(r"[1-9][0-9]*", value) for value in sender_ids):
         raise ValueError("Sender IDs must be positive Telegram user IDs")
+    config = load_config(ENGINE / "config")
+    if config.mode != "live" or config.app["broker"]["capability_manifest"] != "automatic":
+        raise ValueError("Preparation requires the approved live automatic configuration")
     # Preflight private inputs before creating output; never copy a whole config directory.
     private = None
     if include_secrets:
@@ -45,7 +46,14 @@ def prepare(output, namespace, version, *, include_secrets=False, sender_ids=())
         if not values.get("TELEGRAM_BOT_TOKEN") or not values.get("TELEGRAM_ALLOWED_CHAT_IDS"):
             raise ValueError("Gateway token and allowed chat IDs are required")
         chat_ids = [value.strip() for value in values["TELEGRAM_ALLOWED_CHAT_IDS"].split(",") if value.strip()]
-        private = dict(private, TELEGRAM_GATEWAY_URL="http://telegram-gateway:8080", DANTA_CODEX_AUTH_HOME="/app/auth")
+        if not chat_ids or any(not re.fullmatch(r"-?[1-9][0-9]*", value) for value in chat_ids):
+            raise ValueError("Gateway chat IDs are invalid")
+        if not sender_ids:
+            if any(value.startswith("-") for value in chat_ids):
+                raise ValueError("Group chats require an explicit --sender-id")
+            sender_ids = chat_ids
+        private = dict(private, TELEGRAM_GATEWAY_URL="http://telegram-gateway:8080", DANTA_CODEX_AUTH_HOME="/app/auth",
+            TELEGRAM_ALLOWED_CHAT_IDS=",".join(chat_ids), TELEGRAM_ALLOWED_SENDER_IDS=",".join(sender_ids))
 
     output = Path(output).absolute()
     output.mkdir(mode=0o700, parents=False, exist_ok=False)
@@ -71,42 +79,22 @@ def prepare(output, namespace, version, *, include_secrets=False, sender_ids=())
         copy(GATEWAY / "config/routes.example.yaml", "telegram-gateway/config/routes.yaml")
     copy(GATEWAY / "config/telegram.env.example", "telegram-gateway/config/telegram.env.example")
     copy(ENGINE / "config/secrets.yaml.example", "trading-engine/config/secrets.yaml.example")
-    for name in ("app", "strategy", "schedules"):
+    for name in ("strategy", "schedules"):
         copy(ENGINE / "config" / (name + ".yaml"), "trading-engine/config/" + name + ".yaml")
-
-    app = load_config(ENGINE / "config").app
-    app["app"].update(mode="shadow", account_alias="kis-primary", state_dir="/app/var/shadow/kis-primary", listen_host="0.0.0.0")
-    app["broker"].update(environment="real", capability_manifest="/app/config/runtime-manifest.json")
-    app["market"]["calendar_manifest"] = "/app/config/runtime-manifest.json"
-    app["telegram"].update(enabled=True, ingress_enabled=True, route="trading-engine", allowed_sender_ids=list(sender_ids),
-        allowed_chat_ids=chat_ids if private else [])
-    write("trading-engine/config/app.shadow.yaml.example", yaml.safe_dump(app, sort_keys=False, allow_unicode=True), 0o600)
-
-    for path in sorted((ENGINE / "config").glob("runtime*.json.example")):
-        value = json.loads(path.read_text())
-        if "account_alias" in value:
-            value.update(account_alias="kis-primary", environment="real")
-        if path.name == "runtime.json.example":
-            value.update(code_id=code_identity(), model_id=app["model"]["model_id"],
-                prompt_hash=hashlib.sha256((ENGINE / "prompts/portfolio_decision.md").read_bytes()).hexdigest())
-        write("trading-engine/config/" + path.name, json.dumps(value, ensure_ascii=False, indent=2) + "\n", 0o600)
-    runtime_files = []
-    for name in ("runtime.json", "runtime-manifest.json"):
-        path = ENGINE / "config" / name
-        if path.is_symlink():
-            raise ValueError("Runtime configuration must be a regular file")
-        if path.is_file():
-            # Preserve hashes and existing authority exactly; never fill verified fields.
-            write("trading-engine/config/" + name, path.read_bytes(), 0o600)
-            runtime_files.append(name)
+    app = config.app
+    if private:
+        # The copied private allowlists are the authority for this prepared bundle.
+        app["telegram"].update(allowed_sender_ids=[], allowed_chat_ids=[])
+    elif sender_ids:
+        app["telegram"]["allowed_sender_ids"] = list(sender_ids)
+    write("trading-engine/config/app.yaml", yaml.safe_dump(app, sort_keys=False, allow_unicode=True))
     if private:
         write("trading-engine/config/secrets.yaml", yaml.safe_dump(private, sort_keys=False, default_style='"'), 0o600)
         write("telegram-gateway/config/telegram.env", env_body, 0o600)
     guide = (ENGINE / "deployment/README.md").read_text()
     write("README.md", guide)
-    return {"output": str(output), "status": "PREPARED_NOT_AUTHORIZED", "includes_secrets": include_secrets,
-        "default_mode": load_config(ENGINE / "config").mode, "runtime_files": runtime_files,
-        "shadow_settings": "example_only", "sender_allowlist_set": bool(sender_ids),
+    return {"output": str(output), "status": "PREPARED", "includes_secrets": include_secrets,
+        "default_mode": config.mode, "runtime_preparation": "automatic", "sender_allowlist_set": bool(sender_ids),
         "images_pushed": False, "remote_host_modified": False}
 
 

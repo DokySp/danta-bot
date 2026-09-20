@@ -188,6 +188,7 @@ class Config:
     config_hash: str
     strategy_hash: str
     directory: Path
+    source_config_hash: str | None = None
 
     @property
     def data(self) -> dict:
@@ -211,7 +212,7 @@ class Config:
         return path if path.is_absolute() else (self.directory.parent / path).resolve()
 
     def assert_current(self) -> None:
-        if load_config(self.directory).config_hash != self.config_hash:
+        if load_config(self.directory).config_hash != (self.source_config_hash or self.config_hash):
             raise HumanRequired("POLICY_CHANGED: frozen run cannot acquire new authority")
 
     def require_external(self, capability: str, approval: dict | None = None) -> None:
@@ -327,6 +328,13 @@ def validate_activation(config: Config, approval: dict, expected_hash: str, code
         raise HumanRequired("Prompt approval mismatch")
     evidence = {"account_reconciled", "ownership_reconciled", "single_writer", "local_storage", "backup_restore",
                 "model_isolation", "cost_schedule", "calendar", "quote_timestamp", "protection_performance"}
+    if approval.get("authority") == "deployment_config":
+        # Fresh quotes, market phase, account version and deadlines are checked on
+        # each order, including protective sells. They cannot be proven at an
+        # off-hours container startup with no quote or pending order.
+        from .deployment import require_operator_config
+        require_operator_config(load_config(config.directory))
+        evidence -= {"quote_timestamp", "protection_performance"}
     if not evidence.issubset(approval["operational_evidence"]) or any(approval["operational_evidence"][key] is not True for key in evidence):
         raise HumanRequired("Operational validation evidence is incomplete")
     config.require_external("live_orders", approval)

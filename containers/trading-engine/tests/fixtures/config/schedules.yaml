@@ -1,0 +1,31 @@
+schema_version: 1
+scheduler:
+  enabled: false
+  timezone: Asia/Seoul
+  calendar_ref: app.market.calendar_manifest
+  missed_run_policy: skip_expired_reconcile_and_check_protection
+  jobs:
+    - id: finalize_day
+      kind: finalize_and_report
+      trigger: {type: session_offset, anchor: continuous_close, minutes: 30}
+    - id: portfolio_review
+      kind: full_review
+      trigger: {type: session_offset, anchor: continuous_open, minutes: 20}
+    - id: disclosures
+      kind: collect_disclosures
+      trigger: {type: interval_in_session, seconds: 180}
+    - id: material_event
+      kind: event_review
+      trigger: {type: verified_event, coalesce_seconds: 30}
+    - id: risk_monitor
+      kind: risk_monitor
+      trigger: {type: market_event_with_poll_fallback}
+    - id: reconcile
+      kind: reconcile
+      trigger: {type: order_event_with_poll_fallback}
+    - id: holding_deadline
+      kind: time_limit_exit
+      trigger: {type: session_offset, anchor: continuous_close, minutes: -10}
+  discretionary_entry_window:
+    start_minutes_after_continuous_open: 20
+    end_minutes_before_continuous_close: 30

@@ -32,22 +32,22 @@ while True:
     assert time.monotonic() < deadline, 'engine startup timeout'
     time.sleep(.2)
 with patch.object(gateway, 'TelegramClient', return_value=client):
-    for update_id, text in enumerate(('/version', '/status', '/review'), 1):
+    for update_id, text in enumerate(('/version', '/status', '/pause'), 1):
         app.handle_update(route, {'update_id': update_id, 'message': {
             'message_id': update_id, 'chat': {'id': 12345}, 'from': {'id': 12345}, 'text': text}})
     replies = [call.args[1] for call in client.send_message.call_args_list]
     assert len(replies) == 3, replies
     assert 'trading-engine' in replies[0] and 'telegram-gateway' in replies[0], replies[0]
-    assert 'WAITING_FOR_CONFIGURATION' in replies[0], replies[0]
-    assert 'WAITING_FOR_CONFIGURATION' in replies[1], replies[1]
-    assert '요청을 접수했습니다' not in replies[2], replies[2]
+    assert 'READY' in replies[0], replies[0]
+    assert '요청을 접수했습니다' in replies[1], replies[1]
+    assert '요청을 접수했습니다' in replies[2], replies[2]
     count = client.send_message.call_count
     app.handle_update(route, {'update_id': 99, 'message': {
         'message_id': 99, 'chat': {'id': 67890}, 'from': {'id': 67890}, 'text': '/version'}})
     assert client.send_message.call_count == count
 Path('/workspace/memory/smoke.json').write_text(json.dumps({'status':'PASS',
-    'version_round_trip':True, 'inactive_runtime_reported':True, 'denied_chat_blocked':True,
-    'telegram_delivery':'STUBBED', 'broker_or_model_called':False}))
+    'version_round_trip':True, 'live_runtime_ready':True, 'denied_chat_blocked':True,
+    'telegram_delivery':'STUBBED', 'broker_provider':'SYNTHETIC_TRANSPORT','model_auth':'SYNTHETIC_PROBE'}))
 stop = threading.Event()
 signal.signal(signal.SIGTERM, lambda *_: stop.set())
 stop.wait()
@@ -71,7 +71,9 @@ def verify(engine_image, gateway_image):
     parent.mkdir(exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix='deployment-check-', dir=parent)).resolve()
     project = 'danta-check-' + uuid.uuid4().hex[:10]
-    compose = ['docker', 'compose', '-p', project, '-f', str(temporary / 'compose.json')]
+    projects = {name: ['docker', 'compose', '-p', project + '-' + name, '-f', str(temporary / (name + '.json'))]
+                for name in ('trading-engine', 'telegram-gateway')}
+    compose, gateway_compose = projects['trading-engine'], projects['telegram-gateway']
     spec = {'services': {}, 'volumes': {}, 'networks': {'default': {'name': project, 'internal': True}}}
     try:
         for name, image in (('trading-engine', engine_image), ('telegram-gateway', gateway_image)):
@@ -93,6 +95,16 @@ def verify(engine_image, gateway_image):
             if name == 'trading-engine':
                 for filename in ('app.yaml', 'strategy.yaml', 'schedules.yaml'):
                     shutil.copyfile(source / 'config' / filename, temporary / name / 'config' / filename)
+                configdir = temporary / name / 'config'
+                shutil.copyfile(source / 'tests/fixtures/deployment_probe.py', configdir / 'deployment_probe.py')
+                (configdir / 'sitecustomize.py').write_text('from deployment_probe import install\ninstall()\n')
+                (configdir / 'secrets.yaml').write_text('KIS_ACCOUNT_REF: "00000000-00"\n'
+                    'KIS_APP_KEY: "FAKE_KEY_NOT_A_CREDENTIAL"\nKIS_APP_SECRET: "FAKE_SECRET_NOT_A_CREDENTIAL"\n'
+                    'DART_API_KEY: "FAKE_DART_NOT_A_CREDENTIAL"\nDANTA_CODEX_AUTH_HOME: "/app/auth"\n'
+                    'TELEGRAM_GATEWAY_URL: "http://telegram-gateway:8080"\n'
+                    'TELEGRAM_ALLOWED_CHAT_IDS: "12345"\nTELEGRAM_ALLOWED_SENDER_IDS: "12345"\n')
+                (configdir / 'secrets.yaml').chmod(0o600)
+                service.setdefault('environment', {})['PYTHONPATH'] = '/app/config'
             else:
                 shutil.copyfile(source / 'config/routes.example.yaml', temporary / name / 'config/routes.yaml')
                 (temporary / name / 'config/telegram.env').write_text(
@@ -100,12 +112,13 @@ def verify(engine_image, gateway_image):
                 (temporary / name / 'config/probe.py').write_text(PROBE)
                 # Run the real gateway HTTP/router/client; replace only public Telegram delivery.
                 service['command'] = ['python', '/app/config/probe.py']
-        (temporary / 'compose.json').write_text(json.dumps(spec))
-        command(*compose, 'up', '-d', '--pull', 'never', '--wait', '--wait-timeout', '45')
+        for name, service in spec['services'].items():
+            (temporary / (name + '.json')).write_text(json.dumps({**spec, 'services': {name: service}}))
+            command(*projects[name], 'up', '-d', '--pull', 'never', '--wait', '--wait-timeout', '45')
         deadline = time.monotonic() + 45
         result = None
         while time.monotonic() < deadline:
-            probe = subprocess.run([*compose, 'exec', '-T', 'telegram-gateway', 'cat',
+            probe = subprocess.run([*gateway_compose, 'exec', '-T', 'telegram-gateway', 'cat',
                                     '/workspace/memory/smoke.json'], text=True, capture_output=True)
             if probe.returncode == 0:
                 result = json.loads(probe.stdout)
@@ -115,7 +128,7 @@ def verify(engine_image, gateway_image):
         if result is None:
             raise RuntimeError('Deployment HTTP smoke test did not complete')
         logs = command(*compose, 'logs', '--no-color', 'trading-engine')
-        if 'HTTP_LISTENING' not in logs or 'WAITING_FOR_CONFIGURATION' not in logs:
+        if 'HTTP_LISTENING' not in logs or 'INITIALIZATION_COMPLETE' not in logs:
             raise RuntimeError('Deployment startup/readiness logs are missing')
         state = json.loads(command('docker', 'inspect', project + '-trading-engine'))[0]['State']
         if not state['Running'] or state['Health']['Status'] != 'healthy':
@@ -132,15 +145,19 @@ def verify(engine_image, gateway_image):
         state = json.loads(command('docker', 'inspect', project + '-trading-engine'))[0]['State']
         if state['ExitCode'] != 0:
             raise RuntimeError('Engine did not stop cleanly')
+        result['separate_compose_projects'] = True
         return result
     except Exception:
-        if (temporary / 'compose.json').exists():
-            logs = subprocess.run([*compose, 'logs', '--no-color'], text=True, capture_output=True)
+        for name, commands in projects.items():
+            if not (temporary / (name + '.json')).exists():
+                continue
+            logs = subprocess.run([*commands, 'logs', '--no-color'], text=True, capture_output=True)
             print(logs.stdout[-12000:])  # The entire project contains synthetic configuration only.
         raise
     finally:
-        if (temporary / 'compose.json').exists():
-            subprocess.run([*compose, 'down', '--volumes', '--remove-orphans'], capture_output=True)
+        for name, commands in reversed(list(projects.items())):
+            if (temporary / (name + '.json')).exists():
+                subprocess.run([*commands, 'down', '--volumes', '--remove-orphans'], capture_output=True)
         # Root bootstrap owns the synthetic config; restore only this generated temporary tree.
         subprocess.run(['docker', 'run', '--rm', '--pull', 'never', '--network', 'none', '--user', '0:0',
             '--entrypoint', 'python', '-v', str(temporary) + ':/cleanup', engine_image, '-c',

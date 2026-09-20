@@ -276,7 +276,7 @@ class KisAdapter:
     def _account_params(self):
         return {"CANO": self.credentials.account, "ACNT_PRDT_CD": self.credentials.product}
 
-    def _pages(self, path, tr, params, cursor=None):
+    def _pages(self, path, tr, params, cursor=None, *, rows_key="output1", cursor_width=100):
         rows, summaries, seen = [], [], set()
         cursor = cursor or ("", "")
         try:
@@ -284,14 +284,14 @@ class KisAdapter:
                 if cursor in seen:
                     raise AdapterError("REPEATED_CURSOR")
                 seen.add(cursor)
-                data, headers = self._request(path, tr, {**params, "CTX_AREA_FK100": cursor[0], "CTX_AREA_NK100": cursor[1]}, continuation="N" if any(cursor) else "")
-                if not isinstance(data.get("output1"), list):
+                data, headers = self._request(path, tr, {**params, f"CTX_AREA_FK{cursor_width}": cursor[0], f"CTX_AREA_NK{cursor_width}": cursor[1]}, continuation="N" if any(cursor) else "")
+                if not isinstance(data.get(rows_key), list):
                     raise AdapterError("MALFORMED_RESPONSE")
-                rows.extend(data["output1"])
+                rows.extend(data[rows_key])
                 summaries.append(data.get("output2"))
                 if headers.get("tr_cont") not in {"M", "F"}:
                     return FetchResult(tuple(rows), "COMPLETE", utcnow(), metadata={"summaries": summaries})
-                cursor = (data.get("ctx_area_fk100", "").strip(), data.get("ctx_area_nk100", "").strip())
+                cursor = (data.get(f"ctx_area_fk{cursor_width}", "").strip(), data.get(f"ctx_area_nk{cursor_width}", "").strip())
                 if not any(cursor):
                     raise AdapterError("MISSING_CURSOR")
         except AdapterError as exc:
@@ -315,6 +315,36 @@ class KisAdapter:
                 metadata["resources_quality"] = "FETCH_FAILED"
         return FetchResult(result.records, quality, result.retrieved_at, result.next_cursor, metadata)
 
+    def read_buying_power(self, ticker, price):
+        # KIS requires market-price calculation to include the symbol margin ratio.
+        data, _ = self._request(TRADING + "inquire-psbl-order", self._tr("TTC8908R"), {
+            **self._account_params(), "PDNO": symbol(ticker), "ORD_UNPR": str(order_price(price)),
+            "ORD_DVSN": "01", "CMA_EVLU_AMT_ICLD_YN": "N", "OVRS_ICLD_YN": "N"})
+        if not isinstance(data.get("output"), dict):
+            raise AdapterError("MALFORMED_RESPONSE")
+        return data["output"]
+
+    def read_cancelable_orders(self):
+        return self._pages(TRADING + "inquire-psbl-rvsecncl", "TTTC0084R", {
+            **self._account_params(), "INQR_DVSN_1": "0", "INQR_DVSN_2": "0"}, rows_key="output")
+
+    def read_reservations(self, start: date, end: date):
+        if self.environment != "real" or start > end:
+            raise AdapterError("RESERVATION_QUERY_UNSUPPORTED")
+        return self._pages(TRADING + "order-resv-ccnl", "CTSC0004R", {
+            **self._account_params(), "RSVN_ORD_ORD_DT": start.strftime("%Y%m%d"),
+            "RSVN_ORD_END_DT": end.strftime("%Y%m%d"), "TMNL_MDIA_KIND_CD": "00",
+            "PRCS_DVSN_CD": "0", "CNCL_YN": "Y", "RSVN_ORD_SEQ": "", "PDNO": "",
+            "SLL_BUY_DVSN_CD": ""}, rows_key="output", cursor_width=200)
+
+    def read_daily_costs(self, start: date, end: date):
+        if self.environment != "real" or start > end:
+            raise AdapterError("COST_QUERY_UNSUPPORTED")
+        return self._pages(TRADING + "inquire-period-profit", "TTTC8708R", {
+            **self._account_params(), "INQR_STRT_DT": start.strftime("%Y%m%d"),
+            "INQR_END_DT": end.strftime("%Y%m%d"), "SORT_DVSN": "01", "INQR_DVSN": "00",
+            "CBLC_DVSN": "00", "PDNO": ""})
+
     def read_orders(self, start: date, end: date, *, cursor=None, older_than_three_months=False):
         if start > end:
             raise AdapterError("INVALID_DATE_RANGE")
@@ -323,7 +353,7 @@ class KisAdapter:
             tr = "CTSC9215R"
         return self._pages(TRADING + "inquire-daily-ccld", tr, {**self._account_params(), "INQR_STRT_DT": start.strftime("%Y%m%d"),
             "INQR_END_DT": end.strftime("%Y%m%d"), "SLL_BUY_DVSN_CD": "00", "PDNO": "", "CCLD_DVSN": "00", "INQR_DVSN": "00",
-            "INQR_DVSN_3": "00", "ORD_GNO_BRNO": "", "ODNO": "", "INQR_DVSN_1": "", "EXCG_ID_DVSN_CD": "KRX"}, cursor)
+            "INQR_DVSN_3": "00", "ORD_GNO_BRNO": "", "ODNO": "", "INQR_DVSN_1": "", "EXCG_ID_DVSN_CD": "ALL" if self.environment == "real" else "KRX"}, cursor)
 
     def read_fills(self, start, end, **kwargs):
         result = self.read_orders(start, end, **kwargs)
@@ -515,5 +545,12 @@ def parse_master_line(line, board):
         fields.append(tail[pos:pos + width].strip())
         pos += width
     indexes = {"group": 0, "industry": 2, "etp": 12, "spac": 19, "halted": 34, "liquidation": 35, "managed": 36, "preferred": 54} if board == "KOSPI" else {"group": 0, "industry": 2, "etp": 8, "spac": 14, "halted": 29, "liquidation": 30, "managed": 31, "preferred": 49}
-    return {"symbol": symbol(head[:9].strip()), "isin": head[9:21].strip(), "name": head[21:].strip(), "board": board,
+    code = head[:9].strip()
+    # The master also contains longer ETN/fund codes. They remain excluded by
+    # their product group; six-character order-symbol validation is unchanged.
+    if fields[0] == "ST":
+        symbol(code)
+    elif not re.fullmatch(r"[A-Z0-9]{6,9}", code):
+        raise AdapterError("MASTER_CONTRACT_MISMATCH")
+    return {"symbol": code, "isin": head[9:21].strip(), "name": head[21:].strip(), "board": board,
             **{name: fields[index] for name, index in indexes.items()}, "status_requires_validated_provider_codes": True}

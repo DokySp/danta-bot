@@ -84,7 +84,7 @@ class ExternalRuntimeContracts(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.base = Path(self.temp.name)
         self.config_dir = self.base/"config"
-        shutil.copytree(ROOT/"config",self.config_dir,ignore=shutil.ignore_patterns("secrets.yaml"))
+        shutil.copytree(ROOT/"tests/fixtures/config",self.config_dir,ignore=shutil.ignore_patterns("secrets.yaml"))
         self.case = helpers.synthetic_case()
         profile,calendar,ticks,self.now,self.bars,self.index_bars,candidate,quote,event,costs,snapshot = self.case
         self.transport = FixtureTransport(self.now,self.bars,self.index_bars)
@@ -137,7 +137,7 @@ class ExternalRuntimeContracts(unittest.TestCase):
                                           env=self.env,clock=lambda:self.now)
 
     def test_default_offline_makes_no_external_calls(self):
-        config = load_config(ROOT/"config")
+        config = load_config(ROOT/"tests/fixtures/config")
         with self.assertRaises(HumanRequired):
             build_external_runtime(config,None,kis_transport=self.transport,dart_transport=self.transport,env={})
         self.assertEqual(self.transport.calls,[])

@@ -244,7 +244,8 @@ class KisTokenCacheTests(unittest.TestCase):
                 def advance(_timeout):
                     self.now += timedelta(seconds=2)
                     queued.next_at = 0
-                with patch.object(queued.condition, 'wait', side_effect=advance):
+                with patch.object(adapter, 'read_buying_power', return_value={'nrcvb_buy_qty':'1','nrcvb_buy_amt':'1000'}), \
+                        patch.object(queued.condition, 'wait', side_effect=advance):
                     result = broker.submit({'instrument_id':'KRX:000001', 'side':'BUY', 'quantity':1, 'limit_price':'1000',
                         'expires_at':(NOW + timedelta(seconds=1 if boundary == 'decision' else 60)).isoformat()})
                 self.assertEqual(result, {'status':'NOT_SENT', 'reason':'ORDER_VALIDITY_EXPIRED'})

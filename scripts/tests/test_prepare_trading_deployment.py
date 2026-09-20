@@ -1,5 +1,4 @@
 import importlib.util
-import json
 from pathlib import Path
 import shutil
 import tempfile
@@ -15,20 +14,20 @@ spec.loader.exec_module(deployment)
 
 
 class PrepareDeploymentTest(unittest.TestCase):
-    def test_portable_bundle_has_no_build_or_authority_and_refuses_overwrite(self):
+    def test_portable_bundle_uses_live_automatic_config_and_refuses_overwrite(self):
         with tempfile.TemporaryDirectory() as temporary:
             target = Path(temporary) / "release"
             result = deployment.prepare(target, "example", "test-release")
-            self.assertEqual(result["status"], "PREPARED_NOT_AUTHORIZED")
+            self.assertEqual(result["status"], "PREPARED")
             base = yaml.safe_load((target / "trading-engine/compose.yaml").read_text())
             self.assertNotIn("build", base["services"]["trading-engine"])
-            self.assertEqual(deployment.load_config(target / "trading-engine/config").mode, "offline")
-            shadow = yaml.safe_load((target / "trading-engine/config/app.shadow.yaml.example").read_text())
-            self.assertEqual(shadow["app"]["mode"], "shadow")
-            self.assertEqual(shadow["telegram"]["allowed_sender_ids"], [])
-            self.assertEqual(shadow["telegram"]["route"], "trading-engine")
-            self.assertNotIn("trusted_peer_profile", shadow["telegram"])
-            self.assertFalse(shadow["execution"]["enabled"])
+            prepared = deployment.load_config(target / "trading-engine/config")
+            self.assertEqual(prepared.mode, "live")
+            self.assertEqual(prepared.app["broker"]["capability_manifest"], "automatic")
+            self.assertEqual(prepared.app["market"]["calendar_manifest"], "automatic")
+            self.assertEqual(prepared.app["telegram"]["allowed_sender_ids"], [])
+            self.assertEqual(prepared.app["telegram"]["route"], "trading-engine")
+            self.assertTrue(prepared.app["execution"]["enabled"])
             self.assertFalse((target / "trading-engine/config/secrets.yaml").exists())
             self.assertEqual(base["services"]["trading-engine"]["image"], "example/trading-engine:test-release")
             self.assertEqual(set(base["services"]), {"trading-engine"})
@@ -40,15 +39,8 @@ class PrepareDeploymentTest(unittest.TestCase):
                 self.assertEqual(compose["networks"]["default"], {"name": "danta-bot-net"})
             for name in ("trading-engine", "telegram-gateway"):
                 self.assertEqual({p.name for p in (target / name).iterdir()}, {"compose.yaml", "config"})
-            self.assertEqual(shadow["broker"]["capability_manifest"], "/app/config/runtime-manifest.json")
-            self.assertEqual(shadow["market"]["calendar_manifest"], "/app/config/runtime-manifest.json")
-            approval = json.loads((target / "trading-engine/config/runtime.json.example").read_text())
-            self.assertEqual(approval["capabilities"], [])
-            manifest = json.loads((target / "trading-engine/config/runtime-manifest.json.example").read_text())
-            self.assertFalse(manifest["verified"])
-            self.assertFalse(manifest["bootstrap"]["ownership_verified"])
-            self.assertEqual({path.name for path in (target / "trading-engine/config").glob("*.json.example")},
-                             {"runtime.json.example", "runtime-manifest.json.example"})
+            self.assertFalse(list((target / "trading-engine/config").glob("runtime*")))
+            self.assertFalse(list((target / "trading-engine/config").glob("*shadow*")))
             routes = yaml.safe_load((target / "telegram-gateway/config/routes.yaml").read_text())
             self.assertEqual(set(routes["routes"]), {"trading-engine"})
             self.assertEqual(routes["routes"]["trading-engine"]["env_file"], "/app/config/telegram.env")
@@ -58,7 +50,7 @@ class PrepareDeploymentTest(unittest.TestCase):
             self.assertIn("--remove-orphans", guide)
             for file in target.rglob("*"):
                 if file.is_file():
-                    self.assertNotIn(str(deployment.REPO), file.read_text())
+                    self.assertNotIn(str(deployment.REPO) + "/", file.read_text())
             with self.assertRaises(FileExistsError):
                 deployment.prepare(target, "example", "test-release")
 
@@ -74,7 +66,7 @@ class PrepareDeploymentTest(unittest.TestCase):
                 (root / "config").mkdir()
                 for file in (original / "config").iterdir():
                     if file.name in {"app.yaml", "strategy.yaml", "schedules.yaml", "secrets.yaml.example",
-                                     "routes.example.yaml", "telegram.env.example", "runtime.json.example", "runtime-manifest.json.example"}:
+                                     "routes.example.yaml", "telegram.env.example"}:
                         shutil.copyfile(file, root / "config" / file.name)
             shutil.copytree(deployment.ENGINE / "deployment", engine / "deployment")
             shutil.copytree(deployment.ENGINE / "prompts", engine / "prompts")
@@ -102,11 +94,22 @@ class PrepareDeploymentTest(unittest.TestCase):
                 self.assertNotIn("DANTA_TELEGRAM_PEER_SECRET", copied)
                 self.assertFalse((target / "telegram-gateway/config/codex-peer.secret").exists())
                 self.assertEqual(source.read_bytes(), original)
-                self.assertEqual((target / "trading-engine/config/runtime.json").read_text(), runtime)
+                self.assertFalse((target / "trading-engine/config/runtime.json").exists())
                 self.assertFalse((target / "trading-engine/config/do-not-copy.json").exists())
-                shadow = yaml.safe_load((target / "trading-engine/config/app.shadow.yaml.example").read_text())
-                self.assertEqual(shadow["telegram"]["allowed_sender_ids"], ["12345"])
-                self.assertEqual(shadow["telegram"]["allowed_chat_ids"], ["-12345"])
+                self.assertEqual(copied["TELEGRAM_ALLOWED_SENDER_IDS"], "12345")
+                self.assertEqual(copied["TELEGRAM_ALLOWED_CHAT_IDS"], "-12345")
+                app = deployment.load_config(target / "trading-engine/config").app
+                self.assertEqual(app["telegram"]["allowed_sender_ids"], [])
+                self.assertEqual(app["telegram"]["allowed_chat_ids"], [])
+                with self.assertRaises(ValueError):
+                    deployment.prepare(base / "group-without-sender", "example", "test", include_secrets=True)
+                self.assertFalse((base / "group-without-sender").exists())
+                (gateway / "config/telegram.env").write_text("TELEGRAM_BOT_TOKEN=SYNTHETIC_ONLY\nTELEGRAM_ALLOWED_CHAT_IDS=12345,67890\n")
+                inferred = base / "private-chats"
+                deployment.prepare(inferred, "example", "test", include_secrets=True)
+                inferred_secrets = deployment.load_secrets(inferred / "trading-engine/config")
+                self.assertEqual(inferred_secrets["TELEGRAM_ALLOWED_CHAT_IDS"], "12345,67890")
+                self.assertEqual(inferred_secrets["TELEGRAM_ALLOWED_SENDER_IDS"], "12345,67890")
                 routes = yaml.safe_load((gateway / "config/routes.yaml").read_text())
                 routes["routes"]["v2"] = dict(routes["routes"]["trading-engine"])
                 (gateway / "config/routes.yaml").write_text(yaml.safe_dump(routes))

@@ -1,11 +1,84 @@
 # External runtime contract
 
-Status: `IMPLEMENTED` for the factory and injected transport normalization tests;
-`EXTERNAL_INTEGRATION_UNVERIFIED` for actual KIS/DART/Codex deployment. The example
+Status: the factory, automatic preparation and injected transport normalization
+contracts are implemented. Deployment readiness requires observations on the actual
+host; local tests do not prove real order execution or strategy returns. The example
 values in `tests/contract/test_runtime.py` are deliberately fake. They are not a
 fee schedule, market calendar, model identity, credential, or live approval.
 
-## Entry point and authority
+## Automatic deployment: the production default
+
+The approved production YAML selects `live`, `capability_manifest: automatic`,
+`capital_krw: entire_account`, and `accepted_risk_policy: configured_profile`.
+The operator transfers `app.yaml`, `strategy.yaml`, `schedules.yaml`, and private
+`secrets.yaml`, logs into Codex in the shared Docker auth volume, and starts Compose.
+No operator-authored `runtime.json`, `runtime-manifest.json`, SHA-256, or success flags
+are required. `deployment.prepare_application` resolves authority from the protected
+operator configuration and records observed preparation evidence in the existing DB.
+The optional packaging script reports `PREPARED`, which means files were prepared;
+it does not certify a remote host, provider connection, order, or investment outcome.
+
+Preparation acquires the local writer lock, checks Codex login and executes the
+local isolation probe, reads the real account and existing orders, fetches market
+sources and the DART corporation mapping,
+adopts approved inherited holdings once, reconciles, and checks backup/restore.
+The source YAML remains read-only to the engine. Derived configuration, approval
+references and observation hashes live under `var` in `state.sqlite`. Startup uses
+the normal activation path; per-order policy, freshness and broker checks remain.
+Missing credentials, unresolvable existing active/reserved orders or incomplete
+observations prevent readiness. A restart preserves and reconciles the existing ledger.
+Historical purchase prices/times and executions are never invented for adoption.
+The initial collection defers disclosure originals until the review worker runs,
+so approved existing-position protection can start first. Uncollected event coverage
+blocks new entries. Only currently valid reservations block adoption; past one-day reservations and expired DAY orders are historical records. Reservation queries include the next 31 days and period-order expiry. Existing reservations are not automatically canceled.
+
+The entire account's observed economic cash is separate from its stock valuation
+and from the broker's orderable-cash limit. The approved pretrade sizing schedule
+is `CONSERVATIVE_ESTIMATE`: 0.5% commission each side, 0.2% sell tax and 10 bp
+slippage each side. These are estimates, not a verified customer commission agreement
+or actual order-level costs. Broker account cash and reported daily fees/taxes are
+reconciled separately; unknown order-level facts remain unknown. An unexplained cash change is never matched to a later fee solely by equal amount; exact performance stays unavailable until the cash-flow identity is established.
+
+`deployment_sources` fully pages both KOSPI and KOSDAQ index histories and requires
+the observed historical trading dates to agree. Current/future open dates use KIS
+`CTCA0903R`, paging until every requested calendar day is observed, including closed
+days. Pagination stops at that coverage even if further future pages exist; the
+provider recommends daily caching.
+The calendar's `verified` scope is observed open dates and a conservative policy window,
+not actual special hours. Prepared sessions explicitly set `hours_verified: false`
+and `special_hours_verified: false`. Orders are clipped to 09:00–15:20 Seoul time
+and require the live regular-market stream classification. A delayed opening cannot
+supply a valid regular-market quote before it actually opens; an extended close does
+not extend this engine's trading window. The futures `/market-time` API is not used
+as an equity session clock. NXT/SOR, closing-auction and aftermarket orders are not added.
+
+Prepared sessions expose `daily_bar_available_at` at the following Seoul midnight.
+Daily-history collection uses that boundary, separate from the continuous-order
+cutoff, so the unfinished closing-auction/special-session daily bar is never cached
+as complete. The production finalization/report schedule is the next day at 00:10
+Seoul time. Observed adjusted stock HLC values and index HLC values must each pass
+exact ordered session coverage and numeric consistency checks before feature use.
+This establishes a current provider snapshot; `point_in_time_adjustment_verified`
+remains false and does not become archival historical PIT evidence.
+
+KIS master classifications use field-specific codes. For ST shares the actual public
+master's blank ETP field is accepted as absent; other unknown classifications are
+excluded. ETP codes and preferred-share codes are not generic booleans. The official
+`idxcode.mst` byte layout supplies domestic KOSPI/KOSDAQ sector names; product-family
+and placeholder rows are outside this mapping. Missing `0000` sectors stay excluded.
+DART `corpCode.xml` supplies issuer and disclosure mappings. Source refresh retains
+provenance and observed hashes. Telegram allowed chat/sender IDs are private settings;
+a group chat ID never implies a person's sender identity.
+
+`/healthz` reports management HTTP liveness; `/readyz` reports actual trading-service
+readiness. `/version` and `/status` remain available while preparation fails. Neither
+HTTP readiness nor local/synthetic checks proves broker execution or strategy returns.
+See [deployment commands](../deployment/README.md).
+
+## Manual manifest compatibility: entry point and authority
+
+The following file-envelope contract remains available for explicit manual deployments
+and injected contract tests. It is not the default production setup procedure.
 
 `runtime.build_external_runtime(config, trusted_approval)` returns
 `(MarketBundle, broker_port, decide_callback, refresh_callback)`.
@@ -30,11 +103,11 @@ the current complete account must match its quantities and have no unresolved or
 Cash is distinct from stock value. Inherited holdings record adoption valuation/time,
 not fictional BUY intents or historical fills. Existing ledgers are only reconciled on restart.
 Live/demo service startup runs the same activation checks as the explicit CLI before workers start.
-Required values that remain null in the shipped configuration cause
+Unresolved required values in an explicitly selected manual configuration cause
 `WAITING_FOR_HUMAN` when external startup is requested. They do not prevent the
 authorized offline build and synthetic tests.
 
-## Manifest fields
+## Manual manifest fields
 
 The `app.broker.capability_manifest` JSON file has exactly these top-level keys:
 
@@ -74,7 +147,7 @@ Secrets are excluded from policy snapshots, config hashes, prompts and images.
 
 ## Provider normalization
 
-`normalization.instruments` contains the provenance, explicit `true_codes`,
+In the manual compatibility path, `normalization.instruments` contains provenance, explicit `true_codes`,
 `false_codes`, `common_groups`, `issuer_by_symbol`, and `sector_by_industry`.
 Both configured boards are collected completely. Unrecognized status codes,
 missing issuer/sector mappings, excluded security kinds, and official risk states
@@ -84,8 +157,8 @@ remain excluded. The runtime never turns an unknown code into a normal stock.
 bases, source, `consistent_ohlc_verified`, and `price_returns_only`. KIS daily
 prices and the matching KOSPI/KOSDAQ index history are aligned with the approved
 completed-session calendar. Missing sessions and incompatible OHLC bases fail
-feature construction. The daily cache is session-based; refreshes in that same
-session reuse the completed history.
+feature construction. The daily cache is keyed by the latest usable completed history; production automatic
+preparation uses the following-midnight availability boundary described above.
 
 `normalization.quote.transport=websocket` uses KIS `H0STCNT0`: `bid=BIDP1`,
 `ask=ASKP1`, `session_date=BSOP_DATE`, `observed_time=STCK_CNTG_HOUR`,
@@ -264,9 +337,12 @@ check full-universe feature collection, same-session history reuse, no-event
 coverage, source/hash authority, actual quote timestamps, unknown-fee partial
 fills, parser/cursor continuity, and separation of credentials from model input.
 There were no real account, token, DART, model or order calls in those tests.
-Actual account adoption, fees, source-field contracts, cold-start coverage,
-quote latency, sustained rate limits, model isolation and protection performance
-remain deployment evidence requirements, not simulated successes.
+Actual account adoption, fees, cold-start coverage, quote latency, sustained rate limits,
+model isolation and protection performance remain deployment observations, not simulated
+successes. Automatic startup records only checks it performs; a packaging run or this
+document does not certify a remote installation. Public master-file inspection on
+2026-09-21 checked the sector wire layout and ST blank-ETP representation without
+authentication or account calls.
 
 ## Final dispatch boundary
 

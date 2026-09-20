@@ -121,6 +121,14 @@ class AdapterContracts(unittest.TestCase):
         self.assertEqual(item["halted"], "N")
         self.assertEqual(item["etp"], "")
         self.assertTrue(item["status_requires_validated_provider_codes"])
+        fields[0] = "BC"
+        fund = parse_master_line("F70100030" + "KR7000001000" + "합성펀드" + "".join(fields), "KOSPI")
+        self.assertEqual(fund["symbol"], "F70100030")
+        fields[0] = "EN"
+        etn = parse_master_line("Q500061  " + "KR7000001000" + "합성ETN" + "".join(fields), "KOSPI")
+        self.assertEqual(etn["symbol"], "Q500061")
+        with self.assertRaises(AdapterError):
+            kis(FixtureTransport()).submit(fund["symbol"], "BUY", 1, limit_price=100)
         with self.assertRaises(AdapterError):
             parse_master_line("short", "KOSPI")
 

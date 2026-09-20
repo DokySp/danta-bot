@@ -129,7 +129,7 @@ class Application:
         self.monitor_thread = None
         self.review_lock = threading.Lock()
 
-    def adopt_account(self, bootstrap: dict) -> None:
+    def adopt_account(self, bootstrap: dict, *, deployment_bootstrap: dict | None = None) -> None:
         """Import approved existing holdings once, using observed values as the new baseline."""
         self.config.require_external("account_read", self.approval)
         if self.config.mode == "paper":
@@ -145,14 +145,16 @@ class Application:
                 account.get("errors") or account.get("orders") or quantities != actual):
             raise HumanRequired("ACCOUNT_ADOPTION_REQUIRES_MATCHING_COMPLETE_UNENCUMBERED_SNAPSHOT")
         cash = Decimal(bootstrap["strategy_cash"])
-        if not cash.is_finite() or cash < 0 or cash > Decimal(account["broker_available_cash"]):
+        available = account.get("account_cash", {}).get("cash_krw", account["broker_available_cash"])
+        if not cash.is_finite() or cash < 0 or cash > Decimal(available):
             raise HumanRequired("ACCOUNT_ADOPTION_CASH_UNAVAILABLE")
         if cash == 0 and not quantities:
             raise HumanRequired("ACCOUNT_ALLOCATION_EMPTY")
         bundle.calendar.require_environment(synthetic=False)
         bundle.ticks.require_environment(synthetic=False, now=bundle.now)
         session = bundle.calendar.available_session(bundle.now)
-        completed = [item for item in bundle.calendar.sessions if item.closes_at <= bundle.now]
+        from .deployment_sources import completed_sessions
+        completed = completed_sessions(bundle.calendar, bundle.now)
         positions = []
         for symbol, quantity in sorted(quantities.items()):
             instrument, features = bundle.instruments.get(symbol), bundle.features.get(symbol)
@@ -182,7 +184,8 @@ class Application:
             positions.append({"instrument_id": symbol, "quantity": quantity, "valuation_price": mark, "thesis": thesis})
         self.store.import_positions(digest([self.config.config_hash, account, bundle.now]), positions,
             cash=cash, observed_at=bundle.now.isoformat(), source=bootstrap["source"],
-            config_hash=self.config.config_hash, strategy_hash=self.config.strategy_hash)
+            config_hash=self.config.config_hash, strategy_hash=self.config.strategy_hash,
+            deployment_bootstrap=deployment_bootstrap)
 
     def activate(self, expected_hash: str) -> None:
         """Use the same approval and current-account checks for Docker startup and CLI."""
@@ -297,7 +300,9 @@ class Application:
         nav = strategy_nav(cash, {row.instrument_id: row.quantity for row in holdings}, {row.instrument_id: row.mark for row in holdings})
         return PortfolioSnapshot(account_alias=bundle.costs.account_alias, strategy_id="catalyst_trend_swing", as_of=bundle.now,
             nav=nav, allocated_cash=cash, broker_available_cash=Decimal(bundle.data["broker_available_cash"]), holdings=holdings,
-            pending_entries=pending, complete=self.store.get("reconciled") and self.store.get("costs_complete", True) and market_complete, ownership_verified=self.store.get("ownership_complete"),
+            pending_entries=pending, complete=self.store.get("reconciled") and
+                (self.store.get("costs_complete", True) or self.store.get("account_cash_reconciled", False)) and market_complete,
+            ownership_verified=self.store.get("ownership_complete"),
             sector_classification_verified=bundle.data["sector_classification_verified"], account_state_version=self.store.get("account_version"),
             new_risk_paused=self.store.get("paused") or self.store.get("drawdown_paused", False), monitor_degraded=self.store.get("monitor_degraded", False), synthetic=bundle.synthetic)
 
@@ -378,8 +383,10 @@ class Application:
                 continue
             if plan.action == "MONITOR_DEGRADED":
                 with self.store.transaction():
+                    newly_degraded = not self.store.get("monitor_degraded", False)
                     self.store.set("monitor_degraded", True)
-                    self.store.event("protection", "MONITOR_DEGRADED", plan.model_dump(mode="json"), notify=True)
+                    if newly_degraded:
+                        self.store.event("protection", "MONITOR_DEGRADED", plan.model_dump(mode="json"), notify=True)
             if plan.cancel_pending_entries:
                 self.executor.invalidate_unsubmitted_entries("protection", plan.action)
                 opposite = [row for row in self.store.working(holding.instrument_id) if row["side"] == "BUY"]
@@ -408,13 +415,19 @@ class Application:
                             thesis_id=thesis.thesis_id, instrument_id=holding.instrument_id, side="SELL", quantity=quantity,
                             limit_price=None, expires_at=None, reason=plan.action, account_version=self.store.get("account_version"), policy_hash=self.config.config_hash)
                         self.executor.submit(intent, bundle.now)
+        if self.store.get("reconciled") and all(item["action"] not in {"MONITOR_DEGRADED", "RECONCILE_REQUIRED"} for item in results):
+            with self.store.transaction():
+                if self.store.get("monitor_degraded", False):
+                    self.store.set("monitor_degraded", False)
+                    self.store.event("protection", "MONITOR_RECOVERED", {}, notify=True)
         return results
 
     def record_nav(self) -> dict:
         snapshot = self.portfolio()
         session = self.bundle.calendar.active(self.bundle.now)
         point = {"at": self.bundle.now.isoformat(), "nav": str(snapshot.nav), "session_id": session.session_id if session else None,
-                 "completed": False, "quality": "EXACT" if snapshot.complete and snapshot.ownership_verified else "INSUFFICIENT_COVERAGE"}
+                 "completed": False, "quality": "EXACT" if snapshot.complete and snapshot.ownership_verified
+                    and not self.store.get("performance_uncertain", False) else "INSUFFICIENT_COVERAGE"}
         return self._record_nav_point(point, ownership_verified=snapshot.ownership_verified)
 
     def _record_nav_point(self, point: dict, *, ownership_verified: bool) -> dict:
@@ -431,7 +444,7 @@ class Application:
             flows = [ExternalFlow(at=aware_time(item["at"]), amount=item["amount"], before_nav=item.get("before_nav"), after_nav=item.get("after_nav"), kind=item["kind"])
                      for item in self.store.get("external_flows", [])]
             result = performance([NavPoint(at=aware_time(item["at"]), nav=Decimal(item["nav"]), session_id=item["session_id"], completed=item["completed"], quality=item["quality"])
-                                  for item in existing], flows, unallocated=not ownership_verified)
+                                  for item in existing], flows, unallocated=not ownership_verified or self.store.get("performance_uncertain", False))
             self.store.set("nav_points", existing)
             self.store.set("performance", result)
             if result.get("coverage") == "EXACT":
@@ -454,9 +467,10 @@ class Application:
         bundle = self.refresh() if self.refresh else self.bundle
         self.bundle = bundle
         now = self.clock()
+        from .deployment_sources import daily_bar_available_at
         session = next((item for item in reversed(bundle.calendar.sessions)
-                        if item.closes_at <= min(now, bundle.now)
-                        and now < item.closes_at + timedelta(hours=12)), None)
+                        if daily_bar_available_at(item) <= min(now, bundle.now)
+                        and now < daily_bar_available_at(item) + timedelta(hours=12)), None)
         issues = []
         if session is None:
             issues.append("COMPLETED_SESSION_UNAVAILABLE")
@@ -484,7 +498,7 @@ class Application:
             with self.store.lock:
                 if not self.store.get("reconciled") or not self.store.get("ownership_complete"):
                     issues.append("ACCOUNT_RECONCILIATION_REQUIRED")
-                if not self.store.get("costs_complete", False):
+                if (not self.store.get("costs_complete", False) and not self.store.get("account_cash_reconciled", False)) or self.store.get("performance_uncertain", False):
                     issues.append("SETTLEMENT_COSTS_UNCONFIRMED")
                 if any(row["state"] in {"SUBMITTING", "UNKNOWN", "CANCEL_REQUESTED"} for row in self.store.working()):
                     issues.append("ORDER_RECONCILIATION_REQUIRED")
@@ -507,7 +521,7 @@ class Application:
                 result = {"status": "NAV_NOT_FINALIZED", "session_id": session.session_id if session else None,
                           "provenance": bundle.data["provenance"], "issues": sorted(set(issues))}
                 if not issues:
-                    point = {"at": session.closes_at.isoformat(), "nav": str(strategy_nav(self.store.get("cash_krw"), quantities, marks)),
+                    point = {"at": daily_bar_available_at(session).isoformat(), "nav": str(strategy_nav(self.store.get("cash_krw"), quantities, marks)),
                              "session_id": session.session_id, "completed": True, "quality": "EXACT",
                              "observed_at": bundle.now.isoformat(), "provenance": bundle.data["provenance"], "price_sources": sources}
                     result.update(status="NAV_FINALIZED", point=point,
@@ -528,8 +542,10 @@ class Application:
                     self.protect()
                 except Exception as error:
                     with self.store.transaction():
+                        newly_degraded = not self.store.get("monitor_degraded", False)
                         self.store.set("monitor_degraded", True)
-                        self.store.event("monitor", "MONITOR_DEGRADED", {"error_type": type(error).__name__}, notify=True)
+                        if newly_degraded:
+                            self.store.event("monitor", "MONITOR_DEGRADED", {"error_type": type(error).__name__}, notify=True)
         self.monitor_thread = threading.Thread(target=loop, name="danta-protection", daemon=True)
         self.monitor_thread.start()
 
@@ -766,6 +782,8 @@ class Application:
                 "paused": self.store.get("paused"), "reconciled": self.store.get("reconciled"),
                 "cash_krw": self.store.get("cash_krw"), "holdings": self.store.holdings(), "working_orders": self.store.working(),
                 "costs_complete": self.store.get("costs_complete", True), "performance": self.store.get("performance"),
+                "account_cash_reconciled": self.store.get("account_cash_reconciled", False),
+                "account_costs": self.store.get("account_costs"), "pretrade_cost_basis": self.bundle.costs.basis,
                 "nav_finalization": self.store.get("nav_finalization"),
                 "performance_status": "STRATEGY_UNPROVEN", "provenance": self.bundle.data["provenance"]}
 

@@ -94,6 +94,7 @@ class Store:
                     self.set("costs_complete", True)
                     self.event("bootstrap", "BOOTSTRAP", {"scope": scope, "cash_krw": str(initial_cash)})
                 # A process may have died on either side of transmission.
+                self.set("account_cash_reconciled", False)
                 self.db.execute("UPDATE intents SET state='UNKNOWN' WHERE state='SUBMITTING'")
                 if self.db.execute("SELECT 1 FROM intents WHERE state IN ('UNKNOWN','CANCEL_REQUESTED')").fetchone():
                     self.set("reconciled", False)
@@ -160,7 +161,8 @@ class Store:
         return [dict(row) for row in self.db.execute("SELECT * FROM holdings WHERE owner=? AND quantity>0", (owner,))]
 
     def import_positions(self, snapshot_id: str, positions: list[dict], *, cash: Decimal,
-                         observed_at: str, source: str, config_hash: str, strategy_hash: str) -> bool:
+                         observed_at: str, source: str, config_hash: str, strategy_hash: str,
+                         deployment_bootstrap: dict | None = None) -> bool:
         """Adopt one immutable account snapshot, without inventing trades or fill history."""
         if any(not isinstance(value, str) or not value.strip()
                for value in (snapshot_id, source, config_hash, strategy_hash)):
@@ -227,6 +229,8 @@ class Store:
             self.set("reconciled", False)
             self.set("account_adoption", {key: value for key, value in payload.items() if key not in {"positions", "cash_krw"}}
                      | {"payload_hash": body_hash})
+            if deployment_bootstrap is not None:
+                self.set("deployment_bootstrap", deployment_bootstrap)
             version = self.bump_version()
             self.event(snapshot_id, "ACCOUNT_ADOPTED", {**payload, "payload_hash": body_hash, "account_version": version})
             return True
@@ -245,10 +249,58 @@ class Store:
             raise KeyError(intent_id)
         return dict(row)
 
+    def reconcile_account_cash(self, observation: dict) -> None:
+        """Reconcile whole-account cash, preserving unexplained flows outside performance."""
+        cash = finite_decimal(observation["cash_krw"])
+        observed_at = aware_time(observation["observed_at"])
+        if cash < 0 or observation.get("source") != "KIS:inquire-balance:prvs_rcdl_excc_amt":
+            raise ValueError("Invalid whole-account cash evidence")
+        costs = {}
+        for day, row in observation["daily_costs"].items():
+            aware_time(day+"T00:00:00+09:00")
+            amounts = [finite_decimal(row[key]) for key in ("fee", "tl_tax", "loan_int")]
+            if any(amount < 0 for amount in amounts):
+                raise ValueError("Invalid account costs")
+            costs[day] = str(sum(amounts, Decimal(0)))
+        with self.transaction():
+            previous = self.get("account_cash_observation")
+            if previous and observed_at < aware_time(previous["observed_at"]):
+                raise HumanRequired("STALE_ACCOUNT_CASH_OBSERVATION")
+            old_cash = Decimal(self.get("cash_krw"))
+            gross = Decimal(self.get("account_trade_cash_delta", "0"))
+            applied_fees = Decimal(self.get("account_order_fee_delta", "0"))
+            adjustment = cash - (old_cash + gross - applied_fees)
+            known_costs = observation.get("cost_quality") == "BROKER_REPORTED"
+            old_costs = previous.get("daily_costs", {}) if previous else {}
+            # Retain previously reported days if a cost endpoint temporarily lags/fails.
+            cost_delta = sum((Decimal(value)-Decimal(old_costs.get(day, "0")) for day,value in costs.items()), Decimal(0)) if previous and known_costs else Decimal(0)
+            residual = adjustment + cost_delta - applied_fees
+            pending = self.get("unclassified_cash_adjustments", [])
+            if residual:
+                # Equal amounts alone cannot prove a prior debit was this fee.
+                pending.append({"observed_at": observed_at.isoformat(), "amount": str(residual),
+                                "classification": "UNCLASSIFIED_CASH_FLOW"})
+            self.set("unclassified_cash_adjustments", pending)
+            self.set("performance_uncertain", bool(pending))
+            self.set("cash_krw", str(cash))
+            self.set("account_trade_cash_delta", "0")
+            self.set("account_order_fee_delta", "0")
+            self.set("account_cash_reconciled", True)
+            self.set("account_cash_observation", {"cash_krw": str(cash), "observed_at": observed_at.isoformat(),
+                     "source": observation["source"], "daily_costs": old_costs | costs,
+                     "cost_quality": observation.get("cost_quality", "UNCONFIRMED")})
+            if previous is None or cash != old_cash or gross or applied_fees or cost_delta:
+                self.bump_version()
+                self.event("reconcile", "ACCOUNT_CASH_RECONCILED", {"cash_krw": str(cash), "gross_trade_delta_krw": str(gross),
+                           "cash_adjustment_krw": str(adjustment), "account_cost_delta_krw": str(cost_delta),
+                           "unclassified_delta_krw": str(residual), "observed_at": observed_at.isoformat(),
+                           "performance_uncertain": bool(pending)})
+
     def apply_cumulative_fill(self, intent_id: str, *, quantity: int, notional: Decimal,
                               fees: Decimal | None, revision: int, observed_at: str,
                               correction: bool = False, fill_session_id: str | None = None,
-                              fill_time_quality: str = "UNKNOWN", first_fill_at: str | None = None) -> bool:
+                              fill_time_quality: str = "UNKNOWN", first_fill_at: str | None = None,
+                              account_cash_managed: bool = False) -> bool:
         if type(quantity) is not int or type(revision) is not int or quantity < 0:
             raise ValueError("Invalid cumulative cursor")
         if any(not value.is_finite() or value < 0 for value in (notional, fees) if value is not None):
@@ -328,10 +380,15 @@ class Store:
             elif dq and held:
                 basis *= Decimal(new_quantity) / Decimal(held)
             self.db.execute("INSERT INTO holdings VALUES (?,'strategy',?,?,?) ON CONFLICT(instrument_id,owner,thesis_id) DO UPDATE SET quantity=excluded.quantity,cost_basis=excluded.cost_basis", (order["instrument_id"], order["thesis_id"], new_quantity, str(basis)))
-            cash = Decimal(self.get("cash_krw")) - sign * dn - df
-            if cash < 0:
-                raise HumanRequired("Fill would overdraw attributed strategy cash")
-            self.set("cash_krw", str(cash))
+            if account_cash_managed:
+                self.set("account_cash_reconciled", False)
+                self.set("account_trade_cash_delta", str(Decimal(self.get("account_trade_cash_delta", "0"))-sign*dn))
+                self.set("account_order_fee_delta", str(Decimal(self.get("account_order_fee_delta", "0"))+df))
+            else:
+                cash = Decimal(self.get("cash_krw")) - sign * dn - df
+                if cash < 0:
+                    raise HumanRequired("Fill would overdraw attributed strategy cash")
+                self.set("cash_krw", str(cash))
             payload = json.loads(order["payload"])
             remaining = order["quantity"] - quantity
             state = "FILLED" if not remaining else ("CANCEL_REQUESTED" if order["state"] == "CANCEL_REQUESTED" else "PARTIALLY_FILLED")

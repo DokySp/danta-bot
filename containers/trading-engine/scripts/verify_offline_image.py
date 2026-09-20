@@ -68,7 +68,7 @@ def main():
     args = parser.parse_args()
     from danta.safety import reject_credentials
     import yaml
-    files = {name: (args.root / 'config' / name).read_text() for name in ('app.yaml', 'strategy.yaml', 'schedules.yaml')}
+    files = {name: (args.root / 'tests/fixtures/config' / name).read_text() for name in ('app.yaml', 'strategy.yaml', 'schedules.yaml')}
     for body in files.values():
         reject_credentials(yaml.safe_load(body))
     app = yaml.safe_load(files['app.yaml'])

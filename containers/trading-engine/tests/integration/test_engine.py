@@ -25,7 +25,7 @@ class EngineCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.config_dir = self.root / "config"
-        shutil.copytree(ROOT / "config", self.config_dir, ignore=shutil.ignore_patterns("secrets.yaml"))
+        shutil.copytree(ROOT / "tests/fixtures/config", self.config_dir, ignore=shutil.ignore_patterns("secrets.yaml"))
         app = self.config_dir / "app.yaml"
         app.write_text(app.read_text().replace("state_dir: ./var/offline/research", f"state_dir: {self.root / 'state'}"))
         self.config = load_config(self.config_dir)
@@ -378,6 +378,22 @@ class EngineCase(unittest.TestCase):
             ex.store.db.execute("INSERT INTO holdings VALUES ('TEST:AAA','manual','external',100,'10000')")
         with self.assertRaises(ValueError):
             ex.submit(self.intent(ex, side="SELL", quantity=1), self.bundle.now)
+
+    def test_cancel_rejection_and_lost_response_can_reconcile_and_retry(self):
+        from unittest.mock import patch
+        ex = self.executor()
+        order = ex.submit(self.intent(ex), self.bundle.now)
+        with patch.object(ex.broker, "cancel", return_value={"status":"REJECTED"}) as cancel:
+            ex.cancel(order["id"], self.bundle.now)
+            self.assertEqual(ex.store.order(order["id"])["state"], "ACKNOWLEDGED")
+            ex.cancel(order["id"], self.bundle.now)
+            self.assertEqual(cancel.call_count, 2)
+        with patch.object(ex.broker, "cancel", side_effect=TimeoutError):
+            ex.cancel(order["id"], self.bundle.now)
+        self.assertEqual(ex.store.order(order["id"])["state"], "UNKNOWN")
+        self.assertFalse(ex.store.get("reconciled"))
+        ex.reconcile()
+        self.assertEqual(ex.store.order(order["id"])["state"], "ACKNOWLEDGED")
 
     def test_O17_expiry_releases_only_after_cancellation_reconciliation(self):
         ex = self.executor()

@@ -23,7 +23,7 @@ SEOUL = ZoneInfo("Asia/Seoul")
 
 def synthetic_case():
     fixture = json.loads((ROOT / "tests/fixtures/domain-synthetic.json").read_text())
-    profile = yaml.safe_load((ROOT / "config/strategy.yaml").read_text())["strategy"]["research_profile"]
+    profile = yaml.safe_load((ROOT / "tests/fixtures/config/strategy.yaml").read_text())["strategy"]["research_profile"]
     sessions = []
     day = date.fromisoformat(fixture["calendar_start"])
     while len(sessions) < fixture["calendar_sessions"]:

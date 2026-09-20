@@ -22,7 +22,7 @@ class DeploymentHTTPTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             for name in ('app', 'strategy', 'schedules'):
-                shutil.copyfile(ROOT / 'config' / (name + '.yaml'), directory / (name + '.yaml'))
+                shutil.copyfile(ROOT / 'tests/fixtures/config' / (name + '.yaml'), directory / (name + '.yaml'))
             app_path = directory/'app.yaml'
             app_path.write_text(app_path.read_text().replace('mode: offline', 'mode: ' + mode))
             config = load_config(directory)

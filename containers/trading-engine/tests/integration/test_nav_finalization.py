@@ -21,7 +21,7 @@ class NavFinalizationTests(unittest.TestCase):
         self.network.start()
         self.tmp = tempfile.TemporaryDirectory()
         directory = Path(self.tmp.name) / 'config'
-        shutil.copytree(ROOT / 'config', directory, ignore=shutil.ignore_patterns('secrets.yaml'))
+        shutil.copytree(ROOT / 'tests/fixtures/config', directory, ignore=shutil.ignore_patterns('secrets.yaml'))
         settings = directory / 'app.yaml'
         settings.write_text(settings.read_text().replace('state_dir: ./var/offline/research',
                                                        f'state_dir: {self.tmp.name}/state'))

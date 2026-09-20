@@ -1,6 +1,6 @@
 # trading-engine — 투자 전략과 거래 시스템 구현 명세
 
-대상: `DokySp/danta-bot`의 `containers/trading-engine/` · 작성일: 2026-09-13 · 시간대: Asia/Seoul
+대상: `DokySp/danta-bot`의 `containers/trading-engine/` · 작성일: 2026-09-13 · 배포 정책 갱신: 2026-09-21 · 시간대: Asia/Seoul
 
 구현자: 사용자가 별도로 실행하는 Codex GPT-6 Astra Ultra. 개발 모델 지정은 운영 매매 모델·effort·실거래 권한 지정과 다르다.
 
@@ -8,9 +8,29 @@
 
 `report.html`은 이 README에서 생성한 사람용 보고서다. 별도의 요구사항 원본이 아니다. 구현자는 이 파일의 전략 규칙, 설정값, 데이터 계약, 검증 조건을 기준으로 작업한다.
 
-> **전략의 지위:** 아래 투자 전략은 명세 작성자가 선택한, 구현하고 검증할 기본 가설이다. 수익성이 입증된 전략이나 실제 계좌 운용 승인이 아니다. 연구 수치를 실제 투자금·허용 손실로 자동 승인하지 않는다.
+> **전략의 지위:** 아래 전략의 수익성은 입증되지 않았다. 2026-09-21 사용자는 전체 계좌 현금·보유 주식과 기존 보유 인수, 설정된 전략 정책의 운용을 명시적으로 승인했다. 현재 production 설정은 이 승인을 live/automatic으로 표현한다. 연구 결과가 좋다는 이유로 권한을 새로 만드는 기능은 없다.
 >
 > **중단 원칙:** 사용자만 정할 자금·손실·권한 또는 스스로 해결할 수 없는 핵심 명세 모순을 만나면 작업과 하위 에이전트를 멈추고 질문한다. 추천안으로 임의 진행하거나 구 코드로 빈칸을 메우지 않는다.
+
+## 현재 배포 설정
+
+운영 서버에는 엔진의 `app.yaml`, `strategy.yaml`, `schedules.yaml`, `secrets.yaml`과 gateway의
+`routes.yaml`, `telegram.env`를 복사한다. 서비스마다 `compose.yaml` 하나를 사용한다.
+Codex 로그인 후 Compose를 시작하면 승인된 정책과 실제 계좌·시장 관측으로 준비하며, 수동
+`runtime.json`·`runtime-manifest.json`·해시·성공 표시 파일은 필요 없다. 관측 증거는 `var`의 DB에 남는다.
+준비 실패는 `/status`에 표시되고, 같은 계좌의 기존 writer·활성 주문·자료 부족을 임의로 무시하지 않는다.
+
+전체 계좌 NAV와 현금은 KIS 관측으로 정하고, 기존 보유는 과거 체결을 만들지 않고 한 번만 인수한다.
+Codex 로그인과 로컬 격리 검사를 수행하고, 공시 원문 수집은 보유 보호가 시작된 뒤 review 작업에서 처리한다.
+공시 자료가 수집되지 않은 종목은 신규 진입 조건을 통과하지 못한다.
+정책은 `live_mandate.accepted_risk_policy: configured_profile`이 명시적으로 선택한 프로필이다.
+주문 전 수량 계산에는 양방향 0.5% 수수료·매도 0.2% 세금·방향별 10bp 슬리피지 추정치를 쓰고,
+실제 계좌 현금·일별 비용과 분리해 대사한다. 이는 계좌 약정 수수료 또는 확정 체결 비용이 아니다.
+
+KRX 거래 창은 09:00–15:20이며 실시간 정규시장 구분을 함께 확인한다. 특별 거래시간은 미검증으로
+표시하고 지연 개장·연장 종료에 맞춰 거래 창을 늘리지 않는다. 일봉은 다음 날부터 사용하고 일일
+마감 보고는 다음 날 00:10 한국시간에 처리한다. 현재 수집한 수정주가는 역사적 시점 자료나
+전략 수익성의 증거가 아니다. 설치·갱신 명령은 [배포 절차](deployment/README.md)를 따른다.
 
 ## 1. 사람이 먼저 읽을 요약
 
@@ -51,7 +71,7 @@ AI는 사건의 의미·이미 가격에 반영됐을 가능성·반증·후보 
 
 ### 1.3 완료의 의미
 
-**코드 완성, 운영 정확성, 전략 수익성, 실거래 승인**을 구분한다. 연구 결과가 손실이거나 불충분해도 정직하게 보고한다. 개발 완료를 위해 결과가 좋은 기간을 고르거나 수익률을 만들어내지 않는다. 전략 성과가 확인되지 않으면 시스템이 정상 작동해도 실거래 승격을 자동으로 하지 않는다.
+**코드 완성, 운영 정확성, 전략 수익성, 실거래 승인**을 구분한다. 연구 결과가 손실이거나 불충분해도 정직하게 보고한다. 개발 완료를 위해 결과가 좋은 기간을 고르거나 수익률을 만들어내지 않는다. 연구 성과에 따른 실거래 승격은 자동으로 하지 않는다. 현재 실거래 준비는 별도로 명시된 사용자 운용 승인을 근거로 한다.
 
 ## 2. 해결할 문제와 설계 요구사항
 
@@ -83,11 +103,11 @@ AI는 사건의 의미·이미 가격에 반영됐을 가능성·반증·후보 
 
 이는 연구할 가설이지 확인된 사실이 아니다. 사건이 이미 반영됐거나, 추세 확인이 늦거나, 거래비용이 이익을 넘거나, 횡보장에서 반복 손절이 발생할 수 있다. 이 가능성 때문에 §15의 비AI 비교군과 향후 시점 평가를 필수로 둔다. 특정 지표·아래 숫자가 최적이라는 주장도 하지 않는다.
 
-**초기 연구 범위**는 국내 보통주 현금 매수, KRX 정규 연속매매, 밤·주말 보유가 있는 스윙이다. 공매도·신용·레버리지·파생상품은 사용하지 않는다. NXT/SOR·시간외 매매를 자동 추가하지 않는다. 이는 연구안의 범위이며 실제 계좌에서 허용할지는 사용자 승인 대상이다. 밤 보유를 금지한다는 답이 오면 이 전략과 충돌하므로, 이름만 단타로 바꿔 실행하지 말고 작업을 멈춰 전략 변경을 질문한다.
+**초기 연구 범위**는 국내 보통주 현금 매수, KRX 정규 연속매매, 밤·주말 보유가 있는 스윙이다. 공매도·신용·레버리지·파생상품은 사용하지 않는다. NXT/SOR·시간외 매매를 자동 추가하지 않는다. 현재 승인된 실제 계좌 정책도 이 범위다. 밤 보유를 금지한다는 답이 오면 이 전략과 충돌하므로, 이름만 단타로 바꿔 실행하지 말고 작업을 멈춰 전략 변경을 질문한다.
 
 ### 3.2 숫자의 성격
 
-`research_profile`은 구현하고 고정 비교할 **실험 기본값**이다. 개인 운용 정책이 아니다. `live_mandate`에 복사해 자동 활성화하지 않는다. 실험값 변경은 새 실험 ID와 변경 근거가 필요하며, 결과가 좋아지는 방향으로 매 실행 자동 최적화하지 않는다.
+`research_profile`은 구현하고 고정 비교할 **전략 프로필**이다. 현재 사용자는 `live_mandate.accepted_risk_policy: configured_profile`로 이 전체 프로필의 실제 운용을 명시적으로 위임했다. 이 선택이 없는 정책을 임의로 복사해 활성화하지 않는다. 실험값 변경은 새 실험 ID와 변경 근거가 필요하며, 결과가 좋아지는 방향으로 매 실행 자동 최적화하지 않는다.
 
 | 항목 | 연구 기본값 | 목적/의미 |
 |---|---:|---|
@@ -183,11 +203,11 @@ R_price = E - S0
 
 호가단위는 가격대·시장에 따른 현재 공식 규격을 이용한다. `S0>=E`, ATR 누락/0, 해당 범위에서 보호 가격이 성립하지 않으면 진입하지 않는다. 실제 체결이 `E`보다 유리해도 `S0`를 아래로 이동시키지 않는다. 모든 분할 체결은 같은 진입 계획·보호 가격·만료 시각을 따른다.
 
-`S0`는 프로그램이 감시하는 보호 기준이다. KIS가 특정 native stop 주문을 지원한다고 가정하지 않는다. 앱 장애·장외 시간에는 앱의 시세 기반 보호가 실행되지 않을 수 있다. 이 한계와 밤 보유는 실거래 전에 승인받는다.
+`S0`는 프로그램이 감시하는 보호 기준이다. KIS가 특정 native stop 주문을 지원한다고 가정하지 않는다. 앱 장애·장외 시간에는 앱의 시세 기반 보호가 실행되지 않을 수 있다. 현재 운용 승인은 이 앱 기반 보호 한계와 밤 보유를 포함한다.
 
 ### 4.2 비용과 계획 위험
 
-수수료·세금은 계좌·시장·시행일에 맞는 출처와 유효기간을 저장한다. 모르는 값을 0으로 채우지 않는다. 실제 계좌의 수수료를 사용자가 확인해야 하면 그 시점에서 질문한다.
+수수료·세금은 출처·기준·유효기간을 저장하고 모르는 값을 0으로 채우지 않는다. 자동 준비는 수량 계산용 보수 추정치(양방향 수수료 0.5%, 매도 세금 0.2%)를 명시적으로 사용한다. 실제 계좌 현금과 일별 수수료·세금은 KIS 조회로 대사하며, 추정치를 실제 계좌 약정이나 주문별 확정 비용으로 표시하지 않는다.
 
 ```text
 unit_risk = E - S0
@@ -215,7 +235,7 @@ q_new = max(0, min(
 ))
 ```
 
-현금은 계좌 전체가 아니라 승인된 전략 배정 현금으로 제한하고, KIS의 실제 주문 가능 현금도 상한으로 함께 쓴다. D+정산일을 임의 가정해 자금을 미리 쓰지 않는다. 미체결 매수는 현금·노출·위험·슬롯을 예약한다. 같은 전략의 미체결 매도는 실제 확인 전 현금 유입으로 간주하지 않는다.
+현금은 승인된 전략 배정 범위로 제한한다. 현재 정책은 전체 계좌 현금을 배정하며, KIS의 실제 주문 가능 현금도 별도 상한으로 함께 쓴다. D+정산일을 임의 가정해 자금을 미리 쓰지 않는다. 미체결 매수는 현금·노출·위험·슬롯을 예약한다. 같은 전략의 미체결 매도는 실제 확인 전 현금 유입으로 간주하지 않는다.
 
 포트폴리오 계획 위험은 현재 시점에서 보호 매도까지의 추가 하락을 기준으로 계산한다. 보유 수량에는 `max(현재 유효 평가가격 - 현재 보호가격, 0) + 예상 매도 비용/슬리피지 + 0.5×현재 ATR`를 적용한다. 이미 낸 매수 비용은 다시 더하지 않는다. 미체결 신규 매수 잔량에는 §4.2의 unit_risk를 적용하고 체결된 수량과 겹치지 않게 한다. 1%는 신규 위험을 허용하는 게이트이며, 보유 중 이 수치만 넘었다고 별도 자동 매도 규칙을 만들어내지 않는다. 보호·집중·낙폭 규칙은 각각 적용한다.
 
@@ -548,7 +568,7 @@ CLI·스케줄·Telegram·AI·위험 감시에서 발생한 의도는 같은 `ap
 
 신규 매수는 §4의 지정가 상한으로 전송하고 계획 생성부터 120초 만료다. 부분체결이면 체결분을 보호하고 잔량은 만료 시 취소한다. 같은 조건으로 자동 재주문하거나 더 높은 가격으로 쫓아가지 않는다. 새로운 적법 심사가 나오기 전 잔량을 되살리지 않는다.
 
-보호·기간·추세 청산은 실제 정규 세션과 매도 가능 수량을 확인한 뒤 **기본 시장가 매도 정책**으로 구현한다. 이는 가격보다 청산 가능성을 우선하는 연구 선택이며 실제 계좌 적용은 별도 승인 대상이다. 지원 시장가 주문이 없거나 사용자가 지정가만 허용하면, 체결 지연 위험을 제시하고 정책 결정을 받는다. native stop 지원으로 포장하지 않는다.
+보호·기간·추세 청산은 실제 정규 세션과 매도 가능 수량을 확인한 뒤 **기본 시장가 매도 정책**으로 구현한다. 이는 가격보다 청산 가능성을 우선하는 선택이며 현재 실제 계좌 정책에 명시적으로 승인돼 있다. 지원 시장가 주문이 없거나 사용자가 지정가만 허용하면, 체결 지연 위험을 제시하고 정책 결정을 받는다. native stop 지원으로 포장하지 않는다.
 
 체결·취소 결과가 불명일 때는 새로운 반대방향 주문을 보내지 않는다. 시장가라도 체결을 보장하지 않으며, 거래정지·급변·장 종료는 `EXIT_PENDING/UNEXECUTABLE`로 기록한다. 종료 시 미체결이 실제 자동 취소됐다고 추정하지 말고 브로커로 확인한다.
 
@@ -716,7 +736,7 @@ DART 인증이 필요한 API에는 별도 `DART_API_KEY` 참조를 사용한다.
 
 `/resume`는 중단 사유·현재 계좌·승인을 검사한다. 낙폭·UNKNOWN·권한 만료를 단순 명령으로 우회하지 않는다. 모든 주문 취소/전량 매도/보호 감시 중단은 별도 명시 권한이며 기본 pause와 다르다.
 
-2026-09-20 사용자 요청으로 gateway 연결은 `trading-engine` 단일 route로 통합하고 별도 peer 공유키·서명·profile을 제거했다. 기본 ingress 비활성·호스트 포트 비공개는 유지한다. 내부 Docker 네트워크를 통신 경계로 사용하고 gateway의 Telegram bot token 및 허용 chat, 엔진의 허용 sender/chat·route·기존 제어 승인을 검사한다. sender/chat 필드 자체가 발신 프로그램의 신원을 증명하지 않으므로 엔진 HTTP 포트를 외부에 공개하지 않는다. **live 원격 제어 미구현을 일반 채팅 명령 실행으로 우회하지 않는다.**
+2026-09-20 사용자 요청으로 gateway 연결은 `trading-engine` 단일 route로 통합하고 별도 peer 공유키·서명·profile을 제거했다. 현재 승인된 배포 설정은 ingress를 활성화하며 호스트 포트 비공개는 유지한다. 내부 Docker 네트워크를 통신 경계로 사용하고 gateway의 Telegram bot token 및 허용 chat, 엔진의 허용 sender/chat·route·기존 제어 승인을 검사한다. sender/chat 필드 자체가 발신 프로그램의 신원을 증명하지 않으므로 엔진 HTTP 포트를 외부에 공개하지 않는다. **live 원격 제어 미구현을 일반 채팅 명령 실행으로 우회하지 않는다.**
 
 ### 11.4 배포 경계
 
@@ -730,28 +750,29 @@ DART 인증이 필요한 API에는 별도 `DART_API_KEY` 참조를 사용한다.
 
 세 YAML을 strict schema로 읽고 중복 key·알 수 없는 key·잘못된 타입·참조 오류·unsafe YAML tag를 거부한다. 환경변수는 비밀값/배포 위치 참조로 사용하고 전략 수치를 숨겨 덮어쓰는 경로로 만들지 않는다.
 
-`research_profile`에는 전략이 실제로 동작할 실험값이 들어 있다. `live_mandate`의 개인 자금·위임은 미정으로 남는다. **null은 0이나 무제한이 아니라 미확인**이다. 기본 `offline`은 합성/기록 fixture만 사용하고 네트워크·브로커 쓰기를 차단한다.
+`research_profile`에는 선택한 전략 값이 들어 있다. 현재 `live_mandate`는 전체 계좌와 `configured_profile`을 명시적으로 승인하며 startup에서 실제 자금·보유를 관측해 해석한다. **null은 0이나 무제한이 아니라 미확인**이다. 별도 offline fixture 설정은 합성/기록 자료만 사용하고 네트워크·브로커 쓰기를 차단한다.
 
 실험값의 승인 없이 live 복사, 모드 한 줄 변경으로 실거래 활성화, CLI에서 `--force-live` 같은 우회는 금지한다. 각 실행은 설정·프롬프트·모델·도구 정의를 snapshot으로 고정하고 hash를 기록한다. 거래 의미가 바뀌는 설정/코드 변경은 새 승인 또는 실험 manifest가 필요하다.
 
 ### 12.2 app.yaml
 
 ```yaml
+# Production defaults. Credentials and Telegram IDs belong in secrets.yaml.
 schema_version: 1
 app:
   name: trading-engine
   timezone: Asia/Seoul
-  mode: offline
-  account_alias: null
-  state_dir: ./var/offline/research
+  mode: live
+  account_alias: kis-primary
+  state_dir: ./var/live/kis-primary
   listen_host: 0.0.0.0
   listen_port: 8080
 model:
   provider: codex_cli
   executable: codex
-  model_id: null
-  reasoning_effort: null
-  auth_mode: null
+  model_id: gpt-5.6-sol
+  reasoning_effort: xhigh
+  auth_mode: chatgpt
   timeout_seconds: 180
   transient_retries: 1
   retry_delay_seconds: 5
@@ -761,37 +782,37 @@ model:
   quota_unknown_reset: require_operator
 broker:
   provider: kis
-  environment: null
+  environment: real
   account_ref_env: KIS_ACCOUNT_REF
   app_key_env: KIS_APP_KEY
   app_secret_env: KIS_APP_SECRET
-  capability_manifest: null
-  rate_limit_profile: null
+  capability_manifest: automatic
+  rate_limit_profile: kis-standard
 market:
   disclosures: opendart
   dart_key_env: DART_API_KEY
   official_ir_domains: []
-  calendar_manifest: null
+  calendar_manifest: automatic
   corporate_action_source: null
   require_complete_account: true
 execution:
-  enabled: false
+  enabled: true
   single_writer: true
   unknown_submission: reconcile_then_human
   live_requires_trusted_approval: true
 monitoring:
-  enabled: false
+  enabled: true
   quote_poll_fallback_seconds: 5
   order_poll_active_seconds: 5
   account_poll_idle_seconds: 60
   degraded_action: block_new_risk_and_alert
 telegram:
-  enabled: false
+  enabled: true
   gateway_url_env: TELEGRAM_GATEWAY_URL
   route: trading-engine
   allowed_sender_ids: []
   allowed_chat_ids: []
-  ingress_enabled: false
+  ingress_enabled: true
 storage:
   backend: sqlite
   require_local_filesystem: true
@@ -802,25 +823,28 @@ observability:
   emit_structured_events: true
 ```
 
-`null`인 모델/인증/실제 계좌/캘린더/수수료 공급 등은 외부 실행에 필요할 때 질문/확인한다. offline fixture는 이 값 없이도 동작하되 결과에 `FIXTURE_ONLY`를 표시한다. 거래 가능한 시세·캘린더를 검증하지 못하면 외부 거래를 실행하지 않는다. 실제 비밀값은 여기 적지 않는다.
+모델은 명시된 설정과 서버 Codex 로그인을 사용하고, 계좌·거래일·종목·공시 매핑은 startup에서 조회한다. 비밀값이나 검증 자료가 없으면 준비 사유를 표시한다. 별도 offline fixture는 외부 값 없이 동작하며 결과에 `FIXTURE_ONLY`를 표시한다. 거래 가능한 시세·캘린더를 검증하지 못하면 외부 거래를 실행하지 않는다. 실제 비밀값은 여기 적지 않는다.
 
 2026-09-21 배포 경로 수정: `serve`는 `listen_host: 0.0.0.0`에서 관리용 HTTP를 먼저 시작한다. `GET /version`, `/healthz`, `/readyz`는 계좌·모델 초기화와 독립적이며, offline CLI 연구는 외부 API를 호출하지 않는다. 실제 Telegram 작업 접수와 제어·거래 권한 검사는 유지한다. 엔진 포트는 호스트에 공개하지 않고 신뢰하는 컨테이너만 공유 네트워크에 연결한다. 거래 서비스 미준비 상태를 정상 거래로 표시하지 않는다.
 
 ### 12.3 strategy.yaml
 
-아래가 구현할 연구 프로필의 정확한 설정이다. 문자열 비율은 schema에서 Decimal로 읽는다. 각 수치는 §3~6의 연구 가정이다. 개인 손실 허용치로 승인된 것이 아니다.
+아래는 현재 승인된 프로필 선택을 포함한 production 설정이다. 문자열 비율은 Decimal로 읽는다. 프로필의 수익성은 미검증이며 연구용 기준 자금과 실제 startup에서 조회할 전체 계좌 자금은 구분한다.
 
 ```yaml
+# Explicit operator policy: use the profile below with all account stocks and cash.
 schema_version: 1
 strategy:
   id: catalyst_trend_swing
-  active_profile: research
+  active_profile: live
   research_profile:
     status: unproven_hypothesis
     objective: positive_net_value_over_preregistered_baselines
-    capital_krw: "10000000"
+    capital_krw: '10000000'
     universe:
-      boards: [KOSPI, KOSDAQ]
+      boards:
+      - KOSPI
+      - KOSDAQ
       instrument_kind: common_stock
       venue: KRX
       session: regular_continuous
@@ -831,54 +855,59 @@ strategy:
       minimum_completed_bars: 120
       adtv_window: 20
       adtv_statistic: median
-      minimum_adtv_krw: "5000000000"
-      maximum_spread_bps: "30"
+      minimum_adtv_krw: '5000000000'
+      maximum_spread_bps: '30'
       watchlist: []
       excluded_instruments: []
     signal:
-      event_families: [earnings_quality, official_guidance, material_contract]
+      event_families:
+      - earnings_quality
+      - official_guidance
+      - material_contract
       max_event_age_sessions: 5
       primary_source_required: true
       fast_sma: 20
       slow_sma: 60
       sma_slope_lookback: 5
       relative_return_intervals: 20
-      relative_strength_min_exclusive: "0"
+      relative_strength_min_exclusive: '0'
       atr_bars: 14
       atr_method: simple_mean_true_range
       index_entry_gate: close_at_or_above_sma60
-      chase_above_previous_close_atr: "0.75"
-      chase_above_sma20_atr: "2.0"
-      opportunity_horizon_sessions: [3, 20]
+      chase_above_previous_close_atr: '0.75'
+      chase_above_sma20_atr: '2.0'
+      opportunity_horizon_sessions:
+      - 3
+      - 20
     portfolio:
       max_issuers: 5
-      entry_risk_fraction: "0.0025"
-      aggregate_planned_risk_fraction: "0.0100"
-      entry_position_weight: "0.20"
-      entry_sector_weight: "0.40"
-      entry_gross_weight: "0.80"
-      trim_position_trigger: "0.25"
-      trim_sector_trigger: "0.50"
-      trim_gross_trigger: "0.90"
+      entry_risk_fraction: '0.0025'
+      aggregate_planned_risk_fraction: '0.0100'
+      entry_position_weight: '0.20'
+      entry_sector_weight: '0.40'
+      entry_gross_weight: '0.80'
+      trim_position_trigger: '0.25'
+      trim_sector_trigger: '0.50'
+      trim_gross_trigger: '0.90'
       trim_confirmation_observations: 2
       trim_min_observation_gap_seconds: 5
-      max_plan_adtv_fraction: "0.0005"
-      gap_buffer_atr: "0.50"
+      max_plan_adtv_fraction: '0.0005'
+      gap_buffer_atr: '0.50'
       pyramiding: false
       averaging_down: false
       price_drift_rebalance: false
     exits:
       initial_stop_low_window: 5
-      initial_stop_atr_cap: "2.0"
-      minimum_stop_distance_atr: "0.75"
-      trail_activation_initial_r: "1.0"
-      trail_atr: "2.0"
+      initial_stop_atr_cap: '2.0'
+      minimum_stop_distance_atr: '0.75'
+      trail_activation_initial_r: '1.0'
+      trail_atr: '2.0'
       stop_can_move_down: false
       trend_exit_consecutive_closes: 2
       max_holding_sessions: 20
       same_event_reentry_completed_sessions: 1
       reentry_requires_close_above_previous_entry: true
-      drawdown_pause_fraction: "0.10"
+      drawdown_pause_fraction: '0.10'
       drawdown_action: cancel_entries_pause_new_risk_keep_protection
       auto_resume_after_drawdown: false
     orders:
@@ -888,78 +917,97 @@ strategy:
       exit_type: market_in_valid_session
       decision_max_age_seconds: 120
       quote_max_age_seconds: 5
-      maximum_roundtrip_friction_to_initial_r: "0.15"
+      maximum_roundtrip_friction_to_initial_r: '0.15'
       respect_pending_orders: true
     costs:
       commission_schedule: null
       tax_schedule: null
-      simulation_slippage_bps_per_side: "10"
+      simulation_slippage_bps_per_side: '10'
       operating_cost_allocation: null
       unknown_cost_is_zero: false
     evaluation:
       primary_baseline: technical_only
-      secondary_baselines: [cash, event_flag_no_ai]
+      secondary_baselines:
+      - cash
+      - event_flag_no_ai
       optional_diagnostic: full_strategy_scheduled_only
       discovery_completed_sessions: 60
       minimum_closed_theses: 30
       confirmation_completed_sessions: 20
       block_bootstrap_block_sessions: 5
       block_bootstrap_resamples: 2000
-      paired_return_confidence_level: "0.95"
-      slippage_stress_multiplier: "2.0"
+      paired_return_confidence_level: '0.95'
+      slippage_stress_multiplier: '2.0'
       automatic_live_promotion: false
   live_mandate:
-    status: pending_user
-    capital_krw: null
-    capital_required_by: null
-    account_ownership_policy: null
-    inherited_positions_policy: null
-    inherited_orders_policy: null
-    accepted_strategy_hash: null
-    accepted_risk_policy: null
-    overnight_permission: null
-    permitted_order_types: null
-    approved_cost_allocation: null
-    trusted_approval_id: null
+    status: approved
+    capital_krw: entire_account
+    capital_required_by: startup
+    account_ownership_policy: entire_account
+    inherited_positions_policy: adopt_and_protect
+    inherited_orders_policy: require_no_active_orders
+    accepted_strategy_hash: automatic
+    accepted_risk_policy: configured_profile
+    overnight_permission: true
+    permitted_order_types:
+    - limit
+    - market
+    approved_cost_allocation: broker_account_cash_and_explicit_pretrade_estimate
+    trusted_approval_id: deployment-config
 ```
 
 `capital_krw=10000000`는 연구 규모 비교용이다. 실제 계좌 잔고와 같다고 주장하지 않는다. 실제 자본이 크게 다르면 정수 수량·최소 비용·종목 가격의 영향이 달라지므로 그 규모로 평가를 다시 수행한다.
 
-비용 출처가 미정인 상태에서는 산식용 가상 비용을 **명시된 fixture에만** 넣을 수 있다. 외부 시세 기반 경제적 평가에서 수수료/세금을 생략하고 ‘순수익’이라고 보고하지 않는다. 슬리피지 10bp/방향 역시 연구 가정이며, 호가와 지연을 포함한 체결 모델에서 검증·민감도 분석한다.
+합성 검증의 가상 비용은 fixture로 표시한다. 승인된 production의 보수적 주문 전 비용 추정은 실제 비용과 분리해 저장한다. 외부 시세 기반 경제적 평가에서 수수료/세금을 생략하고 ‘순수익’이라고 보고하지 않는다. 슬리피지 10bp/방향 역시 연구 가정이며, 호가와 지연을 포함한 체결 모델에서 검증·민감도 분석한다.
 
-실거래 정책은 사용자가 연구안 채택 여부와 자금·손실·주문 정책을 승인하면 전체 유효 정책으로 확장해 저장한다. 일부 필드가 없는 live 정책을 research 프로필로 자동 메우지 않는다. 이미 승인한 값을 다시 묻지 않는다.
+실거래 정책은 사용자가 연구안 채택 여부와 자금·손실·주문 정책을 승인하면 전체 유효 정책으로 확장해 저장한다. `configured_profile`이라는 명시적 선택 없이 일부 필드가 없는 live 정책을 임의로 메우지 않는다. 이미 승인한 값을 다시 묻지 않는다.
 
 ### 12.4 schedules.yaml
 
 ```yaml
 schema_version: 1
 scheduler:
-  enabled: false
+  enabled: true
   timezone: Asia/Seoul
   calendar_ref: app.market.calendar_manifest
   missed_run_policy: skip_expired_reconcile_and_check_protection
   jobs:
-    - id: finalize_day
-      kind: finalize_and_report
-      trigger: {type: session_offset, anchor: continuous_close, minutes: 30}
-    - id: portfolio_review
-      kind: full_review
-      trigger: {type: session_offset, anchor: continuous_open, minutes: 20}
-    - id: disclosures
-      kind: collect_disclosures
-      trigger: {type: interval_in_session, seconds: 180}
-    - id: material_event
-      kind: event_review
-      trigger: {type: verified_event, coalesce_seconds: 30}
-    - id: risk_monitor
-      kind: risk_monitor
-      trigger: {type: market_event_with_poll_fallback}
-    - id: reconcile
-      kind: reconcile
-      trigger: {type: order_event_with_poll_fallback}
-    - id: holding_deadline
-      kind: time_limit_exit
-      trigger: {type: session_offset, anchor: continuous_close, minutes: -10}
+  - id: finalize_day
+    kind: finalize_and_report
+    trigger:
+      type: session_offset
+      anchor: continuous_close
+      minutes: 530
+  - id: portfolio_review
+    kind: full_review
+    trigger:
+      type: session_offset
+      anchor: continuous_open
+      minutes: 20
+  - id: disclosures
+    kind: collect_disclosures
+    trigger:
+      type: interval_in_session
+      seconds: 180
+  - id: material_event
+    kind: event_review
+    trigger:
+      type: verified_event
+      coalesce_seconds: 30
+  - id: risk_monitor
+    kind: risk_monitor
+    trigger:
+      type: market_event_with_poll_fallback
+  - id: reconcile
+    kind: reconcile
+    trigger:
+      type: order_event_with_poll_fallback
+  - id: holding_deadline
+    kind: time_limit_exit
+    trigger:
+      type: session_offset
+      anchor: continuous_close
+      minutes: -10
   discretionary_entry_window:
     start_minutes_after_continuous_open: 20
     end_minutes_before_continuous_close: 30
@@ -1180,7 +1228,7 @@ technical_only의 재진입은 사건 요구를 제외하고 §5.6의 완성 세
 
 | ID | 사례 | 기대 결과 |
 |---|---|---|
-| O01 | 기본 설정으로 시작 | offline, 외부 모델/브로커 호출 0 |
+| O01 | 별도 offline fixture 설정으로 시작 | offline, 외부 모델/브로커 호출 0 |
 | O02 | 중복/미지 key·문자열 bool·잘못된 비율 | 설정 오류, 조용한 fallback 없음 |
 | O03 | mode만 live 변경·미승인 개인 정책 | submit/cancel/replace 0 |
 | O04 | 실행 중 정책 변경 | frozen hash 유지, 새 거래 의미는 재검증/승인 |
@@ -1233,7 +1281,7 @@ technical_only의 재진입은 사건 요구를 제외하고 §5.6의 완성 세
 | I01 | 구 소스·Git 이력·옛 이미지 없는 빈 작업 공간 | 이 README+공식 규격+새 코드만으로 clean build/offline end-to-end 가능 |
 | I02 | 핵심 기술 명세 누락/모순 | SPEC_GAP으로 질문·중단, 구 코드 복원 금지 |
 | I03 | 실제 자금·밤 보유·손실·권한 미승인 | 사용자 질문 후 구현/위임 중단, 미정값 추정 금지 |
-| I04 | 연구 NAV/위험값을 live로 자동 상속 | 차단, 명시적 승인된 유효 정책 필요 |
+| I04 | 승인 없이 연구 NAV/위험값을 live로 자동 상속 | 차단, 명시적 승인된 유효 정책 필요 |
 | I05 | README에서 report 생성 | 모든 절/표/값 일치, 원본 hash 일치, 숨겨진 별도 전략 없음 |
 | I06 | 수익 검증 없이 코드 테스트만 성공 | ENGINE_VALIDATED와 STRATEGY_UNPROVEN 분리, live 허가 아님 |
 
@@ -1334,9 +1382,9 @@ danta activate --approval <id> --expected-config <hash>
 
 운영 전환은 별도의 사람 결정이다. 실제 대상 서버·계좌·자금·초기 보유/미체결의 인수 범위·정책 hash·코드/모델/프롬프트·비용·보호 한계·승인 유효기간을 확정한다. 미래 투자 수익을 약속하지 않는다.
 
-기존 writer의 새 주문 생성을 승인된 방식으로 중지하고, 잔고·활성 주문·최근 체결·현금·귀속을 확인한다. 그 기록을 새 전략의 bootstrap으로 만든다. 기존 미체결을 유지/취소/인수할지는 사용자 방침대로만 한다. 코드 폴더 삭제가 운영 프로세스 종료를 뜻한다고 가정하지 않는다.
+기존 writer의 새 주문 생성을 승인된 방식으로 중지하고, 잔고·활성 주문·최근 체결·현금·귀속을 확인한다. 자동 준비가 그 관측 기록을 새 전략의 bootstrap으로 DB에 남긴다. 기존 미체결을 유지/취소/인수할지는 사용자 방침대로만 한다. 코드 폴더 삭제가 운영 프로세스 종료를 뜻한다고 가정하지 않는다.
 
-실제 계좌의 수동/외부 보유가 불명하면 인수하지 않는다. backup/restore·환경 분리·단일 writer·신뢰 승인·모델 secret 격리·보호 감시 공백을 확인한 후, 먼저 비제출 상태로 시작한다. live 활성화는 별도 신뢰 operator 명령으로 수행한다.
+실제 계좌의 수동/외부 보유가 불명하면 인수하지 않는다. backup/restore·환경 분리·단일 writer·신뢰 승인·모델 secret 격리·보호 감시 공백을 확인한 후, 먼저 비제출 상태로 시작한다. 현재 automatic 배포는 승인된 YAML과 관측 결과를 확인한 뒤 기존 활성화 검사를 startup에서 수행한다. 별도 수동 활성화 명령은 필요 없다.
 
 오류 발생 시 신규 재량 주문을 막고 계좌 대사를 우선한다. 새 image로 되돌려도 이미 발생한 체결은 없어지지 않는다. 원장·DB schema·활성 주문의 정합성을 확인하고 복구한다. 구 봇 코드를 자동 복원하는 fallback 경로는 만들지 않는다.
 

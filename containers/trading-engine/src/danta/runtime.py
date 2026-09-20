@@ -156,8 +156,8 @@ class KisBrokerPort:
     def bind_store(self,store):
         self.store = store
 
-    def _namespace(self, session_date):
-        return f"{self.adapter.environment}:{self.manifest['account_alias']}:{session_date}:KRX"
+    def _namespace(self, session_date, venue="KRX"):
+        return f"{self.adapter.environment}:{self.manifest['account_alias']}:{session_date}:{venue}"
 
     def submit(self, intent):
         instrument = intent["instrument_id"]
@@ -169,6 +169,14 @@ class KisBrokerPort:
         deadline = min(quote.observed_at + timedelta(seconds=5), session.closes_at)
         if intent.get("expires_at"):
             deadline = min(deadline, aware_time(intent["expires_at"]))
+        if intent["side"] == "BUY":
+            try:
+                power = self.adapter.read_buying_power(ticker, intent["limit_price"])
+                if (_quantity(power["nrcvb_buy_qty"]) < intent["quantity"] or
+                        _decimal(power["nrcvb_buy_amt"]) < intent["quantity"] * _decimal(intent["limit_price"])):
+                    return {"status":"NOT_SENT", "reason":"NO_MARGIN_BUYING_POWER_EXCEEDED"}
+            except (AdapterError, ValueError, KeyError, TypeError, ArithmeticError):
+                return {"status":"NOT_SENT", "reason":"NO_MARGIN_BUYING_POWER_UNVERIFIED"}
         result = self.adapter.submit(ticker, intent["side"], intent["quantity"], limit_price=intent["limit_price"], valid_until=deadline)
         if result.status != "ACKNOWLEDGED":
             return {"status": result.status, "reason": result.code}
@@ -188,6 +196,17 @@ class KisBrokerPort:
         metadata = request.get("metadata") or json.loads(known.get("broker_metadata") or "{}")
         if not metadata.get("organization"):
             raise HumanRequired("Broker organization metadata is unverified")
+        try:
+            result = self.adapter.read_cancelable_orders()
+            matches = [row for row in result.records if str(row.get("odno")) == request["broker_id"]
+                       and str(row.get("ord_gno_brno")) == metadata["organization"]]
+            if result.quality != "COMPLETE" or len(matches) != 1:
+                return {"status":"NOT_SENT", "reason":"CANCELABLE_ORDER_UNVERIFIED"}
+            possible = _quantity(matches[0]["psbl_qty"])
+            if possible < quantity:
+                return {"status":"NOT_SENT", "reason":"CANCELABLE_QUANTITY_CHANGED"}
+        except (AdapterError, ValueError, KeyError, TypeError, ArithmeticError):
+            return {"status":"NOT_SENT", "reason":"CANCELABLE_ORDER_UNVERIFIED"}
         result = self.adapter.cancel(request["broker_id"], metadata["organization"], quantity,
                                      order_type="00" if known["side"] == "BUY" else "01")
         return {"status": result.status, "reason": result.code}
@@ -201,7 +220,205 @@ class KisBrokerPort:
             raise HumanRequired("Settlement evidence scope/verification mismatch")
         return value["orders"]
 
+    @staticmethod
+    def _order_status(record, quantity, cumulative, *, strict=False, expired=False):
+        aliases = [_quantity(record[key]) for key in ("cncl_cfrm_qty", "cnc_cfrm_qty") if key in record]
+        if not aliases or len(set(aliases)) != 1:
+            raise ValueError("CANCEL_QUANTITY_UNVERIFIED")
+        canceled = aliases[0]
+        rejected = _quantity(record["rjct_qty"]) if strict or "rjct_qty" in record else 0
+        remaining = _quantity(record["rmn_qty"]) if strict or "rmn_qty" in record else quantity-cumulative-canceled-rejected
+        accounted = cumulative+canceled+rejected+remaining
+        expired_remainder = expired and remaining == 0 and accounted < quantity
+        if quantity <= 0 or min(cumulative, canceled, rejected, remaining) < 0 or accounted != quantity and not expired_remainder:
+            raise ValueError("CONFLICTING_ORDER_QUANTITIES")
+        canceled_flag = record.get("cncl_yn", "")
+        if canceled_flag not in {"", "Y", "N"} or canceled_flag == "Y" and not canceled:
+            raise ValueError("CONFLICTING_ORDER_CANCELLATION")
+        if expired_remainder:
+            return "EXPIRED"
+        return ("FILLED" if cumulative == quantity else "PARTIAL_CANCELED" if not remaining and cumulative
+                else "CANCELED" if not remaining and canceled else "REJECTED" if not remaining and rejected
+                else "PARTIALLY_FILLED" if cumulative else "ACKNOWLEDGED")
+
+    @staticmethod
+    def order_fingerprint(order):
+        return digest({key: order[key] for key in ("namespace", "broker_id", "instrument_id", "side", "quantity",
+                       "cumulative_quantity", "cumulative_notional", "state", "metadata")})
+
+    @staticmethod
+    def _active_reservation(record, today):
+        # A blank end date is a one-day reservation, not a perpetual order.
+        # KIS documents a maximum 30-day lifetime for period reservations.
+        day = date.fromisoformat(record["rsvn_ord_ord_dt"])
+        raw_end = record.get("rsvn_end_dt", "")
+        end = date.fromisoformat(raw_end) if raw_end not in {"", "00000000"} else day
+        canceled = record.get("cncl_ord_dt", "")
+        if canceled not in {"", "00000000"}:
+            date.fromisoformat(canceled)
+            return False
+        if end < today:
+            return False
+        quantity, filled = _quantity(record["ord_rsvn_qty"]), _quantity(record["tot_ccld_qty"])
+        if not quantity or filled > quantity:
+            raise ValueError("RESERVATION_QUANTITIES_UNVERIFIED")
+        if quantity == filled:
+            return False
+        # A one-day reservation with a returned regular order number has been
+        # converted; its working quantity is reconciled in the ordinary census.
+        number = str(record.get("odno", "")).strip()
+        if end == day and day <= today and number.isdigit() and int(number):
+            return False
+        return True
+
+    def census(self):
+        """Read the whole domestic cash account; no ownership or historical trades are invented."""
+        now, bootstrap = self.clock(), self.manifest["bootstrap"]
+        today = now.astimezone(SEOUL).date()
+        start = max(date.fromisoformat(bootstrap.get("orders_since") or today.isoformat()), today-timedelta(days=80))
+        try:
+            orders = self.adapter.read_orders(start, today)
+            cancelable = self.adapter.read_cancelable_orders()
+            reservations = self.adapter.read_reservations(today-timedelta(days=31), today+timedelta(days=31))
+            try:
+                costs = self.adapter.read_daily_costs(start, today)
+            except AdapterError:
+                costs = None
+            # Read balances last so executions observed above are reflected in positions/cash.
+            account = self.adapter.read_account()
+            if any(result.quality != "COMPLETE" for result in (account, orders, cancelable, reservations)):
+                raise ValueError("BROKER_PAGINATION_INCOMPLETE")
+            fields = ("prvs_rcdl_excc_amt", "tot_evlu_amt", "evlu_amt_smtl_amt", "nass_amt", "tot_loan_amt", "cma_evlu_amt")
+            summaries = []
+            for page in account.metadata["summaries"]:
+                if not isinstance(page, list) or len(page) != 1:
+                    raise ValueError("ACCOUNT_SUMMARY_UNVERIFIED")
+                summaries.append({key: str(_decimal(page[0][key])) for key in fields})
+            if not summaries or any(value != summaries[0] for value in summaries):
+                raise ValueError("ACCOUNT_SUMMARY_CHANGED_DURING_PAGINATION")
+            summary = summaries[0]
+            cash, nav, valuation = (_decimal(summary[key]) for key in fields[:3])
+            if nav != cash + valuation or _decimal(summary["nass_amt"]) != nav:
+                raise ValueError("ACCOUNT_NAV_RECONCILIATION_FAILED")
+            if _decimal(summary["tot_loan_amt"]) or _decimal(summary["cma_evlu_amt"]):
+                raise ValueError("NON_CASH_ACCOUNT_ASSETS_UNSUPPORTED")
+            quantities, sellable, prices, values = {}, {}, {}, {}
+            for record in account.records:
+                instrument = "KRX:" + str(record["pdno"])
+                if not re.fullmatch(r"KRX:[A-Z0-9]{6}", instrument) or instrument in quantities:
+                    raise ValueError("DUPLICATE_OR_INVALID_ACCOUNT_POSITION")
+                quantities[instrument], sellable[instrument] = _quantity(record["hldg_qty"]), _quantity(record["ord_psbl_qty"])
+                prices[instrument], values[instrument] = str(_decimal(record["prpr"])), _decimal(record["evlu_amt"])
+                if sellable[instrument] > quantities[instrument] or quantities[instrument] and _decimal(prices[instrument]) <= 0:
+                    raise ValueError("INVALID_ACCOUNT_POSITION")
+                if _decimal(record.get("loan_amt", "0")):
+                    raise ValueError("NON_CASH_ACCOUNT_ASSETS_UNSUPPORTED")
+            if sum(values.values(), Decimal(0)) != valuation:
+                raise ValueError("ACCOUNT_VALUATION_RECONCILIATION_FAILED")
+            active = {(str(row["ord_gno_brno"]), str(row["odno"])) for row in cancelable.records if _quantity(row["psbl_qty"])}
+            normalized, keys = [], set()
+            for record in orders.records:
+                day = date.fromisoformat(str(record["ord_dt"]))
+                venues = {record[key] for key in ("excg_id_dvsn_cd", "excg_id_dvsn_Cd") if record.get(key)}
+                if len(venues) != 1 or not venues <= {"KRX", "NXT", "SOR"} or day > today:
+                    raise ValueError("ORDER_VENUE_OR_DATE_UNVERIFIED")
+                venue = venues.pop()
+                quantity, cumulative = _quantity(record["ord_qty"]), _quantity(record["tot_ccld_qty"])
+                notional = _decimal(record["tot_ccld_amt"])
+                if bool(cumulative) != bool(notional):
+                    raise ValueError("INVALID_CUMULATIVE_OBSERVATION")
+                organization, broker_id = str(record["ord_gno_brno"]), str(record["odno"])
+                if not organization.isdigit() or not broker_id.isdigit():
+                    raise ValueError("ORDER_IDENTITY_UNVERIFIED")
+                expired = (day < today
+                        and record.get("ord_dvsn_cd") in {"00", "01"} and (organization, broker_id) not in active
+                        and (not record.get("rsvn_ord_end_dt") or str(record["rsvn_ord_end_dt"]) in {"00000000", ""}
+                             or date.fromisoformat(str(record["rsvn_ord_end_dt"])) < today))
+                status = self._order_status(record, quantity, cumulative, strict=True, expired=expired)
+                if expired and status in {"ACKNOWLEDGED", "PARTIALLY_FILLED"}:
+                    status = "EXPIRED"
+                item = {"namespace": self._namespace(day.isoformat(), venue), "broker_id": broker_id,
+                        "instrument_id": "KRX:"+str(record["pdno"]), "side": {"01":"SELL", "02":"BUY"}[record["sll_buy_dvsn_cd"]],
+                        "quantity": quantity, "cumulative_quantity": cumulative, "cumulative_notional": str(notional),
+                        "state": status, "metadata": {"organization": organization, "original_order_id": str(record.get("orgn_odno", "")),
+                                                       "venue": venue, "order_type": record.get("ord_dvsn_cd")},
+                        "observed_at": orders.retrieved_at.isoformat(), "cumulative_fees": None if cumulative else "0",
+                        "first_fill_at": None, "fill_time_quality": "FIRST_OBSERVED" if cumulative else "UNKNOWN",
+                        "fill_session_id": day.isoformat()}
+                item["key"] = item["namespace"]+":"+broker_id
+                if item["key"] in keys:
+                    raise ValueError("DUPLICATE_BROKER_ORDER")
+                keys.add(item["key"])
+                item["fingerprint"] = self.order_fingerprint(item)
+                item["terminal"] = status in {"FILLED", "CANCELED", "REJECTED", "EXPIRED", "PARTIAL_CANCELED"}
+                normalized.append(item)
+            # An active cancelable order missing from the history is incomplete evidence.
+            if not active <= {(row["metadata"]["organization"], row["broker_id"]) for row in normalized}:
+                raise ValueError("ACTIVE_ORDER_MISSING_FROM_HISTORY")
+            daily_costs, cost_quality = {}, "UNCONFIRMED"
+            try:
+                if costs is not None and costs.quality == "COMPLETE":
+                    for record in costs.records:
+                        day = date.fromisoformat(str(record["trad_dt"])).isoformat()
+                        if day in daily_costs or not start <= date.fromisoformat(day) <= today:
+                            raise ValueError("DUPLICATE_OR_INVALID_COST_DAY")
+                        daily_costs[day] = {key: str(_decimal(record[key])) for key in ("buy_amt", "sll_amt", "fee", "tl_tax", "loan_int")}
+                    cost_quality = "BROKER_REPORTED"
+            except (AdapterError, ValueError, KeyError, TypeError, ArithmeticError):
+                daily_costs = {}
+            return {"complete": True, "errors": [], "quantities": quantities, "sellable_quantities": sellable,
+                    "prices": prices, "economic_cash": str(cash), "account_nav": str(nav),
+                    "account_observed_at": account.retrieved_at.isoformat(), "daily_costs": daily_costs,
+                    "cost_quality": cost_quality, "orders": normalized,
+                    "reservations": [row for row in reservations.records if self._active_reservation(row, today)]}
+        except (AdapterError, ValueError, KeyError, TypeError, ArithmeticError) as error:
+            return {"complete": False, "errors": [getattr(error, "code", str(error) if isinstance(error, ValueError) else "PROVIDER_FIELD_UNVERIFIED")],
+                    "orders": [], "reservations": []}
+
+    def _whole_snapshot(self):
+        census = self.census()
+        if not census["complete"]:
+            return {**census, "ownership_complete": False}
+        bootstrap, normalized, errors = self.manifest["bootstrap"], [], []
+        if bootstrap.get("external_quantities") or bootstrap.get("external_order_keys"):
+            errors.append("WHOLE_ACCOUNT_OWNERSHIP_CONFLICT")
+        baseline = bootstrap.get("baseline_orders", {})
+        for item in census["orders"]:
+            known = self.state.known_order(item["namespace"], item["broker_id"])
+            if known is None:
+                if item["state"] in {"FILLED", "CANCELED", "REJECTED", "EXPIRED", "PARTIAL_CANCELED"} and baseline.get(item["key"]) == item["fingerprint"]:
+                    continue
+                errors.append("UNALLOCATED_BROKER_ORDER")
+                continue
+            if json.loads(known.get("broker_metadata") or "{}").get("organization") != item["metadata"]["organization"]:
+                errors.append("ORDER_ORGANIZATION_MISMATCH")
+                continue
+            with self.state.lock:
+                revision = self.state.data["observations"].setdefault(item["key"], {"revision": 0, "last_observation_hash": None})
+                if revision["last_observation_hash"] != item["fingerprint"]:
+                    revision.update(revision=revision["revision"]+1, last_observation_hash=item["fingerprint"])
+                    self.state.save()
+                item["revision"] = revision["revision"]
+            normalized.append(item)
+        if census["reservations"]:
+            errors.append("ACTIVE_RESERVATION_ORDER")
+        available = Decimal(0)
+        try:
+            fields = self.manifest.get("normalization", {}).get("account", {})
+            power = self.adapter.read_buying_power(fields.get("resource_symbol", "005930"), fields.get("resource_price", "1"))
+            available = min(_decimal(census["economic_cash"]), _decimal(power["nrcvb_buy_amt"]))
+        except (AdapterError, ValueError, KeyError, TypeError, ArithmeticError):
+            errors.append("NO_MARGIN_BUYING_POWER_UNVERIFIED")
+        return {"complete": not errors, "ownership_complete": not errors, "errors": errors,
+                "orders": normalized, "strategy_quantities": census["quantities"], "strategy_sellable_quantities": census["sellable_quantities"],
+                "broker_available_cash": str(available), "whole_account": True,
+                "account_cash": {"cash_krw": census["economic_cash"], "observed_at": census["account_observed_at"],
+                                 "source": "KIS:inquire-balance:prvs_rcdl_excc_amt", "daily_costs": census["daily_costs"],
+                                 "cost_quality": census["cost_quality"]}}
+
     def snapshot(self):
+        if self.manifest["bootstrap"].get("whole_account") is True:
+            return self._whole_snapshot()
         now = self.clock()
         mapping = self.manifest["normalization"]
         account = self.adapter.read_account(resource_symbol=mapping["account"]["resource_symbol"],
@@ -267,8 +484,7 @@ class KisBrokerPort:
                     # No executions have occurred. The approved fee contract is trade-based.
                     fees, first_fill, observed, fill_quality = Decimal(0), None, orders.retrieved_at,"UNKNOWN"
                 side = fields["side_codes"][str(_field(record,fields["side"]))]
-                canceled = _quantity(_field(record,fields["canceled_quantity"]))
-                status = "FILLED" if cumulative == quantity else "CANCELED" if canceled >= quantity-cumulative else "PARTIALLY_FILLED" if cumulative else "ACKNOWLEDGED"
+                status = self._order_status(record, quantity, cumulative)
                 item = {"broker_id":broker_id,"namespace":namespace,"instrument_id":"KRX:"+str(_field(record,fields["symbol"])),
                         "side":side,"quantity":quantity,"cumulative_quantity":cumulative,"cumulative_notional":str(notional),
                         "cumulative_fees":str(fees) if fees is not None else None,"observed_at":observed.isoformat(),"first_fill_at":first_fill.isoformat() if first_fill else None,
@@ -318,11 +534,16 @@ class ExternalRuntime:
                 raise HumanRequired("FULL_UNIVERSE_COLLECTION_INCOMPLETE")
             for row in result.records:
                 ticker = row["symbol"]
-                flags = [row.get(key) for key in ("etp","spac","halted","liquidation","managed","preferred")]
-                codes_known = all(value in mapping["true_codes"]+mapping["false_codes"] for value in flags)
-                true = lambda key: row.get(key) in mapping["true_codes"]
-                kind = "common_stock" if row.get("group") in mapping["common_groups"] and not true("etp") and not true("spac") and not true("preferred") else "excluded_instrument"
-                status = "UNKNOWN" if not codes_known else "HALTED" if true("halted") else "DELISTING" if true("liquidation") else "ADMINISTRATIVE" if true("managed") else "NORMAL"
+                if mapping.get("normalizer") == "kis_master_field_codes_v1":
+                    from .deployment_sources import normalize_master_flags
+                    flags = normalize_master_flags(row)
+                    kind, status, codes_known = flags["kind"], flags["status"], flags["codes_known"]
+                else:
+                    flags = [row.get(key) for key in ("etp","spac","halted","liquidation","managed","preferred")]
+                    codes_known = all(value in mapping["true_codes"]+mapping["false_codes"] for value in flags)
+                    true = lambda key: row.get(key) in mapping["true_codes"]
+                    kind = "common_stock" if row.get("group") in mapping["common_groups"] and not true("etp") and not true("spac") and not true("preferred") else "excluded_instrument"
+                    status = "UNKNOWN" if not codes_known else "HALTED" if true("halted") else "DELISTING" if true("liquidation") else "ADMINISTRATIVE" if true("managed") else "NORMAL"
                 issuer = mapping["issuer_by_symbol"].get(ticker)
                 sector = mapping["sector_by_industry"].get(row.get("industry"))
                 instruments.append(Instrument(instrument_id="KRX:"+ticker,issuer_id=issuer or "UNVERIFIED:"+ticker,
@@ -332,13 +553,18 @@ class ExternalRuntime:
                     diagnostics.append({"instrument_id":"KRX:"+ticker,"reason":"UNIVERSE_STATUS_OR_CLASSIFICATION_EXCLUDED"})
         return instruments,diagnostics
 
-    def _bars(self, result, *, index=False):
+    def _bars(self, result, *, index=False, expected=None):
         basis = self.manifest["normalization"]["bars"]
+        if self.manifest.get("automatic"):
+            from .deployment_sources import validate_bar_observations
+            observed = validate_bar_observations(result, expected, index=index)
+            basis = {**basis, **observed}
         rows = []
         for raw in result.records:
             session_id = date.fromisoformat(str(raw["stck_bsop_date"])).isoformat()
             session = self.calendar.session(session_id)
-            if session.closes_at > result.retrieved_at:
+            from .deployment_sources import daily_bar_available_at
+            if daily_bar_available_at(session) > result.retrieved_at:
                 continue
             names = ("bstp_nmix_hgpr","bstp_nmix_lwpr","bstp_nmix_prpr") if index else ("stck_hgpr","stck_lwpr","stck_clpr")
             rows.append(DailyBar(session_id=session_id,opens_at=session.opens_at,closes_at=session.closes_at,
@@ -459,6 +685,12 @@ class ExternalRuntime:
                 if instrument_id not in coverage:
                     continue
                 receipt = row["rcept_no"]
+                if self.manifest.get("automatic"):
+                    title_text = row.get("report_nm", "")
+                    if not any(word in title_text for word in ("계약", "전망", "계획", "영업실적", "실적공시", "사업보고서", "분기보고서", "반기보고서")):
+                        continue
+                    if receipt in cached:
+                        continue  # Corrections have their own receipt; never reset original availability.
                 try:
                     document = self.dart.read_disclosure(receipt)
                     if document.quality != "COMPLETE" or not document.records:
@@ -632,36 +864,69 @@ class ExternalRuntime:
             self.config.assert_current()
             self.config.require_external("market_read",self.approval)
             now = self.clock()
-            completed = [session for session in self.calendar.sessions if session.closes_at <= now]
+            from .deployment_sources import completed_sessions, prepare_market_sources
+            if self.manifest.get("automatic") and aware_time(self.manifest["calendar"]["observed_at"]).astimezone(SEOUL).date() != now.astimezone(SEOUL).date():
+                sources = prepare_market_sources(self.kis, self.dart, now=now)
+                self.manifest["calendar"], self.manifest["ticks"] = sources["calendar"], sources["ticks"]
+                self.manifest["normalization"].update(sources["normalization"])
+                self.manifest["disclosures"]["instrument_by_corp_code"] = sources["disclosures"]["instrument_by_corp_code"]
+                from .deployment import estimated_costs
+                self.manifest["costs"] = estimated_costs(self.manifest["account_alias"], now)
+                self.calendar = SessionCalendar([Session.model_validate_json(canonical(row)) for row in sources["calendar"]["sessions"]],
+                    provenance=sources["calendar"]["source"], verified=True, synthetic=False)
+                self.daily_cache = None
+            completed = completed_sessions(self.calendar, now)
             if len(completed) < self.profile["universe"]["minimum_completed_bars"]:
                 raise HumanRequired("VERIFIED_CALENDAR_HISTORY_INSUFFICIENT")
             day = completed[-1].session_id
-            if self.daily_cache is None or self.daily_cache[0] != day:
+            account,account_order = self._account()
+            new_day = self.daily_cache is None or self.daily_cache[0] != day
+            if new_day:
                 instruments,diagnostics = self._instruments(now)
                 bars,index_bars = {},{}
-                start = completed[-self.profile["universe"]["minimum_completed_bars"]].opens_at.date()
-                end = completed[-1].closes_at.date()
-                for board in self.profile["universe"]["boards"]:
-                    index_bars[board] = self._bars(self.kis.read_index_bars(board,start,end),index=True)
-                expected = [session.session_id for session in completed[-self.profile["universe"]["minimum_completed_bars"]:]]
-                for instrument in instruments:
-                    if instrument.kind != "common_stock" or instrument.status != "NORMAL" or not instrument.status_verified or not instrument.sector:
-                        continue
-                    try:
-                        values = self._bars(self.kis.read_bars(instrument.instrument_id.removeprefix("KRX:"),start,end))
-                        if [bar.session_id for bar in values] != expected:
-                            raise ValueError("DAILY_CALENDAR_COVERAGE_INCOMPLETE")
-                        bars[instrument.instrument_id] = values
-                    except (ValueError,KeyError,AdapterError) as error:
-                        if isinstance(error,HumanRequired) or isinstance(error,AdapterError) and error.code in AUTH_ERRORS:
-                            raise
-                        diagnostics.append({"instrument_id":instrument.instrument_id,"reason":getattr(error,"code",str(error))})
-                self.daily_cache = (day,instruments,bars,index_bars,diagnostics)
-            _,instruments,bars,index_bars,diagnostics = self.daily_cache
+            else:
+                _,instruments,bars,index_bars,diagnostics = self.daily_cache
             diagnostics = list(diagnostics)
-            events,facts,coverage,documents = self._events(instruments,self.clock())
+            if self.manifest.get("automatic") and self.latest_bundle is None:
+                # Start existing-position protection before collecting a month
+                # of disclosure originals. The review worker fills coverage;
+                # no entry can pass the uncollected event gate in the meantime.
+                events, facts, documents = [], [], {}
+                coverage = {item.instrument_id: "FETCH_FAILED" for item in instruments}
+            else:
+                events,facts,coverage,documents = self._events(instruments,self.clock())
             diagnostics.extend(self.disclosure_diagnostics)
-            account,account_order = self._account()
+            expected = [session.session_id for session in completed[-self.profile["universe"]["minimum_completed_bars"]:]]
+            start = completed[-self.profile["universe"]["minimum_completed_bars"]].opens_at.date()
+            end = completed[-1].closes_at.date()
+            needed = self._protection_symbols(account)
+            current_session = self.calendar.available_session(now)
+            for event in events:
+                if (event.official and event.primary_source_complete and
+                        1 <= self.calendar.event_age(event,current_session.session_id) <= self.profile["signal"]["max_event_age_sessions"]):
+                    needed.add(event.instrument_id)
+            for board in self.profile["universe"]["boards"]:
+                if board not in index_bars:
+                    index_bars[board] = self._bars(self.kis.read_index_bars(board,start,end),index=True,expected=expected)
+            for instrument in instruments:
+                if instrument.kind != "common_stock" or instrument.status != "NORMAL" or not instrument.status_verified or not instrument.sector:
+                    continue
+                # Whole universe comes from the master; technical history is only
+                # needed for source-qualified events and held/working positions.
+                if self.manifest.get("automatic") and instrument.instrument_id not in needed:
+                    continue
+                if instrument.instrument_id in bars:
+                    continue
+                try:
+                    values = self._bars(self.kis.read_bars(instrument.instrument_id.removeprefix("KRX:"),start,end),expected=expected)
+                    if [bar.session_id for bar in values] != expected:
+                        raise ValueError("DAILY_CALENDAR_COVERAGE_INCOMPLETE")
+                    bars[instrument.instrument_id] = values
+                except (ValueError,KeyError,AdapterError) as error:
+                    if isinstance(error,HumanRequired) or isinstance(error,AdapterError) and error.code in AUTH_ERRORS:
+                        raise
+                    diagnostics.append({"instrument_id":instrument.instrument_id,"reason":getattr(error,"code",str(error))})
+            self.daily_cache = (day,instruments,bars,index_bars,diagnostics)
             protected = self._protection_symbols(account)
             current = self.calendar.active(self.clock())
             recent = set()
@@ -918,7 +1183,8 @@ class ShadowBrokerPort(KisBrokerPort):
 
 
 def build_external_runtime(config,trusted_approval,*,kis_transport=None,dart_transport=None,
-                           model_runner=None,env=None,clock=utcnow,ws_connector=None):
+                           model_runner=None,env=None,clock=utcnow,ws_connector=None,
+                           manifest=None,kis=None,dart=None,state=None,store=None):
     """Return (MarketBundle, broker port, decision callback, refresh callback).
 
     The optional transports/runner are injection points for contract tests, not
@@ -926,18 +1192,22 @@ def build_external_runtime(config,trusted_approval,*,kis_transport=None,dart_tra
     """
     for capability in ("account_read","market_read","disclosure_read","model_call","broker_auth"):
         config.require_external(capability,trusted_approval)
-    path = config.app["broker"]["capability_manifest"]
-    if not path:
-        raise HumanRequired("Verified runtime capability manifest is not configured")
-    path = Path(path)
-    path = path if path.is_absolute() else config.directory/path
-    manifest = _json(path)
-    expected = trusted_approval["operational_evidence"].get("runtime_manifest_sha256")
-    if expected != hashlib.sha256(path.read_bytes()).hexdigest():
-        raise HumanRequired("Runtime manifest is not bound to the trusted approval")
+    automatic = manifest is not None and trusted_approval.get("authority") == "deployment_config"
+    if manifest is not None and not automatic:
+        raise HumanRequired("Runtime observations require operator deployment authority")
+    if not automatic:
+        path = config.app["broker"]["capability_manifest"]
+        if not path:
+            raise HumanRequired("Verified runtime capability manifest is not configured")
+        path = Path(path)
+        path = path if path.is_absolute() else config.directory/path
+        manifest = _json(path)
+        expected = trusted_approval["operational_evidence"].get("runtime_manifest_sha256")
+        if expected != hashlib.sha256(path.read_bytes()).hexdigest():
+            raise HumanRequired("Runtime manifest is not bound to the trusted approval")
     required = {"schema_version","source","verified","account_alias","environment","effective_at","expires_at",
                 "credentials","calendar","ticks","costs","normalization","bootstrap","model","disclosures","rate_limit"}
-    if set(manifest) != required or manifest["schema_version"] != 1 or manifest["verified"] is not True or not manifest["source"]:
+    if set(manifest) != required | ({"automatic"} if automatic else set()) or manifest["schema_version"] != 1 or manifest["verified"] is not True or not manifest["source"]:
         raise HumanRequired("Runtime manifest contract/source is incomplete")
     now = clock()
     if (manifest["account_alias"] != config.app["app"]["account_alias"] or
@@ -949,15 +1219,16 @@ def build_external_runtime(config,trusted_approval,*,kis_transport=None,dart_tra
     for section in ("calendar","ticks"):
         if manifest[section].get("verified") is not True or not manifest[section].get("source"):
             raise HumanRequired("Unverified "+section+" source")
-    calendar_reference = config.app["market"]["calendar_manifest"]
-    if not calendar_reference:
-        raise HumanRequired("Calendar manifest reference is not configured")
-    calendar_path = Path(calendar_reference)
-    calendar_value = _json(calendar_path if calendar_path.is_absolute() else config.directory/calendar_path)
-    if digest(calendar_value.get("calendar",calendar_value)) != digest(manifest["calendar"]):
-        raise HumanRequired("Calendar reference differs from approved runtime calendar")
+    if not automatic:
+        calendar_reference = config.app["market"]["calendar_manifest"]
+        if not calendar_reference:
+            raise HumanRequired("Calendar manifest reference is not configured")
+        calendar_path = Path(calendar_reference)
+        calendar_value = _json(calendar_path if calendar_path.is_absolute() else config.directory/calendar_path)
+        if digest(calendar_value.get("calendar",calendar_value)) != digest(manifest["calendar"]):
+            raise HumanRequired("Calendar reference differs from approved runtime calendar")
     bars = manifest["normalization"]["bars"]
-    if bars.get("consistent_ohlc_verified") is not True or not bars.get("source") or bars.get("price_returns_only") is not True:
+    if (not automatic and bars.get("consistent_ohlc_verified") is not True) or not bars.get("source") or bars.get("price_returns_only") is not True:
         raise HumanRequired("Point-in-time OHLC/index adjustment basis is unverified")
     if type(manifest["normalization"]["orders"].get("day_order_fill_session_verified")) is not bool:
         raise HumanRequired("Day-order fill-session verification must be an explicit boolean")
@@ -1009,22 +1280,24 @@ def build_external_runtime(config,trusted_approval,*,kis_transport=None,dart_tra
                       "broker_write":"live_orders" if config.mode == "live" else "demo_orders"}[operation]
         config.assert_current()
         config.require_external(capability,trusted_approval)
-    origins = {BASE_URLS[manifest["environment"]],MASTER_ORIGIN}
-    kis_transport = kis_transport or http_transport(allowed_origins=origins,network_enabled=True)
-    rate = manifest["rate_limit"]
-    if rate.get("verified") is not True or not rate.get("source"):
-        raise HumanRequired("Approved rate/monitor budget is unavailable")
-    kis_transport = PriorityTransport(kis_transport,minimum_interval_seconds=rate["minimum_interval_seconds"],
-                                      maximum_queue_seconds=rate["maximum_queue_seconds"])
-    tokens = KisTokenCache(environment=manifest["environment"], app_key=credentials.app_key,
-        app_secret=credentials.app_secret, path=config.state_dir/"kis-token.json", transport=kis_transport,
-        mode=config.mode, authorize=authorize, clock=clock)
-    kis = KisAdapter(environment=manifest["environment"],credentials=credentials,transport=kis_transport,
-        mode=config.mode,authorize=authorize,token_provider=tokens,clock=clock,ws_connector=ws_connector)
-    dart = DartAdapter(api_key=secret(config.app["market"]["dart_key_env"]),mode=config.mode,authorize=authorize,
-        official_ir_domains=config.app["market"]["official_ir_domains"],
-        transport=dart_transport or http_transport(allowed_origins={ORIGIN,*("https://"+host for host in config.app["market"]["official_ir_domains"])},network_enabled=True))
-    state = RuntimeState(config.state_dir/"state.sqlite")
+    if kis is None:
+        origins = {BASE_URLS[manifest["environment"]],MASTER_ORIGIN}
+        kis_transport = kis_transport or http_transport(allowed_origins=origins,network_enabled=True)
+        rate = manifest["rate_limit"]
+        if rate.get("verified") is not True or not rate.get("source"):
+            raise HumanRequired("Approved rate/monitor budget is unavailable")
+        kis_transport = PriorityTransport(kis_transport,minimum_interval_seconds=rate["minimum_interval_seconds"],
+                                          maximum_queue_seconds=rate["maximum_queue_seconds"])
+        tokens = KisTokenCache(environment=manifest["environment"], app_key=credentials.app_key,
+            app_secret=credentials.app_secret, path=config.state_dir/"kis-token.json", transport=kis_transport,
+            mode=config.mode, authorize=authorize, clock=clock)
+        kis = KisAdapter(environment=manifest["environment"],credentials=credentials,transport=kis_transport,
+            mode=config.mode,authorize=authorize,token_provider=tokens,clock=clock,ws_connector=ws_connector)
+    if dart is None:
+        dart = DartAdapter(api_key=secret(config.app["market"]["dart_key_env"]),mode=config.mode,authorize=authorize,
+            official_ir_domains=config.app["market"]["official_ir_domains"],
+            transport=dart_transport or http_transport(allowed_origins={ORIGIN,*("https://"+host for host in config.app["market"]["official_ir_domains"])},network_enabled=True))
+    state = state or RuntimeState(config.state_dir/"state.sqlite")
     def persist_circuit(circuit):
         with state.lock:
             state.data["circuit"] = circuit
@@ -1042,6 +1315,8 @@ def build_external_runtime(config,trusted_approval,*,kis_transport=None,dart_tra
         runtime.broker = PaperBrokerPort(runtime)
     elif config.mode == "shadow":
         runtime.broker = ShadowBrokerPort(kis,manifest,state,clock=clock)
+    if store is not None:
+        runtime.broker.bind_store(store)
     try:
         bundle = runtime.refresh()
     except BaseException:

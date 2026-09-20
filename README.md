@@ -10,7 +10,7 @@
 
 ## Docker 구성
 
-- `trading-engine`: 명세에 따른 투자 연구·실행 엔진. 기본 설정은 offline이며 실제 거래는 별도 승인과 운영 설정이 필요합니다.
+- `trading-engine`: 명세에 따른 투자 연구·실행 엔진. 기본 설정은 승인된 전체 계좌 live 정책이며 시작할 때 계좌·시장·실행 환경을 자동 준비합니다.
 - `telegram-gateway`: 텔레그램 송수신 컨테이너.
 - `kis-trade-mcp`: 한국투자증권 MCP 컨테이너. 새 엔진의 KIS 어댑터는 직접 API를 호출합니다.
 
@@ -86,9 +86,7 @@ trading-engine/
   compose.yaml
   config/
     app.yaml, strategy.yaml, schedules.yaml
-    secrets.yaml              # KIS·DART 비밀값과 연결 주소
-    runtime.json              # 확정된 운영 승인 (외부 연결 시)
-    runtime-manifest.json     # 검증된 운영 정보 (외부 연결 시)
+    secrets.yaml              # KIS·DART 비밀값, 연결 주소, Telegram 허용 chat/sender
     *.example                 # 작성 형식 참고용
   var/                        # 실행 시 자동 생성: 상태·발급 토큰
   locks/                      # 실행 시 자동 생성: 중복 실행 방지
@@ -102,10 +100,10 @@ telegram-gateway/
 
 설정과 비밀값은 이미지에 들어가지 않으므로 서버에는 각 `config/`를 전달합니다.
 엔진 컨테이너는 `trading-engine` 하나입니다. 시작 시 내부에서 권한을 준비한 뒤 UID 10001과
-읽기 전용 config로 실행하며, 기본 명령은 `serve`입니다. `runtime.json`은 config에서 자동으로
-찾되 기존 내용·유효기간·권한 검사를 통과해야 사용합니다. 관리용 HTTP와 Telegram `/version`은
-거래 설정과 독립적으로 작동합니다. `/status`는 누락된 설정을 표시합니다. 기본 app.yaml은
-offline이며 실제 계좌·모델·주문 준비가 완료되지 않은 상태를 명시합니다.
+읽기 전용 config로 실행하며, 기본 명령은 `serve`입니다. 기본 live/automatic 설정은 승인된 전체 계좌
+현금·보유를 실제 조회하고 준비 결과·해시·권한 참조를 `var`의 DB에 기록합니다. `runtime.json`이나
+`runtime-manifest.json`을 작성할 필요는 없습니다. 관리 HTTP와 Telegram `/version`은 초기화와 독립적으로
+작동하며 `/status`가 부족한 설정과 실제 준비 상태를 표시합니다. 준비 완료도 체결 성공이나 수익성 검증은 아닙니다.
 
 Codex 인증은 운영 컴퓨터에서 기존처럼 `codex login`으로 생성하며, 로그인과 엔진이
 `trading-engine-auth` Docker volume을 공유합니다. 인증 파일을 직접 작성하거나 옮길 필요는 없습니다.
@@ -119,11 +117,17 @@ Codex 인증은 운영 컴퓨터에서 기존처럼 `codex login`으로 생성�
 설정 묶음을 만드는 `scripts/prepare-trading-deployment.py`는 선택 사항입니다.
 이미 필요한 config가 있으면 직접 복사하면 됩니다. 생성 결과도 각 서비스의 Compose 하나와
 config뿐이며 `.env`나 데이터 디렉터리는 만들지 않습니다. 실제 비밀값은 `--include-secrets`를
-지정했을 때만 복사합니다. 실제 runtime 파일이 있으면 내용을 그대로 보존해 함께 복사하며,
-없으면 example만 제공합니다. 검증되지 않은 운영 정보를 자동 승인하지 않습니다.
+지정했을 때만 복사합니다. 실제 live 설정을 복사하며 shadow 예시·수동 runtime 승인 파일은 만들거나
+묶지 않습니다. `PREPARED`는 파일 묶음 생성 상태입니다. 허용 chat은 gateway 설정에서 가져오고,
+개인 채팅의 양수 ID만 sender로 추론합니다. 그룹 채팅은 `--sender-id`로 허용 사용자를 명시합니다.
 
 Telegram은 `trading-engine` route와 `config/telegram.env` 하나를 사용합니다. 두 서비스는
 `danta-bot-net` 네트워크로 연결하며 엔진 포트를 호스트에 공개하지 않습니다.
+주문 전 비용은 양방향 0.5% 수수료·매도 0.2% 세금의 보수적 추정치로 계산하고, 실제 계좌 현금·비용과
+구분해 대사합니다. KRX 09:00–15:20과 정규시장 실시간 구분을 함께 확인하며 일봉은 다음 날부터
+사용합니다. 일일 마감 보고는 다음 날 00:10 한국시간입니다. 특별 거래시간을 검증했다고 주장하거나
+애프터마켓으로 거래 시간을 늘리지 않습니다.
+
 허용 sender/chat과 제어·거래 권한 검사는 유지합니다. `/report`는 승인된 설정에서 일일
 HTML 파일을 전달합니다. 상세 동작은 [runbook](containers/trading-engine/docs/runbook.md)을 참고하세요.
 
