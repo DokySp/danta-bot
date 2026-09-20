@@ -37,7 +37,7 @@ class ChatTests(unittest.TestCase):
         self.assertFalse(case.service.run_once(review=True))
         old_session = self.calls[0]['session_id']
         case.service.close()
-        case.service = Service(case.app, telegram=case.adapter, peer_auth=case.auth, clock=lambda: case.now)
+        case.service = Service(case.app, telegram=case.adapter, clock=lambda: case.now)
         case.receive('방금 말한 종목 전량 매수해줘', update=2)
         case.service.run_once(review=True)
         self.assertEqual(self.calls[1]['session_id'], old_session)

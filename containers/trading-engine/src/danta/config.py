@@ -178,6 +178,8 @@ def _validate_semantics(data: dict) -> None:
         raise ConfigurationError("Unsupported provider")
     if app["model"]["isolation_profile"] != "market_tools_only":
         raise ConfigurationError("Unsupported model isolation profile")
+    if app["telegram"]["route"] != "trading-engine":
+        raise ConfigurationError("Telegram route must be trading-engine")
 
 
 @dataclass(frozen=True)

@@ -1,4 +1,4 @@
-"""Gateway wire contract. Peer identity comes from trusted transport, never JSON."""
+"""Single-engine gateway wire contract with sender/chat checks and durable receipts."""
 
 import base64
 import hashlib
@@ -12,12 +12,13 @@ from ..safety import CredentialError, reject_credentials
 
 COMMANDS = frozenset("status report usage version review stop pause session new schedule_on schedule_off reasoning_effort add_portfolio_ticker remove_portfolio_ticker add_portfolio_except_ticker remove_portfolio_except_ticker show_touch_point resume".split())
 READ_COMMANDS = frozenset("status report usage version session show_touch_point".split())
+ROUTE = "trading-engine"
+GATEWAY = "telegram-gateway"
 
 
 @dataclass(frozen=True)
 class TelegramRequest:
     request_id: str
-    trusted_peer: str
     route: str
     update_id: int
     chat_id: str
@@ -27,20 +28,18 @@ class TelegramRequest:
 
 
 class TelegramAdapter:
-    def __init__(self, connection: sqlite3.Connection, *, enabled=False, trusted_peers=(), allowed_senders=(), allowed_chats=(),
+    def __init__(self, connection: sqlite3.Connection, *, enabled=False, allowed_senders=(), allowed_chats=(),
                  gateway_url="http://telegram-gateway:8080", transport=None, authorize=None):
         self.db, self.enabled = connection, enabled
-        self.peers, self.senders, self.chats = set(trusted_peers), set(map(str, allowed_senders)), set(map(str, allowed_chats))
+        self.senders, self.chats = set(map(str, allowed_senders)), set(map(str, allowed_chats))
         self.gateway_url, self.authorize = gateway_url.rstrip("/"), authorize
         self.transport = transport or http_transport(allowed_origins={self.gateway_url})
         self.db.execute("CREATE TABLE IF NOT EXISTS telegram_requests (peer TEXT, route TEXT, update_id INTEGER, body_hash TEXT NOT NULL, request_id TEXT UNIQUE NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'PENDING', PRIMARY KEY(peer,route,update_id))")
         self.db.commit()
 
-    def receive(self, body, *, trusted_peer=None):
+    def receive(self, body):
         if not self.enabled:
             raise AdapterError("TELEGRAM_INGRESS_DISABLED")
-        if trusted_peer not in self.peers:
-            raise AdapterError("UNTRUSTED_GATEWAY")
         if not isinstance(body, dict) or body.get("source") != "telegram" or type(body.get("update_id")) is not int or body["update_id"] < 0:
             raise AdapterError("INVALID_TELEGRAM_REQUEST")
         values = {}
@@ -49,6 +48,8 @@ class TelegramAdapter:
             if isinstance(value, bool) or not isinstance(value, (str, int)) or not str(value):
                 raise AdapterError("INVALID_TELEGRAM_REQUEST")
             values[key] = str(value)
+        if values["route"] != ROUTE:
+            raise AdapterError("UNKNOWN_TELEGRAM_ROUTE")
         if values["chat_id"] not in self.chats or values["user_id"] not in self.senders:
             raise AdapterError("SENDER_NOT_ALLOWED")
         text = body.get("text")
@@ -67,14 +68,15 @@ class TelegramAdapter:
         body_hash = hashlib.sha256(payload.encode()).hexdigest()
         request_id = str(uuid.uuid4())
         with self.db:
-            existing = self.db.execute("SELECT body_hash,request_id FROM telegram_requests WHERE peer=? AND route=? AND update_id=?", (trusted_peer, values["route"], body["update_id"])).fetchone()
+            # Retain the existing peer column so stored receipts need no schema migration.
+            existing = self.db.execute("SELECT body_hash,request_id FROM telegram_requests WHERE peer=? AND route=? AND update_id=?", (GATEWAY, values["route"], body["update_id"])).fetchone()
             if existing:
                 if existing[0] != body_hash:
                     raise AdapterError("DUPLICATE_UPDATE_BODY_CONFLICT")
                 request_id = existing[1]
             else:
-                self.db.execute("INSERT INTO telegram_requests(peer,route,update_id,body_hash,request_id,payload) VALUES(?,?,?,?,?,?)", (trusted_peer, values["route"], body["update_id"], body_hash, request_id, payload))
-        request = TelegramRequest(request_id, trusted_peer, values["route"], body["update_id"], values["chat_id"], values["user_id"], text, command)
+                self.db.execute("INSERT INTO telegram_requests(peer,route,update_id,body_hash,request_id,payload) VALUES(?,?,?,?,?,?)", (GATEWAY, values["route"], body["update_id"], body_hash, request_id, payload))
+        request = TelegramRequest(request_id, values["route"], body["update_id"], values["chat_id"], values["user_id"], text, command)
         return {"accepted": True, "request_id": request_id, "reply_text": "요청을 접수했습니다."}, request
 
     def _post(self, endpoint, payload):

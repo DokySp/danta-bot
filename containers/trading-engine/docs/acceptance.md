@@ -82,7 +82,7 @@ PYTHONPATH=src python -m danta.safety src schemas migrations prompts README.md s
 | O22 | engine `test_O09_O22`; 독립 monitor | 합성: 모델 응답 없이 보호·대사 경로 지속 |
 | O23 | engine stale_and_missing_holding_quote/future_received_quote; S13 | 합성: stale NAV 인증/신규 dispatch 차단; 실제 rate-limit 지속 부하는 운영 |
 | O24 | adapter snapshot_scope/credential_fields; local CLI probe | 합성: 최초 prompt/도구 전 scope/credential 차단, 명령 무권한 |
-| O25 | adapter Telegram dedup/conflicts; service body_sender_and_peer/portfolio/resume/effort; engine candidate_controls/resume_and_candidate_changes | 합성: body 자기선언만으로 제어 불가, 목록 변경·resume 권한 검사와 보유 불변 |
+| O25 | adapter Telegram dedup/conflicts; service unsigned_ingress/portfolio/resume/effort; engine candidate_controls/resume_and_candidate_changes | 합성: 허용 sender/chat·단일 route 검사, 목록 변경·resume 권한 검사와 보유 불변 |
 | O26 | engine `test_O26`; service outbox_retry | 합성: 알림 재시도에서 거래 재실행0 |
 | O27 | engine `test_O27`; service restart recovery | 합성: backup/restore·예약/UNKNOWN 보존; 실운영 복구는 운영 |
 | O28 | adapter `test_O28_source_fixture_html_and_shared_document_refuse_credentials`; safety CLI; Docker scanner | 합성: source/fixture/HTML/report/전송 직전 거부, 값 로그노출0 |

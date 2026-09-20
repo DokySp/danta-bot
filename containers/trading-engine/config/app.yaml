@@ -49,10 +49,9 @@ monitoring:
 telegram:
   enabled: false
   gateway_url_env: TELEGRAM_GATEWAY_URL
-  route: null
+  route: trading-engine
   allowed_sender_ids: []
   allowed_chat_ids: []
-  trusted_peer_profile: null
   ingress_enabled: false
 storage:
   backend: sqlite

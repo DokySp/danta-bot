@@ -3,8 +3,6 @@ from contextlib import redirect_stdout
 from datetime import timedelta
 from decimal import Decimal
 import base64
-import hashlib
-import hmac
 import html
 import io
 import json
@@ -24,7 +22,7 @@ from danta.config import HumanRequired, ROOT, canonical, load_config, utcnow
 from danta.market import SessionCalendar
 from danta.models import Session
 from danta.safety import CredentialError
-from danta.service import PeerAuthenticator, Service, serve
+from danta.service import Service, serve
 from danta.store import Store
 
 
@@ -109,8 +107,8 @@ class ServiceIntegrationTests(unittest.TestCase):
         data['app']['app']['mode'] = 'paper'
         data['app']['app']['state_dir'] = str(Path(self.tmp.name) / 'state')
         data['app']['telegram'].update(enabled=True, ingress_enabled=True,
-            trusted_peer_profile='synthetic-injected-profile', allowed_sender_ids=['user-1'],
-            allowed_chat_ids=['chat-1'], route='v1')
+            allowed_sender_ids=['user-1'],
+            allowed_chat_ids=['chat-1'], route='trading-engine')
         self.directory = Path(self.tmp.name) / 'config'
         self.directory.mkdir()
         for key, value in data.items():
@@ -123,15 +121,10 @@ class ServiceIntegrationTests(unittest.TestCase):
         self.sent = []
         self.sent_urls = []
         self.fail_send = False
-        self.adapter = TelegramAdapter(self.app.store.db, enabled=True, trusted_peers=['verified-peer'],
+        self.adapter = TelegramAdapter(self.app.store.db, enabled=True,
             allowed_senders=['user-1'], allowed_chats=['chat-1'], transport=self.transport,
             authorize=lambda *args: None)
-        profile = {'schema_version': 1, 'identity': 'verified-peer', 'allowed_source_ips': ['127.0.0.1'],
-            'secret_env': 'SYNTHETIC_KEY', 'verified': True, 'evidence_id': 'synthetic-test-proof',
-            'expires_at': (self.now + timedelta(hours=1)).isoformat(), 'config_hash': self.config.config_hash}
-        self.auth = PeerAuthenticator(profile, self.config.config_hash,
-            env={'SYNTHETIC_KEY': SECRET}, clock=lambda: self.now)
-        self.service = Service(self.app, telegram=self.adapter, peer_auth=self.auth, clock=lambda: self.now)
+        self.service = Service(self.app, telegram=self.adapter, clock=lambda: self.now)
         self.adapter.authorize = self.service._authorize_control
 
     def tearDown(self):
@@ -149,13 +142,10 @@ class ServiceIntegrationTests(unittest.TestCase):
         return HttpResponse(200, b'{"ok":true}')
 
     def receive(self, text='/status', update=1, **overrides):
-        body = {'source': 'telegram', 'route': 'v1', 'update_id': update,
+        body = {'source': 'telegram', 'route': 'trading-engine', 'update_id': update,
                 'chat_id': 'chat-1', 'user_id': 'user-1', 'text': text, **overrides}
         raw = canonical(body).encode()
-        timestamp = self.now.isoformat()
-        signature = hmac.new(SECRET.encode(), timestamp.encode() + b'\nPOST\n/telegram\n' + raw, hashlib.sha256).hexdigest()
-        return self.service.receive_http(raw, '127.0.0.1',
-            {'X-Danta-Timestamp': timestamp, 'X-Danta-Signature': signature})
+        return self.service.receive_http(raw)
 
     def last_result(self):
         row = self.app.store.db.execute("SELECT result FROM requests WHERE request_key LIKE 'service:%' ORDER BY rowid DESC LIMIT 1").fetchone()
@@ -175,16 +165,23 @@ class ServiceIntegrationTests(unittest.TestCase):
         with self.assertRaises(AdapterError):
             self.receive('/pause')
 
-    def test_body_sender_and_peer_claim_cannot_replace_transport_proof(self):
-        raw = canonical({'source': 'telegram', 'trusted_peer': 'verified-peer'}).encode()
+    def test_unsigned_ingress_still_checks_sender_chat_route_and_payload(self):
+        for overrides in ({'user_id': 'not-allowed'}, {'chat_id': 'not-allowed'},
+                          {'route': 'other-engine'}, {'source': 'other-source'}):
+            with self.subTest(overrides=overrides), self.assertRaises(AdapterError):
+                self.receive(**overrides)
         with self.assertRaises(AdapterError):
-            self.service.receive_http(raw, '127.0.0.1', {})
-        with self.assertRaises(AdapterError):
-            self.receive(user_id='not-allowed')
-        timestamp = (self.now - timedelta(minutes=1)).isoformat()
-        signature = hmac.new(SECRET.encode(), timestamp.encode() + b'\nPOST\n/telegram\n' + raw, hashlib.sha256).hexdigest()
-        with self.assertRaises(AdapterError):
-            self.auth.verify(raw, '127.0.0.1', {'X-Danta-Timestamp': timestamp, 'X-Danta-Signature': signature})
+            self.service.receive_http(b'{invalid-json')
+        self.assertEqual(self.app.store.db.execute('SELECT COUNT(*) FROM telegram_requests').fetchone()[0], 0)
+
+    def test_ingress_initializes_without_shared_secret_or_peer_profile(self):
+        secret_file = self.directory / 'secrets.yaml'
+        secret_file.write_text(yaml.safe_dump({'TELEGRAM_GATEWAY_URL': 'http://telegram-gateway:8080'}))
+        service = Service(self.app, clock=lambda: self.now)
+        self.addCleanup(service.close)
+        body = {'source': 'telegram', 'route': 'trading-engine', 'update_id': 1,
+                'chat_id': 'chat-1', 'user_id': 'user-1', 'text': '/status'}
+        self.assertTrue(service.receive_http(canonical(body).encode())['accepted'])
 
     def test_chat_and_new_never_call_model_or_clear_trading_ledger(self):
         self.receive('지금 전량 매수해줘 /review', update=1)
@@ -238,7 +235,7 @@ class ServiceIntegrationTests(unittest.TestCase):
         self.app.approval['config_hash'] = self.config.config_hash
         self.adapter.chats.add('chat-2')
         self.service.close()
-        self.service = Service(self.app, telegram=self.adapter, peer_auth=self.auth, clock=lambda: self.now)
+        self.service = Service(self.app, telegram=self.adapter, clock=lambda: self.now)
 
         self.receive('/report', chat_id='chat-2')
         self.assertTrue(self.service.run_once())
@@ -263,12 +260,12 @@ class ServiceIntegrationTests(unittest.TestCase):
         with self.app.store.transaction():
             self.app.store.db.execute("UPDATE outbox SET state='SENDING' WHERE state='PENDING'")
         self.service.close()
-        self.service = Service(self.app, telegram=self.adapter, peer_auth=self.auth, clock=lambda: self.now)
+        self.service = Service(self.app, telegram=self.adapter, clock=lambda: self.now)
         self.fail_send = False
         self.assertTrue(self.service.outbox_once())
         self.assertFalse(self.service.outbox_once())
         self.assertEqual(self.sent[1], self.sent[2])
-        self.assertEqual(self.sent[2]['route'], 'v1')
+        self.assertEqual(self.sent[2]['route'], 'trading-engine')
         self.assertEqual(self.sent[2]['chat_id'], 'chat-2')
         self.assertEqual(self.sent[2]['filename'], 'daily-' + result['report']['date'] + '.html')
         self.assertEqual(sum(url.endswith('/sendMessage') for url in self.sent_urls), 1)
@@ -289,7 +286,7 @@ class ServiceIntegrationTests(unittest.TestCase):
         self.assertEqual(self.app.store.db.execute('SELECT COUNT(*) FROM outbox').fetchone()[0], 1)
         self.assertTrue(self.service.outbox_once())
         self.assertTrue(self.sent_urls[0].endswith('/sendDocument'))
-        self.assertEqual((self.sent[0]['route'], self.sent[0]['chat_id']), ('v1', 'chat-1'))
+        self.assertEqual((self.sent[0]['route'], self.sent[0]['chat_id']), ('trading-engine', 'chat-1'))
         self.assertEqual(base64.b64decode(self.sent[0]['content_base64']), Path(result['paths']['html']).read_bytes())
         self.assertFalse(self.service.run_once(review=True))
         self.assertFalse(self.service.outbox_once())
@@ -304,7 +301,7 @@ class ServiceIntegrationTests(unittest.TestCase):
         self.assertEqual(self.app.store.db.execute('SELECT COUNT(*) FROM outbox').fetchone()[0], 0)
         self.assertEqual(self.service.queue_tick(), 0)
         self.service.close()
-        self.service = Service(self.app, telegram=self.adapter, peer_auth=self.auth, clock=lambda: self.now)
+        self.service = Service(self.app, telegram=self.adapter, clock=lambda: self.now)
         self.service.scheduler['enabled'] = True
         self.now += timedelta(minutes=5) - timedelta(seconds=1)
         self.assertEqual(self.service.queue_tick(), 0)
@@ -374,12 +371,12 @@ class ServiceIntegrationTests(unittest.TestCase):
                     self.app.store.db.execute('DELETE FROM outbox')
                     if identity == 'credential-pattern':
                         with self.assertRaises(CredentialError):
-                            self.app.store.queue_document(identity, 'report.html', content, route='v1', chat_id=chat)
+                            self.app.store.queue_document(identity, 'report.html', content, route='trading-engine', chat_id=chat)
                         self.app.store.db.execute('INSERT INTO outbox(event_key,payload) VALUES (?,?)',
-                            (identity, canonical({'route': 'v1', 'chat_id': chat,
+                            (identity, canonical({'route': 'trading-engine', 'chat_id': chat,
                                 'document': {'filename': 'report.html', 'content': content}})))
                     else:
-                        self.app.store.queue_document(identity, 'report.html', content, route='v1', chat_id=chat)
+                        self.app.store.queue_document(identity, 'report.html', content, route='trading-engine', chat_id=chat)
                 self.assertFalse(self.service.outbox_once())
                 self.assertEqual(self.sent, [])
                 self.assertEqual(self.app.store.db.execute('SELECT state FROM outbox').fetchone()[0], 'BLOCKED')
@@ -395,7 +392,7 @@ class ServiceIntegrationTests(unittest.TestCase):
         with self.app.store.transaction():
             self.app.store.db.execute('DELETE FROM outbox')
             self.app.store.queue_document('expired-approval', 'report.html', '<html>safe report</html>',
-                                          route='v1', chat_id='chat-1')
+                                          route='trading-engine', chat_id='chat-1')
         self.app.approval['expires_at'] = (utcnow() - timedelta(seconds=1)).isoformat()
         with self.assertRaises(HumanRequired):
             self.service.outbox_once()

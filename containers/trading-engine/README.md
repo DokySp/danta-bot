@@ -679,7 +679,7 @@ DART 인증이 필요한 API에는 별도 `DART_API_KEY` 참조를 사용한다.
 {
   "source": "telegram",
   "gateway_version": "EXTERNAL_VERSION",
-  "route": "v1",
+  "route": "trading-engine",
   "update_id": 10001,
   "message_id": 101,
   "chat_id": "CHAT_ID",
@@ -690,14 +690,14 @@ DART 인증이 필요한 API에는 별도 `DART_API_KEY` 참조를 사용한다.
 }
 ```
 
-`route/chat_id/user_id`는 문자열로 정규화하고 update ID는 bool이 아닌 정수다. 원문 `raw_message`를 직접 명령으로 실행하지 않는다. durable 중복키는 `(trusted_gateway_identity, route, update_id)`이며 같은 ID에 다른 본문이 오면 거부한다.
+`route/chat_id/user_id`는 문자열로 정규화하고 update ID는 bool이 아닌 정수다. 원문 `raw_message`를 직접 명령으로 실행하지 않는다. durable 중복키는 `(telegram-gateway, route, update_id)`이며 같은 ID에 다른 본문이 오면 거부한다.
 
 요청을 저장한 뒤 200/202로 `{"accepted":true,"request_id":"...","reply_text":"요청을 접수했습니다."}`를 반환한다. gateway는 `reply_text`, 없으면 `text`를 즉시 답장으로 쓰는 계약이다. 장시간 모델 응답을 HTTP 연결에서 기다리지 않는다.
 
 송신: `POST /sendMessage` 또는 `/notify`에 다음을 보내고 `{"ok":true}`를 확인한다.
 
 ```json
-{"route":"v1","chat_id":"CHAT_ID","text":"판단 보류, 신규 주문 없음","parse_mode":"","escape":true}
+{"route":"trading-engine","chat_id":"CHAT_ID","text":"판단 보류, 신규 주문 없음","parse_mode":"","escape":true}
 ```
 
 파일은 `/sendDocument`의 `route/chat_id/filename/content_base64`, 선택 `caption/parse_mode` 계약을 사용한다. 이 base64는 프로그램 간 wire 형식이다. 공유 파일에서 secret 제거를 먼저 검증한다. `/healthz`는 gateway 상태 조회다. 알림 timeout은 전달 불명일 수 있으며 같은 outbox만 재시도한다. 거래를 재실행하지 않는다.
@@ -716,7 +716,7 @@ DART 인증이 필요한 API에는 별도 `DART_API_KEY` 참조를 사용한다.
 
 `/resume`는 중단 사유·현재 계좌·승인을 검사한다. 낙폭·UNKNOWN·권한 만료를 단순 명령으로 우회하지 않는다. 모든 주문 취소/전량 매도/보호 감시 중단은 별도 명시 권한이며 기본 pause와 다르다.
 
-확인된 gateway의 sender/route 필드 자체는 인증 증거가 아니다. 기본 ingress 비활성·호스트 포트 비공개로 시작한다. 신뢰 peer 인증과 allowed sender/chat 검증이 입증되기 전 Telegram을 통한 live 제어를 허용하지 않는다. token을 보내기만 하면 기존 gateway가 검증할 것이라고 가정하지 않는다. 인증 proxy 등 외부 운영 변경은 승인받는다. **live 원격 제어 미구현을 일반 채팅 명령 실행으로 우회하지 않는다.**
+2026-09-20 사용자 요청으로 gateway 연결은 `trading-engine` 단일 route로 통합하고 별도 peer 공유키·서명·profile을 제거했다. 기본 ingress 비활성·호스트 포트 비공개는 유지한다. 내부 Docker 네트워크를 통신 경계로 사용하고 gateway의 Telegram bot token 및 허용 chat, 엔진의 허용 sender/chat·route·기존 제어 승인을 검사한다. sender/chat 필드 자체가 발신 프로그램의 신원을 증명하지 않으므로 엔진 HTTP 포트를 외부에 공개하지 않는다. **live 원격 제어 미구현을 일반 채팅 명령 실행으로 우회하지 않는다.**
 
 ### 11.4 배포 경계
 
@@ -788,10 +788,9 @@ monitoring:
 telegram:
   enabled: false
   gateway_url_env: TELEGRAM_GATEWAY_URL
-  route: null
+  route: trading-engine
   allowed_sender_ids: []
   allowed_chat_ids: []
-  trusted_peer_profile: null
   ingress_enabled: false
 storage:
   backend: sqlite
@@ -1205,7 +1204,7 @@ technical_only의 재진입은 사건 요구를 제외하고 §5.6의 완성 세
 | O22 | 모델 quota 상태의 기존 포지션 | 보호·기한 청산·대사 독립 동작 |
 | O23 | 시세/감시 stale·rate limit | MONITOR_DEGRADED, 새 위험 차단·알림 |
 | O24 | 뉴스/첨부의 secret·명령·정책 해제 지시 | 실제 권한에서 차단, 모델 출력만 믿지 않음 |
-| O25 | 위조 sender/route·unsigned live 명령 | 신뢰 peer 없으면 제어 거부 |
+| O25 | 미허용 sender/chat·다른 route·승인 없는 제어 명령 | 허용 목록·단일 route·기존 제어 승인 검사로 거부 |
 | O26 | Telegram timeout·알림 재시도 | outbox만 재처리, 거래 재실행 0 |
 | O27 | DB backup/restore·전송 중 프로세스 재시작 | 원장·예약·승인·중복 방지 복구 후 대사 |
 | O28 | secret 포함 fixture/build context/HTML | 검출·배포/공유 차단, 값은 로그에 재노출하지 않음 |

@@ -117,10 +117,11 @@ DANTA_IMAGE=danta-trading-engine:local docker compose -f containers/trading-engi
 전달 파일, 운영 PC 권한·네트워크, Codex 로그인, 승인 준비, 실행·백업 명령을 정리했습니다.
 
 ```bash
+DEPLOYMENT_ID=$(date +%Y%m%d-%H%M%S)
 mkdir -p containers/trading-engine/var
 .venv/bin/python scripts/prepare-trading-deployment.py \
-  --namespace dokysp --version YOUR_RELEASE \
-  --output containers/trading-engine/var/YOUR_RELEASE --include-secrets
+  --namespace dokysp --version latest \
+  --output "containers/trading-engine/var/deployment-$DEPLOYMENT_ID" --include-secrets
 ```
 
 이 명령은 새 배포 폴더만 생성합니다. 이미지 push·원격 실행은 수행하지 않습니다.
@@ -129,10 +130,11 @@ mkdir -p containers/trading-engine/var
 0600으로 복사하며, Codex 인증·원장·레거시는 복사하지 않습니다. 운영 PC의 Codex 로그인은
 그 PC의 전용 volume에 유지합니다. 생성된 기본 설정은 offline이며 shadow 설정은 별도 example입니다.
 
-gateway Compose는 `config/codex-peer.secret`의 64자리 16진 문자열로 항상 서명합니다.
-엔진 `secrets.yaml`의 `DANTA_TELEGRAM_PEER_SECRET`과 같아야 하며 Git·이미지에서 제외됩니다.
-두 서비스는 `.env`의 공통 외부 네트워크에 연결하고, gateway의 고정 IP를 신뢰 peer profile과
-맞춥니다. 실제 달력·수수료·계좌 귀속·허용 sender/chat·승인 검증은 운영 연결 단계에서 확정합니다.
+Telegram은 `trading-engine` route 하나와 `config/telegram.env` 하나를 사용합니다.
+별도 peer 키·서명·profile·고정 IP 설정은 필요하지 않습니다. 두 서비스는 `.env`의 공통
+Docker 네트워크에 연결하며 엔진의 HTTP 포트를 호스트에 공개하지 않습니다. 해당 네트워크에는
+신뢰하는 컨테이너만 연결합니다. 허용 sender/chat과 제어·거래 승인은 계속 검사합니다.
+실제 달력·수수료·계좌 귀속·허용 sender/chat·승인 검증은 운영 연결 단계에서 확정합니다.
 기존 `trading-engine/profiles/*/compose.yaml` 경로는 사용하지 않습니다.
 
 운영 연결 후 `/report`로 일일 HTML 파일을 텔레그램에서 받을 수 있습니다. 승인된 장 마감 작업과

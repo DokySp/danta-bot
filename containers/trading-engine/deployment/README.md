@@ -35,8 +35,9 @@ mkdir -p containers/trading-engine/var
 설정 준비 도구는 이미지 push를 실행하지 않는다. `latest`는 다음 배포에서 바뀌는 별칭이며,
 이미 실행 중인 컨테이너는 push만으로 갱신되지 않는다.
 
-`--include-secrets`는 현재 엔진의 private secrets.yaml, gateway의 v1 env와 일치하는 peer 키를
-새 폴더에 0600으로 복사한다. 토큰 캐시·Codex auth·원장·레거시는 복사하지 않는다.
+`--include-secrets`는 현재 엔진의 private secrets.yaml과 gateway의 `config/telegram.env`를
+새 폴더에 0600으로 복사한다. `routes.yaml`은 `trading-engine` route 하나여야 한다.
+더 이상 사용하지 않는 peer 비밀값은 결과에서 제외한다. 토큰 캐시·Codex auth·원장·레거시는 복사하지 않는다.
 출력 폴더가 존재하면 중단하며 기존 파일은 갱신하지 않는다. 공개 example만 필요하면 옵션을 생략한다.
 확인된 Telegram 발신자 ID는 `--sender-id 숫자`로 추가할 수 있다. 채팅 ID를 사용자 ID로 추정하지 않는다.
 그룹 채팅에서 누가 제어할 수 있는지는 별도 확인한다. 옵션 생략 시 발신자 목록은 비어 있어 접수할 수 없다.
@@ -62,18 +63,15 @@ mkdir -p containers/trading-engine/var
     approvals/
       runtime-manifest.json.example
       runtime.json.example
-      telegram-peer.json.example
     var/                         # 운영 PC 로컬 파일시스템의 DB/토큰
     locks/                       # 동일 계좌 writer가 공유할 잠금
   telegram-gateway/
-    .env                         # 이미지·네트워크·고정 IP
+    .env                         # 이미지·네트워크
     compose.yaml
     config/
       routes.yaml
-      telegram-v1.env.example
-      codex-peer.secret.example
-      telegram-v1.env             # --include-secrets일 때만
-      codex-peer.secret           # --include-secrets일 때만
+      telegram.env.example
+      telegram.env               # --include-secrets일 때만
     memory/
 ```
 
@@ -95,17 +93,17 @@ sudo chown 10001:10001 trading-engine/config/secrets.yaml
 sudo chmod 400 trading-engine/config/secrets.yaml
 sudo chown -R 10001:10001 trading-engine/var trading-engine/locks
 sudo chmod 700 trading-engine/var trading-engine/locks telegram-gateway/config
-sudo chmod 600 telegram-gateway/config/telegram-v1.env telegram-gateway/config/codex-peer.secret
+sudo chmod 600 telegram-gateway/config/telegram.env
 ```
 
-gateway의 `.env`에는 별도 네트워크 `danta-catalyst-net`, 예시 subnet `172.30.85.0/24`,
-고정 IP `172.30.85.3`이 들어 있다. 기존 Docker/LAN/VPN 대역과 겹치지 않는지 확인한다.
-다른 대역은 개발 PC의 준비 명령에 `--gateway-subnet 대역 --gateway-ip 주소`를 지정하면
-gateway `.env`와 peer example에 함께 반영된다. 네트워크 이름을 바꾸면 양쪽 `.env`를 같이 바꾼다.
+양쪽 `.env`는 같은 Docker 네트워크 `danta-catalyst-net`을 사용한다. 별도 고정 IP나
+서브넷 지정은 필요하지 않다. 네트워크 이름을 바꾸면 양쪽 `.env`를 같이 바꾼다.
+게이트웨이와 엔진 사이의 별도 서명 인증은 없으므로 이 네트워크에는 신뢰하는 컨테이너만
+연결하고 엔진의 HTTP 포트를 호스트에 공개하지 않는다.
 
 ```sh
-# gateway/.env와 같은 이름·대역으로 최초 한 번 생성한다.
-docker network create --subnet 172.30.85.0/24 danta-catalyst-net
+# 양쪽 .env와 같은 이름으로 최초 한 번 생성한다.
+docker network create danta-catalyst-net
 cd telegram-gateway
 docker compose config --quiet
 docker compose pull
@@ -116,7 +114,7 @@ docker compose run --rm trading-engine doctor
 ```
 
 이미 같은 이름의 네트워크가 있으면 삭제하거나 다시 만들지 말고 `docker network inspect`로
-이름·대역을 대조한다. 기존 gateway와 같은 컨테이너 이름/봇을 쓰므로 기존 poller와 동시에 시작하지 않는다.
+이름을 대조한다. 기존 gateway와 같은 컨테이너 이름/봇을 쓰므로 기존 poller와 동시에 시작하지 않는다.
 공통 네트워크의 서비스 DNS는 `trading-engine`, `telegram-gateway`이며 호스트 IP를 secrets.yaml에 넣지 않는다.
 
 ## 3. 운영 컴퓨터: Codex 로그인
@@ -146,7 +144,6 @@ auth 디렉터리로 초기화된다. 기존 로그인 상태가 유효하면 �
 |---|---|
 | config/app.shadow.yaml.example → app.yaml | 계좌 별칭/환경, 실제 허용 sender/chat. shadow·execution=false·스케줄 비활성 유지 |
 | approvals/runtime-manifest.json | 실제 달력/호가단위/수수료/가격·시간 필드/호출 제한/기업 코드·공시/계좌 귀속·자금/CLI 격리 증거와 유효기간 |
-| approvals/telegram-peer.json | 고정 gateway IP, config hash, 검증 출처·만료시각, 검증된 peer임을 확인 |
 | approvals/runtime.json | 같은 config/strategy/code/model/prompt, manifest SHA-256, 확인된 읽기·모델·Telegram 권한과 유효기간 |
 
 준비된 shadow 예시는 `kis-primary`/실전 API 환경 `real`이다. 계좌 키를 실제 API에서 확인하고
@@ -192,10 +189,16 @@ Codex 로그인 volume은 자동으로 이름을 바꾸거나 삭제하지 않�
 새 엔진 `.env`의 `DANTA_AUTH_VOLUME`을 기존 volume 이름(예: `codex-exec-auth`)으로 지정한다.
 DB·잠금·비밀값 경로를 유지하고, app 이름 변경으로 달라진 config hash의 승인을 재검증한다.
 
-새 릴리스마다 개발 PC에서 같은 태그의 두 이미지를 게시하고 새로운 준비 폴더를 만든다.
-운영 PC에는 변경된 Compose/메뉴 파일을 검토해 반영하고 양쪽 `.env`의 이미지 태그를 바꾼다.
-기존 secrets.yaml·gateway env/키·확정된 app/strategy/schedules·approvals·DB·잠금·인증 volume은
+새 릴리스마다 개발 PC에서 두 이미지의 `latest`를 게시하고 새로운 준비 폴더를 만든다.
+운영 PC에는 변경된 Compose/메뉴 파일을 검토해 반영하고 양쪽 `.env`의 이미지 태그는 `latest`로 유지한다.
+기존 secrets.yaml·gateway env·확정된 app/strategy/schedules·approvals·DB·잠금·인증 volume은
 새 설치용 example으로 덮어쓰지 않는다. 코드/설정 hash 변경에 따른 승인 갱신을 확인한다.
+
+이전 v1/v2 설정을 사용했다면 사용할 봇의 token/chat 값을 `config/telegram.env`로 옮기고,
+`routes.yaml`을 단일 `trading-engine` route로 교체한다. 엔진의 `telegram.route`도
+`trading-engine`으로 맞추고 `trusted_peer_profile` 설정은 삭제한다. 기존 peer 키와 profile은
+더 이상 사용하지 않으며 Compose의 peer 키 환경변수·고정 IP 설정도 제거한다.
+허용 sender/chat과 runtime 승인 자체는 유지하며 변경된 config hash에 맞게 승인 기록을 갱신한다.
 
 활성 원장은 SQLite backup API로 복사한다. 아래 명령은 실행 중인 엔진의 현재 DB를 같은
 운영 PC의 `var/backups`에 새 파일로 보관하며 원본을 바꾸지 않는다. 인증/설정은 별도로 비공개 백업한다.

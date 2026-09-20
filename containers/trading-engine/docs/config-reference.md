@@ -41,7 +41,7 @@ hash를 고정한다. 파일이 바뀐 진행 실행은 기존 hash로 새 권�
 | market | OpenDART, 공식 IR 목록 빈 값, calendar/corporate action null | DART 권한, 승인 도메인, 실제 세션·기업행위 출처 |
 | execution | enabled false, single writer true | 실행 활성화와 승인 capability가 함께 필요 |
 | monitoring | enabled false, 호가/활성주문 5초, idle계좌 60초 | 최신성/호출량/보호 실행 가능성 검증 |
-| telegram | enabled/ingress false, sender/chat 빈 목록, route/peer null | 신뢰 peer·송신/수신/제어 승인 및 허용 sender/chat |
+| telegram | enabled/ingress false, sender/chat 빈 목록, route `trading-engine` | 같은 Docker 네트워크·송신/수신/제어 승인 및 허용 sender/chat |
 | storage | SQLite, 로컬 filesystem 필수, raw 보존 기간 null | writable 로컬 상태 디렉터리·백업/복원, 보존 정책 |
 | observability | redaction/attempt usage/structured events true | 실제 운영 검증을 합성 성공으로 표시하지 않음 |
 
@@ -50,7 +50,7 @@ hash를 고정한다. 파일이 바뀐 진행 실행은 기존 hash로 새 권�
 transport도 이 경우에만 내부 `FIXTURE_ONLY` 표지를 사용한다. 외부 분기에는 적용하지 않는다.
 
 실제 adapter 구성과 manifest 필드는 [runtime-contract.md](runtime-contract.md), gateway
-인증과 mount 절차는 [runbook.md](runbook.md)를 따른다. image에는 고정 Codex CLI가 포함되며, 실제 인증과 외부 egress는 별도 운영 설정이다.
+연결과 mount 절차는 [runbook.md](runbook.md)를 따른다. image에는 고정 Codex CLI가 포함되며, 실제 인증과 외부 egress는 별도 운영 설정이다.
 
 ## strategy.yaml
 
@@ -128,7 +128,7 @@ fallback은 없다. 기존 `*_env` 필드는 이 파일의 키 이름을 가리�
 - `KIS_ACCOUNT_REF`: 계좌번호 8자리와 상품코드 2자리를 하이픈으로 연결한 문자열.
 - `KIS_APP_KEY`, `KIS_APP_SECRET`: 승인된 KIS 환경의 앱 인증 정보.
 - `DART_API_KEY`: OpenDART 인증 정보.
-- `TELEGRAM_GATEWAY_URL`, `DANTA_TELEGRAM_PEER_SECRET`: 사용 승인된 gateway 연결 정보.
+- `TELEGRAM_GATEWAY_URL`: gateway 연결 주소. Docker 배포에서는 `http://telegram-gateway:8080`.
 - `DANTA_CODEX_AUTH_HOME`: 전용 Codex 인증 디렉터리 경로. 로그인/runtime Compose 모두 `/app/auth`.
   `compose.auth.yaml`의 `codex login`이 공유 Docker volume에 인증을 생성·갱신한다.
 

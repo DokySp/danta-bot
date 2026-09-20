@@ -77,21 +77,21 @@ WebSocket `subscribe_quotes`는 검증된 운영 capability가 없어 명시적�
 
 ## Telegram과 스케줄
 
-gateway 통신은 제공 명세 §11.3을 사용한다. 기본 ingress off이며 신뢰 transport가 제공한 peer ID와 sender/chat allowlist가 모두 맞아야 수신한다. body의 route/sender는 인증 증거로 쓰지 않는다. `(peer,route,update_id)`와 본문 hash를 SQLite에 저장한 뒤 즉시 접수 응답을 반환한다. 같은 ID/다른 본문은 거부하며 raw_message는 실행하지 않는다. controller callback의 별도 승인이 없는 변경 명령은 거부한다.
+gateway 통신은 명세 §11.3의 단일 `trading-engine` route를 사용한다. 기본 ingress는 off이며,
+Telegram bot token과 chat 허용 목록은 gateway가, sender/chat·route와 기존 제어 승인은
+엔진이 검사한다. 내부 Docker 네트워크를 통신 경계로 사용하고 엔진 HTTP 포트를 호스트에
+공개하지 않는다. 별도 peer 공유키·서명·profile·고정 IP는 2026-09-20 사용자 요청으로 제거했다.
+본문의 sender/chat만으로 요청을 보낸 프로그램의 신원이 증명되지는 않는다.
 
-gateway는 별도 0400/0600 `codex-peer.secret`의 64자리 16진 문자열을 읽고,
-`X-Danta-Timestamp`와 `X-Danta-Signature`를 보낸다. 정확한 body bytes와 timestamp,
-`POST /telegram`을 HMAC-SHA256으로 묶으며 수신기는 ±30초, 실제 TCP IP와 profile을 검사한다.
-로컬 HTTP에서 정상/중복/SQLite 재시작 후 중복은 202, 서명·시각·IP·profile·JSON 거부는 403을
-확인했다. 합성 키·승인 fixture를 사용한 검증이며 배포 네트워크와 운영 profile의 증거는 아니다.
-[로컬 검증 결과](gateway-signing-verification.json)
+SQLite의 기존 peer 열에는 고정된 `telegram-gateway` 식별자를 사용하고,
+`(peer,route,update_id)`와 본문 hash로 접수 중복과 본문 충돌을 검사한다. 저장 뒤 즉시
+접수 응답을 반환하며 raw_message는 실행하지 않는다. 2026-09-20 로컬 HTTP에서 서명 없는
+정상·동일 중복 요청 202, 미허용 chat 403 및 거래 호출 0회를 확인했다.
 
-2026-09-15 두 이미지에 포함된 코드를 별도 internal Docker network로 연결해 정상·중복·
-수신기 재시작 후 동일 접수 202, 서명 누락/변조·미허용 컨테이너 IP 403을 확인했다.
-root 소유 profile을 UID10001 수신기가 읽고 변경할 수 없는 조건도 통과했다.
-합성 키·FakeApp 승인 fixture를 사용했으며 운영 gateway poller·외부 송신 worker는 시작하지 않았다.
+[이전 서명 검증 결과](gateway-signing-verification.json)는 2026-09-14/15의 변경 전
+합성 키·FakeApp 검증 기록이다. 현행 설정이나 운영 profile의 요구사항으로 사용하지 않는다.
 
-송신은 `/sendMessage|/notify`에 `route/chat_id/text/parse_mode=""/escape=true`, 문서는 secret_scan 통과 후 `/sendDocument`에 base64를 보낸다. `ok:true`를 확인한다. 전송 불명의 outbox 재시도는 application 소유이며 어댑터가 거래를 재실행하지 않는다. 배포 gateway 실응답·peer 인증은 미검증이다.
+송신은 `/sendMessage|/notify`에 `route/chat_id/text/parse_mode=""/escape=true`, 문서는 secret_scan 통과 후 `/sendDocument`에 base64를 보낸다. `ok:true`를 확인한다. 전송 불명의 outbox 재시도는 application 소유이며 어댑터가 거래를 재실행하지 않는다. 실제 운영 gateway의 Telegram 송수신은 별도로 검증해야 한다.
 
 SchedulePlanner는 전달받은 실제 세션 개장/종료시각으로 due intent를 만든다. 고정 평일 시계를 거래소 달력으로 대체하지 않는다. 재량 pause는 risk/reconcile/time-limit 의도를 막지 않으며, 만료된 심사를 재시작 후 재생하지 않는다. 실행/중복 claim/보호 권한 검사는 application의 동일 workflow가 소유한다.
 

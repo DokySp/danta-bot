@@ -1,7 +1,7 @@
 routes:
   # New trading-engine service; controls still require trusted runtime approval.
-  v1:
-    env_file: /app/config/telegram-v1.env
+  trading-engine:
+    env_file: /app/config/telegram.env
     url: http://trading-engine:8080/telegram
     bot_commands:
       - command: status

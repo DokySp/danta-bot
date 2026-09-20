@@ -165,23 +165,23 @@ class AdapterContracts(unittest.TestCase):
             path = str(Path(directory) / "requests.sqlite")
             conn = sqlite3.connect(path)
             transport = FixtureTransport(response({"ok": True}), response({"ok": True}))
-            adapter = TelegramAdapter(conn, enabled=True, trusted_peers={"fixture-peer"}, allowed_senders={3}, allowed_chats={2}, transport=transport)
-            body = {"source": "telegram", "gateway_version": "fixture", "route": 1, "update_id": 10001, "message_id": 1, "chat_id": 2, "user_id": 3, "text": "/status", "raw_message": {"text": "/sell-all"}}
-            acknowledgement, request = adapter.receive(body, trusted_peer="fixture-peer")
+            adapter = TelegramAdapter(conn, enabled=True, allowed_senders={3}, allowed_chats={2}, transport=transport)
+            body = {"source": "telegram", "gateway_version": "fixture", "route": "trading-engine", "update_id": 10001, "message_id": 1, "chat_id": 2, "user_id": 3, "text": "/status", "raw_message": {"text": "/sell-all"}}
+            acknowledgement, request = adapter.receive(body)
             self.assertTrue(acknowledgement["accepted"])
             self.assertEqual(request.command, "status")
-            self.assertEqual(request.route, "1")
+            self.assertEqual(request.route, "trading-engine")
             conn.close()
             conn = sqlite3.connect(path)
-            restarted = TelegramAdapter(conn, enabled=True, trusted_peers={"fixture-peer"}, allowed_senders={3}, allowed_chats={2})
-            self.assertEqual(restarted.receive(body, trusted_peer="fixture-peer")[0]["request_id"], request.request_id)
+            restarted = TelegramAdapter(conn, enabled=True, allowed_senders={3}, allowed_chats={2})
+            self.assertEqual(restarted.receive(body)[0]["request_id"], request.request_id)
             for changed in (dict(body, text="/version"), dict(body, update_id=True)):
                 with self.assertRaises(AdapterError):
-                    restarted.receive(changed, trusted_peer="fixture-peer")
+                    restarted.receive(changed)
             with self.assertRaises(AdapterError):
-                restarted.receive(body, trusted_peer=None)
+                restarted.receive(dict(body, route="other-engine"))
             with self.assertRaisesRegex(AdapterError, "CONTROL_AUTHORIZATION"):
-                restarted.receive(dict(body, text="/resume", update_id=2), trusted_peer="fixture-peer")
+                restarted.receive(dict(body, text="/resume", update_id=2))
             adapter.send_message("1", "2", "<fixture>")
             adapter.send_document("1", "2", "fixture.txt", b"safe fixture", secret_scan=lambda value: True)
             self.assertEqual(json.loads(transport.calls[0][3])["parse_mode"], "")

@@ -28,7 +28,7 @@ python -m unittest discover -s tests/integration
 
 ## 프로세스와 저장소
 
-하나의 Application과 Store를 사용한다. HTTP는 인증·검증·영속 접수 후 202 응답을 보내고
+하나의 Application과 Store를 사용한다. HTTP는 허용 사용자·권한 검증·영속 접수 후 202 응답을 보내고
 모델 호출을 기다리지 않는다. 느린 심사, 빠른 제어, 알림 전송은 별도 worker이며, 보호·대사는
 `Application.start_monitor`가 별도 실행한다. `/pause`, `/stop`, `/schedule_off`는 보호와
 대사를 끄지 않는다. 단일 writer는 같은 실제 계좌·모드의 공유 파일 잠금으로 보장한다.
@@ -55,53 +55,22 @@ WAL 파일만 복사하거나 활성 DB 파일을 덮어쓰지 않는다. 재시
 
 설정의 `enabled`, `ingress_enabled`, allowed sender/chat, route 외에도 trusted approval의
 `telegram_ingress`, `telegram_send`, 제어에는 `telegram_control` capability가 필요하다.
-JSON의 sender/route/peer 선언만으로 인증하지 않는다. `trusted_peer_profile`은 root 소유,
-app이 변경 불가한 경로의 별도 JSON이다. gateway 서명 구현, 로컬 HTTP와 별도 internal
-Docker network의 이미지 간 수신·재시작 후 중복 방지를 검증했다. root 소유 profile의
-비root 읽기도 확인했다. 실제 운영 Docker/NAS 연결·Telegram 송수신·배포는 아직 검증하지 않았다.
-
-gateway의 `config/codex-peer.secret.example`을 `config/codex-peer.secret`으로 복사하고,
-placeholder 대신 새 64자리 16진 문자열 한 줄을 넣는다. 예를 들어 로컬 Python의
-`secrets.token_hex(32)`로 생성할 수 있다. 파일은 0400/0600인 일반 파일이어야 하며,
-symlink·잘못된 형식·128 bytes 초과 파일은 거부한다. 실제 키는 Git·이미지에 넣지 않는다.
-같은 문자열을 엔진 private `config/secrets.yaml`의 `DANTA_TELEGRAM_PEER_SECRET`에 넣는다.
-16진 문자열을 binary로 변환하지 않고 ASCII bytes 그대로 HMAC 키로 사용한다.
-
-gateway Compose는 `DANTA_TELEGRAM_PEER_SECRET_FILE=/app/config/codex-peer.secret`을 항상 설정하고
-읽기 전용 config mount에서 파일을 읽는다. 파일을 읽을 수 없으면 시작이 실패한다.
-서명 경로를 생략하는 별도 client 사용은 기존 코드 호환용이며 이 배포 Compose는 사용하지 않는다.
-키는 프로세스 시작 때만 읽으므로 교체할 때 양쪽 서비스에 같은 키를 반영하고 재생성한다.
-signed route URL은 credentials/query/fragment 없는 HTTP(S)의 정확한 `/telegram` 경로여야 한다.
-서명된 요청은 리다이렉트와 환경 proxy를 사용하지 않는다.
+Telegram은 `trading-engine` route 하나와 gateway의 `config/telegram.env` 하나를 사용한다.
+엔진의 `telegram.route`와 gateway route 이름은 `trading-engine`으로 맞춘다. 별도 peer 키,
+HMAC 서명, peer profile, 고정 gateway IP 설정은 사용하지 않는다. gateway가 Telegram에서
+받은 발신자·채팅 정보를 전달하고 엔진은 허용 sender/chat과 runtime 권한을 검사한다.
 
 기본 Compose의 엔진은 `isolated` 네트워크와 HTTP listen `127.0.0.1`을 유지한다.
-runtime override는 gateway와 같은 외부 네트워크 `DANTA_GATEWAY_NETWORK`에 추가로 연결한다.
-배포 생성기의 shadow example은 listen `0.0.0.0`, 고정 gateway IP 및 profile 경로를 준비한다.
-운영 전환 시 공통 네트워크와 컨테이너 수신 주소, 수신기가 보는 실제 gateway IP를 대조해
-아래 profile 및 sender/chat allowlist에 반영해야 한다. root 소유 profile·승인 경로와
-설정 hash/유효기간 검증도 충족해야 한다. 로컬 합성 검증 결과를 운영 승인 파일로 사용하지 않는다.
+runtime override는 gateway와 같은 Docker 네트워크 `DANTA_GATEWAY_NETWORK`에 추가로 연결한다.
+배포 생성기의 shadow example은 listen `0.0.0.0`을 준비한다. 엔진 HTTP 포트를 호스트에
+공개하지 않으며 공통 네트워크에는 신뢰하는 컨테이너만 연결한다. 이 네트워크의 다른
+클라이언트 요청을 별도 서명으로 구별하지 않으므로 sender/chat 목록만으로 전송 출처가
+인증되는 것은 아니다. 실제 운영 Docker/NAS 연결·Telegram 송수신·배포는 별도로 검증한다.
 
-프로파일 계약:
-
-```json
-{
-  "schema_version": 1,
-  "identity": "approved-gateway-identity",
-  "allowed_source_ips": ["127.0.0.1"],
-  "secret_env": "DANTA_TELEGRAM_PEER_SECRET",
-  "verified": true,
-  "evidence_id": "operator-provided-transport-verification",
-  "expires_at": "2030-01-01T00:00:00+00:00",
-  "config_hash": "exact-approved-configuration-hash"
-}
-```
-
-이 예시는 유효한 승인 파일이 아니다. 운영자가 실제 증거·유효기간·hash를 넣어야 한다.
-요청의 실제 TCP peer IP와 profile을 검사하고, `X-Danta-Timestamp`의 ±30초 시각과
-`X-Danta-Signature`의 HMAC-SHA256 16진 문자열을 확인한다. 서명 입력은 정확한 UTF-8
-timestamp + `\nPOST\n/telegram\n` + 원본 요청 bytes이다. 수신기는 최소 32자를 요구하며
-현재 gateway 파일 형식은 64자리 16진 문자열이다. 비밀값은 image,
-설정 snapshot, 로그, 응답에 쓰지 않는다. `X-Forwarded-For`나 본문의 peer는 신뢰하지 않는다.
+기존 설정을 이전할 때는 사용할 봇의 token/chat 값을 `config/telegram.env`로 옮기고
+routes를 단일 `trading-engine`으로 바꾼다. 엔진 `trusted_peer_profile` 설정과 Compose의
+peer 키 환경변수·고정 IP 설정은 제거한다. config hash가 바뀌므로 runtime 승인 기록은
+변경된 설정에 맞춰 갱신한다. 제어·거래 승인과 허용 sender/chat 목록은 계속 필요하다.
 
 일반 대화는 route·chat·user별 별도 세션에서 승인된 모델을 호출한다. 최근 10회 대화를
 문맥으로 사용하고 `/new`로 초기화한다. 일반 대화에는 매매 도구나 계좌 자료를 제공하지
@@ -247,6 +216,6 @@ docker compose -f compose.yaml -f compose.runtime.yaml up -d
 
 운영 override는 `on-failure:3`, 전용 auth mount, 읽기 전용 approval mount를 추가한다.
 기본 ingress는 꺼져 있으며 host port는 열지 않는다. 기존 gateway에서 접근하려면
-검증한 공용 Docker network와 listen_host/route/peer 서명을 준비해야 한다. 운영 증거
+공통 Docker network와 listen_host/route, 허용 sender/chat을 준비해야 한다. 운영 증거
 없이 모드를 live로 바꾸거나 빈 승인을 생성하지 않는다. 이미지 빌드·푸시 스크립트는
 NAS 파일 복사, 로그인, 기존 계좌 인수, 운영 컨테이너 재시작을 실행하지 않는다.

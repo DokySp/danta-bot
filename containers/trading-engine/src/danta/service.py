@@ -1,15 +1,11 @@
 """Durable typed service ingress; HTTP never waits for a model or broker."""
 from __future__ import annotations
 
-import hashlib
-import hmac
 import html
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
 import json
-import os
 from pathlib import Path
-import stat
 import threading
 from datetime import timedelta
 from uuid import uuid4
@@ -29,59 +25,10 @@ PROTECTION = frozenset({'risk_monitor', 'reconcile', 'time_limit_exit'})
 REVIEWS = frozenset({'full_review', 'event_review'})
 
 
-class PeerAuthenticator:
-    """A separately approved gateway/proxy signs exact bytes and transport time.
-
-    The delivered gateway wire contract has no authentication header. This
-    optional deployment contract must be verified before ingress is enabled.
-    """
-    def __init__(self, profile, config_hash, *, env=None, clock=utcnow):
-        self.clock = clock
-        required = {'schema_version', 'identity', 'allowed_source_ips', 'secret_env',
-                    'verified', 'evidence_id', 'expires_at', 'config_hash'}
-        if (set(profile) != required or profile['schema_version'] != 1 or profile['verified'] is not True
-                or not profile['evidence_id'] or profile['config_hash'] != config_hash):
-            raise HumanRequired('Trusted gateway transport proof is missing or mismatched')
-        self.identity = profile['identity']
-        self.addresses = {str(ipaddress.ip_address(value)) for value in profile['allowed_source_ips']}
-        self.expires_at = aware_time(profile['expires_at'])
-        secret = (os.environ if env is None else env).get(profile['secret_env'], '')
-        if not self.identity or not self.addresses or len(secret) < 32:
-            raise HumanRequired('Trusted gateway identity, addresses and secret are required')
-        self.secret = secret.encode()
-
-    @classmethod
-    def from_file(cls, path, config_hash, **kwargs):
-        path = Path(path).absolute()
-        for current in (path, *path.parents):
-            info = current.lstat()
-            if stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
-                raise HumanRequired('Trusted peer profile path must be root-owned and not writable by the app')
-        return cls(json.loads(path.read_text()), config_hash, **kwargs)
-
-    def verify(self, raw_body: bytes, client_ip: str, headers) -> str:
-        now = self.clock()
-        if now >= self.expires_at or str(ipaddress.ip_address(client_ip)) not in self.addresses:
-            raise AdapterError('UNTRUSTED_GATEWAY_TRANSPORT')
-        timestamp = headers.get('X-Danta-Timestamp', '')
-        signature = headers.get('X-Danta-Signature', '')
-        try:
-            when = aware_time(timestamp)
-        except (ValueError, TypeError):
-            raise AdapterError('INVALID_GATEWAY_PROOF') from None
-        if abs((now - when).total_seconds()) > 30:
-            raise AdapterError('EXPIRED_GATEWAY_PROOF')
-        message = timestamp.encode() + b'\nPOST\n/telegram\n' + raw_body
-        expected = hmac.new(self.secret, message, hashlib.sha256).hexdigest()
-        if not isinstance(signature, str) or not hmac.compare_digest(signature, expected):
-            raise AdapterError('INVALID_GATEWAY_PROOF')
-        return self.identity
-
-
 class Service:
-    def __init__(self, app, *, telegram=None, peer_auth=None, clock=utcnow):
+    def __init__(self, app, *, telegram=None, clock=utcnow):
         self.app, self.store, self.config, self.clock = app, app.store, app.config, clock
-        self.telegram, self.peer_auth = telegram, peer_auth
+        self.telegram = telegram
         self.stop = threading.Event()
         self.worker_failed = False
         self.threads = []
@@ -93,18 +40,14 @@ class Service:
         tg = self.config.app['telegram']
         if tg['ingress_enabled']:
             self.config.require_external('telegram_ingress', self.app.approval)
-            if not tg['enabled'] or not tg['trusted_peer_profile']:
-                raise HumanRequired('Telegram ingress needs enabled adapter and verified transport profile')
-            if self.peer_auth is None:
-                self.peer_auth = PeerAuthenticator.from_file(tg['trusted_peer_profile'], self.config.config_hash,
-                    env=load_secrets(self.config.directory), clock=clock)
+            if not tg['enabled'] or not tg['allowed_sender_ids'] or not tg['allowed_chat_ids']:
+                raise HumanRequired('Telegram ingress needs enabled adapter and allowed senders/chats')
         if self.telegram is None and tg['enabled']:
             self.config.require_external('telegram_send', self.app.approval)
             gateway = load_secrets(self.config.directory).get(tg['gateway_url_env'])
             if not gateway:
                 raise HumanRequired('Telegram gateway URL is unresolved')
             self.telegram = TelegramAdapter(self.store.db, enabled=tg['ingress_enabled'],
-                trusted_peers=[self.peer_auth.identity] if self.peer_auth else [],
                 allowed_senders=tg['allowed_sender_ids'], allowed_chats=tg['allowed_chat_ids'],
                 gateway_url=gateway, authorize=self._authorize_control,
                 transport=http_transport(allowed_origins={gateway.rstrip('/')}, network_enabled=True))
@@ -143,20 +86,19 @@ class Service:
                 # No receipt timestamp means the previous HTTP acknowledgement was not durable.
                 self.store.db.execute("UPDATE telegram_requests SET status='INTERRUPTED' WHERE status='PENDING'")
 
-    def receive_http(self, raw_body, client_ip, headers):
-        if not self.config.app['telegram']['ingress_enabled'] or not self.telegram or not self.peer_auth:
+    def receive_http(self, raw_body):
+        if not self.config.app['telegram']['ingress_enabled'] or not self.telegram:
             raise AdapterError('TELEGRAM_INGRESS_DISABLED')
         self.config.assert_current()
         self.config.require_external('telegram_ingress', self.app.approval)
         if len(raw_body) > 65536:
             raise AdapterError('TELEGRAM_PAYLOAD_TOO_LARGE')
-        peer = self.peer_auth.verify(raw_body, client_ip, headers)
         try:
             body = json.loads(raw_body)
         except (ValueError, UnicodeDecodeError):
             raise AdapterError('INVALID_TELEGRAM_JSON') from None
         with self.store.lock:
-            acknowledgement, request = self.telegram.receive(body, trusted_peer=peer)
+            acknowledgement, request = self.telegram.receive(body)
             receipt = self.store.db.execute('SELECT status FROM telegram_requests WHERE request_id=?', (request.request_id,)).fetchone()
             if receipt['status'] == 'INTERRUPTED':
                 raise AdapterError('INTERRUPTED_RECEIPT_REQUIRES_NEW_UPDATE')
@@ -407,7 +349,7 @@ class Service:
         text = html.unescape(content.decode('utf-8'))
         secrets = load_secrets(self.config.directory)
         return not any(value and value in text for name, value in secrets.items()
-            if name in {'KIS_ACCOUNT_REF', 'KIS_APP_KEY', 'KIS_APP_SECRET', 'DART_API_KEY', 'DANTA_TELEGRAM_PEER_SECRET'})
+            if name in {'KIS_ACCOUNT_REF', 'KIS_APP_KEY', 'KIS_APP_SECRET', 'DART_API_KEY'})
 
     def outbox_once(self):
         if self.telegram is None or not self.config.app['telegram']['enabled']:
@@ -522,7 +464,7 @@ def handler_for(service):
                 raw = self.rfile.read(length)
                 if len(raw) != length:
                     raise AdapterError('TRUNCATED_REQUEST')
-                self.respond(202, service.receive_http(raw, self.client_address[0], self.headers))
+                self.respond(202, service.receive_http(raw))
             except (AdapterError, HumanRequired, ValueError, OSError) as error:
                 self.respond(403, {'accepted': False, 'error_type': type(error).__name__})
     return Handler
@@ -539,7 +481,7 @@ def serve(config, args=None, *, application_factory=None, stop_event=None):
         service = Service(app)
         if config.app['telegram']['ingress_enabled']:
             host = config.app['app']['listen_host']
-            # Non-loopback binding requires the already verified signed-peer gate.
+            # Compose exposes this endpoint only within the gateway Docker network.
             ipaddress.ip_address(host)
             server = ThreadingHTTPServer((host, config.app['app']['listen_port']), handler_for(service))
             server.daemon_threads = True
