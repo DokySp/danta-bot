@@ -1,7 +1,8 @@
-"""Prepare mounted directories once; the engine itself remains unprivileged."""
+"""Prepare permissions and exec the unprivileged engine in the same container."""
 from pathlib import Path
 import os
 import stat
+import sys
 
 
 def set_permissions(path: Path, *, uid: int, mode: int, directory: bool = False):
@@ -19,11 +20,12 @@ def set_permissions(path: Path, *, uid: int, mode: int, directory: bool = False)
         os.close(fd)
 
 
-def initialize(app: Path = Path("/app"), locks: Path = Path("/tmp/danta-writers-10001")):
+def initialize(app: Path = Path("/app"), locks: Path = Path("/tmp/danta-writers-10001"),
+               config: Path | None = None):
     # These mount roots are created by Docker. Never traverse existing DB/auth data.
     for path in (app / "var", locks, app / "auth"):
         set_permissions(path, uid=10001, mode=0o700, directory=True)
-    config = app / "config"
+    config = config or app / "config"
     set_permissions(config, uid=0, mode=0o755, directory=True)
     for name in ("app.yaml", "strategy.yaml", "schedules.yaml"):
         set_permissions(config / name, uid=0, mode=0o644)
@@ -34,5 +36,16 @@ def initialize(app: Path = Path("/app"), locks: Path = Path("/tmp/danta-writers-
             set_permissions(path, uid=uid, mode=mode)
 
 
+def main():
+    if os.getuid() == 0:
+        initialize(config=Path("/root/danta-config"))
+        os.setgroups([])
+        os.setgid(10001)
+        os.setuid(10001)
+    args = sys.argv[1:] or ["doctor"]
+    command = args if args[0] == "codex" else ["danta", *args]
+    os.execvp(command[0], command)
+
+
 if __name__ == "__main__":
-    initialize()
+    main()

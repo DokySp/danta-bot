@@ -99,7 +99,7 @@ telegram-gateway/
 ```
 
 설정과 비밀값은 이미지에 들어가지 않으므로 서버에는 각 `config/`를 전달합니다.
-엔진 Compose의 `init`은 필요한 디렉터리 권한만 준비하고 종료합니다. 엔진은 UID 10001과
+엔진 컨테이너는 `trading-engine` 하나입니다. 시작 시 내부에서 권한을 준비한 뒤 UID 10001과
 읽기 전용 config로 실행하며, 기본 명령은 `serve`입니다. `runtime.json`은 config에서 자동으로
 찾되 기존 내용·유효기간·권한 검사를 통과해야 사용합니다. 기본 app.yaml은 offline이므로
 Compose 실행만으로 실제 계좌 조회나 주문이 켜지지는 않습니다.
@@ -119,7 +119,7 @@ config뿐이며 `.env`나 데이터 디렉터리는 만들지 않습니다. 실�
 지정했을 때만 복사하고, 운영 승인은 example만 제공합니다.
 
 Telegram은 `trading-engine` route와 `config/telegram.env` 하나를 사용합니다. 두 서비스는
-`danta-catalyst-net` 네트워크로 연결하며 엔진 포트를 호스트에 공개하지 않습니다.
+`danta-bot-net` 네트워크로 연결하며 엔진 포트를 호스트에 공개하지 않습니다.
 허용 sender/chat과 제어·거래 권한 검사는 유지합니다. `/report`는 승인된 설정에서 일일
 HTML 파일을 전달합니다. 상세 동작은 [runbook](containers/trading-engine/docs/runbook.md)을 참고하세요.
 

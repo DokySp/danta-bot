@@ -39,8 +39,9 @@ RUN python -m pip install --no-cache-dir --no-deps --no-build-isolation -e . \
     && printf '%s\n' "$APP_VERSION" > /app/VERSION \
     && groupadd --gid 10001 danta \
     && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin danta \
-    && install -d -m 0700 -o 10001 -g 10001 /app/auth
+    && install -d -m 0700 -o 10001 -g 10001 /app/auth \
+    && install -d -m 0700 /root /root/danta-config
 
 USER 10001:10001
-ENTRYPOINT ["danta"]
+ENTRYPOINT ["python", "-m", "danta.container_init"]
 CMD ["doctor"]

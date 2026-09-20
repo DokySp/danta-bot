@@ -1,37 +1,24 @@
 services:
-  init:
-    image: dokysp/trading-engine:latest
-    user: "0:0"
-    entrypoint: ["python", "-m", "danta.container_init"]
-    restart: "no"
-    network_mode: none
-    read_only: true
-    cap_drop: ["ALL"]
-    cap_add: ["CHOWN", "FOWNER", "DAC_OVERRIDE"]
-    security_opt: ["no-new-privileges:true"]
-    volumes:
-      - ./config:/app/config:rw
-      - ./var:/app/var:rw
-      - ./locks:/tmp/danta-writers-10001:rw
-      - codex-auth:/app/auth:rw
-
   trading-engine:
+    container_name: trading-engine
     image: dokysp/trading-engine:latest
-    user: "10001:10001"
+    entrypoint: ["python", "-m", "danta.container_init"]
+    # The entrypoint prepares permissions, then drops to UID/GID 10001.
+    user: "0:0"
     command: ["serve"]
     restart: "on-failure:3"
-    depends_on:
-      init:
-        condition: service_completed_successfully
     environment:
       CODEX_HOME: /app/auth
     read_only: true
     init: true
     cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "FOWNER", "DAC_OVERRIDE", "SETUID", "SETGID"]
     security_opt: ["no-new-privileges:true"]
     pids_limit: 128
     volumes:
       - ./config:/app/config:ro
+      # Root-only bootstrap access; /root is mode 0700 and inaccessible to the engine.
+      - ./config:/root/danta-config:rw
       - ./var:/app/var:rw
       - ./locks:/tmp/danta-writers-10001:rw
       - codex-auth:/app/auth:rw
@@ -44,5 +31,4 @@ volumes:
 
 networks:
   default:
-    name: danta-catalyst-net
-    external: true
+    name: danta-bot-net

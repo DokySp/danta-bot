@@ -12,5 +12,4 @@ services:
 
 networks:
   default:
-    name: danta-catalyst-net
-    external: true
+    name: danta-bot-net

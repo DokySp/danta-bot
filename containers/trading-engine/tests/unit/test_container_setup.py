@@ -12,6 +12,7 @@ from unittest.mock import patch
 from danta.cli import main
 from danta.config import HumanRequired
 from danta.container_init import initialize
+from danta.container_init import main as container_main
 
 
 class ContainerSetupTests(unittest.TestCase):
@@ -73,6 +74,30 @@ class ContainerSetupTests(unittest.TestCase):
                     patch("danta.service.serve") as serve, redirect_stdout(io.StringIO()):
                 self.assertEqual(main(["--config-dir", str(self.root / "config"), "serve"]), 0)
             self.assertEqual(serve.call_args.args[1].approval_file, expected)
+
+    def test_entrypoint_prepares_and_drops_privileges_before_engine_or_login(self):
+        for args, command in ((["serve"], ["danta", "serve"]),
+                              (["codex", "login", "status"], ["codex", "login", "status"])):
+            calls = []
+            with patch("danta.container_init.os.getuid", return_value=0), \
+                    patch("danta.container_init.initialize", side_effect=lambda **kw: calls.append(("prepare", kw))), \
+                    patch("danta.container_init.os.setgroups", side_effect=lambda value: calls.append(("groups", value))), \
+                    patch("danta.container_init.os.setgid", side_effect=lambda value: calls.append(("gid", value))), \
+                    patch("danta.container_init.os.setuid", side_effect=lambda value: calls.append(("uid", value))), \
+                    patch("danta.container_init.os.execvp", side_effect=lambda *value: calls.append(("exec", value))), \
+                    patch("sys.argv", ["entrypoint", *args]):
+                container_main()
+            self.assertEqual(calls, [("prepare", {"config": Path("/root/danta-config")}),
+                                     ("groups", []), ("gid", 10001), ("uid", 10001),
+                                     ("exec", (command[0], command))])
+
+    def test_entrypoint_does_not_run_engine_when_initialization_fails(self):
+        with patch("danta.container_init.os.getuid", return_value=0), \
+                patch("danta.container_init.initialize", side_effect=PermissionError), \
+                patch("danta.container_init.os.execvp") as execute:
+            with self.assertRaises(PermissionError):
+                container_main()
+            execute.assert_not_called()
 
 
 if __name__ == "__main__":

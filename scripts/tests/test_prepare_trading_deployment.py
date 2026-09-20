@@ -31,9 +31,13 @@ class PrepareDeploymentTest(unittest.TestCase):
             self.assertFalse(shadow["execution"]["enabled"])
             self.assertFalse((target / "trading-engine/config/secrets.yaml").exists())
             self.assertEqual(base["services"]["trading-engine"]["image"], "example/trading-engine:test-release")
-            self.assertEqual(base["services"]["init"]["image"], "example/trading-engine:test-release")
+            self.assertEqual(set(base["services"]), {"trading-engine"})
+            self.assertEqual(base["services"]["trading-engine"]["container_name"], "trading-engine")
+            self.assertEqual(base["services"]["trading-engine"]["entrypoint"], ["python", "-m", "danta.container_init"])
             gateway = yaml.safe_load((target / "telegram-gateway/compose.yaml").read_text())
             self.assertEqual(gateway["services"]["telegram-gateway"]["image"], "example/telegram-gateway:test-release")
+            for compose in (base, gateway):
+                self.assertEqual(compose["networks"]["default"], {"name": "danta-bot-net"})
             for name in ("trading-engine", "telegram-gateway"):
                 self.assertEqual({p.name for p in (target / name).iterdir()}, {"compose.yaml", "config"})
             self.assertEqual(shadow["broker"]["capability_manifest"], "/app/config/runtime-manifest.json")
@@ -50,7 +54,8 @@ class PrepareDeploymentTest(unittest.TestCase):
             self.assertEqual(routes["routes"]["trading-engine"]["env_file"], "/app/config/telegram.env")
             self.assertTrue((target / "telegram-gateway/config/telegram.env.example").is_file())
             guide = (target / "README.md").read_text()
-            self.assertIn("docker network create danta-catalyst-net", guide)
+            self.assertNotIn("docker network create", guide)
+            self.assertIn("--remove-orphans", guide)
             for file in target.rglob("*"):
                 if file.is_file():
                     self.assertNotIn(str(deployment.REPO), file.read_text())

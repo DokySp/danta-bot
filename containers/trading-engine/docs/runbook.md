@@ -60,7 +60,8 @@ Telegram은 `trading-engine` route 하나와 gateway의 `config/telegram.env` �
 HMAC 서명, peer profile, 고정 gateway IP 설정은 사용하지 않는다. gateway가 Telegram에서
 받은 발신자·채팅 정보를 전달하고 엔진은 허용 sender/chat과 runtime 권한을 검사한다.
 
-엔진과 gateway는 각자의 `compose.yaml`에서 공통 `danta-catalyst-net` 네트워크에 연결한다.
+엔진과 gateway는 각자의 `compose.yaml`에서 공통 `danta-bot-net` 네트워크에 연결한다.
+`external`은 사용하지 않으며 없는 네트워크는 Compose가 자동 생성한다.
 기본 app.yaml의 HTTP listen은 `127.0.0.1`이며 ingress가 비활성이다.
 배포 생성기의 shadow example은 listen `0.0.0.0`을 준비한다. 엔진 HTTP 포트를 호스트에
 공개하지 않으며 공통 네트워크에는 신뢰하는 컨테이너만 연결한다. 이 네트워크의 다른
@@ -148,9 +149,14 @@ Codex CLI는 image에 포함하며 기본 `model.executable: codex`를 사용한
 
 설치·로그인·업데이트 명령은 [배포 절차](../deployment/README.md)에 모았다.
 서비스별 `compose.yaml` 하나를 사용하며 별도 `.env`나 Compose override는 없다.
-엔진의 `init` 서비스는 network 없이 실행되어 config·var·locks·auth의 소유권과 권한만 준비한
-뒤 종료한다. 설정 내용과 기존 DB·인증 파일 내용은 변경하지 않는다. 실제 엔진은 UID 10001,
-읽기 전용 root/config, cap_drop ALL, no-new-privileges로 실행하며 Docker socket은 연결하지 않는다.
+엔진 컨테이너는 `trading-engine` 하나다. 시작 프로세스가 config·var·locks·auth의 소유권과
+권한을 준비한 뒤 보조 그룹을 비우고 UID/GID 10001로 전환하여 엔진을 실행한다.
+설정 내용과 기존 DB·인증 파일 내용은 변경하지 않는다. 실제 엔진은 읽기 전용 root/config와
+유효 capability 없이 실행하며 no-new-privileges를 유지한다. Docker socket은 연결하지 않는다.
+권한 준비용 config mount는 mode 0700인 `/root` 아래에 있어 일반 사용자로 실행되는 엔진은
+접근할 수 없다. 시작 단계의 권한 준비·사용자 전환 capability는 엔진 실행 시 제거된다.
+컨테이너에서 운영 CLI를 직접 실행할 때는 `docker compose exec --user 10001:10001
+trading-engine danta ...`처럼 일반 사용자를 지정한다.
 로그인도 이 Compose와 같은 인증 volume을 사용한다. `docker compose down -v`는 인증을 지우므로
 사용하지 않는다. 기본 model/effort는 `gpt-5.6-sol`/`xhigh`, 인증 방식은 `chatgpt`다.
 

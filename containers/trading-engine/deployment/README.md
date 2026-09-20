@@ -47,8 +47,9 @@ docker login -u dokysp
     └── config/              ← routes.yaml, telegram.env
 ```
 
-`var/`, `locks/`, `memory/`는 옮기거나 미리 만들 필요가 없다. Docker가 생성하고 엔진의
-`init` 컨테이너가 권한을 준비한 뒤 종료한다. 실행 중인 엔진은 config를 읽기 전용으로 사용한다.
+`var/`, `locks/`, `memory/`는 옮기거나 미리 만들 필요가 없다. Docker가 생성하고
+`trading-engine` 컨테이너 내부에서 권한을 준비한 뒤 일반 사용자로 엔진을 실행한다.
+별도 init 컨테이너는 없으며, 실행 중인 엔진은 config를 읽기 전용으로 사용한다.
 기존 설치를 갱신할 때는 기존 데이터 폴더를 그대로 사용한다. `var`는 서버의 로컬 디스크에
 두며 SMB/NFS 마운트 위에서 활성 DB를 실행하지 않는다. 다른 PC에서 SMB로 NAS에 파일을
 전달하는 것은 괜찮지만, Docker에서 사용하는 저장소 자체는 NAS의 로컬 디스크여야 한다.
@@ -60,35 +61,35 @@ docker login -u dokysp
 ## 3. 운영 서버에서 최초 실행
 
 아래는 서버 폴더가 `/docker/trading-engine`, `/docker/telegram-gateway`인 경우다.
-NAS 관리 화면을 쓰는 경우도 같은 공유 네트워크를 먼저 만들고 해당 Compose로 실행한다.
-네트워크는 두 서비스가 서로 통신하는 데 사용하며 신뢰하는 컨테이너만 연결한다.
+공유 네트워크는 기존 `danta-bot-net`을 사용한다. `external` 설정은 없으며 네트워크가
+없으면 Compose가 자동 생성한다. 네트워크에는 신뢰하는 컨테이너만 연결한다.
 
 ```sh
-docker network inspect danta-catalyst-net >/dev/null 2>&1 || docker network create danta-catalyst-net
-
 cd /docker/trading-engine
 docker compose pull
-docker compose run --rm --entrypoint codex trading-engine -c 'cli_auth_credentials_store="file"' login --device-auth
+docker compose run --rm trading-engine codex -c 'cli_auth_credentials_store="file"' login --device-auth
 ```
 
 로그인 명령에 표시되는 URL과 일회용 코드를 브라우저에서 완료한다. 이미 해당 서버에서
 로그인했다면 다시 할 필요 없다. 로그인 상태는 다음 명령으로 확인한다.
 
 ```sh
-docker compose run --rm --entrypoint codex trading-engine -c 'cli_auth_credentials_store="file"' login status
+docker compose run --rm trading-engine codex -c 'cli_auth_credentials_store="file"' login status
 ```
 
 로그인은 서버의 `trading-engine-auth` Docker volume에 저장된다. 개발 PC의 인증 파일을
 복사하거나 직접 작성하지 않는다. 로그인과 서비스는 같은 Compose와 volume을 사용한다.
+로그인도 시작 절차를 거쳐야 하므로
+이전의 `--entrypoint codex` 옵션은 사용하지 않는다.
 
 ```sh
 cd /docker/trading-engine
 docker compose run --rm trading-engine doctor
-docker compose up -d --force-recreate
+docker compose up -d --force-recreate --remove-orphans
 
 cd /docker/telegram-gateway
 docker compose pull
-docker compose up -d --force-recreate
+docker compose up -d --force-recreate --remove-orphans
 ```
 
 기본 offline 설정에서는 엔진이 기동해도 계좌 조회·매매·Telegram 접수를 하지 않는다.
@@ -104,15 +105,17 @@ docker compose up -d --force-recreate
 설정이 변경되지 않았다면 config를 다시 복사할 필요 없다. 설정·코드가 바뀐 경우 승인에
 기록된 hash를 기존 검증 절차에 따라 갱신한다. `--force-recreate`는 이미지가 같아도 변경된
 config를 다시 읽도록 컨테이너를 재생성한다. 기존 비밀값·DB·인증 volume은 보존한다.
+`--remove-orphans`는 이전 구성의 별도 init
+컨테이너를 정리한다. 새 엔진 컨테이너 이름은 `trading-engine`으로 고정된다.
 
 ```sh
 cd /docker/trading-engine
 docker compose pull
-docker compose up -d --force-recreate
+docker compose up -d --force-recreate --remove-orphans
 
 cd /docker/telegram-gateway
 docker compose pull
-docker compose up -d --force-recreate
+docker compose up -d --force-recreate --remove-orphans
 ```
 
 기존 배포에서 옮길 때는 `approvals/runtime.json`과 `approvals/runtime-manifest.json`을
