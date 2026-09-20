@@ -59,13 +59,11 @@ def prepare(output, namespace, version, *, include_secrets=False, sender_ids=())
     def copy(source, name):
         write(name, source.read_bytes())
 
-    for name in ("compose.yaml", "compose.runtime.yaml", "compose.auth.yaml"):
-        copy(ENGINE / name, "trading-engine/" + name)
-    # Runtime host only pulls published images; it needs no source checkout or Dockerfile.
-    base = yaml.safe_load((output / "trading-engine/compose.yaml").read_text())
-    base["services"]["trading-engine"].pop("build")
-    (output / "trading-engine/compose.yaml").write_text(yaml.safe_dump(base, sort_keys=False))
-    copy(GATEWAY / "compose.yaml", "telegram-gateway/compose.yaml")
+    for source, name in ((ENGINE, "trading-engine"), (GATEWAY, "telegram-gateway")):
+        compose = yaml.safe_load((source / "compose.yaml").read_text())
+        for service in compose["services"].values():
+            service["image"] = f"{namespace}/{name}:{version}"
+        write(name + "/compose.yaml", yaml.safe_dump(compose, sort_keys=False))
     if private:
         routes["routes"]["trading-engine"].update(url="http://trading-engine:8080/telegram")
         write("telegram-gateway/config/routes.yaml", yaml.safe_dump(routes, sort_keys=False, allow_unicode=True), 0o600)
@@ -78,29 +76,23 @@ def prepare(output, namespace, version, *, include_secrets=False, sender_ids=())
 
     app = load_config(ENGINE / "config").app
     app["app"].update(mode="shadow", account_alias="kis-primary", state_dir="/app/var/shadow/kis-primary", listen_host="0.0.0.0")
-    app["broker"].update(environment="real", capability_manifest="/app/approvals/runtime-manifest.json")
-    app["market"]["calendar_manifest"] = "/app/approvals/runtime-manifest.json"
+    app["broker"].update(environment="real", capability_manifest="/app/config/runtime-manifest.json")
+    app["market"]["calendar_manifest"] = "/app/config/runtime-manifest.json"
     app["telegram"].update(enabled=True, ingress_enabled=True, route="trading-engine", allowed_sender_ids=list(sender_ids),
         allowed_chat_ids=chat_ids if private else [])
     write("trading-engine/config/app.shadow.yaml.example", yaml.safe_dump(app, sort_keys=False, allow_unicode=True), 0o600)
 
-    for kind in ("engine", "gateway"):
-        body = (ENGINE / "deployment" / (kind + ".env.example")).read_text()
-        body = body.replace("dokysp/", namespace + "/").replace("SET_RELEASE_TAG", version)
-        write(("trading-engine" if kind == "engine" else "telegram-gateway") + "/.env", body, 0o600)
-    for path in sorted((ENGINE / "deployment/examples").glob("*.json.example")):
+    for path in sorted((ENGINE / "config").glob("runtime*.json.example")):
         value = json.loads(path.read_text())
         if "account_alias" in value:
             value.update(account_alias="kis-primary", environment="real")
         if path.name == "runtime.json.example":
             value.update(code_id=code_identity(), model_id=app["model"]["model_id"],
                 prompt_hash=hashlib.sha256((ENGINE / "prompts/portfolio_decision.md").read_bytes()).hexdigest())
-        write("trading-engine/approvals/" + path.name, json.dumps(value, ensure_ascii=False, indent=2) + "\n", 0o600)
+        write("trading-engine/config/" + path.name, json.dumps(value, ensure_ascii=False, indent=2) + "\n", 0o600)
     if private:
         write("trading-engine/config/secrets.yaml", yaml.safe_dump(private, sort_keys=False, default_style='"'), 0o600)
         write("telegram-gateway/config/telegram.env", env_body, 0o600)
-    for name in ("trading-engine/var", "trading-engine/locks", "telegram-gateway/memory"):
-        (output / name).mkdir(mode=0o700)
     guide = (ENGINE / "deployment/README.md").read_text()
     write("README.md", guide)
     return {"output": str(output), "status": "PREPARED_NOT_AUTHORIZED", "includes_secrets": include_secrets,
@@ -111,8 +103,8 @@ def prepare(output, namespace, version, *, include_secrets=False, sender_ids=())
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--namespace", required=True)
-    parser.add_argument("--version", required=True)
+    parser.add_argument("--namespace", default="dokysp")
+    parser.add_argument("--version", default="latest")
     parser.add_argument("--include-secrets", action="store_true")
     parser.add_argument("--sender-id", action="append", default=[])
     args = parser.parse_args()

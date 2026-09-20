@@ -1,25 +1,16 @@
 services:
   telegram-gateway:
     container_name: telegram-gateway
-    image: ${GATEWAY_IMAGE:-dokysp/telegram-gateway:latest}
+    image: dokysp/telegram-gateway:latest
     user: "0:0"
-    environment:
-      GATEWAY_ROUTES_FILE: /app/config/routes.yaml
-      GATEWAY_HOST: 0.0.0.0
-      GATEWAY_PORT: 8080
-      HTTP_TIMEOUT: 10
-      LOG_LEVEL: INFO
-      GATEWAY_CONVERSATION_LOG_DIR: /workspace/memory/telegram-conversations
     ports:
       - "127.0.0.1:8088:8080"
     volumes:
       - ./config:/app/config:ro
       - ./memory:/workspace/memory:rw
     restart: unless-stopped
-    networks:
-      - default
 
 networks:
   default:
-    name: ${DANTA_GATEWAY_NETWORK:-danta-catalyst-net}
+    name: danta-catalyst-net
     external: true

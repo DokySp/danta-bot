@@ -68,6 +68,9 @@ def main(argv=None) -> int:
     app = None
     try:
         config = load_config(args.config_dir)
+        default_approval = args.config_dir / "runtime.json"
+        if args.approval_file is None and default_approval.exists() and (config.mode != "offline" or args.command == "approvals"):
+            args.approval_file = default_approval
         if args.command == "doctor":
             result = {"configuration": "VALID", "mode": config.mode, "code_id": code_identity(), "config_hash": config.config_hash,
                 "strategy_hash": config.strategy_hash, "default_network": "BLOCKED" if config.mode == "offline" else "APPROVAL_REQUIRED",

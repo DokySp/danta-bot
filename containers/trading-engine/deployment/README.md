@@ -1,15 +1,13 @@
 # 다른 컴퓨터에서 실행하는 배포 절차
 
-개발 PC는 코드·테스트·이미지 빌드/push를 담당한다. 운영 컴퓨터는 전달받은 파일과
-이미지만 사용한다. 개발 PC의 소스 경로, Python 환경, Docker 인증 volume을 공유하지 않는다.
-이 문서는 준비된 배포 폴더의 `README.md`로도 복사된다. 명령의 `<배포폴더>`는 운영 컴퓨터의
-실제 절대 경로로 바꾼다. 기존 서비스가 있는 폴더에 최초 설치 파일을 덮어쓰지 않는다.
+개발 PC에서는 이미지를 Docker Hub에 올리고, 운영 서버에서는 그 이미지를 받아 실행한다.
+서버에 직접 옮기는 것은 각 서비스의 `config/`다. **Compose는 서비스 폴더마다 하나**이며
+NAS 관리 화면에는 해당 `compose.yaml` 내용 전체를 넣으면 된다. 별도 `.env`는 사용하지 않는다.
 
-## 1. 개발 PC: 이미지 태그와 전달 파일 준비
+## 1. 개발 PC에서 이미지 올리기
 
-저장소 루트에서 다음 명령으로 두 이미지를 `latest`로 빌드하고 push한다.
-배포 전 회귀 테스트는 Docker의 Python 3.12와 고정 의존성으로 자동 실행한다.
-호스트 Python의 패키지 설치나 `PYTHON_BIN` 설정은 필요하지 않다.
+저장소 루트에서 실행한다. 테스트·빌드·push가 모두 성공한 뒤 다음 단계로 간다.
+두 이미지 모두 `latest`를 사용하며 테스트 의존성은 Docker에서 준비한다.
 
 ```sh
 docker login -u dokysp
@@ -17,217 +15,109 @@ docker login -u dokysp
 ./scripts/deploy-telegram-gateway.sh dokysp
 ```
 
-설정 폴더를 만드는 Python 도구는 별도 의존성 환경이 필요하다. Python 3.12 이상으로
-가상환경을 만들고 기존 lockfile을 설치한다. Ubuntu/Debian에서 `venv`가 없다면
-먼저 `sudo apt-get install python3-venv`를 실행한다.
+## 2. 서버로 옮길 파일
 
-```sh
-python3 -m venv .venv
-.venv/bin/python -m pip install -r containers/trading-engine/requirements.lock
-DEPLOYMENT_ID=$(date +%Y%m%d-%H%M%S)
-mkdir -p containers/trading-engine/var
-.venv/bin/python scripts/prepare-trading-deployment.py \
-  --namespace dokysp --version latest \
-  --output "containers/trading-engine/var/deployment-$DEPLOYMENT_ID" --include-secrets
-```
+| 개발 PC의 파일 | 서버에서 둘 위치 | 용도 |
+|---|---|---|
+| containers/trading-engine/config/app.yaml | trading-engine/config/app.yaml | 엔진 실행 설정 |
+| containers/trading-engine/config/strategy.yaml | trading-engine/config/strategy.yaml | 매매 정책 |
+| containers/trading-engine/config/schedules.yaml | trading-engine/config/schedules.yaml | 실행 일정 |
+| containers/trading-engine/config/secrets.yaml | trading-engine/config/secrets.yaml | KIS·DART 인증 정보, 연결 주소 |
+| 확정된 runtime.json | trading-engine/config/runtime.json | 외부 연결·운용 승인 |
+| 확정된 runtime-manifest.json | trading-engine/config/runtime-manifest.json | 검증된 운영 정보 |
+| containers/telegram-gateway/config/routes.yaml | telegram-gateway/config/routes.yaml | 엔진 연결과 메뉴 |
+| containers/telegram-gateway/config/telegram.env | telegram-gateway/config/telegram.env | 봇 토큰·허용 채팅 |
 
-위 명령은 `latest`만 push한다. 테스트·빌드·push 실패 시 다음 단계는 실행하지 않는다.
-설정 준비 도구는 이미지 push를 실행하지 않는다. `latest`는 다음 배포에서 바뀌는 별칭이며,
-이미 실행 중인 컨테이너는 push만으로 갱신되지 않는다.
+`*.example`은 작성 형식 참고용이다. 실제 값이 있는 파일을 예제로 덮어쓰지 않는다.
+`runtime.json.example`과 `runtime-manifest.json.example`도 엔진 `config/`에 있다.
+이 둘은 미승인 예시이므로 이름만 바꾼다고 외부 연결·거래가 가능해지지 않는다.
+기본 `app.yaml`은 offline이다. 설정 정리나 Compose 실행이 운영 승인을 대신하지 않는다.
 
-`--include-secrets`는 현재 엔진의 private secrets.yaml과 gateway의 `config/telegram.env`를
-새 폴더에 0600으로 복사한다. `routes.yaml`은 `trading-engine` route 하나여야 한다.
-더 이상 사용하지 않는 peer 비밀값은 결과에서 제외한다. 토큰 캐시·Codex auth·원장·레거시는 복사하지 않는다.
-출력 폴더가 존재하면 중단하며 기존 파일은 갱신하지 않는다. 공개 example만 필요하면 옵션을 생략한다.
-확인된 Telegram 발신자 ID는 `--sender-id 숫자`로 추가할 수 있다. 채팅 ID를 사용자 ID로 추정하지 않는다.
-그룹 채팅에서 누가 제어할 수 있는지는 별도 확인한다. 옵션 생략 시 발신자 목록은 비어 있어 접수할 수 없다.
-
-전달 폴더 전체는 비공개 파일 전송 수단으로 운영 컴퓨터의 새 디렉터리에 복사한다.
-실제 비밀값이 들어 있으므로 Git에 추가하거나 Docker build context로 사용하지 않는다.
+서버 구조는 아래와 같다. Compose를 파일로 관리한다면 각 서비스의 `compose.yaml`을 하나씩
+복사한다. NAS 관리 화면으로 관리한다면 파일 복사 대신 같은 내용을 화면에 붙여 넣는다.
+그 프로젝트의 작업 폴더를 해당 서비스 폴더로 지정한다.
 
 ```text
-<배포폴더>/
-  README.md
-  trading-engine/
-    .env                         # 운영 PC 상대 경로와 게시할 이미지 태그
-    compose.yaml                 # build 항목 없이 image pull만 사용
-    compose.runtime.yaml         # 승인 후 serve 및 gateway 네트워크 연결
-    compose.auth.yaml            # 이 운영 PC에서 Codex 로그인
-    config/
-      app.yaml                   # 최초 검사는 offline, 외부 수신 비활성
-      app.shadow.yaml.example    # 주문 없는 연결 검증용, 아직 적용하지 않음
-      strategy.yaml
-      schedules.yaml
-      secrets.yaml.example
-      secrets.yaml               # --include-secrets일 때만
-    approvals/
-      runtime-manifest.json.example
-      runtime.json.example
-    var/                         # 운영 PC 로컬 파일시스템의 DB/토큰
-    locks/                       # 동일 계좌 writer가 공유할 잠금
-  telegram-gateway/
-    .env                         # 이미지·네트워크
-    compose.yaml
-    config/
-      routes.yaml
-      telegram.env.example
-      telegram.env               # --include-secrets일 때만
-    memory/
+서버의 Docker 폴더/
+├── trading-engine/
+│   ├── compose.yaml
+│   └── config/              ← 위의 엔진 설정·비밀값·승인 파일
+└── telegram-gateway/
+    ├── compose.yaml
+    └── config/              ← routes.yaml, telegram.env
 ```
 
-## 2. 운영 컴퓨터: 경로·권한·네트워크
+`var/`, `locks/`, `memory/`는 옮기거나 미리 만들 필요가 없다. Docker가 생성하고 엔진의
+`init` 컨테이너가 권한을 준비한 뒤 종료한다. 실행 중인 엔진은 config를 읽기 전용으로 사용한다.
+기존 설치를 갱신할 때는 기존 데이터 폴더를 그대로 사용한다. `var`는 서버의 로컬 디스크에
+두며 SMB/NFS 마운트 위에서 활성 DB를 실행하지 않는다. 다른 PC에서 SMB로 NAS에 파일을
+전달하는 것은 괜찮지만, Docker에서 사용하는 저장소 자체는 NAS의 로컬 디스크여야 한다.
 
-운영 PC에 Docker Engine와 `docker compose`가 있어야 한다. 이미지의 OS/CPU 아키텍처와
-운영 PC가 일치하는지 확인한다. 개발 PC와 아키텍처가 다르면 해당 플랫폼 이미지 빌드가 선행돼야 한다.
-DB는 운영 PC 자체의 로컬 디스크에 둔다. 개발 PC에서 SMB로 보이는 경로를 활성 DB로 사용하지 않는다.
-한 계좌의 writer를 여러 배포 폴더로 나눠 실행하면 `.env`의 `DANTA_LOCK_DIR`은 같은 실제 경로여야 한다.
+설정 묶음을 만드는 `prepare-trading-deployment.py`는 선택 도구이며 필수 배포 단계가 아니다.
+기존 설정을 직접 복사하면 된다. 도구를 사용할 경우 `--namespace`와 `--version`의 기본값은
+`dokysp`, `latest`이며 `--include-secrets`를 지정해야 실제 비밀값을 복사한다.
 
-아래 소유권 변경은 **새 배포 폴더만** 대상으로 한다. 기존 운영 DB·인증 volume에는 일괄 적용하지 않는다.
+## 3. 운영 서버에서 최초 실행
+
+아래는 서버 폴더가 `/docker/trading-engine`, `/docker/telegram-gateway`인 경우다.
+NAS 관리 화면을 쓰는 경우도 같은 공유 네트워크를 먼저 만들고 해당 Compose로 실행한다.
+네트워크는 두 서비스가 서로 통신하는 데 사용하며 신뢰하는 컨테이너만 연결한다.
 
 ```sh
-cd <배포폴더>
-sudo chown -R root:root trading-engine/config trading-engine/approvals telegram-gateway/config
-sudo chmod 755 trading-engine/config trading-engine/approvals
-sudo chmod 644 trading-engine/config/app.yaml trading-engine/config/strategy.yaml trading-engine/config/schedules.yaml
-sudo chown 10001:10001 trading-engine/config/secrets.yaml
-sudo chmod 400 trading-engine/config/secrets.yaml
-sudo chown -R 10001:10001 trading-engine/var trading-engine/locks
-sudo chmod 700 trading-engine/var trading-engine/locks telegram-gateway/config
-sudo chmod 600 telegram-gateway/config/telegram.env
+docker network inspect danta-catalyst-net >/dev/null 2>&1 || docker network create danta-catalyst-net
+
+cd /docker/trading-engine
+docker compose pull
+docker compose run --rm --entrypoint codex trading-engine -c 'cli_auth_credentials_store="file"' login --device-auth
 ```
 
-양쪽 `.env`는 같은 Docker 네트워크 `danta-catalyst-net`을 사용한다. 별도 고정 IP나
-서브넷 지정은 필요하지 않다. 네트워크 이름을 바꾸면 양쪽 `.env`를 같이 바꾼다.
-게이트웨이와 엔진 사이의 별도 서명 인증은 없으므로 이 네트워크에는 신뢰하는 컨테이너만
-연결하고 엔진의 HTTP 포트를 호스트에 공개하지 않는다.
+로그인 명령에 표시되는 URL과 일회용 코드를 브라우저에서 완료한다. 이미 해당 서버에서
+로그인했다면 다시 할 필요 없다. 로그인 상태는 다음 명령으로 확인한다.
 
 ```sh
-# 양쪽 .env와 같은 이름으로 최초 한 번 생성한다.
-docker network create danta-catalyst-net
-cd telegram-gateway
-docker compose config --quiet
-docker compose pull
-cd ../trading-engine
-docker compose -f compose.yaml -f compose.runtime.yaml config --quiet
-docker compose pull
+docker compose run --rm --entrypoint codex trading-engine -c 'cli_auth_credentials_store="file"' login status
+```
+
+로그인은 서버의 `trading-engine-auth` Docker volume에 저장된다. 개발 PC의 인증 파일을
+복사하거나 직접 작성하지 않는다. 로그인과 서비스는 같은 Compose와 volume을 사용한다.
+
+```sh
+cd /docker/trading-engine
 docker compose run --rm trading-engine doctor
-```
+docker compose up -d --force-recreate
 
-이미 같은 이름의 네트워크가 있으면 삭제하거나 다시 만들지 말고 `docker network inspect`로
-이름을 대조한다. 기존 gateway와 같은 컨테이너 이름/봇을 쓰므로 기존 poller와 동시에 시작하지 않는다.
-공통 네트워크의 서비스 DNS는 `trading-engine`, `telegram-gateway`이며 호스트 IP를 secrets.yaml에 넣지 않는다.
-
-## 3. 운영 컴퓨터: Codex 로그인
-
-```sh
-cd <배포폴더>/trading-engine
-docker compose -f compose.auth.yaml pull
-docker compose -f compose.auth.yaml run --rm codex-login login status
-# 인증이 없으면 아래 명령의 URL/코드를 브라우저에서 완료한다.
-docker compose -f compose.auth.yaml run --rm codex-login
-```
-
-login과 runtime은 `.env`의 `DANTA_AUTH_VOLUME`을 공유한다. 새 volume은 이미지의 UID10001·0700
-auth 디렉터리로 초기화된다. 기존 로그인 상태가 유효하면 재로그인하지 않는다.
-기존 volume의 권한 문제는 별도 확인하며 자동 초기화하지 않는다. 업데이트할 때 이름을 유지하고
-`docker compose down -v`를 사용하지 않는다. 개발 PC에서 로그인한 사실은 이 운영 PC의 로그인 증거가 아니다.
-
-## 4. 운영 검증 후 설정 확정
-
-이 배포 준비는 운영 승인이나 실제 수수료·달력 확인을 만들지 않는다. `*.json.example`의
-`verified=false`, `capabilities=[]`, null은 의도적으로 미확인 상태다. 임의로 true/0/장기 유효기간으로 바꾸지 않는다.
-검증 전에는 `app.yaml`의 offline 상태로 doctor만 실행할 수 있다.
-
-다음 항목은 운영 컴퓨터의 실제 연결 검증 단계에서 확인하고 파일을 확정한다.
-
-| 파일 | 확인·반영할 값 |
-|---|---|
-| config/app.shadow.yaml.example → app.yaml | 계좌 별칭/환경, 실제 허용 sender/chat. shadow·execution=false·스케줄 비활성 유지 |
-| approvals/runtime-manifest.json | 실제 달력/호가단위/수수료/가격·시간 필드/호출 제한/기업 코드·공시/계좌 귀속·자금/CLI 격리 증거와 유효기간 |
-| approvals/runtime.json | 같은 config/strategy/code/model/prompt, manifest SHA-256, 확인된 읽기·모델·Telegram 권한과 유효기간 |
-
-준비된 shadow 예시는 `kis-primary`/실전 API 환경 `real`이다. 계좌 키를 실제 API에서 확인하고
-다른 환경을 사용하면 app과 두 manifest의 별칭/환경을 함께 맞춘다. `strategy_cash`는 연구 자본과
-계좌 귀속 정책 검증을 거쳐 확정한다. 기존 보유·미체결을 자동으로 새 전략에 인수하지 않는다.
-`kis-primary`는 예시 식별자이며 실제 계좌 번호나 계좌 귀속 확인을 뜻하지 않는다.
-
-`runtime.json`의 shadow 연결 권한은 승인된 경우에 한해 `account_read`, `market_read`,
-`disclosure_read`, `model_call`, `broker_auth`, `telegram_ingress`, `telegram_send`를 명시한다.
-제어 명령에는 `telegram_control`, 후보 목록 변경에는 `candidate_control`이 추가로 필요하다.
-이 예시에 `live_orders`, `demo_orders`, `paper_simulation` 권한을 추가하지 않는다.
-
-설정을 확정한 뒤 `doctor`가 반환하는 config_hash/strategy_hash/code_id와 아래 파일 hash를
-운영 검증 기록에 대조한다. 초기 example의 코드 hash도 실제 pull한 이미지와 반드시 대조한다.
-
-```sh
-docker compose run --rm trading-engine doctor
-docker compose run --rm --entrypoint sha256sum trading-engine /opt/codex/bin/codex /app/prompts/portfolio_decision.md
-sha256sum approvals/runtime-manifest.json
-sudo chown root:root approvals/*.json
-sudo chmod 444 approvals/*.json
-```
-
-실제 외부 연결 검증과 Telegram 전송이 허용되고 위 파일이 확정된 뒤에만 서비스 시작 단계로 간다.
-Telegram 메뉴의 일반 문장은 별도 대화 세션에서 모델이 답한다. `/new`는 해당 대화 기록을
-초기화하며, 일반 대화에는 주문 실행 도구를 제공하지 않는다. `/review`가 매매 심사 요청이다.
-일반 대화도 승인된 모델 설정·인증·호출량 제한을 사용한다.
-
-```sh
-cd <배포폴더>/trading-engine
-docker compose -f compose.yaml -f compose.runtime.yaml up -d --no-build
-docker compose -f compose.yaml -f compose.runtime.yaml logs --tail 100 trading-engine
-cd ../telegram-gateway
-docker compose up -d --no-build
-```
-
-## 5. 업데이트와 복구
-
-기존 `codex-exec` 배포를 전환할 때는 기존 서비스를 먼저 정상 종료한 뒤 새 `trading-engine`
-서비스를 시작한다. 폴더와 Compose 서비스 이름 변경만으로 기존 컨테이너가 중지되지는 않는다.
-이미지 이름은 `trading-engine`, gateway 목적지는 `http://trading-engine:8080/telegram`로 맞춘다.
-Codex 로그인 volume은 자동으로 이름을 바꾸거나 삭제하지 않는다. 기존 인증을 재사용하려면
-새 엔진 `.env`의 `DANTA_AUTH_VOLUME`을 기존 volume 이름(예: `codex-exec-auth`)으로 지정한다.
-DB·잠금·비밀값 경로를 유지하고, app 이름 변경으로 달라진 config hash의 승인을 재검증한다.
-
-새 릴리스마다 개발 PC에서 두 이미지의 `latest`를 게시하고 새로운 준비 폴더를 만든다.
-운영 PC에는 변경된 Compose/메뉴 파일을 검토해 반영하고 양쪽 `.env`의 이미지 태그는 `latest`로 유지한다.
-기존 secrets.yaml·gateway env·확정된 app/strategy/schedules·approvals·DB·잠금·인증 volume은
-새 설치용 example으로 덮어쓰지 않는다. 코드/설정 hash 변경에 따른 승인 갱신을 확인한다.
-
-이전 v1/v2 설정을 사용했다면 사용할 봇의 token/chat 값을 `config/telegram.env`로 옮기고,
-`routes.yaml`을 단일 `trading-engine` route로 교체한다. 엔진의 `telegram.route`도
-`trading-engine`으로 맞추고 `trusted_peer_profile` 설정은 삭제한다. 기존 peer 키와 profile은
-더 이상 사용하지 않으며 Compose의 peer 키 환경변수·고정 IP 설정도 제거한다.
-허용 sender/chat과 runtime 승인 자체는 유지하며 변경된 config hash에 맞게 승인 기록을 갱신한다.
-
-활성 원장은 SQLite backup API로 복사한다. 아래 명령은 실행 중인 엔진의 현재 DB를 같은
-운영 PC의 `var/backups`에 새 파일로 보관하며 원본을 바꾸지 않는다. 인증/설정은 별도로 비공개 백업한다.
-
-```sh
-cd <배포폴더>/trading-engine
-docker compose -f compose.yaml -f compose.runtime.yaml exec -T trading-engine python - <<'PY'
-from pathlib import Path
-from datetime import datetime, timezone
-import os, sqlite3
-from danta.config import load_config
-os.umask(0o077)
-source = load_config('/app/config').state_dir / 'state.sqlite'
-target = Path('/app/var/backups')
-target.mkdir(mode=0o700, exist_ok=True)
-target = target / (datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ') + '.sqlite')
-target.touch(mode=0o600, exist_ok=False)
-with sqlite3.connect(source.as_uri() + '?mode=ro', uri=True) as src, sqlite3.connect(target) as dst:
-    src.backup(dst)
-    assert dst.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
-print(target)
-PY
-docker compose -f compose.yaml -f compose.runtime.yaml pull
-docker compose -f compose.yaml -f compose.runtime.yaml up -d --no-build
-cd ../telegram-gateway
+cd /docker/telegram-gateway
 docker compose pull
-docker compose up -d --no-build
+docker compose up -d --force-recreate
 ```
 
-복구는 서비스 중지 후 검증한 백업을 **새 상태 디렉터리**에 두고 상태 경로·권한·config hash와
-승인을 재검증하는 절차다. 활성 DB/WAL을 덮어쓰거나 이미지 태그만 되돌려 계좌가 복구됐다고 판단하지 않는다.
-실제 계좌와 원장을 대사한 뒤 재개하며, 기존 봇 코드로 자동 fallback하지 않는다.
+기본 offline 설정에서는 엔진이 기동해도 계좌 조회·매매·Telegram 접수를 하지 않는다.
+외부 운용에는 기존 검증 절차에 따라 확정된 설정과 `config/runtime.json`,
+`config/runtime-manifest.json`이 필요하다. 승인 내용·유효기간·설정 hash 검사는 유지된다.
+승인 파일 경로는 자동으로 읽으므로 별도 실행 옵션은 필요 없다. gateway에서 엔진으로
+접속할 운영 설정은 listen_host `0.0.0.0`, route `trading-engine`, 허용 sender/chat을 맞춘다.
+`doctor`의 설정 검사 성공은 외부 연결이나 실제 주문 성공의 증거가 아니다.
+
+## 4. 이후 업데이트
+
+개발 PC에서 1번 명령으로 새 `latest`를 올린 뒤 서버에서 실행한다.
+설정이 변경되지 않았다면 config를 다시 복사할 필요 없다. 설정·코드가 바뀐 경우 승인에
+기록된 hash를 기존 검증 절차에 따라 갱신한다. `--force-recreate`는 이미지가 같아도 변경된
+config를 다시 읽도록 컨테이너를 재생성한다. 기존 비밀값·DB·인증 volume은 보존한다.
+
+```sh
+cd /docker/trading-engine
+docker compose pull
+docker compose up -d --force-recreate
+
+cd /docker/telegram-gateway
+docker compose pull
+docker compose up -d --force-recreate
+```
+
+기존 배포에서 옮길 때는 `approvals/runtime.json`과 `approvals/runtime-manifest.json`을
+엔진의 `config/`로 옮기고 app.yaml의 해당 경로를 `/app/config/runtime-manifest.json`으로
+맞춘다. `.env`, `compose.auth.yaml`, `compose.runtime.yaml`은 새 Compose에서는 사용하지 않는다.
+기존 인증 volume 이름이 다르면 엔진 Compose의 `volumes.codex-auth.name`만 기존 이름으로 맞춘다.
+기존 codex-exec 컨테이너는 새 엔진을 시작하기 전에 정상 종료하고, 같은 계좌를 다른 폴더에서
+동시에 실행하지 않는다. 인증 보존을 위해 `docker compose down -v`는 사용하지 않는다.

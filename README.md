@@ -75,71 +75,53 @@ PYTHONPATH=containers/trading-engine/src .venv/bin/python containers/trading-eng
 
 ## Docker Compose와 설정
 
-새 엔진은 `containers/trading-engine/compose.yaml`을 사용합니다. 기본 명령은 `doctor`이며
-외부 네트워크가 차단됩니다. 지속 실행용 `compose.runtime.yaml`은 `serve`와 재시작 정책을
-추가하며, 실제 계좌·모델·Telegram 연결에는 검증된 설정과 별도 승인 파일이 필요합니다.
-이미지 이름은 `DANTA_IMAGE`로 지정합니다. 구체적인 마운트·권한·실행 명령은
-[runbook](containers/trading-engine/docs/runbook.md)을 따릅니다.
+각 서비스 폴더는 **`compose.yaml` 하나와 `config/` 하나**를 사용합니다.
+Compose에는 `dokysp/trading-engine:latest`, `dokysp/telegram-gateway:latest`가 직접 적혀
+있으며 별도 `.env`, 실행용 override, 로그인용 Compose는 필요하지 않습니다.
 
 ```text
-containers/trading-engine/
-  Dockerfile
+trading-engine/
   compose.yaml
-  compose.auth.yaml
-  compose.runtime.yaml
   config/
-    *.yaml                 # 정책 설정
-    secrets.yaml.example   # 비밀 설정 작성 예시 (Git 포함)
-    secrets.yaml           # 실제 비밀 설정 (Git·이미지 제외)
-  src/danta/
-  tests/
-  docs/
-  var/                     # 모드·계좌별 상태와 발급 토큰 (Git·이미지 제외)
+    app.yaml, strategy.yaml, schedules.yaml
+    secrets.yaml              # KIS·DART 비밀값과 연결 주소
+    runtime.json              # 확정된 운영 승인 (외부 연결 시)
+    runtime-manifest.json     # 검증된 운영 정보 (외부 연결 시)
+    *.example                 # 작성 형식 참고용
+  var/                        # 실행 시 자동 생성: 상태·발급 토큰
+  locks/                      # 실행 시 자동 생성: 중복 실행 방지
+telegram-gateway/
+  compose.yaml
+  config/
+    routes.yaml               # 엔진 연결과 Telegram 메뉴
+    telegram.env              # 봇 토큰·허용 채팅
+  memory/                     # 실행 시 자동 생성: 대화·첨부 기록
 ```
 
-비밀값은 `config/secrets.yaml`에 별도로 두고 config 디렉터리를 읽기 전용으로
-마운트합니다. 발급된 KIS access token은 쓰기 가능한 상태 디렉터리에 별도 보관합니다.
-활성 SQLite DB는 NAS 공유 경로 대신 운영 호스트의 로컬 파일시스템에 두어야 합니다.
+설정과 비밀값은 이미지에 들어가지 않으므로 서버에는 각 `config/`를 전달합니다.
+엔진 Compose의 `init`은 필요한 디렉터리 권한만 준비하고 종료합니다. 엔진은 UID 10001과
+읽기 전용 config로 실행하며, 기본 명령은 `serve`입니다. `runtime.json`은 config에서 자동으로
+찾되 기존 내용·유효기간·권한 검사를 통과해야 사용합니다. 기본 app.yaml은 offline이므로
+Compose 실행만으로 실제 계좌 조회나 주문이 켜지지는 않습니다.
+
+Codex 인증은 운영 컴퓨터에서 기존처럼 `codex login`으로 생성하며, 로그인과 엔진이
+`trading-engine-auth` Docker volume을 공유합니다. 인증 파일을 직접 작성하거나 옮길 필요는 없습니다.
+로그인도 같은 Compose를 사용합니다. 실제 명령과 최초 설치·업데이트 순서는
+[배포 절차](containers/trading-engine/deployment/README.md) 한 곳에서 확인합니다.
+
+`var`는 운영 서버의 로컬 디스크에 둡니다. NAS로 파일을 SMB 전송하는 것과 NAS의 Docker가
+자기 로컬 디스크에서 실행하는 것은 별개이며, 활성 DB를 SMB/NFS 마운트 위에서 실행하지 않습니다.
 레거시 파일은 새 이미지와 런타임에 포함되지 않습니다.
 
-Codex 인증은 기존처럼 로그인으로 생성합니다. 이미지를 준비한 뒤 아래 명령을 실행하고
-표시된 URL과 일회용 코드를 브라우저에서 완료합니다. `auth.json`을 직접 만들 필요는 없습니다.
+설정 묶음을 만드는 `scripts/prepare-trading-deployment.py`는 선택 사항입니다.
+이미 필요한 config가 있으면 직접 복사하면 됩니다. 생성 결과도 각 서비스의 Compose 하나와
+config뿐이며 `.env`나 데이터 디렉터리는 만들지 않습니다. 실제 비밀값은 `--include-secrets`를
+지정했을 때만 복사하고, 운영 승인은 example만 제공합니다.
 
-```bash
-DANTA_IMAGE=danta-trading-engine:local docker compose -f containers/trading-engine/compose.auth.yaml run --rm codex-login
-```
-
-로그인과 서비스는 기본 Docker volume `trading-engine-auth`를 공유합니다. 프로필별 저장소는
-`DANTA_AUTH_VOLUME`으로 구분하고 양쪽 실행에 같은 값을 사용합니다. 상태 확인은 위
-명령 뒤에 `login status`를 붙입니다. 비밀 설정의 `DANTA_CODEX_AUTH_HOME`은 `/app/auth`입니다.
-
-운영은 다른 컴퓨터에서 수행합니다. [원격 설치·업데이트 절차](containers/trading-engine/deployment/README.md)에
-전달 파일, 운영 PC 권한·네트워크, Codex 로그인, 승인 준비, 실행·백업 명령을 정리했습니다.
-
-```bash
-DEPLOYMENT_ID=$(date +%Y%m%d-%H%M%S)
-mkdir -p containers/trading-engine/var
-.venv/bin/python scripts/prepare-trading-deployment.py \
-  --namespace dokysp --version latest \
-  --output "containers/trading-engine/var/deployment-$DEPLOYMENT_ID" --include-secrets
-```
-
-이 명령은 새 배포 폴더만 생성합니다. 이미지 push·원격 실행은 수행하지 않습니다.
-출력에는 두 서비스의 Compose, 같은 이미지 태그의 `.env`, 설정·비밀 파일 example과
-미승인 운영 검증 파일 example이 들어갑니다. `--include-secrets`를 지정하면 기존 비밀 파일을
-0600으로 복사하며, Codex 인증·원장·레거시는 복사하지 않습니다. 운영 PC의 Codex 로그인은
-그 PC의 전용 volume에 유지합니다. 생성된 기본 설정은 offline이며 shadow 설정은 별도 example입니다.
-
-Telegram은 `trading-engine` route 하나와 `config/telegram.env` 하나를 사용합니다.
-별도 peer 키·서명·profile·고정 IP 설정은 필요하지 않습니다. 두 서비스는 `.env`의 공통
-Docker 네트워크에 연결하며 엔진의 HTTP 포트를 호스트에 공개하지 않습니다. 해당 네트워크에는
-신뢰하는 컨테이너만 연결합니다. 허용 sender/chat과 제어·거래 승인은 계속 검사합니다.
-실제 달력·수수료·계좌 귀속·허용 sender/chat·승인 검증은 운영 연결 단계에서 확정합니다.
-기존 `trading-engine/profiles/*/compose.yaml` 경로는 사용하지 않습니다.
-
-운영 연결 후 `/report`로 일일 HTML 파일을 텔레그램에서 받을 수 있습니다. 승인된 장 마감 작업과
-심사 실행도 HTML을 첨부하며, 전달 실패는 거래 재실행 없이 별도로 재시도합니다.
-자세한 수신 대상·권한 조건은 [runbook](containers/trading-engine/docs/runbook.md)을 참고하세요.
+Telegram은 `trading-engine` route와 `config/telegram.env` 하나를 사용합니다. 두 서비스는
+`danta-catalyst-net` 네트워크로 연결하며 엔진 포트를 호스트에 공개하지 않습니다.
+허용 sender/chat과 제어·거래 권한 검사는 유지합니다. `/report`는 승인된 설정에서 일일
+HTML 파일을 전달합니다. 상세 동작은 [runbook](containers/trading-engine/docs/runbook.md)을 참고하세요.
 
 ## Codex CLI
 

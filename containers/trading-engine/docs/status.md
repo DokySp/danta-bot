@@ -1,5 +1,15 @@
 # 구현·검증 상태
 
+## 2026-09-20 설정·Compose 정리
+
+서비스별 Compose를 하나로 통합하고 Compose용 `.env`와 별도 auth/runtime Compose를 제거했다.
+승인·운영 정보와 예제도 `config/`로 모았다. 엔진 시작 전에 init이 디렉터리 권한만 준비하며
+실제 엔진의 비특권 실행·읽기 전용 config·승인 검사는 유지한다. 비밀값과 기존 데이터는 보존한다.
+배포 명령과 전달 파일 목록은 [배포 절차](../deployment/README.md)에 모았다.
+Docker 회귀 **270 PASS**(엔진218/gateway33/도구19), 새 이미지 빌드·격리 검증,
+실제 Compose 기동·권한·동일 Compose의 Codex 로그인 진입·재생성 후 데이터/auth 보존을 확인했다.
+독립 검토에서 추가 중요 결함은 없었다. 검증은 합성 설정을 사용했으며 외부 배포·실거래 증거가 아니다.
+
 ## 2026-09-20 Telegram 단일 엔진 설정
 
 사용자 요청으로 Telegram route를 `trading-engine`, 봇 설정 파일을 `telegram.env`로
@@ -187,6 +197,9 @@ gpt-5.6-luna/max 읽기 전용 검토에서 지급조건의 미정/미공개/공
 원시 필드 단계에서 거부하도록 수정하고 관련 회귀 및 전체 검증을 다시 수행했다.
 
 ## 2026-09-14 Codex 로그인 경로
+
+아래는 당시 검증 기록이다. 현재는 서비스별 단일 `compose.yaml`을 사용하며
+설치 명령은 [배포 절차](../deployment/README.md)를 따른다.
 
 `compose.auth.yaml`에서 `codex login --device-auth`를 실행하고, 생성된 인증을 runtime과
 같은 `codex-exec-auth` volume에 보존한다. 새 volume은 UID 10001·0700으로 초기화한다.

@@ -1,28 +1,48 @@
 services:
-  trading-engine:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: ${DANTA_IMAGE:-danta-trading-engine:local}
-    user: "10001:10001"
-    command: ["doctor"]
+  init:
+    image: dokysp/trading-engine:latest
+    user: "0:0"
+    entrypoint: ["python", "-m", "danta.container_init"]
     restart: "no"
+    network_mode: none
+    read_only: true
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "FOWNER", "DAC_OVERRIDE"]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - ./config:/app/config:rw
+      - ./var:/app/var:rw
+      - ./locks:/tmp/danta-writers-10001:rw
+      - codex-auth:/app/auth:rw
+
+  trading-engine:
+    image: dokysp/trading-engine:latest
+    user: "10001:10001"
+    command: ["serve"]
+    restart: "on-failure:3"
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    environment:
+      CODEX_HOME: /app/auth
     read_only: true
     init: true
     cap_drop: ["ALL"]
     security_opt: ["no-new-privileges:true"]
     pids_limit: 128
-    # Configuration, secrets, approvals, database and host-wide writer lock are external.
     volumes:
-      - ${DANTA_CONFIG_DIR:?Set an external config directory}:/app/config:ro
-      - ${DANTA_STATE_DIR:?Set a local state directory}:/app/var:rw
-      - ${DANTA_LOCK_DIR:?Set the shared private writer-lock directory}:/tmp/danta-writers-10001:rw
+      - ./config:/app/config:ro
+      - ./var:/app/var:rw
+      - ./locks:/tmp/danta-writers-10001:rw
+      - codex-auth:/app/auth:rw
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m,mode=1777
-    # No host port, Docker socket, host network, or automatic live command.
-    networks:
-      - isolated
+
+volumes:
+  codex-auth:
+    name: trading-engine-auth
 
 networks:
-  isolated:
-    internal: true
+  default:
+    name: danta-catalyst-net
+    external: true

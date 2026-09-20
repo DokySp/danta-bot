@@ -129,8 +129,8 @@ fallback은 없다. 기존 `*_env` 필드는 이 파일의 키 이름을 가리�
 - `KIS_APP_KEY`, `KIS_APP_SECRET`: 승인된 KIS 환경의 앱 인증 정보.
 - `DART_API_KEY`: OpenDART 인증 정보.
 - `TELEGRAM_GATEWAY_URL`: gateway 연결 주소. Docker 배포에서는 `http://telegram-gateway:8080`.
-- `DANTA_CODEX_AUTH_HOME`: 전용 Codex 인증 디렉터리 경로. 로그인/runtime Compose 모두 `/app/auth`.
-  `compose.auth.yaml`의 `codex login`이 공유 Docker volume에 인증을 생성·갱신한다.
+- `DANTA_CODEX_AUTH_HOME`: 전용 Codex 인증 디렉터리 경로. 동일 Compose의 로그인과 엔진이 `/app/auth`를 공유한다.
+  `codex login`이 `trading-engine-auth` Docker volume에 인증을 생성·갱신한다.
 
 공백 값은 미설정이다. 파일 누락/형식 오류 메시지에는 입력값을 넣지 않는다. offline
 명령은 이 파일을 읽지 않는다. 실제 값은 Git/Docker context/정책 snapshot/보고서에서 제외한다.

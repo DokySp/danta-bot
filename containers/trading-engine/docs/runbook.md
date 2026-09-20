@@ -38,7 +38,7 @@ python -m unittest discover -s tests/integration
 PARTIAL로 기록하고, 계좌·호가·거래 상태가 불명확하면 보호를 성공으로 표시하지 않는다.
 확정 거절/취소된 보호 매도는 대사·현재 조건 검사 후 새 revision으로 재시도하지만 UNKNOWN이나
 CANCEL_REQUESTED 주문은 재전송하지 않는다. 주문 요약은 원장의 실제 상태를 표시한다.
-control/review worker 실패는 정리 후 종료 코드 1로 끝나며 runtime Compose의 `on-failure:3`
+control/review worker 실패는 정리 후 종료 코드 1로 끝나며 Compose의 `on-failure:3`
 재시작 대상이 된다. 정상 stop은 성공 종료다.
 
 SQLite 파일은 검증된 로컬 파일시스템에 둔다. CIFS/NFS에 활성 DB를 두지 않는다. 백업은
@@ -60,8 +60,8 @@ Telegram은 `trading-engine` route 하나와 gateway의 `config/telegram.env` �
 HMAC 서명, peer profile, 고정 gateway IP 설정은 사용하지 않는다. gateway가 Telegram에서
 받은 발신자·채팅 정보를 전달하고 엔진은 허용 sender/chat과 runtime 권한을 검사한다.
 
-기본 Compose의 엔진은 `isolated` 네트워크와 HTTP listen `127.0.0.1`을 유지한다.
-runtime override는 gateway와 같은 Docker 네트워크 `DANTA_GATEWAY_NETWORK`에 추가로 연결한다.
+엔진과 gateway는 각자의 `compose.yaml`에서 공통 `danta-catalyst-net` 네트워크에 연결한다.
+기본 app.yaml의 HTTP listen은 `127.0.0.1`이며 ingress가 비활성이다.
 배포 생성기의 shadow example은 listen `0.0.0.0`을 준비한다. 엔진 HTTP 포트를 호스트에
 공개하지 않으며 공통 네트워크에는 신뢰하는 컨테이너만 연결한다. 이 네트워크의 다른
 클라이언트 요청을 별도 서명으로 구별하지 않으므로 sender/chat 목록만으로 전송 출처가
@@ -131,7 +131,8 @@ README 렌더링을 확인한다. 실제 API·모델·Telegram 송신은 실행�
 이 스크립트는 호스트 검증용이며 image에는 포함하지 않는다.
 
 image는 Python 3.12, 고정 Python 의존성, Codex CLI 0.153.4와 새 application 코드·schema·migration·prompt와
-명시된 합성 snapshot만 포함한다. 기본 명령은 `doctor`이며 자동 재시작하지 않는다.
+명시된 합성 snapshot만 포함한다. 이미지 단독 기본 명령은 `doctor`다.
+배포 Compose는 `serve`로 실행하며 실패 시 최대 3회 재시작한다.
 실제 configuration/state/secret/approval을 image에 복사하지 않는다.
 README와 렌더러도 포함한다. 읽기 전용 컨테이너에서는
 `python scripts/render_report.py --output /app/var/design-report.html`처럼 결과를 상태 mount에
@@ -145,77 +146,27 @@ Codex CLI는 image에 포함하며 기본 `model.executable: codex`를 사용한
 인증은 image 및 브로커 비밀값·정책·승인 디렉터리와 분리한다.
 [공식 인증 저장·갱신 설명](https://learn.chatgpt.com/docs/auth).
 
-엔진 이미지를 준비한 뒤 아래 명령을 실행한다. 로그인 전용 Compose는 거래 설정·DB·
-승인 파일 없이 실행되며, 표시된 URL과 일회용 코드를 사용자가 브라우저에서 완료한다.
-Docker/NAS에서 localhost callback을 연결할 필요가 없는 기기 코드 로그인이다.
+설치·로그인·업데이트 명령은 [배포 절차](../deployment/README.md)에 모았다.
+서비스별 `compose.yaml` 하나를 사용하며 별도 `.env`나 Compose override는 없다.
+엔진의 `init` 서비스는 network 없이 실행되어 config·var·locks·auth의 소유권과 권한만 준비한
+뒤 종료한다. 설정 내용과 기존 DB·인증 파일 내용은 변경하지 않는다. 실제 엔진은 UID 10001,
+읽기 전용 root/config, cap_drop ALL, no-new-privileges로 실행하며 Docker socket은 연결하지 않는다.
+로그인도 이 Compose와 같은 인증 volume을 사용한다. `docker compose down -v`는 인증을 지우므로
+사용하지 않는다. 기본 model/effort는 `gpt-5.6-sol`/`xhigh`, 인증 방식은 `chatgpt`다.
 
-```sh
-cd containers/trading-engine  # 저장소 루트에서 실행할 때
-export DANTA_IMAGE=danta-trading-engine:local  # 배포한 이미지 이름으로 맞춘다
-docker compose -f compose.auth.yaml run --rm codex-login
+비밀값은 `config/secrets.yaml`, 승인과 운영 정보는 `config/runtime.json`과
+`config/runtime-manifest.json`에 둔다. `danta`는 외부 모드에서 config의 runtime.json을 자동으로
+찾아 검증한다. `--approval-file`을 명시하면 해당 파일을 우선 사용한다. offline 실행은 기본
+승인을 읽지 않으며, `approvals show`는 모드와 관계없이 저장된 승인을 검증해 보여준다.
+승인 파일이 없거나 만료·설정 hash 불일치이면 외부 실행을 허용하지 않는다.
 
-# 저장된 로그인 상태만 확인
-docker compose -f compose.auth.yaml run --rm codex-login login status
-```
+비밀값 작성 형식은 [secrets.yaml.example](../config/secrets.yaml.example)을 참고한다.
+기존 env는 런타임이 자동 로딩하지 않는다. 레거시의 계좌번호가 8자리이면 기존 상품코드
+`KIS_PROD_TYPE`, 미설정 시 `01`을 적용하여 `KIS_ACCOUNT_REF`로 이전한다. 발급 토큰 캐시는
+옮기지 않으며 새 cache가 만료시각을 관리한다. 실제 값을 출력하거나 Git에 올리지 않는다.
+비밀값·정책 변경은 다음 프로세스 시작에 적용되며 config hash가 바뀌면 승인도 갱신해야 한다.
 
-기본 model/effort는 기존 env의 `gpt-5.6-sol`/`xhigh`, 인증 방식은 `chatgpt`이다.
-로그인과 판단 subprocess는 모두 file 저장 방식을 사용한다. 실제 모델 호출은 운영
-설정·격리 증거·승인 검증을 계속 거친다. 로그인 성공이 거래 권한을 부여하지 않는다.
-
-2026-09-14에는 `danta-codex-exec:login-20260914-verified`에서 실제 ChatGPT 로그인,
-읽기 도구 호출과 JSON 결과 검증을 완료했다. 이 이미지에는 실제 모델이 요구하는
-Code Mode host와 market 도구 제한, auth 읽기를 차단하는 권한 profile이 반영되어 있다.
-[단독 연결 검증 결과](codex-login-verification.json)를 운영 승인으로 대신 사용하지 않는다.
-
-여러 운영 프로필은 `DANTA_AUTH_VOLUME`을 다르게 지정한다. 로그인과 runtime 명령에
-같은 값을 사용해야 한다. 기존 호스트 인증 디렉터리를 쓰려면 양쪽에 같은 `DANTA_AUTH_DIR`
-절대 경로를 지정할 수 있다. 이 경우 UID 10001의 읽기/쓰기 권한을 운영자가 준비한다.
-기존 volume/디렉터리의 권한과 내용은 자동으로 변경하지 않는다. 인증 보존을 위해
-`docker compose down -v`로 이 volume을 삭제하지 않는다.
-
-컨테이너 안에서 사용하는 실행 파일의 SHA-256과 제한 도구 probe 결과를 manifest에
-연결한다. 호스트의 npm launcher hash를 컨테이너 native binary 증거로 사용하지 않는다.
-
-compose 사용 전에 다음 **외부 위치 참조**를 준비한다. 실제 경로 생성/권한 변경과 운영
-서비스 시작은 운영자가 승인한 전환 절차에 포함되어야 한다.
-
-| 환경 참조 | 조건 |
-|---|---|
-| DANTA_CONFIG_DIR | app.yaml/strategy.yaml/schedules.yaml이 있는 읽기 전용 디렉터리 |
-| config/secrets.yaml | config 디렉터리 안의 실제 비밀 파일. UID 10001이 읽을 수 있는 0400/0600; Git/image 제외 |
-| DANTA_IMAGE | 빌드/푸시한 정확한 이미지 이름·태그 |
-| DANTA_AUTH_VOLUME | 선택 사항. 기본 `trading-engine-auth`; 로그인/runtime이 공유하며 프로필별로 구분 |
-| DANTA_AUTH_DIR | 선택 사항. named volume 대신 기존 전용 디렉터리를 쓸 때 지정, UID 10001 소유 0700 |
-| DANTA_APPROVAL_DIR | root 소유 읽기 전용 승인 디렉터리, runtime.json 포함 |
-| DANTA_STATE_DIR | 로컬 파일시스템, UID/GID 10001이 쓸 수 있는 상태 디렉터리 |
-| DANTA_LOCK_DIR | 같은 계좌를 구동할 모든 컨테이너가 공유하는 UID 10001 소유 mode 0700 디렉터리 |
-
-기본 state_dir 상대경로는 `/app/var` bind mount 아래에 보존된다. 컨테이너는 UID/GID 10001,
-읽기 전용 root filesystem, 권한 제거, no-new-privileges로 실행한다. host port·host network·
-Docker socket은 연결하지 않는다. 기본 internal network는 외부 API egress를 허용하지 않는다.
-실제 계좌·모델·gateway 연결에 필요한 네트워크·인증 volume·trusted approval mount는
-검증과 별도 운영 승인을 거쳐야 하며, 이 compose가 이미 live 운용을 제공한다고 해석하지 않는다.
-
-## 비밀값 이전과 runtime Compose
-
-`config/secrets.yaml.example`을 복사하여 실제 비밀값을 채운다. 기존 env는 런타임이
-자동 로딩하지 않는다. 레거시의 계좌번호가 8자리이면 기존 코드의 상품코드 규칙
-`KIS_PROD_TYPE`, 미설정 시 `01`을 적용하여 `KIS_ACCOUNT_REF`로 이전한다. 이전 결과를
-출력하거나 Git에 올리지 않는다. 예전 cache는 복사하지 않으며 새 cache가 만료시각을 관리한다.
-비밀값 변경은 다음 프로세스 시작에 적용된다.
-
-아래 명령은 설정·인증·운영 증거·신뢰 승인을 준비한 운영 호스트에서만 실행한다.
-설정의 `state_dir`는 `/app/var/<mode>/<account-alias>`처럼 모드와 계좌별로 분리한다.
-
-```sh
-# 1회 검증: 외부 egress 차단, doctor
-docker compose -f compose.yaml run --rm trading-engine
-# 지속 실행: 명시적으로 egress를 허용하고 승인 파일을 읽어 serve 시작
-docker compose -f compose.yaml -f compose.runtime.yaml up -d
-```
-
-운영 override는 `on-failure:3`, 전용 auth mount, 읽기 전용 approval mount를 추가한다.
-기본 ingress는 꺼져 있으며 host port는 열지 않는다. 기존 gateway에서 접근하려면
-공통 Docker network와 listen_host/route, 허용 sender/chat을 준비해야 한다. 운영 증거
-없이 모드를 live로 바꾸거나 빈 승인을 생성하지 않는다. 이미지 빌드·푸시 스크립트는
-NAS 파일 복사, 로그인, 기존 계좌 인수, 운영 컨테이너 재시작을 실행하지 않는다.
+컨테이너 안 실행 파일의 SHA-256과 제한 도구 probe 결과를 runtime-manifest.json에 연결한다.
+호스트의 npm launcher hash를 컨테이너 native binary 증거로 사용하지 않는다. 2026-09-14의
+[단독 연결 검증](codex-login-verification.json)은 현재 운영 승인이나 배포 완료의 대체 증거가 아니다.
+이미지 빌드·푸시는 서버 파일 복사, 로그인, 기존 계좌 인수, 운영 컨테이너 재시작을 실행하지 않는다.

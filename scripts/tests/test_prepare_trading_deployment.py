@@ -30,22 +30,25 @@ class PrepareDeploymentTest(unittest.TestCase):
             self.assertNotIn("trusted_peer_profile", shadow["telegram"])
             self.assertFalse(shadow["execution"]["enabled"])
             self.assertFalse((target / "trading-engine/config/secrets.yaml").exists())
-            self.assertIn("example/trading-engine:test-release", (target / "trading-engine/.env").read_text())
-            self.assertIn("example/telegram-gateway:test-release", (target / "telegram-gateway/.env").read_text())
-            approval = json.loads((target / "trading-engine/approvals/runtime.json.example").read_text())
+            self.assertEqual(base["services"]["trading-engine"]["image"], "example/trading-engine:test-release")
+            self.assertEqual(base["services"]["init"]["image"], "example/trading-engine:test-release")
+            gateway = yaml.safe_load((target / "telegram-gateway/compose.yaml").read_text())
+            self.assertEqual(gateway["services"]["telegram-gateway"]["image"], "example/telegram-gateway:test-release")
+            for name in ("trading-engine", "telegram-gateway"):
+                self.assertEqual({p.name for p in (target / name).iterdir()}, {"compose.yaml", "config"})
+            self.assertEqual(shadow["broker"]["capability_manifest"], "/app/config/runtime-manifest.json")
+            self.assertEqual(shadow["market"]["calendar_manifest"], "/app/config/runtime-manifest.json")
+            approval = json.loads((target / "trading-engine/config/runtime.json.example").read_text())
             self.assertEqual(approval["capabilities"], [])
-            manifest = json.loads((target / "trading-engine/approvals/runtime-manifest.json.example").read_text())
+            manifest = json.loads((target / "trading-engine/config/runtime-manifest.json.example").read_text())
             self.assertFalse(manifest["verified"])
             self.assertFalse(manifest["bootstrap"]["ownership_verified"])
-            self.assertEqual({path.name for path in (target / "trading-engine/approvals").iterdir()},
+            self.assertEqual({path.name for path in (target / "trading-engine/config").glob("*.json.example")},
                              {"runtime.json.example", "runtime-manifest.json.example"})
             routes = yaml.safe_load((target / "telegram-gateway/config/routes.yaml").read_text())
             self.assertEqual(set(routes["routes"]), {"trading-engine"})
             self.assertEqual(routes["routes"]["trading-engine"]["env_file"], "/app/config/telegram.env")
             self.assertTrue((target / "telegram-gateway/config/telegram.env.example").is_file())
-            gateway_env = (target / "telegram-gateway/.env").read_text()
-            self.assertNotIn("DANTA_GATEWAY_SUBNET", gateway_env)
-            self.assertNotIn("DANTA_GATEWAY_IP", gateway_env)
             guide = (target / "README.md").read_text()
             self.assertIn("docker network create danta-catalyst-net", guide)
             for file in target.rglob("*"):
@@ -60,13 +63,13 @@ class PrepareDeploymentTest(unittest.TestCase):
             engine, gateway = base / "engine", base / "gateway"
             for root, original in ((engine, deployment.ENGINE), (gateway, deployment.GATEWAY)):
                 root.mkdir()
-                for name in ("compose.yaml", "compose.auth.yaml", "compose.runtime.yaml", "telegram_gateway.py"):
+                for name in ("compose.yaml", "telegram_gateway.py"):
                     if (original / name).exists():
                         shutil.copyfile(original / name, root / name)
                 (root / "config").mkdir()
                 for file in (original / "config").iterdir():
                     if file.name in {"app.yaml", "strategy.yaml", "schedules.yaml", "secrets.yaml.example",
-                                     "routes.example.yaml", "telegram.env.example"}:
+                                     "routes.example.yaml", "telegram.env.example", "runtime.json.example", "runtime-manifest.json.example"}:
                         shutil.copyfile(file, root / "config" / file.name)
             shutil.copytree(deployment.ENGINE / "deployment", engine / "deployment")
             shutil.copytree(deployment.ENGINE / "prompts", engine / "prompts")
