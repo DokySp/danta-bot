@@ -278,6 +278,7 @@ class KisAdapter:
 
     def _pages(self, path, tr, params, cursor=None, *, rows_key="output1", cursor_width=100):
         rows, summaries, seen = [], [], set()
+        metadata = {"endpoint": path.rsplit("/", 1)[-1], "summaries": summaries}
         cursor = cursor or ("", "")
         try:
             for _ in range(self.max_pages):
@@ -285,18 +286,25 @@ class KisAdapter:
                     raise AdapterError("REPEATED_CURSOR")
                 seen.add(cursor)
                 data, headers = self._request(path, tr, {**params, f"CTX_AREA_FK{cursor_width}": cursor[0], f"CTX_AREA_NK{cursor_width}": cursor[1]}, continuation="N" if any(cursor) else "")
-                if not isinstance(data.get(rows_key), list):
+                if not isinstance(data.get(rows_key), list) or any(not isinstance(row, dict) for row in data[rows_key]):
                     raise AdapterError("MALFORMED_RESPONSE")
                 rows.extend(data[rows_key])
                 summaries.append(data.get("output2"))
-                if headers.get("tr_cont") not in {"M", "F"}:
-                    return FetchResult(tuple(rows), "COMPLETE", utcnow(), metadata={"summaries": summaries})
-                cursor = (data.get(f"ctx_area_fk{cursor_width}", "").strip(), data.get(f"ctx_area_nk{cursor_width}", "").strip())
-                if not any(cursor):
+                continuation = headers.get("tr_cont", "")
+                if not isinstance(continuation, str) or continuation.strip() not in {"", "D", "E", "M", "F"}:
+                    raise AdapterError("INVALID_CONTINUATION")
+                if continuation.strip() not in {"M", "F"}:
+                    return FetchResult(tuple(rows), "COMPLETE", utcnow(), metadata=metadata)
+                # KIS cursors are opaque: send the previous response unchanged.
+                cursor = (data.get(f"ctx_area_fk{cursor_width}", ""), data.get(f"ctx_area_nk{cursor_width}", ""))
+                if any(not isinstance(value, str) for value in cursor):
+                    raise AdapterError("MALFORMED_CURSOR")
+                if not any(value.strip() for value in cursor):
                     raise AdapterError("MISSING_CURSOR")
-        except AdapterError as exc:
-            return FetchResult(tuple(rows), "PARTIAL" if rows else "FETCH_FAILED", utcnow(), cursor, {"error": exc.code, "summaries": summaries})
-        return FetchResult(tuple(rows), "PARTIAL", utcnow(), cursor, {"error": "PAGE_LIMIT", "summaries": summaries})
+        except (AdapterError, OSError) as exc:
+            return FetchResult(tuple(rows), "PARTIAL" if rows else "FETCH_FAILED", utcnow(), cursor,
+                               dict(metadata, error=exc.code if isinstance(exc, AdapterError) else "TRANSPORT_FAILED"))
+        return FetchResult(tuple(rows), "PARTIAL", utcnow(), cursor, dict(metadata, error="PAGE_LIMIT"))
 
     def read_account(self, *, resource_symbol=None, resource_price=None):
         result = self._pages(TRADING + "inquire-balance", self._tr("TTC8434R"), {**self._account_params(),
