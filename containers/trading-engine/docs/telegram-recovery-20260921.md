@@ -49,3 +49,13 @@ NAS의 `telegram-gateway/memory/telegram-conversations` 2026-06-18~09-21, 83개 
 ## Guess: 아직 확정되지 않은 원인
 
 과거 `PROCESS_FAILED`는 인증 방식 불일치와 실행 환경 문제를 포함한 후보가 남아 있다. 계좌 조회의 반복 실패도 현재는 재현되지 않았다. shared SQLite 경합과 큰 캐시의 반복 저장은 확인된 결함이지만, 누락된 traceback 때문에 과거 모든 `InterfaceError`의 원인이라고 단정하지 않는다. 새 버전의 안전한 진단 기록과 운영 관측으로 구분해야 한다.
+
+## Fact: NAS AI 실행 실패 후속 복구
+
+- NAS 관리 화면의 실행 중인 엔진에서 확인했다. `/app/auth/auth.json`과 `config.toml`은 UID 10001이지만 Codex DB·캐시·세션·잠금 파일 대부분은 root 소유였다.
+- 같은 컨테이너에서 UID 10001과 실제 제한된 실행 명령으로 주문과 분리한 연결 점검을 수행했다. 로그인 파일을 읽은 뒤 `failed to initialize in-process app-server client: Permission denied`로 종료했다. 종료 코드 1, 응답 이벤트·사용량·최종 응답 모두 없었다.
+- 시작 시 전용 Codex 저장소의 기존 파일·하위 디렉터리 소유권을 UID 10001로 복구한다. 파일 내용과 모드는 보존하고 심볼릭 링크는 따라가지 않으며, 외부 파일을 바꿀 수 있는 하드 링크는 거절한다. 거래 원장은 순회하지 않는다.
+- NAS 터미널에서도 로그인은 `python -m danta.container_init codex ...`로 실행하도록 배포 절차에 명시했다. root CLI가 다시 런타임 파일을 생성하는 일을 예방한다.
+- NAS에 같은 소유권 복구 함수를 적용한 뒤 UID 10001의 실제 `gpt-5.6-sol` 연결 점검이 성공했다. 종료 코드 0, `connection_ok` 최종 응답, 입력 6,410·출력 16토큰, stderr 없음이었다. 이 짧은 진단의 effort만 low였으며 운영 xhigh 설정은 바꾸지 않았다. 주문·브로커·Telegram 전송은 호출하지 않았다.
+- 13:32 KST 동일 NAS 인증으로 실제 사용량 조회도 `CURRENT`와 한도 응답을 반환했다. 앞선 `/usage` 시간 초과 경로가 복구됐음을 확인했다.
+- 전체 회귀 337개와 실제 Docker UID 전환 후 쓰기 검사를 통과했다. 독립 읽기 전용 검토에서도 추가 결함이 발견되지 않았다.

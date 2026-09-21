@@ -55,6 +55,38 @@ class ContainerSetupTests(unittest.TestCase):
             self.assertEqual(target.stat().st_mode & 0o777, 0o600)
             self.assertEqual(target.read_text(), "UNCHANGED")
 
+    def test_existing_codex_state_is_adopted_without_following_links_or_rewriting_files(self):
+        auth = self.root / "auth"
+        nested = auth / "sessions"
+        nested.mkdir()
+        state, session = auth / "state.sqlite", nested / "existing.jsonl"
+        for path in (state, session):
+            path.write_bytes(b"EXISTING_CODEX_DATA")
+            path.chmod(0o600)
+        outside = self.root / "outside"
+        outside.mkdir()
+        target = outside / "unchanged"
+        target.write_bytes(b"UNRELATED")
+        (auth / "helper").symlink_to(target)
+        (auth / "external-directory").symlink_to(outside, target_is_directory=True)
+        adopted = set()
+        def record(fd, uid, gid):
+            if uid == gid == 10001:
+                adopted.add(os.fstat(fd).st_ino)
+        with patch("danta.container_init.os.fchown", side_effect=record):
+            initialize(self.root, self.root / "locks")
+        for path in (auth, nested, state, session):
+            self.assertIn(path.stat().st_ino, adopted)
+        for path in (outside, target):
+            self.assertNotIn(path.stat().st_ino, adopted)
+        for path in (state, session):
+            self.assertEqual(path.read_bytes(), b"EXISTING_CODEX_DATA")
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        os.link(target, auth / "hardlink")
+        with patch("danta.container_init.os.fchown"), self.assertRaises(ValueError):
+            initialize(self.root, self.root / "locks")
+        self.assertEqual(target.read_bytes(), b"UNRELATED")
+
     def test_config_approval_is_validated_and_explicit_override_still_works(self):
         default = self.root / "config/runtime.json"
         explicit = self.root / "explicit.json"

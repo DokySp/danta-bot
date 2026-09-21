@@ -74,6 +74,11 @@ docker compose run --rm trading-engine codex -c 'cli_auth_credentials_store="fil
 표시되는 URL과 일회용 코드를 브라우저에서 완료한다. 로그인과 엔진은 `trading-engine-auth` Docker volume을
 공유한다. 이미 이 서버에서 로그인했다면 로그인은 생략할 수 있다. `--entrypoint codex`는 사용하지 않는다.
 
+NAS 관리 화면의 컨테이너 터미널은 root로 열릴 수 있다. 이때는 `codex`를 바로 실행하지 말고
+`python -m danta.container_init codex -c 'cli_auth_credentials_store="file"' login --device-auth`를
+사용한다. 시작 과정에서 기존 Codex DB·캐시·세션의 소유권을 UID 10001로 복구하며 내용과 파일 권한은
+보존한다. root로 남은 파일은 로그인 확인이 성공해도 실제 AI 실행과 사용량 조회를 막을 수 있다.
+
 ```sh
 docker compose run --rm trading-engine codex -c 'cli_auth_credentials_store="file"' login status
 docker compose up -d --force-recreate --remove-orphans
