@@ -155,6 +155,13 @@ class Store:
                 notify = False
             else:
                 self.set(key, {"fingerprint": fingerprint, "at": now.isoformat()})
+        for failure, recovery in (('MONITOR_DEGRADED', 'MONITOR_RECOVERED'), ('ACCOUNT_INCOMPLETE', 'ACCOUNT_RECOVERED')):
+            key = 'notice_open:' + failure
+            if kind == failure and notify:
+                self.set(key, True)
+            elif kind == recovery:
+                notify = notify and self.get(key, False)
+                self.set(key, False)
         cursor = self.db.execute("INSERT INTO journal(created_at,run_id,kind,payload) VALUES (?,?,?,?)", (utcnow().isoformat(), run_id, kind, canonical(payload)))
         if notify:
             self.db.execute("INSERT INTO outbox(event_key,payload) VALUES (?,?)", (str(cursor.lastrowid), canonical({"kind": kind, **payload})))

@@ -9,6 +9,34 @@ from danta.safety import CredentialError
 
 
 class OperatorReportingTests(unittest.TestCase):
+    def test_operational_failure_has_cause_impact_and_truthful_action(self):
+        text = render_notification({'kind': 'MONITOR_DEGRADED', 'error_type': 'HumanRequired',
+            'diagnostics': [{'endpoint': 'balance', 'quality': 'FETCH_FAILED', 'reason': 'TRANSIENT_FAILURE', 'http_status': 503}]})
+        self.assertIn('잔고', text)
+        self.assertIn('503', text)
+        self.assertIn('자동으로 다시 확인', text)
+        self.assertNotIn('HumanRequired', text)
+        self.assertNotIn('FETCH_FAILED', text)
+        self.assertNotIn('재개하면', text)
+        recovered = render_notification({'kind': 'MONITOR_RECOVERED', 'checked_at': '2026-09-21T10:00:00+00:00'})
+        self.assertIn('60초', recovered)
+        self.assertNotIn('상세 자료가 없습니다', recovered)
+
+    def test_candidate_view_is_not_misrepresented_as_a_mutation_or_candidate_list(self):
+        text = render_notification({'status': 'CANDIDATE_CONTROLS', 'controls': {'removed': [], 'excluded': []}})
+        self.assertIn('조회만 수행', text)
+        self.assertIn('실제 투자 후보 목록이 아닙니다', text)
+        self.assertNotIn('처리 결과', text)
+
+    def test_status_separates_chat_success_from_uncalled_investment_model(self):
+        text = render_notification({'mode': 'live', 'holdings': [], 'model_id': 'gpt-5.6-sol',
+            'chat_model': {'status': 'SUCCESS', 'checked_at': '2026-09-21T10:00:00+00:00'},
+            'review_model': {}, 'review_status': 'ACCOUNT_INCOMPLETE'})
+        self.assertIn('일반 대화 AI: 성공', text)
+        self.assertIn('투자 판단 AI: 호출하지 않음', text)
+        self.assertIn('투자 검토: 계좌 조회 불완전', text)
+        self.assertIn('계좌 재조회·복구를 실행하지 않습니다', text)
+
     def test_daily_report_keeps_all_protection_fills_and_unverified_values(self):
         at = '2026-09-21T00:20:00+00:00'
         orders = [{'instrument_id': f'KRX:00000{i}', 'name': f'보호종목{i}', 'side': 'SELL',

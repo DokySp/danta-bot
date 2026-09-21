@@ -102,6 +102,12 @@ LABELS = {
     'total_tokens': '전체 토큰', 'input_tokens': '입력 토큰', 'output_tokens': '출력 토큰',
     'cached_input_tokens': '재사용 입력 토큰', 'usage': '토큰 사용량', 'usage_status': '사용량 조회',
     'kind': '종류', 'count': '건수', 'scope': '대상', 'source': '출처', 'version': '버전',
+    'endpoint': '조회 항목', 'http_status': '서버 응답 코드', 'provider_code': '증권사 오류 코드',
+    'transport_error': '통신 오류', 'failed_page': '실패한 조회 페이지', 'stable_seconds': '연속 정상 확인 시간(초)',
+    'checked_at': '확인 시각', 'account_checked_at': '계좌 조회 시각', 'account_succeeded_at': '계좌 최근 성공',
+    'monitor_checked_at': '감시 확인 시각', 'model_checked_at': '모델 최근 실행', 'model_id': '사용 모델',
+    'model_purpose': '최근 모델 용도', 'chat_model': '일반 대화 AI', 'review_model': '투자 판단 AI',
+    'status_checked_at': '상태 확인 시각', 'monitor_diagnostic': '현재 감시 문제', 'account_diagnostics': '현재 계좌 문제',
 }
 STATES = {
     'READY': '초기 검사 통과', 'SUCCESS': '성공', 'SUCCEEDED': '성공', 'COMPLETE': '완료',
@@ -139,6 +145,15 @@ STATES = {
     'UNALLOCATED': '전략에 귀속되지 않은 자산 존재', 'FLOW_VALUATION_MISSING': '입출금 시점 평가 누락',
     'offline': '오프라인 검증', 'paper': '모의 거래', 'shadow': '관찰', 'live': '실거래',
     'strategy_entry': '전략 진입', 'inherited': '기존 보유 종목 편입',
+    'FETCH_FAILED': '조회 실패', 'TRANSIENT_FAILURE': '증권사 서버의 일시 오류',
+    'TRANSPORT_FAILED': '증권사 연결 실패', 'RATE_LIMITED': '조회 요청 한도 초과',
+    'NETWORK_FAILURE': '네트워크 통신 실패', 'DNS_FAILURE': '서버 주소 확인 실패',
+    'TLS_FAILURE': '보안 연결 실패', 'CONNECTION_FAILURE': '연결 끊김 또는 접속 실패',
+    'OUTSIDE_SESSION': '장 운영 시간 밖 · 다음 거래 시간 대기',
+    'HumanRequired': '자동 처리를 완료하지 못함', 'ACCOUNT_RECOVERED': '계좌 조회 복구',
+    'balance': '잔고', 'orders': '주문·체결', 'cancelable': '취소 가능한 주문', 'reservations': '예약 주문',
+    'chat': '일반 대화', 'review': '투자 판단',
+    'INTERRUPTED_RECONCILE_REQUIRED': '재시작으로 중단된 이전 작업 · 계좌 자동 대조 중',
 }
 INTERNAL = {'id', 'run_id', 'session_id', 'intent_id', 'broker_id', 'request_id', 'thesis_id', 'approval_id',
             'event_ids', 'fact_ids', 'source_uris', 'route', 'chat_id', 'user_id', 'requested_by', 'code_id',
@@ -234,6 +249,28 @@ def reported_fee(data):
     return value if data.get('fees_confirmed', _number(value) not in (None, 0)) else None
 
 
+def diagnostic_text(data):
+    """Describe the observation; an exception class is not an operator instruction."""
+    rows = data.get('diagnostics') or []
+    if rows:
+        parts = []
+        for row in rows:
+            if isinstance(row, str):
+                parts.append(_value(row))
+                continue
+            text = _value(row.get('endpoint', row.get('scope', '조회'))) + ': ' + _value(row.get('reason'))
+            evidence = [str(row[key]) for key in ('http_status', 'provider_code') if row.get(key) is not None]
+            if row.get('transport_error'):
+                evidence.append(_value(row['transport_error']))
+            parts.append(text + (' (' + ', '.join(evidence) + ')' if evidence else ''))
+        return '; '.join(parts)
+    reason = data.get('reason') or data.get('action')
+    prefix = 'External account observations incomplete: '
+    if isinstance(reason, str) and reason.startswith(prefix):
+        return '계좌 자료 미완료: ' + ', '.join(_value(code) for code in reason[len(prefix):].split(','))
+    return _value(reason) if reason else '상세 원인이 기록되지 않아 확정할 수 없습니다.'
+
+
 def render_notification(payload, *, symbols=None) -> str:
     """Render a flat event, {kind, payload} envelope, or command result as plain text."""
     reject_credentials(payload)
@@ -250,6 +287,24 @@ def render_notification(payload, *, symbols=None) -> str:
     status = data.get('status', '')
     if not isinstance(status, str):
         status = ''
+    if kind in {'ACCOUNT_INCOMPLETE', 'MONITOR_DEGRADED'}:
+        title = '계좌 조회 재확인 중' if kind == 'ACCOUNT_INCOMPLETE' else '보호 감시 재확인 중'
+        impact = ('계좌 확인 전까지 신규 투자 판단을 보류합니다.' if kind == 'ACCOUNT_INCOMPLETE' else
+                  '현재 자료로 보호 조건을 모두 확인하지 못했습니다. 신규 위험을 늘리지 않습니다.')
+        return '\n'.join([title, '확인된 문제: ' + diagnostic_text(data), '영향: ' + impact,
+                          '자동으로 다시 확인합니다. /status에서 현재 상태와 확인 시각을 볼 수 있습니다.'])
+    if kind in {'ACCOUNT_RECOVERED', 'MONITOR_RECOVERED'}:
+        return (('계좌 조회가 복구되었습니다. 잔고·주문 자료 대조를 마쳤습니다.' if kind == 'ACCOUNT_RECOVERED' else
+                 '보호 감시가 복구되었습니다. 60초 동안 정상 확인이 이어졌습니다.') +
+                ('\n확인 시각: ' + _time(data['checked_at']) if data.get('checked_at') else ''))
+    if kind == 'SERVICE_REQUEST_RECOVERED':
+        return '재시작으로 중단된 이전 작업은 자동 재실행하지 않았습니다.\n계좌·주문은 감시 루프에서 자동으로 대조합니다. 현재 상태는 /status에서 확인할 수 있습니다.'
+    if status == 'CANDIDATE_CONTROLS':
+        controls = data['controls']
+        return '\n'.join(['종목 제외 설정 · 조회만 수행했습니다.',
+            '투자 후보 심사에서 제외: ' + (', '.join(_name({'instrument_id': symbol}, symbols) for symbol in controls['removed']) or '없음'),
+            '매수 금지: ' + (', '.join(_name({'instrument_id': symbol}, symbols) for symbol in controls['excluded']) or '없음'),
+            '이 화면은 실제 투자 후보 목록이 아닙니다. 후보 선정 결과와 근거는 /report에서 확인하세요.'])
     if kind in {'ORDER_ACKNOWLEDGED', 'CUMULATIVE_FILL', 'FILL_CORRECTION'}:
         title = {'ORDER_ACKNOWLEDGED': '주문 접수', 'CUMULATIVE_FILL': '체결 확인', 'FILL_CORRECTION': '체결 기록 정정'}[kind]
         lines = [f'{title} · {_name(data, symbols)} · {_value(data.get("side"))}']
@@ -275,6 +330,22 @@ def render_notification(payload, *, symbols=None) -> str:
         for key in ('authentication', 'model_status', 'account_status', 'monitor_status', 'review_status', 'scheduler_status'):
             if key in data:
                 lines.append(LABELS[key] + ': ' + _value(data[key]))
+        if data.get('model_id'):
+            lines.append('사용 모델: ' + data['model_id'])
+        for key in ('chat_model', 'review_model'):
+            health = data.get(key, {})
+            if key in data:
+                lines.append(LABELS[key] + ': ' + _value(health.get('status', 'NOT_CALLED')) +
+                             (' · ' + _time(health['checked_at']) if health.get('checked_at') else ''))
+        if data.get('model_checked_at'):
+            lines.append('최근 모델 실행: ' + _time(data['model_checked_at']) + ' · ' + _value(data.get('model_purpose')))
+        for key in ('account_checked_at', 'monitor_checked_at'):
+            if data.get(key):
+                lines.append(LABELS[key] + ': ' + _time(data[key]))
+        if data.get('account_diagnostics'):
+            lines.append('현재 계좌 문제: ' + diagnostic_text({'diagnostics': data['account_diagnostics']}))
+        if data.get('monitor_status') == 'MONITOR_DEGRADED':
+            lines.append('현재 감시 문제: ' + diagnostic_text(data.get('monitor_diagnostic') or {}))
         diagnostic = data.get('model_diagnostic') or {}
         if data.get('model_status') not in {'SUCCESS', 'NOT_CALLED', None} and diagnostic:
             lines.append('모델 진단: ' + _value(diagnostic.get('category')) + ' / 종료 코드 ' + str(diagnostic.get('exit_code', '미확인')))
@@ -286,6 +357,7 @@ def render_notification(payload, *, symbols=None) -> str:
                 lines.append(LABELS.get(key, key) + ': ' + _value(data[key], key))
         lines.append('대화: ' + ('이어지는 대화 있음 · /new로 초기화' if data.get('session_active') else '새 대화 준비'))
         lines.append('운영 변경은 아래 버튼에서 선택하세요. /stop은 현재 대화 응답만 중단합니다.')
+        lines.append('표시된 시각의 저장 상태입니다. 이 명령은 계좌 재조회·복구를 실행하지 않습니다.')
         return '\n'.join(lines)
     simple = {
         'NEW_SESSION': '새 대화를 시작했습니다. 거래·보유 상태는 유지됩니다.',

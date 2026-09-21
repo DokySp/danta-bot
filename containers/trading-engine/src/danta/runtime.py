@@ -1109,8 +1109,10 @@ class ExternalRuntime:
                     "provider":"codex_cli","reasoning_effort":self.codex.reasoning_effort,"purpose":purpose,
                     **{key: frozen[key] for key in ("created_at", "strategy_hash", "config_hash", "code_id") if key in frozen}}
         with store.transaction():
-            store.set("model_health", {"status": result.status, "checked_at": self.clock().isoformat(),
-                "purpose": purpose, "diagnostic": attempts[-1].get("diagnostic") if attempts else None})
+            health = {"status": result.status, "checked_at": self.clock().isoformat(),
+                "purpose": purpose, "diagnostic": attempts[-1].get("diagnostic") if attempts else None}
+            store.set("model_health", health)
+            store.set('model_health:' + purpose, health)
             for index,attempt in enumerate(attempts,1):
                 store.event(frozen["run_id"],"MODEL_ATTEMPT",{**metadata,**attempt,"record_type":"MODEL_ATTEMPT",
                     "attempt_number":index,"usage_scope":"attempt"})

@@ -348,6 +348,14 @@ class Service:
                     data = self._report_data()
                     context = {key: data[key] for key in ('created_at', 'status', 'theses', 'instruments')}
                     context.update(orders=data['orders'][-20:], fills=data['fills'][-20:], runs=data['runs'][-5:])
+                    context['diagnostics'] = data['diagnostics'][-20:]
+                    context['operator_contract'] = {
+                        'authentication': 'Codex 로그인 상태이며 KIS 증권사 인증 상태가 아니다.',
+                        'status': '/status는 저장된 현재 상태를 표시하며 계좌 재조회나 장애 복구를 실행하지 않는다.',
+                        'resume': '/resume는 명시적으로 일시정지한 투자를 재개한다. paused=false이면 재개 조치를 안내하지 않는다.',
+                        'monitor': '보호 감시는 오류 후에도 자동 재시도한다. HumanRequired라는 예외 이름만으로 사람을 기다리는 상태라고 판단하지 않는다.',
+                        'evidence': '각 사건의 시각을 구분한다. 과거 투자 검토 실패를 최근 감시 장애의 원인으로 연결하지 않는다.',
+                    }
                     included = {row.get('instrument_id') for row in context['status'].get('holdings', []) + context['orders']}
                     context['instruments'] = {key: name for key, name in context['instruments'].items() if key in included}
                     context['coverage'] = '당일 최근 주문 20건·체결 20건·검토 5건, 현재 저장된 계좌 상태. 실시간 추가 조회 없음.'
@@ -407,7 +415,7 @@ class Service:
                 arguments = payload['text'].split()[1:]
                 if arguments == ['candidates']:
                     controls = self.store.get('candidate_controls', {'removed': [], 'excluded': []})
-                    return {'reply_text': '후보·제외 종목 관리\n' + render_notification(controls, symbols=self._symbols()),
+                    return {'reply_text': render_notification({'status': 'CANDIDATE_CONTROLS', 'controls': controls}, symbols=self._symbols()),
                         '_reply_markup': self._keyboard([[('후보 복원', '/add_portfolio_ticker'), ('후보 제거', '/remove_portfolio_ticker')],
                             [('매수 제외', '/add_portfolio_except_ticker'), ('제외 해제', '/remove_portfolio_except_ticker')]])}
                 if arguments == ['effort']:
@@ -516,7 +524,7 @@ class Service:
                     'nav': self.store.get('nav_points', []),
                     'theses': [thesis.model_dump(mode='json') for thesis in self.app.theses()],
                     'diagnostics': [{'at': row['created_at'], 'kind': row['kind'], **row['payload']} for row in journal
-                        if row['kind'] in {'ACCOUNT_INCOMPLETE', 'MONITOR_DEGRADED', 'MONITOR_RECOVERED', 'SERVICE_WORKER_FAILED', 'MODEL_OUTCOME'}]}
+                        if row['kind'] in {'ACCOUNT_INCOMPLETE', 'ACCOUNT_RECOVERED', 'MONITOR_DEGRADED', 'MONITOR_RECOVERED', 'SERVICE_WORKER_FAILED', 'MODEL_OUTCOME'}]}
 
     def _report(self):
         data = self._report_data()

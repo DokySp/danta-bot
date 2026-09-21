@@ -20,6 +20,7 @@ from .models import Candidate, CostSchedule, DailyBar, EventRecord, Holding, Ins
 from .portfolio import buy_commission, size_entry
 from .reporting import write_report
 from .risk import ConcentrationMonitor, DrawdownCircuit, evaluate_exit, update_trailing_stop
+from .safety import reject_credentials
 from .store import Store
 from .strategy import assess_entry, quote_fresh, rank_candidates, reentry_eligibility
 
@@ -385,6 +386,8 @@ class Application:
                 with self.store.transaction():
                     newly_degraded = not self.store.get("monitor_degraded", False)
                     self.store.set("monitor_degraded", True)
+                    self.store.set('monitor_diagnostic', plan.model_dump(mode='json'))
+                    self.store.set('monitor_checked_at', bundle.now.isoformat())
                     self.store.set("monitor_healthy_since", None)
                     if newly_degraded:
                         self.store.event("protection", "MONITOR_DEGRADED", plan.model_dump(mode="json"), notify=True)
@@ -425,9 +428,11 @@ class Application:
                         self.store.set("monitor_healthy_since", bundle.now.isoformat())
                     elif (bundle.now - aware_time(healthy_since)).total_seconds() >= 60:
                         self.store.set("monitor_degraded", False)
-                        self.store.event("protection", "MONITOR_RECOVERED", {}, notify=True)
+                        self.store.set('monitor_diagnostic', None)
+                        self.store.event("protection", "MONITOR_RECOVERED", {'checked_at': bundle.now.isoformat(), 'stable_seconds': 60}, notify=True)
         else:
             self.store.set("monitor_healthy_since", None)
+        self.store.set('monitor_checked_at', bundle.now.isoformat())
         return results
 
     def record_nav(self) -> dict:
@@ -551,12 +556,21 @@ class Application:
                     if self.config.mode != "shadow":
                         self.executor.expire_entries(self.bundle.now)
                 except Exception as error:
+                    reason = str(error)[:500]
+                    try:
+                        reject_credentials(reason)
+                    except ValueError:
+                        reason = 'PRIVATE_DIAGNOSTIC_REDACTED'
+                    diagnostic = {'error_type': type(error).__name__, 'reason': reason,
+                                  'diagnostics': self.store.get('account_diagnostics', []) if not self.store.get('reconciled') else []}
                     with self.store.transaction():
                         newly_degraded = not self.store.get("monitor_degraded", False)
                         self.store.set("monitor_degraded", True)
                         self.store.set("monitor_healthy_since", None)
+                        self.store.set('monitor_checked_at', self.clock().isoformat())
+                        self.store.set('monitor_diagnostic', diagnostic)
                         if newly_degraded:
-                            self.store.event("monitor", "MONITOR_DEGRADED", {"error_type": type(error).__name__}, notify=True)
+                            self.store.event("monitor", "MONITOR_DEGRADED", diagnostic, notify=True)
         self.monitor_thread = threading.Thread(target=loop, name="danta-protection", daemon=True)
         self.monitor_thread.start()
 
@@ -791,16 +805,29 @@ class Application:
 
     def status(self) -> dict:
         health = self.store.get("model_health", {})
+        paused = self.store.get('paused') or self.store.get('drawdown_paused', False)
+        review_status = ('PAUSED' if paused else 'ACCOUNT_INCOMPLETE' if not self.store.get('reconciled') else
+                         'MONITOR_DEGRADED' if self.store.get('monitor_degraded', False) else
+                         'OUTSIDE_SESSION' if self.bundle.calendar.active(self.clock()) is None else 'ENABLED')
         return {"mode": self.config.mode, "config_hash": self.config.config_hash, "code_id": self.code_id,
                 "as_of": self.bundle.now.isoformat(),
+                'status_checked_at': self.clock().isoformat(),
+                'model_id': self.config.app['model']['model_id'],
+                'model_checked_at': health.get('checked_at'), 'model_purpose': health.get('purpose'),
+                'chat_model': self.store.get('model_health:chat', {}),
+                'review_model': self.store.get('model_health:review', {}),
                 "authentication": health['status'] if health.get("status", "").startswith("AUTH_") else
                     "AUTHENTICATED_AT_STARTUP" if self.config.mode != 'offline' else "UNVERIFIED",
                 "model_status": health.get("status", "NOT_CALLED"), "model_diagnostic": health.get("diagnostic"),
                 "account_status": "COMPLETE" if self.store.get("reconciled") else "ACCOUNT_INCOMPLETE",
                 "account_diagnostics": self.store.get("account_diagnostics", []),
+                'account_checked_at': self.store.get('account_checked_at'),
+                'account_succeeded_at': self.store.get('account_succeeded_at'),
+                'monitor_checked_at': self.store.get('monitor_checked_at'),
+                'monitor_diagnostic': self.store.get('monitor_diagnostic'),
                 "monitor_status": "MONITOR_DEGRADED" if self.store.get("monitor_degraded", False) else
                     "RUNNING" if self.monitor_thread and self.monitor_thread.is_alive() else "NOT_RUNNING",
-                "review_status": "PAUSED" if self.store.get("paused") or self.store.get("drawdown_paused", False) else "ENABLED",
+                "review_status": review_status,
                 "paused": self.store.get("paused"), "reconciled": self.store.get("reconciled"),
                 "cash_krw": self.store.get("cash_krw"), "holdings": self.store.holdings(), "working_orders": self.store.working(),
                 "costs_complete": self.store.get("costs_complete", True), "performance": self.store.get("performance"),

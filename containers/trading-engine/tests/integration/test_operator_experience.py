@@ -104,6 +104,33 @@ class OperatorExperienceTests(unittest.TestCase):
         self.assertEqual(store.read("SELECT COUNT(*) FROM journal WHERE kind='ACCOUNT_INCOMPLETE'")[0][0], 20)
         self.assertEqual(store.read('SELECT COUNT(*) FROM outbox')[0][0], 1)
 
+    def test_suppressed_failure_does_not_send_an_unpaired_recovery(self):
+        store = self.case.app.store
+        with store.transaction():
+            for _ in range(2):
+                store.event('monitor', 'MONITOR_DEGRADED', {'diagnostics': ['TRANSPORT_FAILED']}, notify=True)
+                store.event('monitor', 'MONITOR_RECOVERED', {'checked_at': '2026-09-21T10:00:00+00:00'}, notify=True)
+        self.assertEqual(store.read("SELECT COUNT(*) FROM journal WHERE kind IN ('MONITOR_DEGRADED','MONITOR_RECOVERED')")[0][0], 4)
+        notices = [json.loads(row[0])['kind'] for row in store.read('SELECT payload FROM outbox')]
+        self.assertEqual(notices, ['MONITOR_DEGRADED', 'MONITOR_RECOVERED'])
+
+    def test_chat_receives_dated_incidents_and_real_operator_contract(self):
+        case = self.case
+        case.app.approval['capabilities'].append('model_call')
+        captured = []
+        case.app.chat = lambda **kwargs: (captured.append(kwargs) or
+            {'status': 'CHAT_COMPLETE', 'reply_text': '합성 응답', 'model_called': True, 'orders_created': False})
+        with case.app.store.transaction():
+            case.app.store.event('monitor', 'MONITOR_DEGRADED', {'diagnostics': [{'endpoint': 'orders', 'reason': 'TRANSIENT_FAILURE', 'http_status': 503}]})
+        case.receive('감시 오류의 원인이 뭐야?')
+        case.service.run_once(review=True)
+        context = captured[0]['account_context']
+        self.assertEqual(context['diagnostics'][-1]['diagnostics'][0]['http_status'], 503)
+        self.assertIn('at', context['diagnostics'][-1])
+        self.assertIn('재조회나 장애 복구를 실행하지 않는다', context['operator_contract']['status'])
+        self.assertIn('KIS', context['operator_contract']['authentication'])
+        self.assertEqual(case.app.reconcile_calls, 0)
+
     def test_full_long_reply_is_immutable_attachment_and_status_has_controls(self):
         case = self.case
         case.receive('/status')

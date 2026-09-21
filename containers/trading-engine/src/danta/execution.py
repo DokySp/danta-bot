@@ -295,9 +295,12 @@ class Executor:
                         self.store.set("reconciled", False)
                     raise HumanRequired("ACCOUNT_CASH_RECONCILIATION_REQUIRED") from error
             with self.store.transaction():
+                previous_diagnostics = self.store.get('account_diagnostics', [])
                 self.store.set('account_checked_at', checked_at)
                 self.store.set('account_diagnostics', [])
                 self.store.set('account_succeeded_at', self.store.get('account_checked_at'))
+                if previous_diagnostics:
+                    self.store.event('reconcile', 'ACCOUNT_RECOVERED', {'checked_at': self.store.get('account_checked_at')}, notify=True)
             return {"status": "RECONCILED"}
 
 
