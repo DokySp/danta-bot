@@ -154,6 +154,8 @@ STATES = {
     'balance': '잔고', 'orders': '주문·체결', 'cancelable': '취소 가능한 주문', 'reservations': '예약 주문',
     'chat': '일반 대화', 'review': '투자 판단',
     'INTERRUPTED_RECONCILE_REQUIRED': '재시작으로 중단된 이전 작업 · 계좌 자동 대조 중',
+    'OWNERSHIP_RECONCILIATION_REQUIRED': '보유 자산의 전략 귀속 확인 필요',
+    'ACCOUNT_CASH_RECONCILIATION_REQUIRED': '계좌 현금 대조 필요',
 }
 INTERNAL = {'id', 'run_id', 'session_id', 'intent_id', 'broker_id', 'request_id', 'thesis_id', 'approval_id',
             'event_ids', 'fact_ids', 'source_uris', 'route', 'chat_id', 'user_id', 'requested_by', 'code_id',
@@ -339,7 +341,7 @@ def render_notification(payload, *, symbols=None) -> str:
                              (' · ' + _time(health['checked_at']) if health.get('checked_at') else ''))
         if data.get('model_checked_at'):
             lines.append('최근 모델 실행: ' + _time(data['model_checked_at']) + ' · ' + _value(data.get('model_purpose')))
-        for key in ('account_checked_at', 'monitor_checked_at'):
+        for key in ('account_checked_at', 'account_succeeded_at', 'monitor_checked_at'):
             if data.get(key):
                 lines.append(LABELS[key] + ': ' + _time(data[key]))
         if data.get('account_diagnostics'):
@@ -503,8 +505,17 @@ def _operational_report(data):
     if not daily:
         body += _table(['항목', '결과'], [[LABELS[key], _value(data[key])] for key in ('run_status', 'reason', 'model_status', 'decision_status', 'order_status') if key in data])
     else:
-        health = {key: value for key, value in status.items() if key not in {'holdings', 'working_orders', 'performance', 'account_costs', 'nav_finalization'}}
-        body += _details('인증·계좌·보호 감시 상태', health, symbols)
+        health_keys = ('model_id', 'authentication', 'review_status', 'account_status', 'account_checked_at', 'account_succeeded_at', 'monitor_status', 'monitor_checked_at')
+        body += _table(['현재 상태', '확인 결과'], [[LABELS[key], _value(status[key], key)] for key in health_keys if key in status])
+        for key in ('chat_model', 'review_model'):
+            health = status.get(key, {})
+            if key in status:
+                body += '<p>' + LABELS[key] + ': ' + html.escape(_value(health.get('status', 'NOT_CALLED'))) + ' · ' + html.escape(_time(health.get('checked_at'))) + '</p>'
+        if status.get('account_diagnostics'):
+            body += '<p class="notice">' + html.escape(diagnostic_text({'diagnostics': status['account_diagnostics']})) + '</p>'
+        if status.get('monitor_status') == 'MONITOR_DEGRADED':
+            body += '<p class="notice">현재 보호 감시 문제: ' + html.escape(diagnostic_text(status.get('monitor_diagnostic') or {})) + '</p>'
+        body += '<p class="muted">일반 대화 성공은 투자 판단 완료를 뜻하지 않습니다. 상태별 확인 시각과 아래 과거 사건을 구분해 보세요.</p>'
     body += '</section><section id="holdings"><h2>보유 종목</h2>'
     body += _table(['종목', '보유 수량', '평가 단가', '평가 금액', '가격 기준 시각'],
         [[_name(row, symbols), _amount(row.get('quantity'), '주'), _amount(row.get('price', row.get('mark'))),
@@ -539,9 +550,15 @@ def _operational_report(data):
     body += '<p class="muted">누적 성과의 기간은 저장된 평가 기록 전체입니다. 운영 비용이 미확인이면 비용 차감 후 손익도 확정하지 않습니다.</p>'
     body += _details('자산 평가 원장', nav)
     body += '</section><section id="diagnostics"><h2>운영 진단</h2>'
-    body += _table(['시각', '종류', '설명'], [[_time(row.get('at', row.get('created_at'))),
-        _value(row.get('kind')), '\n'.join(_lines({key: value for key, value in row.items() if key not in {'at', 'created_at', 'kind'}}, symbols=symbols))]
-        for row in data.get('diagnostics', [])], empty='별도로 제공된 진단 기록이 없습니다.')
+    diagnostics = data.get('diagnostics', [])
+    counts = {kind: sum(row.get('kind') == kind for row in diagnostics) for kind in dict.fromkeys(row.get('kind') for row in diagnostics)}
+    body += _table(['사건 종류', '기록 수'], [[_value(kind), str(count)] for kind, count in counts.items()], empty='기록된 운영 장애가 없습니다.')
+    body += '<p class="muted">원장에 남은 사건 수입니다. 중복 억제된 알림도 포함하며, 현재 장애 수나 Telegram 메시지 수를 뜻하지 않습니다. 최근 10건을 표시합니다.</p>'
+    body += _table(['시각', '종류', '설명'], [[_time(row.get('at', row.get('created_at'))), _value(row.get('kind')),
+        render_notification(row, symbols=symbols) if row.get('kind') in {'ACCOUNT_INCOMPLETE', 'ACCOUNT_RECOVERED', 'MONITOR_DEGRADED', 'MONITOR_RECOVERED'} else '\n'.join(_lines(row, symbols=symbols))]
+        for row in diagnostics[-10:]], empty='별도로 제공된 진단 기록이 없습니다.')
+    if len(diagnostics) > 10:
+        body += _details('전체 사건 기록 (' + str(len(diagnostics)) + '건)', diagnostics, symbols)
     if not daily:
         # Preserve the complete run contract for audit readers and existing exports.
         body += '<details><summary>전체 실행 기록</summary>' + facts_html({key: data[key] for key in ('run_status', 'reason', 'decision_status', 'order_status', 'performance_status') if key in data}) + facts_html(data) + '</details>'

@@ -9,6 +9,19 @@ from danta.safety import CredentialError
 
 
 class OperatorReportingTests(unittest.TestCase):
+    def test_html_shows_current_monitor_cause_even_without_history(self):
+        data = {'date': '2026-09-21', 'status': {'holdings': [], 'monitor_status': 'MONITOR_DEGRADED',
+                'account_succeeded_at': '2026-09-21T10:00:00+00:00',
+                'monitor_diagnostic': {'diagnostics': [{'endpoint': 'orders', 'reason': 'TRANSIENT_FAILURE', 'http_status': 503}]}},
+                'diagnostics': [], 'runs': []}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'daily.html'
+            write_report(data, Path(tmp) / 'daily.json', path)
+            rendered = path.read_text()
+        self.assertIn('현재 보호 감시 문제', rendered)
+        self.assertIn('503', rendered)
+        self.assertIn('계좌 최근 성공', rendered)
+
     def test_operational_failure_has_cause_impact_and_truthful_action(self):
         text = render_notification({'kind': 'MONITOR_DEGRADED', 'error_type': 'HumanRequired',
             'diagnostics': [{'endpoint': 'balance', 'quality': 'FETCH_FAILED', 'reason': 'TRANSIENT_FAILURE', 'http_status': 503}]})

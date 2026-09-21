@@ -349,6 +349,11 @@ class CodexAdapter:
                 thread.join(timeout=2)
             process.stdout.close()
             process.stderr.close()
+        # A short process can exit before the consumer sees its last public event.
+        while not lines.empty():
+            text = public_progress(lines.get_nowait())
+            if on_progress and text:
+                on_progress(text)
         return process.returncode, "".join(stdout), "".join(stderr)
 
     def run(self, frozen_input, schema, *, attempt_root, prompt, validate_schema, validate_semantic, expires_at,

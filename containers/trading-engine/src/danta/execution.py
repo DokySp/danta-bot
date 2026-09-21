@@ -281,10 +281,13 @@ class Executor:
                 actual = {key: value for key, value in snapshot["strategy_quantities"].items() if value}
                 ownership_ok = ownership_ok and actual == recorded
             with self.store.transaction():
+                self.store.set('account_checked_at', checked_at)
                 self.store.set("ownership_complete", ownership_ok)
                 self.store.set("reconciled", not unknown and ownership_ok)
                 self.store.set("account_cash_reconciled", False)
                 self.store.event("reconcile", "RECONCILIATION", {"unresolved_intents": unknown, "ownership_complete": ownership_ok}, notify=bool(unknown) or not ownership_ok)
+                if unknown or not ownership_ok:
+                    self.store.set('account_diagnostics', ['ORDER_RECONCILIATION_REQUIRED' if unknown else 'OWNERSHIP_RECONCILIATION_REQUIRED'])
             if unknown or not ownership_ok:
                 raise HumanRequired("UNALLOCATED or UNKNOWN requires broker evidence/operator decision")
             if snapshot.get("whole_account") is True:
@@ -293,6 +296,7 @@ class Executor:
                 except (KeyError, ValueError, TypeError, ArithmeticError) as error:
                     with self.store.transaction():
                         self.store.set("reconciled", False)
+                        self.store.set('account_diagnostics', ['ACCOUNT_CASH_RECONCILIATION_REQUIRED'])
                     raise HumanRequired("ACCOUNT_CASH_RECONCILIATION_REQUIRED") from error
             with self.store.transaction():
                 previous_diagnostics = self.store.get('account_diagnostics', [])

@@ -436,7 +436,12 @@ class KisBrokerPort:
         orders = self.adapter.read_orders(date.fromisoformat(self.manifest["bootstrap"]["orders_since"]), now.astimezone(SEOUL).date())
         errors, normalized = [], []
         if account.quality != "COMPLETE" or orders.quality != "COMPLETE":
-            return {"complete": False, "ownership_complete": False, "orders": [], "errors": ["BROKER_PAGINATION_INCOMPLETE"]}
+            failures = [{'endpoint': name, 'quality': result.quality,
+                         'reason': result.metadata.get('error', 'BROKER_PAGINATION_INCOMPLETE'),
+                         **{key: result.metadata[key] for key in ('http_status', 'provider_code', 'transport_error', 'failed_page') if key in result.metadata}}
+                        for name, result in (('balance', account), ('orders', orders)) if result.quality != 'COMPLETE']
+            return {"complete": False, "ownership_complete": False, "orders": [],
+                    "errors": sorted({item['reason'] for item in failures}), 'diagnostics': failures}
         try:
             resources = _decimal(_field(account.metadata["orderable_resources"], mapping["account"]["available_cash"]))
             actual = {}
@@ -1015,7 +1020,7 @@ class ExternalRuntime:
             bundle.exclusions.extend(diagnostics)
             return self._publish(bundle)
 
-    def decide(self,frozen):
+    def decide(self,frozen,*,on_progress=None):
         self.config.require_external("model_call",self.approval)
         store = getattr(self.broker,"store",None)
         if store is None:
@@ -1045,7 +1050,7 @@ class ExternalRuntime:
                 current_facts_hash=digest([frozen["events"],frozen["facts"]]),completed_at=completed_at,now=completed_at)
         result = self.codex.run(enriched,DecisionProposal.model_json_schema(),attempt_root=attempt_root,
             prompt=(ROOT/"prompts/portfolio_decision.md").read_text(),validate_schema=lambda value:DecisionProposal.model_validate(value),
-            validate_semantic=validate_at_completion,
+            validate_semantic=validate_at_completion,on_progress=on_progress,
             expires_at=started_at+timedelta(seconds=self.config.app["model"]["timeout_seconds"]+self.profile["orders"]["decision_max_age_seconds"]))
         self._record_model_result(store, frozen, call_id, attempt_root, started_at, result, purpose="review")
         if result.status != "SUCCESS":

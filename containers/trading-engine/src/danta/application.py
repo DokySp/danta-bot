@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import threading
 from datetime import datetime, timedelta
@@ -79,7 +80,7 @@ class MarketBundle:
         return digest([self.events, self.facts])
 
 
-def fixture_decision(frozen: dict) -> dict:
+def fixture_decision(frozen: dict, *, on_progress=None) -> dict:
     """Recorded synthetic reviewer contract. Never presented as an actual LLM call."""
     return {"schema_version": 1, "run_id": frozen["run_id"], "input_snapshot_id": frozen["input_snapshot_id"],
         "account_state_version": frozen["portfolio"]["account_state_version"], "review_scope": frozen["review_scope"],
@@ -549,12 +550,13 @@ class Application:
         def loop():
             while not self.monitor_stop.wait(interval):
                 try:
-                    # protect() already refreshes and reconciles one complete account snapshot.
-                    if not (self.protection_refresh or self.refresh):
+                    # Working orders retain reconcile -> expire -> protection ordering.
+                    # With no orders, protect() supplies the sole complete account snapshot.
+                    if self.store.working() or not (self.protection_refresh or self.refresh):
                         self.reconcile()
-                    self.protect()
                     if self.config.mode != "shadow":
-                        self.executor.expire_entries(self.bundle.now)
+                        self.executor.expire_entries(self.clock())
+                    self.protect()
                 except Exception as error:
                     reason = str(error)[:500]
                     try:
@@ -575,13 +577,13 @@ class Application:
         self.monitor_thread.start()
 
     def review(self, *, kind: str = "full_review", event_id: str | None = None,
-               request_key: str | None = None) -> dict:
+               request_key: str | None = None, on_progress=None) -> dict:
         if kind not in {"full_review", "event_review"}:
             raise ValueError("Unknown review kind")
         with self.review_lock:
-            return self._review(kind, event_id, request_key)
+            return self._review(kind, event_id, request_key, on_progress)
 
-    def _review(self, kind: str, event_id: str | None, request_key: str | None) -> dict:
+    def _review(self, kind: str, event_id: str | None, request_key: str | None, on_progress=None) -> dict:
         bundle = self.bundle
         key = request_key or "manual:" + str(uuid4())
         run_id, new = self.store.accept_request(key, {"kind": kind, "event_id": event_id})
@@ -600,6 +602,8 @@ class Application:
         result = {**metadata, "run_status": "RUNNING", "model_status": "NOT_CALLED", "decision_status": "NOT_REACHED",
                   "order_status": "NONE", "performance_status": "STRATEGY_UNPROVEN", "live_status": "LIVE_NOT_AUTHORIZED" if self.config.mode != "live" else "OPERATOR_AUTHORIZED"}
         try:
+            if on_progress:
+                on_progress('계좌·주문 상태와 보호 조건을 확인하고 있습니다.')
             self.reconcile()
             if self.protection_refresh and self.refresh:
                 self.bundle = self.refresh()
@@ -651,7 +655,12 @@ class Application:
                 result.update(run_status="COMPLETE", decision_status="KEEP_EXISTING_PLAN")
                 return result
             result["model_status"] = "FIXTURE_RECORDED_RESPONSE" if bundle.synthetic else "RUNNING"
-            proposal_value = self.decide(frozen)
+            if on_progress:
+                on_progress('확인한 계좌와 후보 자료로 투자 판단을 요청하고 있습니다.')
+            supports_progress = on_progress and 'on_progress' in inspect.signature(self.decide).parameters
+            proposal_value = self.decide(frozen, on_progress=on_progress) if on_progress and supports_progress else self.decide(frozen)
+            if on_progress:
+                on_progress('모델의 판단을 현재 계좌·주문 조건과 대조하고 있습니다.')
             completed_at = self.clock()
             from datetime import timedelta
             decision_deadline = completed_at + timedelta(seconds=self.profile["orders"]["decision_max_age_seconds"])
@@ -814,8 +823,8 @@ class Application:
                 'status_checked_at': self.clock().isoformat(),
                 'model_id': self.config.app['model']['model_id'],
                 'model_checked_at': health.get('checked_at'), 'model_purpose': health.get('purpose'),
-                'chat_model': self.store.get('model_health:chat', {}),
-                'review_model': self.store.get('model_health:review', {}),
+                'chat_model': self.store.get('model_health:chat', health if health.get('purpose') == 'chat' else {}),
+                'review_model': self.store.get('model_health:review', health if health.get('purpose') == 'review' else {}),
                 "authentication": health['status'] if health.get("status", "").startswith("AUTH_") else
                     "AUTHENTICATED_AT_STARTUP" if self.config.mode != 'offline' else "UNVERIFIED",
                 "model_status": health.get("status", "NOT_CALLED"), "model_diagnostic": health.get("diagnostic"),

@@ -54,6 +54,19 @@ class EngineCase(unittest.TestCase):
             reason="TEST", account_version=executor.store.get("account_version"), policy_hash="synthetic-policy",
             reserve_cash=D(quantity * 100) if side == "BUY" else D(0), reserve_risk=D(quantity * 10) if side == "BUY" else D(0))
 
+    def test_status_preserves_legacy_model_success_only_for_its_recorded_purpose(self):
+        app = Application(self.config, self.bundle)
+        try:
+            health = {'purpose': 'chat', 'status': 'SUCCESS', 'checked_at': '2026-09-21T10:00:00Z'}
+            app.store.set('model_health', health)
+            status = app.status()
+            self.assertEqual(status['chat_model'], health)
+            self.assertEqual(status['review_model'], {})
+            app.store.set('model_health:chat', {**health, 'status': 'PROCESS_FAILED'})
+            self.assertEqual(app.status()['chat_model']['status'], 'PROCESS_FAILED')
+        finally:
+            app.close()
+
     def test_successful_reconciliation_clears_previous_account_failure(self):
         ex = self.executor()
         ex.reconcile({'complete': False, 'diagnostics': [{'endpoint': 'balance', 'reason': 'TRANSIENT_FAILURE', 'http_status': 503}]})
@@ -63,6 +76,59 @@ class EngineCase(unittest.TestCase):
         self.assertTrue(ex.store.get('reconciled'))
         self.assertEqual(ex.store.get('account_diagnostics'), [])
         self.assertIsNotNone(ex.store.get('account_succeeded_at'))
+
+    def test_review_progress_reaches_model_and_validation_stages(self):
+        app = Application(self.config, self.bundle)
+        progress = []
+        def model(frozen, *, on_progress=None):
+            self.assertIsNotNone(on_progress)
+            on_progress('공개 모델 진행 안내')
+            return fixture_decision(frozen)
+        from danta.application import fixture_decision
+        app.decide = model
+        try:
+            result = app.review(on_progress=progress.append)
+            self.assertEqual(result['run_status'], 'COMPLETE')
+            self.assertIn('공개 모델 진행 안내', progress)
+            self.assertIn('대조', progress[-1])
+        finally:
+            app.close()
+
+    def test_monitor_expires_working_entries_before_a_protection_failure(self):
+        app = Application(self.config, self.bundle)
+        calls = []
+        def fail_protection():
+            calls.append('protect')
+            app.monitor_stop.set()
+            raise HumanRequired('synthetic protection refresh failed')
+        try:
+            with patch.object(app.store, 'working', return_value=[{}]), \
+                 patch.object(app, 'reconcile', side_effect=lambda: calls.append('reconcile')), \
+                 patch.object(app.executor, 'expire_entries', side_effect=lambda now: calls.append('expire')), \
+                 patch.object(app, 'protect', side_effect=fail_protection):
+                app.start_monitor(interval=0.001)
+                app.monitor_thread.join(2)
+            self.assertEqual(calls, ['reconcile', 'expire', 'protect'])
+        finally:
+            app.close()
+
+    def test_review_progress_preserves_one_argument_deciders(self):
+        from danta.application import fixture_decision
+        app = Application(self.config, self.bundle, decide=lambda frozen: fixture_decision(frozen))
+        try:
+            self.assertEqual(app.review(on_progress=lambda text: None)['run_status'], 'COMPLETE')
+        finally:
+            app.close()
+
+    def test_failed_ownership_check_has_fresh_time_without_changing_last_success(self):
+        ex = self.executor()
+        ex.reconcile({'complete': True, 'ownership_complete': True, 'orders': []})
+        success = ex.store.get('account_succeeded_at')
+        with self.assertRaises(HumanRequired):
+            ex.reconcile({'complete': True, 'ownership_complete': False, 'orders': []})
+        self.assertGreater(ex.store.get('account_checked_at'), success)
+        self.assertEqual(ex.store.get('account_succeeded_at'), success)
+        self.assertEqual(ex.store.get('account_diagnostics'), ['OWNERSHIP_RECONCILIATION_REQUIRED'])
 
     def test_O01_I01_offline_end_to_end_without_network(self):
         with patch.object(socket.socket, "connect", side_effect=AssertionError("network forbidden")):

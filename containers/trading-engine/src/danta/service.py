@@ -252,7 +252,9 @@ class Service:
             yield lambda _text: None
             return
         ended, changed = threading.Event(), threading.Event()
-        latest = ['']
+        latest = ['계좌·주문 상태와 보호 조건을 확인하고 있습니다.' if payload['command'] == 'review' else
+                  '제공된 대화와 운영 기록을 확인하고 있습니다.']
+        changed.set()
         draft_id = int(digest(request_id)[:8], 16) % 2147483647 + 1
         def update(text):
             latest[0] = text[:3000]
@@ -445,7 +447,8 @@ class Service:
                 return {'status': 'PAUSED', 'protection': 'CONTINUES'}
             if self.app.bundle.synthetic and payload['source'] == 'scheduler':
                 raise HumanRequired('Synthetic input cannot drive a recurring market strategy')
-            return self.app.review(kind=kind, event_id=payload.get('event_id'), request_key='workflow:' + request_id)
+            return self.app.review(kind=kind, event_id=payload.get('event_id'), request_key='workflow:' + request_id,
+                                   on_progress=on_progress if payload.get('source') == 'telegram' else None)
         if kind in PROTECTION:
             self.app.reconcile()
             return {'status': 'PROTECTION_CHECKED', 'result': self.app.protect()}

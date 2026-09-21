@@ -55,7 +55,7 @@ class FakeApp:
         self.review_entered.set()
         if not self.review_release.wait(5):
             raise AssertionError('test failed to release the fake model')
-        return {'status': 'FAKE_REVIEW_COMPLETE', 'kwargs': kwargs}
+        return {'status': 'FAKE_REVIEW_COMPLETE', 'kwargs': {key: value for key, value in kwargs.items() if key != 'on_progress'}}
 
     def reconcile(self):
         self.reconcile_calls += 1

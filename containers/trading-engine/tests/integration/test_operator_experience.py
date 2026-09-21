@@ -96,6 +96,14 @@ class OperatorExperienceTests(unittest.TestCase):
                 self.assertTrue(drafted.wait(5))
         self.assertFalse(any(thread.name == 'telegram-progress' for thread in threading.enumerate()))
 
+    def test_review_receives_progress_callback(self):
+        case = self.case
+        captured = []
+        case.app.review = lambda **kwargs: (captured.append(kwargs) or {'status': 'FAKE_REVIEW_COMPLETE'})
+        case.receive('/review')
+        case.service.run_once(review=True)
+        self.assertTrue(callable(captured[0]['on_progress']))
+
     def test_repeated_account_warning_keeps_ledger_but_sends_one_notice(self):
         store = self.case.app.store
         with store.transaction():
