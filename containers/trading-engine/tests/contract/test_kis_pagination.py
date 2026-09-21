@@ -1,10 +1,11 @@
 """KIS paging contracts, using synthetic responses without network or credentials."""
 import json
 import unittest
+from unittest.mock import patch
 from datetime import date
 from urllib.parse import parse_qs, urlsplit
 
-from danta.adapters import HttpResponse
+from danta.adapters import AdapterError, HttpResponse, require_http_ok
 from danta.adapters.kis import KisAdapter, KisCredentials
 
 
@@ -15,7 +16,7 @@ class KisPaginationContracts(unittest.TestCase):
         def transport(method, url, headers, body, timeout):
             self.assertEqual(method, "GET")
             calls.append((parse_qs(urlsplit(url).query, keep_blank_values=True), headers))
-            page = pages[len(calls) - 1]
+            page = pages[min(len(calls) - 1, len(pages) - 1)]
             if isinstance(page, Exception):
                 raise page
             data, continuation = page
@@ -65,6 +66,30 @@ class KisPaginationContracts(unittest.TestCase):
                 self.assertEqual(result.quality, quality)
                 self.assertEqual(result.metadata["error"], error)
                 self.assertEqual(result.metadata["endpoint"], "inquire-balance")
+
+    @patch('danta.adapters.kis.time.sleep')
+    def test_transient_read_retries_same_page_without_duplicate_rows(self, sleep):
+        first = {'rt_cd': '0', 'output1': [{'fixture': 'first'}], 'ctx_area_fk100': 'next', 'ctx_area_nk100': 'key'}
+        adapter, calls = self.adapter([(first, 'M'), AdapterError('TRANSIENT_FAILURE', diagnostic={'http_status': 503}),
+                                      ({'rt_cd': '0', 'output1': [{'fixture': 'last'}]}, 'D')])
+        result = adapter.read_account()
+        self.assertEqual(result.quality, 'COMPLETE')
+        self.assertEqual(len(result.records), 2)
+        self.assertEqual(calls[1], calls[2])
+        sleep.assert_called_once_with(0.5)
+
+    @patch('danta.adapters.kis.time.sleep')
+    def test_exhausted_read_preserves_safe_diagnostics_and_auth_is_not_retried(self, sleep):
+        for code, status, count in [('TRANSIENT_FAILURE', 503, 2), ('AUTH_FAILED', 401, 1)]:
+            adapter, calls = self.adapter([AdapterError(code, diagnostic={'http_status': status, 'provider_code': 'EGW00201'})])
+            result = adapter.read_account()
+            self.assertEqual(len(calls), count)
+            self.assertEqual(result.quality, 'FETCH_FAILED')
+            self.assertEqual(result.metadata['http_status'], status)
+            self.assertEqual(result.metadata['failed_page'], 1)
+        with self.assertRaises(AdapterError) as failure:
+            require_http_ok(HttpResponse(503, b'{"msg_cd":"EGW00201","msg1":"private provider details"}'))
+        self.assertEqual(failure.exception.diagnostic, {'http_status': 503, 'provider_code': 'EGW00201'})
 
 
 if __name__ == "__main__":

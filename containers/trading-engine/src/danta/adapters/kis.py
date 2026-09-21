@@ -8,6 +8,7 @@ import os
 import re
 import stat
 import threading
+import time
 import zipfile
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -285,7 +286,18 @@ class KisAdapter:
                 if cursor in seen:
                     raise AdapterError("REPEATED_CURSOR")
                 seen.add(cursor)
-                data, headers = self._request(path, tr, {**params, f"CTX_AREA_FK{cursor_width}": cursor[0], f"CTX_AREA_NK{cursor_width}": cursor[1]}, continuation="N" if any(cursor) else "")
+                for attempt in range(2):
+                    try:
+                        data, headers = self._request(path, tr, {**params, f"CTX_AREA_FK{cursor_width}": cursor[0], f"CTX_AREA_NK{cursor_width}": cursor[1]}, continuation="N" if any(cursor) else "")
+                        break
+                    except (AdapterError, OSError) as error:
+                        code = error.code if isinstance(error, AdapterError) else 'TRANSPORT_FAILED'
+                        details = getattr(error, 'diagnostic', {})
+                        delay = details.get('retry_after_seconds', 0.5)
+                        # Replay only the failed read page; submissions are never retried here.
+                        if attempt or code not in {'TRANSIENT_FAILURE', 'TRANSPORT_FAILED', 'RATE_LIMITED', 'BROKER_REJECTED:EGW00201'} or delay > 2:
+                            raise
+                        time.sleep(delay)
                 if not isinstance(data.get(rows_key), list) or any(not isinstance(row, dict) for row in data[rows_key]):
                     raise AdapterError("MALFORMED_RESPONSE")
                 rows.extend(data[rows_key])
@@ -303,7 +315,8 @@ class KisAdapter:
                     raise AdapterError("MISSING_CURSOR")
         except (AdapterError, OSError) as exc:
             return FetchResult(tuple(rows), "PARTIAL" if rows else "FETCH_FAILED", utcnow(), cursor,
-                               dict(metadata, error=exc.code if isinstance(exc, AdapterError) else "TRANSPORT_FAILED"))
+                               dict(metadata, error=exc.code if isinstance(exc, AdapterError) else "TRANSPORT_FAILED",
+                                    **getattr(exc, 'diagnostic', {}), failed_page=len(summaries) + 1))
         return FetchResult(tuple(rows), "PARTIAL", utcnow(), cursor, dict(metadata, error="PAGE_LIMIT"))
 
     def read_account(self, *, resource_symbol=None, resource_price=None):

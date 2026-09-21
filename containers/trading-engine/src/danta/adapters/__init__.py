@@ -1,6 +1,9 @@
 """Explicit external boundaries. Importing adapters never reads credentials."""
 
 import json
+import re
+import socket
+import ssl
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable
@@ -10,8 +13,9 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 
 class AdapterError(RuntimeError):
-    def __init__(self, code: str):
+    def __init__(self, code: str, *, diagnostic=None):
         self.code = code
+        self.diagnostic = diagnostic or {}
         super().__init__(code)  # Do not leak URLs, account ids, tokens, or provider bodies.
 
 
@@ -53,9 +57,19 @@ def http_transport(*, allowed_origins: set[str], network_enabled: bool = False) 
                     raise AdapterError("RESPONSE_TOO_LARGE")
                 return HttpResponse(response.status, data, {k.lower(): v for k, v in response.headers.items()})
         except HTTPError as exc:
-            return HttpResponse(exc.code, b"{}", {})
-        except OSError:
-            raise AdapterError("TRANSPORT_FAILED") from None
+            # Only bounded provider error codes leave this boundary, never bodies or URLs.
+            try:
+                body = exc.read(65536)
+            except OSError:
+                body = b"{}"
+            return HttpResponse(exc.code, body, {k.lower(): v for k, v in exc.headers.items()})
+        except OSError as exc:
+            reason = getattr(exc, 'reason', exc)
+            category = ('TIMEOUT' if isinstance(reason, TimeoutError) else
+                        'DNS_FAILURE' if isinstance(reason, socket.gaierror) else
+                        'TLS_FAILURE' if isinstance(reason, ssl.SSLError) else
+                        'CONNECTION_FAILURE' if isinstance(reason, ConnectionError) else 'NETWORK_FAILURE')
+            raise AdapterError("TRANSPORT_FAILED", diagnostic={'transport_error': category}) from None
 
     return request
 
@@ -74,11 +88,23 @@ def utcnow():
 
 
 def require_http_ok(response: HttpResponse):
+    if response.status == 200:
+        return
+    diagnostic = {'http_status': response.status}
+    try:
+        code = response.json().get('msg_cd')
+        if isinstance(code, str) and re.fullmatch(r'[A-Z][A-Z0-9_]{1,31}', code):
+            diagnostic['provider_code'] = code
+    except (AdapterError, AttributeError):
+        pass
+    retry_after = response.headers.get('retry-after', '')
+    if retry_after.isdigit():
+        diagnostic['retry_after_seconds'] = min(int(retry_after), 86400)
     if response.status in {401, 403}:
-        raise AdapterError("AUTH_FAILED")
+        raise AdapterError("AUTH_FAILED", diagnostic=diagnostic)
     if response.status == 429:
-        raise AdapterError("RATE_LIMITED")
+        raise AdapterError("RATE_LIMITED", diagnostic=diagnostic)
     if response.status >= 500:
-        raise AdapterError("TRANSIENT_FAILURE")
+        raise AdapterError("TRANSIENT_FAILURE", diagnostic=diagnostic)
     if response.status != 200:
-        raise AdapterError("HTTP_FAILURE")
+        raise AdapterError("HTTP_FAILURE", diagnostic=diagnostic)

@@ -54,6 +54,16 @@ class EngineCase(unittest.TestCase):
             reason="TEST", account_version=executor.store.get("account_version"), policy_hash="synthetic-policy",
             reserve_cash=D(quantity * 100) if side == "BUY" else D(0), reserve_risk=D(quantity * 10) if side == "BUY" else D(0))
 
+    def test_successful_reconciliation_clears_previous_account_failure(self):
+        ex = self.executor()
+        ex.reconcile({'complete': False, 'diagnostics': [{'endpoint': 'balance', 'reason': 'TRANSIENT_FAILURE', 'http_status': 503}]})
+        self.assertFalse(ex.store.get('reconciled'))
+        self.assertTrue(ex.store.get('account_diagnostics'))
+        ex.reconcile({'complete': True, 'ownership_complete': True, 'orders': []})
+        self.assertTrue(ex.store.get('reconciled'))
+        self.assertEqual(ex.store.get('account_diagnostics'), [])
+        self.assertIsNotNone(ex.store.get('account_succeeded_at'))
+
     def test_O01_I01_offline_end_to_end_without_network(self):
         with patch.object(socket.socket, "connect", side_effect=AssertionError("network forbidden")):
             app = Application(self.config, self.bundle)

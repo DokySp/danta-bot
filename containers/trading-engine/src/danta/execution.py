@@ -225,8 +225,10 @@ class Executor:
         """Snapshot has complete broker observations; never infer fills from prose."""
         with self.dispatch_lock:
             snapshot = snapshot if snapshot is not None else self.broker.snapshot()
+            checked_at = utcnow().isoformat()
             if snapshot.get("complete") is not True:
                 with self.store.transaction():
+                    self.store.set('account_checked_at', checked_at)
                     self.store.set("reconciled", False)
                     self.store.set("account_cash_reconciled", False)
                     diagnostics = snapshot.get("diagnostics") or snapshot.get("errors", [])
@@ -292,6 +294,10 @@ class Executor:
                     with self.store.transaction():
                         self.store.set("reconciled", False)
                     raise HumanRequired("ACCOUNT_CASH_RECONCILIATION_REQUIRED") from error
+            with self.store.transaction():
+                self.store.set('account_checked_at', checked_at)
+                self.store.set('account_diagnostics', [])
+                self.store.set('account_succeeded_at', self.store.get('account_checked_at'))
             return {"status": "RECONCILED"}
 
 

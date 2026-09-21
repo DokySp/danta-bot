@@ -544,10 +544,12 @@ class Application:
         def loop():
             while not self.monitor_stop.wait(interval):
                 try:
-                    self.reconcile()
+                    # protect() already refreshes and reconciles one complete account snapshot.
+                    if not (self.protection_refresh or self.refresh):
+                        self.reconcile()
+                    self.protect()
                     if self.config.mode != "shadow":
                         self.executor.expire_entries(self.bundle.now)
-                    self.protect()
                 except Exception as error:
                     with self.store.transaction():
                         newly_degraded = not self.store.get("monitor_degraded", False)

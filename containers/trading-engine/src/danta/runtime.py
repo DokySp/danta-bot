@@ -290,12 +290,13 @@ class KisBrokerPort:
             # Read balances last so executions observed above are reflected in positions/cash.
             account = self.adapter.read_account()
             failures = [{"endpoint": name, "quality": result.quality,
-                         "reason": result.metadata.get("error", "BROKER_PAGINATION_INCOMPLETE")}
+                         "reason": result.metadata.get("error", "BROKER_PAGINATION_INCOMPLETE"),
+                         **{key: result.metadata[key] for key in ('http_status', 'provider_code', 'transport_error', 'failed_page') if key in result.metadata}}
                         for name, result in (("balance", account), ("orders", orders),
                                              ("cancelable", cancelable), ("reservations", reservations))
                         if result.quality != "COMPLETE"]
             if failures:
-                return {"complete": False, "errors": ["BROKER_PAGINATION_INCOMPLETE"],
+                return {"complete": False, "errors": sorted({item['reason'] for item in failures}),
                         "diagnostics": failures, "orders": [], "reservations": []}
             fields = ("prvs_rcdl_excc_amt", "tot_evlu_amt", "evlu_amt_smtl_amt", "nass_amt", "tot_loan_amt", "cma_evlu_amt")
             summaries = []
@@ -784,7 +785,14 @@ class ExternalRuntime:
     def _account(self):
         self.config.require_external("account_read",self.approval)
         account = self.broker.snapshot()
+        store = getattr(self.broker, 'store', None)
         if account.get("complete") is not True or account.get("ownership_complete") is not True:
+            if store is not None:
+                with store.transaction():
+                    store.set('reconciled', False)
+                    store.set('account_cash_reconciled', False)
+                    store.set('account_checked_at', self.clock().isoformat())
+                    store.set('account_diagnostics', account.get('diagnostics') or account.get('errors', []))
             raise HumanRequired("External account observations incomplete: "+",".join(account.get("errors",[])))
         return account,time.monotonic_ns()
 
