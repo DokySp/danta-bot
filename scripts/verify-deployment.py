@@ -31,22 +31,30 @@ while True:
         pass
     assert time.monotonic() < deadline, 'engine startup timeout'
     time.sleep(.2)
-with patch.object(gateway, 'TelegramClient', return_value=client):
+receipts = []
+post_message = app.engine.post_message
+def accept_request(*args, **kwargs):
+    response = post_message(*args, **kwargs)
+    assert response and response.get('accepted') is True and response.get('request_id'), response
+    receipts.append(response['request_id'])
+    return response
+with patch.object(gateway, 'TelegramClient', return_value=client), \
+        patch.object(app.engine, 'post_message', side_effect=accept_request):
     for update_id, text in enumerate(('/version', '/status', '/pause'), 1):
         app.handle_update(route, {'update_id': update_id, 'message': {
             'message_id': update_id, 'chat': {'id': 12345}, 'from': {'id': 12345}, 'text': text}})
     replies = [call.args[1] for call in client.send_message.call_args_list]
-    assert len(replies) == 3, replies
+    assert len(replies) == 1, replies
+    assert len(set(receipts)) == 2, receipts
     assert 'trading-engine' in replies[0] and 'telegram-gateway' in replies[0], replies[0]
     assert 'READY' in replies[0], replies[0]
-    assert '요청을 접수했습니다' in replies[1], replies[1]
-    assert '요청을 접수했습니다' in replies[2], replies[2]
     count = client.send_message.call_count
     app.handle_update(route, {'update_id': 99, 'message': {
         'message_id': 99, 'chat': {'id': 67890}, 'from': {'id': 67890}, 'text': '/version'}})
     assert client.send_message.call_count == count
 Path('/workspace/memory/smoke.json').write_text(json.dumps({'status':'PASS',
     'version_round_trip':True, 'live_runtime_ready':True, 'denied_chat_blocked':True,
+    'durable_requests_accepted':len(receipts), 'receipt_messages_suppressed':True,
     'telegram_delivery':'STUBBED', 'broker_provider':'SYNTHETIC_TRANSPORT','model_auth':'SYNTHETIC_PROBE'}))
 stop = threading.Event()
 signal.signal(signal.SIGTERM, lambda *_: stop.set())
