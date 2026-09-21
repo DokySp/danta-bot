@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import html
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
 import json
@@ -10,15 +11,16 @@ from pathlib import Path
 import signal
 import sys
 import threading
-from datetime import timedelta
+import traceback
+from datetime import datetime, time, timedelta, timezone
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from .adapters import AdapterError, http_transport
 from .adapters.scheduler import SchedulePlanner
-from .adapters.telegram import READ_COMMANDS, TelegramAdapter
-from .config import HumanRequired, aware_time, canonical, load_secrets, utcnow
-from .reporting import write_report
+from .adapters.telegram import MAX_REQUEST_BYTES, READ_COMMANDS, TelegramAdapter
+from .config import HumanRequired, aware_time, canonical, digest, load_secrets, utcnow
+from .reporting import render_notification, reported_fee, write_report
 
 
 PORTFOLIO_CONTROLS = frozenset({'add_portfolio_ticker', 'remove_portfolio_ticker',
@@ -40,6 +42,8 @@ class Service:
         self.stop = threading.Event()
         self.worker_failed = False
         self.threads = []
+        self.active_chats = {}
+        self.chat_lock = threading.RLock()
         self.scheduler = self.config.data['schedules']['scheduler']
         monitoring = self.config.app['monitoring']
         self.planner = SchedulePlanner(self.scheduler['jobs'],
@@ -99,7 +103,7 @@ class Service:
             raise AdapterError('TELEGRAM_INGRESS_DISABLED')
         self.config.assert_current()
         self.config.require_external('telegram_ingress', self.app.approval)
-        if len(raw_body) > 65536:
+        if len(raw_body) > MAX_REQUEST_BYTES:
             raise AdapterError('TELEGRAM_PAYLOAD_TOO_LARGE')
         try:
             body = json.loads(raw_body)
@@ -112,7 +116,8 @@ class Service:
                 raise AdapterError('INTERRUPTED_RECEIPT_REQUIRES_NEW_UPDATE')
             payload = {'source': 'telegram', 'kind': 'telegram', 'command': request.command,
                 'telegram_request_id': request.request_id, 'route': request.route,
-                'chat_id': request.chat_id, 'user_id': request.user_id, 'text': request.text}
+                'chat_id': request.chat_id, 'user_id': request.user_id, 'text': request.text,
+                'attachments': body.get('attachments', [])}
             queue_id, fresh = self.store.accept_request('service:telegram:' + request.request_id, payload)
             with self.store.transaction():
                 if fresh:
@@ -174,12 +179,12 @@ class Service:
     def _review_job(payload):
         return payload['kind'] in REVIEWS | {'collect_disclosures', 'finalize_and_report'} or payload.get('command') in {'review', 'chat'}
 
-    def run_once(self, *, review=False):
+    def run_once(self, *, review=False, chat=None):
         row = None
         with self.store.transaction():
-            for candidate in self.store.db.execute("SELECT * FROM requests WHERE request_key LIKE 'service:%' AND status='ACCEPTED' ORDER BY rowid"):
+            for candidate in self.store.db.execute("SELECT * FROM requests WHERE request_key LIKE 'service:%' AND status='ACCEPTED' ORDER BY rowid").fetchall():
                 payload = json.loads(candidate['payload'])
-                if self._review_job(payload) == review:
+                if self._review_job(payload) == review and (chat is None or (payload.get('command') == 'chat') == chat):
                     row = dict(candidate)
                     self.store.db.execute("UPDATE requests SET status='RUNNING' WHERE request_id=?", (row['request_id'],))
                     break
@@ -194,12 +199,14 @@ class Service:
             elif payload['kind'] not in PROTECTION and self.clock() >= aware_time(deadline):
                 result = {'status': 'EXPIRED', 'reason': 'Request execution deadline passed'}
             else:
-                result = self._dispatch(payload, row['request_id'])
+                with self.progress(payload, row['request_id']) as update:
+                    result = self._dispatch(payload, row['request_id'], on_progress=update)
         except Exception as error:
             result = {'status': getattr(error, 'state', 'FAILED'), 'error_type': type(error).__name__}
             if isinstance(error, HumanRequired):
                 result['reason'] = str(error)
         document = result.pop('_document', None)
+        markup = result.pop('_reply_markup', None)
         with self.store.transaction():
             self.store.db.execute('UPDATE requests SET status=?,result=? WHERE request_id=?',
                 ('COMPLETE', canonical(result), row['request_id']))
@@ -207,7 +214,9 @@ class Service:
             if payload.get('source') == 'telegram':
                 self.store.db.execute("UPDATE telegram_requests SET status='COMPLETE' WHERE request_id=?", (payload['telegram_request_id'],))
                 notification = {'route': payload['route'], 'chat_id': payload['chat_id'],
-                                'text': result.get('reply_text') or canonical(result)}
+                                'text': render_notification(result, symbols=self._symbols())}
+                if markup:
+                    notification['reply_markup'] = markup
                 self.store.db.execute('INSERT OR IGNORE INTO outbox(event_key,payload) VALUES (?,?)',
                     ('service:' + row['request_id'], canonical(notification)))
             if document:
@@ -215,7 +224,67 @@ class Service:
                     route=payload.get('route'), chat_id=payload.get('chat_id'))
         return True
 
-    def _dispatch(self, payload, request_id):
+    @staticmethod
+    def _chat_key(payload):
+        return canonical([payload['route'], payload['chat_id'], payload['user_id']])
+
+    def _cancel_chat(self, payload):
+        key, count = self._chat_key(payload), 0
+        with self.chat_lock:
+            active = self.active_chats.get(key)
+            if active:
+                active.set()
+            with self.store.transaction():
+                for row in self.store.db.execute("SELECT request_id,payload,status FROM requests WHERE status IN ('ACCEPTED','RUNNING')").fetchall():
+                    queued = json.loads(row['payload'])
+                    if queued.get('command') == 'chat' and self._chat_key(queued) == key:
+                        self.store.set('chat_cancelled:' + row['request_id'], True)
+                        if row['status'] == 'ACCEPTED':
+                            result = {'status': 'CHAT_CANCELLED', 'model_called': False, 'orders_created': False}
+                            self.store.db.execute("UPDATE requests SET status='COMPLETE',result=? WHERE request_id=?", (canonical(result), row['request_id']))
+                            self.store.db.execute("UPDATE telegram_requests SET status='COMPLETE' WHERE request_id=?", (queued['telegram_request_id'],))
+                        count += 1
+        return count
+
+    @contextmanager
+    def progress(self, payload, request_id):
+        if not self.telegram or payload.get('source') != 'telegram' or payload.get('command') not in {'chat', 'review'}:
+            yield lambda _text: None
+            return
+        ended, changed = threading.Event(), threading.Event()
+        latest = ['']
+        draft_id = int(digest(request_id)[:8], 16) % 2147483647 + 1
+        def update(text):
+            latest[0] = text[:3000]
+            changed.set()
+        def display():
+            while not ended.is_set():
+                try:
+                    self.config.require_external('telegram_send', self.app.approval)
+                    self.telegram.send_typing(payload['route'], payload['chat_id'])
+                    if changed.is_set() and not ended.is_set():
+                        changed.clear()
+                        self.telegram.send_draft(payload['route'], payload['chat_id'], draft_id, latest[0])
+                except Exception as error:
+                    log_event('PROGRESS_UNAVAILABLE', error_type=type(error).__name__)
+                if ended.wait(4):
+                    break
+        thread = threading.Thread(target=display, name='telegram-progress', daemon=True)
+        thread.start()
+        try:
+            yield update
+        finally:
+            ended.set()
+            thread.join(timeout=31)  # Two bounded gateway calls; finish before final text can be sent.
+
+    def _symbols(self):
+        return getattr(self.app.bundle, 'data', {}).get('instrument_names', {})
+
+    @staticmethod
+    def _keyboard(rows):
+        return {'inline_keyboard': [[{'text': text, 'callback_data': command} for text, command in row] for row in rows]}
+
+    def _dispatch(self, payload, request_id, *, on_progress=None):
         self.config.assert_current()
         kind = payload['kind']
         command = payload.get('command')
@@ -224,6 +293,8 @@ class Service:
                 self._authorize_control(command, payload['user_id'], payload['chat_id'])
             if command in PORTFOLIO_CONTROLS:
                 arguments = payload['text'].split()[1:]
+                if not arguments:
+                    return {'reply_text': '종목 코드를 함께 입력해 주세요.\n/' + command + ' 005930\n보유 수량을 바꾸거나 자동 매도하지 않습니다.'}
                 if len(arguments) != 1:
                     raise ValueError('Candidate-list commands require exactly one ticker')
                 return self.app.update_candidate_list(command, arguments[0])
@@ -231,7 +302,10 @@ class Service:
                 if len(payload['text'].split()) != 1:
                     raise ValueError('Resume accepts no arguments; trusted approval is checked separately')
                 return self.app.resume()
-            if command in {'pause', 'stop'}:
+            if command == 'stop':
+                count = self._cancel_chat(payload)
+                return {'status': 'CANCEL_REQUESTED' if count else 'NO_ACTIVE_CHAT', 'protection': 'CONTINUES'}
+            if command == 'pause':
                 return self.app.pause()
             if command in {'schedule_on', 'schedule_off'}:
                 if command == 'schedule_on' and (self.app.bundle.synthetic or not self.scheduler['enabled']):
@@ -240,7 +314,10 @@ class Service:
                     self.store.set('discretionary_schedule', command == 'schedule_on')
                 return {'status': command.upper(), 'protection': 'CONTINUES'}
             if command in {'chat', 'session', 'new'}:
-                key = 'chat_session:' + canonical([payload['route'], payload['chat_id'], payload['user_id']])
+                scope = self._chat_key(payload)
+                key = 'chat_session:' + scope
+                if command == 'new':
+                    self._cancel_chat(payload)
                 with self.store.transaction():
                     session_id = self.store.get(key)
                     if command == 'new' or session_id is None:
@@ -259,13 +336,32 @@ class Service:
                 text = payload['text'].strip()
                 if text.startswith('/chat '):
                     text = text[6:].strip()
-                if not text or len(text) > 4000:
-                    raise ValueError('Chat text must contain 1 to 4000 characters')
+                if not text or len(text) > 16384:
+                    raise ValueError('Chat text must contain 1 to 16384 characters')
                 messages = history + [{'role': 'user', 'content': text}]
-                result = callback(request_id=request_id, session_id=session_id, messages=messages)
+                cancel = threading.Event()
+                with self.chat_lock:
+                    self.active_chats[scope] = cancel
+                    if self.store.get('chat_cancelled:' + request_id, False):
+                        cancel.set()
+                try:
+                    data = self._report_data()
+                    context = {key: data[key] for key in ('created_at', 'status', 'theses', 'instruments')}
+                    context.update(orders=data['orders'][-20:], fills=data['fills'][-20:], runs=data['runs'][-5:])
+                    included = {row.get('instrument_id') for row in context['status'].get('holdings', []) + context['orders']}
+                    context['instruments'] = {key: name for key, name in context['instruments'].items() if key in included}
+                    context['coverage'] = '당일 최근 주문 20건·체결 20건·검토 5건, 현재 저장된 계좌 상태. 실시간 추가 조회 없음.'
+                    result = callback(request_id=request_id, session_id=session_id, messages=messages,
+                        account_context=context, attachments=payload.get('attachments', []),
+                        on_progress=on_progress, cancel=cancel)
+                finally:
+                    with self.chat_lock:
+                        self.active_chats.pop(scope, None)
                 with self.store.transaction():
                     if self.store.get(key) != session_id:
                         return {'status': 'SESSION_CHANGED', 'model_called': result['model_called'], 'orders_created': False}
+                    if cancel.is_set():
+                        return {'status': 'CHAT_CANCELLED', 'model_called': result['model_called'], 'orders_created': False}
                     if result['status'] == 'CHAT_COMPLETE':
                         messages = messages + [{'role': 'assistant', 'content': result['reply_text']}]
                         # ponytail: retain 10 recent turns; add explicit archival retrieval if longer context is needed.
@@ -296,13 +392,37 @@ class Service:
                 with self.store.lock:
                     attempts = [json.loads(row[0]) for row in self.store.db.execute(
                         "SELECT payload FROM journal WHERE kind IN ('MODEL_ATTEMPT','MODEL_OUTCOME') ORDER BY sequence DESC LIMIT 100")]
-                return {'status': 'RECORDED_ATTEMPTS' if attempts else 'UNKNOWN', 'attempts': attempts,
+                runtime = getattr(self.app.refresh, '__self__', None)
+                try:
+                    quota = runtime.codex.read_rate_limits() if runtime and hasattr(runtime, 'codex') else {'status': 'UNAVAILABLE'}
+                except (AdapterError, OSError):
+                    quota = {'status': 'UNAVAILABLE'}
+                return {'status': 'USAGE', 'reason': quota['status'], 'rate_limits': quota.get('rate_limits'),
+                        'rate_limits_by_id': quota.get('rate_limits_by_id'), 'checked_at': quota.get('checked_at'), 'attempts': attempts,
                         'operating_cost': 'UNCONFIRMED', 'subscription_quota_is_not_api_billing': True}
             if command == 'show_touch_point':
                 return {'theses': [thesis.model_dump(mode='json') for thesis in self.app.theses()],
                         'as_of': self.app.bundle.now.isoformat()}
             if command == 'status':
-                return self.app.status()
+                arguments = payload['text'].split()[1:]
+                if arguments == ['candidates']:
+                    controls = self.store.get('candidate_controls', {'removed': [], 'excluded': []})
+                    return {'reply_text': '후보·제외 종목 관리\n' + render_notification(controls, symbols=self._symbols()),
+                        '_reply_markup': self._keyboard([[('후보 복원', '/add_portfolio_ticker'), ('후보 제거', '/remove_portfolio_ticker')],
+                            [('매수 제외', '/add_portfolio_except_ticker'), ('제외 해제', '/remove_portfolio_except_ticker')]])}
+                if arguments == ['effort']:
+                    return {'reasoning_effort': self.config.app['model']['reasoning_effort'], 'changed': False,
+                        '_reply_markup': self._keyboard([[('현재 수준 유지', '/status'), ('high 변경 요청', '/reasoning_effort high')],
+                            [('medium 변경 요청', '/reasoning_effort medium'), ('xhigh 변경 요청', '/reasoning_effort xhigh')]])}
+                state = self.app.status()
+                scheduled = self.store.get('discretionary_schedule', self.scheduler['enabled'])
+                return {**state, 'version': os.environ.get('APP_VERSION', 'dev'),
+                    'scheduler_status': 'SCHEDULE_ON' if scheduled else 'SCHEDULE_OFF',
+                    'reasoning_effort': self.config.app['model']['reasoning_effort'],
+                    'session_active': bool(self.store.get('chat_session:' + self._chat_key(payload))),
+                    '_reply_markup': self._keyboard([[('전체 투자 검토', '/review'), ('투자 재개' if state.get('paused') else '투자 일시정지', '/resume' if state.get('paused') else '/pause')],
+                        [('예약 검토 끄기' if scheduled else '예약 검토 켜기', '/schedule_off' if scheduled else '/schedule_on'), ('후보·제외 종목', '/status candidates')],
+                        [('추론 수준', '/status effort'), ('리포트', '/report'), ('사용량', '/usage')]])}
             if command == 'report':
                 return self._report()
             if command == 'review':
@@ -340,17 +460,69 @@ class Service:
             return {**self._report(), 'finalization': finalization}
         raise ValueError('Unknown typed service request')
 
-    def _report(self):
-        date = self.clock().astimezone(ZoneInfo('Asia/Seoul')).date().isoformat()
+    def _report_data(self):
+        now = self.clock()
+        day = now.astimezone(ZoneInfo('Asia/Seoul')).date()
+        start = datetime.combine(day, time(), ZoneInfo('Asia/Seoul')).astimezone(timezone.utc)
+        end = start + timedelta(days=1)
         with self.store.lock:
-            outcomes = [json.loads(row[0]) for row in self.store.db.execute(
-                "SELECT payload FROM journal WHERE kind='RUN_OUTCOME' AND substr(created_at,1,10)=?", (date,))]
-            data = {'schema_version': 1, 'created_at': self.clock().isoformat(), 'date': date,
+            journal = [dict(row) for row in self.store.read(
+                'SELECT created_at,run_id,kind,payload FROM journal WHERE created_at>=? AND created_at<? ORDER BY sequence',
+                (start.isoformat(), end.isoformat()))]
+            for row in journal:
+                row['payload'] = json.loads(row['payload'])
+                if row['kind'] == 'INTENT_RESERVED':
+                    intent = row['payload']
+                    intent['intent_id'] = digest([intent['plan_id'], intent['plan_revision'], intent['side']])
+            touched = {row['payload']['intent_id'] for row in journal if row['payload'].get('intent_id')}
+            touched.update(row['payload']['id'] for row in journal if row['kind'] == 'INTENT_RESERVED' and row['payload'].get('id'))
+            orders, by_id = [], {}
+            symbols = self._symbols()
+            for row in self.store.read('SELECT * FROM intents ORDER BY rowid'):
+                raw = dict(row)
+                intent = json.loads(raw['payload'])
+                record = {key: raw[key] for key in ('instrument_id', 'side', 'quantity', 'state', 'cumulative_quantity', 'cumulative_notional')}
+                record.update(reason=intent.get('reason'), run_id=intent.get('run_id'), name=symbols.get(raw['instrument_id']))
+                by_id[raw['id']] = record
+                if raw['id'] in touched:
+                    record['created_at'] = next((item['created_at'] for item in journal
+                        if item['payload'].get('intent_id', item['payload'].get('id')) == raw['id']), None)
+                    orders.append(record)
+            fills = []
+            for row in journal:
+                if row['kind'] in {'CUMULATIVE_FILL', 'FILL_CORRECTION'}:
+                    fill = row['payload']
+                    order = by_id.get(fill.get('intent_id'), {})
+                    fills.append({**{key: order.get(key) for key in ('instrument_id', 'name', 'side', 'reason')},
+                        'at': fill.get('observed_at', row['created_at']), 'quantity': fill.get('quantity_delta'),
+                        'amount_krw': fill.get('notional_delta_krw'), 'fee_krw': reported_fee(fill),
+                        'correction': row['kind'] == 'FILL_CORRECTION'})
+            state = self.app.status()
+            for holding in state.get('holdings', []):
+                holding['name'] = symbols.get(holding['instrument_id'])
+                quote = getattr(self.app.bundle, 'quotes', {}).get(holding['instrument_id'])
+                if quote:
+                    from .strategy import quote_fresh
+                    if quote_fresh(quote, now, self.app.profile['orders']['quote_max_age_seconds']):
+                        holding.update(price=str(quote.bid), value=str(quote.bid * holding['quantity']),
+                            price_observed_at=quote.observed_at.isoformat(), valuation_quality='EXACT')
+                    else:
+                        holding['valuation_quality'] = 'STALE'
+            return {'schema_version': 1, 'created_at': now.isoformat(), 'date': day.isoformat(),
                     'config_hash': self.config.config_hash, 'strategy_hash': self.config.strategy_hash,
-                    'code_id': self.app.code_id, 'status': self.app.status(), 'runs': outcomes}
-            directory = self.config.state_dir / 'reports' / date
-            paths = write_report(data, directory / 'daily.json', directory / 'daily.html', '일일 판단·성과')
-            document = {'filename': f'daily-{date}.html', 'content': Path(paths['html']).read_text(encoding='utf-8')}
+                    'code_id': self.app.code_id, 'status': state,
+                    'runs': [row['payload'] for row in journal if row['kind'] == 'RUN_OUTCOME'],
+                    'orders': orders, 'fills': fills, 'instruments': symbols,
+                    'nav': self.store.get('nav_points', []),
+                    'theses': [thesis.model_dump(mode='json') for thesis in self.app.theses()],
+                    'diagnostics': [{'at': row['created_at'], 'kind': row['kind'], **row['payload']} for row in journal
+                        if row['kind'] in {'ACCOUNT_INCOMPLETE', 'MONITOR_DEGRADED', 'MONITOR_RECOVERED', 'SERVICE_WORKER_FAILED', 'MODEL_OUTCOME'}]}
+
+    def _report(self):
+        data = self._report_data()
+        directory = self.config.state_dir / 'reports' / data['date']
+        paths = write_report(data, directory / 'daily.json', directory / 'daily.html', '일일 판단·성과')
+        document = {'filename': f"daily-{data['date']}.html", 'content': Path(paths['html']).read_text(encoding='utf-8')}
         return {'status': 'REPORT_READY', 'report': data, 'paths': paths, '_document': document}
 
     def _document_secret_scan(self, content):
@@ -386,10 +558,28 @@ class Service:
                 self.telegram.send_document(route, chat, document['filename'], document['content'].encode('utf-8'),
                     secret_scan=self._document_secret_scan)
             else:
-                text = payload.get('text') or canonical(payload)
+                if payload.get('intent_id'):
+                    order = self.store.order(payload['intent_id'])
+                    intent = json.loads(order['payload'])
+                    payload = {**{key: order[key] for key in ('instrument_id', 'side', 'quantity')},
+                               'reason': intent.get('reason'), **payload}
+                text = payload.get('text')
+                if text:
+                    try:
+                        decoded = json.loads(text)
+                        if isinstance(decoded, dict):
+                            text = render_notification(decoded, symbols=self._symbols())
+                    except ValueError:
+                        pass
+                else:
+                    text = render_notification(payload, symbols=self._symbols())
                 if len(text) > 3500:
-                    text = text[:3400] + '\n… 전체 결과는 저장된 보고서에서 확인하세요.'
-                self.telegram.send_message(route, chat, text)
+                    from .reporting import _document
+                    with self.store.transaction():
+                        self.store.queue_document('long:' + str(row['id']), 'response.html',
+                            _document('전체 응답', '<pre>' + html.escape(text) + '</pre>'), route=route, chat_id=chat)
+                    text = text[:1000] + '\n\n전체 내용은 첨부 HTML로 이어서 보내드립니다.'
+                self.telegram.send_message(route, chat, text, reply_markup=payload.get('reply_markup'))
             state = 'DELIVERED'
         except Exception as error:
             blocked = ('document' in payload and isinstance(error, AdapterError)
@@ -406,32 +596,39 @@ class Service:
     def start(self):
         if self.config.app['monitoring']['enabled']:
             self.app.start_monitor(self.config.app['monitoring']['quote_poll_fallback_seconds'])
-        def worker(review):
+        def worker(review, chat):
             while not self.stop.wait(.1):
                 try:
                     if not review:
                         self.queue_tick()
-                    self.run_once(review=review)
+                    self.run_once(review=review, chat=chat)
                 except Exception as error:
                     self.worker_failed = True
-                    log_event('SERVICE_WORKER_FAILED', error_type=type(error).__name__)
+                    frames = [{'file': Path(frame.filename).name, 'line': frame.lineno, 'function': frame.name}
+                              for frame in traceback.extract_tb(error.__traceback__)[-5:]]
+                    detail = {'error_type': type(error).__name__, 'frames': frames}
+                    log_event('SERVICE_WORKER_FAILED', **detail)
                     with self.store.transaction():
-                        self.store.event('service', 'SERVICE_WORKER_FAILED', {'error_type': type(error).__name__})
+                        self.store.event('service', 'SERVICE_WORKER_FAILED', detail, notify=True)
                     self.stop.set()
         def notify():
-            while not self.stop.wait(5):
+            while not self.stop.wait(1):
                 try:
                     self.outbox_once()
                 except Exception as error:
                     with self.store.transaction():
                         self.store.event('service', 'NOTIFY_BLOCKED', {'error_type': type(error).__name__})
-        for name, target, args in [('control', worker, (False,)), ('review', worker, (True,)), ('outbox', notify, ())]:
+        for name, target, args in [('control', worker, (False, False)), ('review', worker, (True, False)),
+                                   ('chat', worker, (True, True)), ('outbox', notify, ())]:
             thread = threading.Thread(target=target, args=args, name='danta-' + name, daemon=True)
             thread.start()
             self.threads.append(thread)
 
     def close(self):
         self.stop.set()
+        with self.chat_lock:
+            for cancel in self.active_chats.values():
+                cancel.set()
         for thread in self.threads:
             thread.join(timeout=20)
         if any(thread.is_alive() for thread in self.threads):
@@ -461,8 +658,12 @@ class RuntimeHost:
                 self.service.config.require_external('telegram_ingress', self.service.app.approval)
             except (HumanRequired, ValueError, OSError):
                 status = 'CONFIGURATION_CHANGED_OR_APPROVAL_EXPIRED'
+        components = {}
+        if self.service:
+            health = self.service.app.status()
+            components = {key: health.get(key) for key in ('authentication', 'model_status', 'account_status', 'monitor_status', 'review_status')}
         return {'status': status, 'ready': status == 'READY', 'mode': self.config.mode,
-                'issues': self.issues}
+                'issues': self.issues, 'components': components}
 
     def version(self):
         return {'version': os.environ.get('APP_VERSION', 'dev'), 'code_id': self.code_id,
@@ -523,7 +724,7 @@ def handler_for(host):
                 return
             try:
                 length = int(self.headers.get('Content-Length', '0'))
-                if self.headers.get('Transfer-Encoding') or not 0 < length <= 65536:
+                if self.headers.get('Transfer-Encoding') or not 0 < length <= MAX_REQUEST_BYTES:
                     raise AdapterError('INVALID_REQUEST_SIZE')
                 if self.headers.get_content_type() != 'application/json':
                     raise AdapterError('JSON_CONTENT_TYPE_REQUIRED')
@@ -539,8 +740,14 @@ def handler_for(host):
                 self.respond(202, host.service.receive_http(raw))
             except (AdapterError, HumanRequired, ValueError, OSError) as error:
                 log_event('INGRESS_REJECTED', error_type=type(error).__name__)
-                self.respond(403, {'accepted': False, 'error_type': type(error).__name__,
-                    'reply_text': '요청이 거부되었습니다. 엔진의 허용 sender/chat과 운영 승인 설정을 확인해 주세요.'})
+                code = getattr(error, 'code', '')
+                explanations = {'UNKNOWN_COMMAND': '지원하지 않는 명령어입니다. /status에서 운영 메뉴를 확인해 주세요.',
+                    'INVALID_ATTACHMENTS': '첨부 파일 형식을 확인할 수 없습니다. UTF-8 텍스트 파일을 보내 주세요.',
+                    'ATTACHMENTS_TOO_LARGE': '첨부 텍스트는 합계 32KiB까지 전달할 수 있습니다.',
+                    'ATTACHMENTS_REQUIRE_CHAT': '첨부 파일은 명령어 대신 일반 메시지와 함께 보내 주세요.',
+                    'TELEGRAM_PAYLOAD_TOO_LARGE': '메시지와 첨부가 너무 큽니다. 나누어 보내 주세요.'}
+                self.respond(400 if code in explanations else 403, {'accepted': False, 'error_type': type(error).__name__,
+                    'reply_text': explanations.get(code, '요청 권한 또는 운영 설정을 확인할 수 없습니다. /status에서 상태를 확인해 주세요.')})
     return Handler
 
 

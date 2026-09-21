@@ -9,6 +9,7 @@ import sqlite3
 import threading
 from contextlib import contextmanager
 from decimal import Decimal, InvalidOperation
+from functools import wraps
 from pathlib import Path
 from uuid import uuid4
 
@@ -17,6 +18,14 @@ from .models import InvestmentThesis, finite_decimal
 
 TERMINAL = {"FILLED", "CANCELED", "REJECTED", "EXPIRED", "PARTIAL_CANCELED", "INVALIDATED"}
 WORKING = {"PLANNED", "VALIDATED", "SUBMITTING", "ACKNOWLEDGED", "PARTIALLY_FILLED", "UNKNOWN", "CANCEL_REQUESTED"}
+
+
+def locked(method):
+    @wraps(method)
+    def call(self, *args, **kwargs):
+        with self.lock:
+            return method(self, *args, **kwargs)
+    return call
 
 
 def ensure_local(path: Path) -> str:
@@ -114,24 +123,44 @@ class Store:
             else:
                 self.db.execute("COMMIT")
 
+    @locked
+    def read(self, sql, parameters=()):
+        # Materialize before releasing the shared connection's lock.
+        return self.db.execute(sql, parameters).fetchall()
+
+    @locked
     def get(self, key: str, default=None):
         row = self.db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
         return json.loads(row[0]) if row else default
 
+    @locked
     def set(self, key: str, value) -> None:
         self.db.execute("INSERT INTO meta VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, canonical(value)))
 
+    @locked
     def bump_version(self) -> int:
         version = self.get("account_version") + 1
         self.set("account_version", version)
         return version
 
+    @locked
     def event(self, run_id: str, kind: str, payload: dict, *, notify: bool = False) -> int:
+        # Keep every ledger event; identical operational warnings notify once per 15 minutes.
+        if notify and kind in {"ACCOUNT_INCOMPLETE", "RECONCILIATION", "MONITOR_DEGRADED", "SERVICE_WORKER_FAILED"}:
+            key = "notice:" + kind
+            previous = self.get(key, {})
+            fingerprint, now = digest(payload), utcnow()
+            if (previous.get("fingerprint") == fingerprint and previous.get("at")
+                    and (now - aware_time(previous["at"])).total_seconds() < 900):
+                notify = False
+            else:
+                self.set(key, {"fingerprint": fingerprint, "at": now.isoformat()})
         cursor = self.db.execute("INSERT INTO journal(created_at,run_id,kind,payload) VALUES (?,?,?,?)", (utcnow().isoformat(), run_id, kind, canonical(payload)))
         if notify:
             self.db.execute("INSERT INTO outbox(event_key,payload) VALUES (?,?)", (str(cursor.lastrowid), canonical({"kind": kind, **payload})))
         return cursor.lastrowid
 
+    @locked
     def queue_document(self, event_key, filename, content, *, route=None, chat_id=None):
         """Snapshot generated HTML in the caller's transaction; never follow queued paths."""
         from .safety import reject_credentials
@@ -153,10 +182,12 @@ class Store:
             self.event(request_id, "REQUEST_ACCEPTED", {"request_key": key})
             return request_id, True
 
+    @locked
     def working(self, instrument_id: str | None = None) -> list[dict]:
         rows = self.db.execute("SELECT * FROM intents ORDER BY rowid").fetchall()
         return [dict(row) for row in rows if row["state"] in WORKING and (instrument_id is None or row["instrument_id"] == instrument_id)]
 
+    @locked
     def holdings(self, owner: str = "strategy") -> list[dict]:
         return [dict(row) for row in self.db.execute("SELECT * FROM holdings WHERE owner=? AND quantity>0", (owner,))]
 
@@ -235,6 +266,7 @@ class Store:
             self.event(snapshot_id, "ACCOUNT_ADOPTED", {**payload, "payload_hash": body_hash, "account_version": version})
             return True
 
+    @locked
     def quantity(self, instrument: str, owner: str = "strategy") -> int:
         return self.db.execute("SELECT COALESCE(SUM(quantity),0) FROM holdings WHERE instrument_id=? AND owner=?", (instrument, owner)).fetchone()[0]
 
@@ -243,6 +275,7 @@ class Store:
             raise ValueError("Unknown reservation")
         return sum((Decimal(row[name]) for row in self.working()), Decimal(0))
 
+    @locked
     def order(self, intent_id: str) -> dict:
         row = self.db.execute("SELECT * FROM intents WHERE id=?", (intent_id,)).fetchone()
         if not row:
@@ -305,6 +338,7 @@ class Store:
             raise ValueError("Invalid cumulative cursor")
         if any(not value.is_finite() or value < 0 for value in (notional, fees) if value is not None):
             raise ValueError("Invalid cumulative amount")
+        fees_confirmed = fees is not None
         observed_at = aware_time(observed_at).isoformat()
         if fill_time_quality not in {"EXACT", "FIRST_OBSERVED", "UNKNOWN"} or (first_fill_at is not None) != (fill_time_quality == "EXACT"):
             raise ValueError("Invalid fill time quality")
@@ -397,7 +431,7 @@ class Store:
             reserve_scale = Decimal(remaining) / Decimal(order["quantity"]) if state in WORKING else Decimal(0)
             self.db.execute("UPDATE intents SET cumulative_quantity=?, cumulative_notional=?,cumulative_fees=?,broker_revision=?,state=?,reserve_cash=?,reserve_risk=? WHERE id=?", (quantity, str(notional), str(fees), revision, state, str(Decimal(payload["reserve_cash"]) * reserve_scale), str(Decimal(payload["reserve_risk"]) * reserve_scale), intent_id))
             self.bump_version()
-            self.event(payload["run_id"], "FILL_CORRECTION" if correction else "CUMULATIVE_FILL", {"intent_id": intent_id, "quantity_delta": dq, "notional_delta_krw": str(dn), "fee_delta_krw": str(df), "cumulative_quantity": quantity, "observed_at": observed_at}, notify=True)
+            self.event(payload["run_id"], "FILL_CORRECTION" if correction else "CUMULATIVE_FILL", {"intent_id": intent_id, "quantity_delta": dq, "notional_delta_krw": str(dn), "fee_delta_krw": str(df), "fees_confirmed": fees_confirmed, "cumulative_quantity": quantity, "observed_at": observed_at}, notify=True)
             return True
 
     def backup(self, destination: Path) -> None:

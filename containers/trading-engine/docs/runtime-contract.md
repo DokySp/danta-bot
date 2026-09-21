@@ -302,7 +302,7 @@ The runtime refuses an unbound model call instead of opening a second writer.
 Each call owns a new directory under `model-attempts`; after the adapter returns,
 all of its attempt result/status/usage records are written as `MODEL_ATTEMPT`
 journal events and the returned ModelResult as `MODEL_OUTCOME` in one short
-transaction. `/usage` reads those same events. Missing provider usage stays
+transaction. `/usage` reads those same events and separately queries subscription rate limits through the authenticated Codex app-server RPC. It never resets the quota circuit or changes trading authority. Missing provider usage stays
 `null`, including quota-circuit calls with zero attempts. Outcome usage is labeled
 `last_attempt`; it is not an additional billable attempt or a summed cost.
 

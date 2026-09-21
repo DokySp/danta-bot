@@ -712,7 +712,7 @@ DART 인증이 필요한 API에는 별도 `DART_API_KEY` 참조를 사용한다.
 
 `route/chat_id/user_id`는 문자열로 정규화하고 update ID는 bool이 아닌 정수다. 원문 `raw_message`를 직접 명령으로 실행하지 않는다. durable 중복키는 `(telegram-gateway, route, update_id)`이며 같은 ID에 다른 본문이 오면 거부한다.
 
-요청을 저장한 뒤 200/202로 `{"accepted":true,"request_id":"...","reply_text":"요청을 접수했습니다."}`를 반환한다. gateway는 `reply_text`, 없으면 `text`를 즉시 답장으로 쓰는 계약이다. 장시간 모델 응답을 HTTP 연결에서 기다리지 않는다.
+요청을 저장한 뒤 202로 `{"accepted":true,"request_id":"..."}`를 반환한다. 접수 문구는 채팅에 보내지 않는다. 모델 응답은 별도 worker에서 처리하고 작성 중 표시와 공개 가능한 진행 안내를 draft로 보낸 뒤 최종 결과를 outbox로 전달한다. 숨겨진 추론은 전달하지 않는다. 구조화된 거절 응답은 안내 문구를 표시하며 미접수 첨부를 소비하지 않는다.
 
 송신: `POST /sendMessage` 또는 `/notify`에 다음을 보내고 `{"ok":true}`를 확인한다.
 
@@ -726,13 +726,16 @@ DART 인증이 필요한 API에는 별도 `DART_API_KEY` 참조를 사용한다.
 |---|---|
 | `/status`, `/report`, `/usage`, `/version` | 실제 상태·원장 보고·사용량·코드/정책 식별값 |
 | `/review` | 승인된 범위의 심사 요청. 실제 주문 허가를 새로 만들지 않음 |
-| `/stop`, `/pause` | 현재 재량 심사를 중단하고 신규 재량 의도 생성 금지. 기존 보호·대사는 유지 |
-| `/session`, `/new` | 일반 대화 세션 조회/초기화. 거래 원장 초기화 금지 |
+| `/stop` | 현재 사용자·채팅의 진행 중/대기 중 일반 대화만 취소. 거래 상태 유지 |
+| `/pause` | 신규 재량 의도 생성 금지. 기존 보호·대사는 유지 |
+| `/session`, `/new` | 일반 대화 세션 조회/초기화. `/new` 접수 시 대기 첨부도 비우며 거래 원장은 유지 |
 | `/schedule_on`, `/schedule_off` | 재량 심사 스케줄 on/off. 보호 감시·주문 대사를 끄지 않음 |
 | `/reasoning_effort` | 조회 또는 승인 필요한 변경 요청. 숨은 live override 금지 |
 | `/add_portfolio_ticker`, `/remove_portfolio_ticker` | 후보 목록 변경. 보유 수량 변경 아님 |
 | `/add_portfolio_except_ticker`, `/remove_portfolio_except_ticker` | 신규 후보 제외 규칙 변경. 자동 청산 아님 |
 | `/show_touch_point` | 유효한 기준점·보호/관찰 구간·출처 표시 |
+
+기본 메뉴는 `/status`, `/report`, `/usage`, `/new`, `/stop` 다섯 개다. `/status`의 버튼에서 심사·일시정지/재개·스케줄·후보/제외 종목·추론 수준을 관리한다. 나머지 명령은 호환 별칭으로 계속 처리한다. 투자 논제와 보호 기준점은 일일 HTML에 함께 표시한다.
 
 `/resume`는 중단 사유·현재 계좌·승인을 검사한다. 낙폭·UNKNOWN·권한 만료를 단순 명령으로 우회하지 않는다. 모든 주문 취소/전량 매도/보호 감시 중단은 별도 명시 권한이며 기본 pause와 다르다.
 

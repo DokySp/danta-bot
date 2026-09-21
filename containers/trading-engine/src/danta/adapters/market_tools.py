@@ -15,10 +15,27 @@ ID_TOOLS = {"get_event": ("events", "event_id"), "get_fact": ("facts", "fact_id"
             "get_candidate": ("candidates", "instrument_id"), "get_position_thesis": ("theses", "thesis_id")}
 SNAPSHOT_FIELDS = frozenset({"schema_version", "run_id", "created_at", "config_hash", "strategy_hash", "code_id", "session_id",
     "review_scope", "reviewed_positions", "strategy_contract", "portfolio", "theses", "events", "facts", "candidates",
-    "pending_orders", "missing_data", "output_contract", "material_hash", "input_snapshot_id", "tool_scope", "tool_records", "conversation"})
+    "pending_orders", "missing_data", "output_contract", "material_hash", "input_snapshot_id", "tool_scope", "tool_records", "conversation",
+    "account_context", "attachments"})
 RECORD_FIELDS = {"events": set(EventRecord.model_fields), "facts": set(MarketFact.model_fields),
                  "candidates": set(Candidate.model_fields), "theses": set(InvestmentThesis.model_fields)}
 DOCUMENT_FIELDS = {"fact_id", "instrument_id", "source", "sha256", "content", "receipt_id", "available_at", "interpretation_status"}
+
+
+def validate_attachments(attachments):
+    if not isinstance(attachments, list) or len(attachments) > 5:
+        raise AdapterError("INVALID_ATTACHMENTS")
+    total = 0
+    for item in attachments:
+        if (not isinstance(item, dict) or set(item) != {"file_name", "content"}
+                or not isinstance(item["file_name"], str) or not 1 <= len(item["file_name"]) <= 180
+                or any(char in item["file_name"] for char in ("/", "\\", "\x00"))
+                or not isinstance(item["content"], str) or "\x00" in item["content"]):
+            raise AdapterError("INVALID_ATTACHMENTS")
+        total += len(item["content"].encode("utf-8"))
+    if total > 32768:
+        raise AdapterError("ATTACHMENTS_TOO_LARGE")
+    reject_credentials(attachments)
 
 
 def _record_in_scope(collection, record, instrument_ids, record_id=None):
@@ -52,8 +69,12 @@ def validate_snapshot(snapshot):
         if (not isinstance(messages, list) or not 1 <= len(messages) <= 21 or
                 any(not isinstance(item, dict) or set(item) != {"role", "content"} or
                     item["role"] not in {"user", "assistant"} or not isinstance(item["content"], str) or
-                    not 1 <= len(item["content"]) <= 4000 for item in messages)):
+                    not 1 <= len(item["content"]) <= 16384 for item in messages)):
             raise AdapterError("INVALID_CONVERSATION")
+    if "attachments" in snapshot:
+        validate_attachments(snapshot["attachments"])
+    if "account_context" in snapshot and not isinstance(snapshot["account_context"], dict):
+        raise AdapterError("INVALID_ACCOUNT_CONTEXT")
     scope = snapshot.get("tool_scope", {})
     if not isinstance(scope, dict) or set(scope) - {"instrument_ids", "start", "end", "official_domains"}:
         raise AdapterError("INVALID_TOOL_SCOPE")

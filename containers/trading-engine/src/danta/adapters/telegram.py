@@ -8,12 +8,15 @@ import uuid
 from dataclasses import dataclass
 
 from . import AdapterError, http_transport, require_http_ok
+from .market_tools import validate_attachments
 from ..safety import CredentialError, reject_credentials
 
 COMMANDS = frozenset("status report usage version review stop pause session new schedule_on schedule_off reasoning_effort add_portfolio_ticker remove_portfolio_ticker add_portfolio_except_ticker remove_portfolio_except_ticker show_touch_point resume".split())
 READ_COMMANDS = frozenset("status report usage version session show_touch_point".split())
 ROUTE = "trading-engine"
 GATEWAY = "telegram-gateway"
+# JSON escaping and retained Telegram metadata exceed the decoded 32KiB attachment budget.
+MAX_REQUEST_BYTES = 256 * 1024
 
 
 @dataclass(frozen=True)
@@ -58,12 +61,15 @@ class TelegramAdapter:
         command = text.split()[0][1:].split("@", 1)[0] if text.startswith("/") else "chat"
         if command != "chat" and command not in COMMANDS:
             raise AdapterError("UNKNOWN_COMMAND")
+        validate_attachments(body.get("attachments", []))
+        if body.get("attachments") and command != "chat":
+            raise AdapterError("ATTACHMENTS_REQUIRE_CHAT")
         if command not in READ_COMMANDS and command != "chat":
             if self.authorize is None:
                 raise AdapterError("CONTROL_AUTHORIZATION_REQUIRED")
             self.authorize(command, values["user_id"], values["chat_id"])
         payload = json.dumps({**body, **values}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        if len(payload.encode()) > 65536:
+        if len(payload.encode()) > MAX_REQUEST_BYTES:
             raise AdapterError("TELEGRAM_PAYLOAD_TOO_LARGE")
         body_hash = hashlib.sha256(payload.encode()).hexdigest()
         request_id = str(uuid.uuid4())
@@ -77,7 +83,7 @@ class TelegramAdapter:
             else:
                 self.db.execute("INSERT INTO telegram_requests(peer,route,update_id,body_hash,request_id,payload) VALUES(?,?,?,?,?,?)", (GATEWAY, values["route"], body["update_id"], body_hash, request_id, payload))
         request = TelegramRequest(request_id, values["route"], body["update_id"], values["chat_id"], values["user_id"], text, command)
-        return {"accepted": True, "request_id": request_id, "reply_text": "요청을 접수했습니다."}, request
+        return {"accepted": True, "request_id": request_id}, request
 
     def _post(self, endpoint, payload):
         response = self.transport("POST", self.gateway_url + endpoint, {"content-type": "application/json"}, json.dumps(payload, ensure_ascii=False).encode(), 15)
@@ -86,10 +92,20 @@ class TelegramAdapter:
             raise AdapterError("NOTIFICATION_NOT_ACKNOWLEDGED")
         return {"ok": True}
 
-    def send_message(self, route, chat_id, text, *, notify=False):
+    def send_message(self, route, chat_id, text, *, notify=False, reply_markup=None):
         if not isinstance(text, str):
             raise AdapterError("INVALID_NOTIFICATION")
-        return self._post("/notify" if notify else "/sendMessage", {"route": str(route), "chat_id": str(chat_id), "text": text, "parse_mode": "", "escape": True})
+        payload = {"route": str(route), "chat_id": str(chat_id), "text": text, "parse_mode": "", "escape": True}
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        return self._post("/notify" if notify else "/sendMessage", payload)
+
+    def send_typing(self, route, chat_id):
+        return self._post("/sendChatAction", {"route": str(route), "chat_id": str(chat_id), "action": "typing"})
+
+    def send_draft(self, route, chat_id, draft_id, text):
+        return self._post("/sendMessageDraft", {"route": str(route), "chat_id": str(chat_id),
+            "draft_id": draft_id, "text": text})
 
     def send_document(self, route, chat_id, filename, content: bytes, *, secret_scan, caption=""):
         if not filename or "/" in filename or "\\" in filename or not isinstance(content, bytes):

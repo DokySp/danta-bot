@@ -65,6 +65,7 @@ def resolved_config(source, capital, secrets):
 
 def model_evidence(config, secrets):
     from .adapters.isolation_probe import probe
+    from .adapters.codex_cli import auth_preflight
     settings = config.app["model"]
     executable = shutil.which(settings["executable"])
     if not executable:
@@ -72,8 +73,11 @@ def model_evidence(config, secrets):
     auth = secrets.get("DANTA_CODEX_AUTH_HOME")
     if not auth:
         raise HumanRequired("CODEX_AUTH_HOME_MISSING")
+    authentication = auth_preflight(auth, settings["auth_mode"])
+    if authentication != "AUTHENTICATED":
+        raise HumanRequired("CODEX_" + authentication)
     # Never copy auth into the image, model inputs or a probe transcript.
-    result = subprocess.run([executable, "login", "status"], capture_output=True, timeout=15,
+    result = subprocess.run([executable, "-c", 'cli_auth_credentials_store="file"', "login", "status"], capture_output=True, timeout=15,
         env={"PATH": os.environ.get("PATH", ""), "HOME": auth, "CODEX_HOME": auth}, shell=False)
     if result.returncode:
         raise HumanRequired("CODEX_LOGIN_REQUIRED")

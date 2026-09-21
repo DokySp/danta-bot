@@ -62,6 +62,10 @@ class AutomaticDeploymentTests(unittest.TestCase):
                     self.assertEqual(app.config.app['telegram']['allowed_sender_ids'], ['12345'])
                     app.store.set('monitor_degraded', True)
                     app.protect()
+                    self.assertTrue(app.store.get('monitor_degraded'))
+                    from datetime import timedelta
+                    app.store.set('monitor_healthy_since', (app.bundle.now - timedelta(seconds=61)).isoformat())
+                    app.protect()
                     self.assertFalse(app.store.get('monitor_degraded'))
                 finally:
                     app.close()

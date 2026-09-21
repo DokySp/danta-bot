@@ -98,16 +98,16 @@ class Executor:
     def submit(self, intent: OrderIntent, now: datetime | None = None) -> dict:
         now = now or utcnow()
         with self.dispatch_lock:
-            previous = self.store.db.execute("SELECT id FROM intents WHERE idempotency_key=?", (intent.id,)).fetchone()
+            previous = self.store.read("SELECT id FROM intents WHERE idempotency_key=?", (intent.id,))
             if previous:
-                return self.store.order(previous[0])
+                return self.store.order(previous[0][0])
         # Provider collection may be slow; protection/reconciliation must keep running.
         self.authorize(intent, "submit")
         self.preflight(intent, now)
         with self.dispatch_lock:
-            previous = self.store.db.execute("SELECT id FROM intents WHERE idempotency_key=?", (intent.id,)).fetchone()
+            previous = self.store.read("SELECT id FROM intents WHERE idempotency_key=?", (intent.id,))
             if previous:
-                return self.store.order(previous[0])
+                return self.store.order(previous[0][0])
             with self.store.transaction():
                 self._validate_state(intent, now)
                 payload = intent.payload()
@@ -229,14 +229,16 @@ class Executor:
                 with self.store.transaction():
                     self.store.set("reconciled", False)
                     self.store.set("account_cash_reconciled", False)
-                    self.store.event("reconcile", "ACCOUNT_INCOMPLETE", {}, notify=True)
+                    diagnostics = snapshot.get("diagnostics") or snapshot.get("errors", [])
+                    self.store.set("account_diagnostics", diagnostics)
+                    self.store.event("reconcile", "ACCOUNT_INCOMPLETE", {"diagnostics": diagnostics}, notify=True)
                 return {"status": "DATA_INCOMPLETE"}
             unknown = []
             orders_to_reconcile = self.store.working()
             working_ids = {order["id"] for order in orders_to_reconcile}
             observed_keys = {(item.get("namespace"), item.get("broker_id")) for item in snapshot["orders"] if item.get("broker_id")}
             observed_clients = {item.get("verified_client_intent_id") for item in snapshot["orders"] if item.get("verified_client_intent_id")}
-            for row in self.store.db.execute("SELECT * FROM intents"):
+            for row in self.store.read("SELECT * FROM intents"):
                 # Closed orders still accept later broker revisions, but their
                 # absence from a bounded history page is not a new UNKNOWN.
                 if row["id"] not in working_ids and ((row["broker_namespace"], row["broker_id"]) in observed_keys or row["id"] in observed_clients):

@@ -92,22 +92,25 @@ class RuntimeState:
         for namespace in ("observations","events","circuit"):
             self.data.setdefault(namespace,{})
 
-    def save(self):
+    def save(self, namespaces=None):
         with self.lock:
+            # Serialize only changed namespaces, before taking SQLite's writer lock.
+            values = [(key, canonical(self.data[key])) for key in (namespaces if namespaces is not None else self.data)]
             self.db.execute("BEGIN IMMEDIATE")
             try:
                 self.db.executemany("INSERT INTO runtime_cache VALUES (?,?) ON CONFLICT(namespace) DO UPDATE SET payload=excluded.payload",
-                                    [(key,canonical(value)) for key,value in self.data.items()])
+                                    values)
                 self.db.execute("COMMIT")
             except Exception:
                 self.db.execute("ROLLBACK")
                 raise
 
     def known_order(self,namespace,broker_id):
-        if not self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='intents'").fetchone():
-            return None
-        row = self.db.execute("SELECT * FROM intents WHERE broker_namespace=? AND broker_id=?",(namespace,broker_id)).fetchone()
-        return dict(row) if row else None
+        with self.lock:
+            if not self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='intents'").fetchone():
+                return None
+            row = self.db.execute("SELECT * FROM intents WHERE broker_namespace=? AND broker_id=?",(namespace,broker_id)).fetchone()
+            return dict(row) if row else None
 
 
 class PriorityTransport:
@@ -286,8 +289,14 @@ class KisBrokerPort:
                 costs = None
             # Read balances last so executions observed above are reflected in positions/cash.
             account = self.adapter.read_account()
-            if any(result.quality != "COMPLETE" for result in (account, orders, cancelable, reservations)):
-                raise ValueError("BROKER_PAGINATION_INCOMPLETE")
+            failures = [{"endpoint": name, "quality": result.quality,
+                         "reason": result.metadata.get("error", "BROKER_PAGINATION_INCOMPLETE")}
+                        for name, result in (("balance", account), ("orders", orders),
+                                             ("cancelable", cancelable), ("reservations", reservations))
+                        if result.quality != "COMPLETE"]
+            if failures:
+                return {"complete": False, "errors": ["BROKER_PAGINATION_INCOMPLETE"],
+                        "diagnostics": failures, "orders": [], "reservations": []}
             fields = ("prvs_rcdl_excc_amt", "tot_evlu_amt", "evlu_amt_smtl_amt", "nass_amt", "tot_loan_amt", "cma_evlu_amt")
             summaries = []
             for page in account.metadata["summaries"]:
@@ -397,7 +406,7 @@ class KisBrokerPort:
                 revision = self.state.data["observations"].setdefault(item["key"], {"revision": 0, "last_observation_hash": None})
                 if revision["last_observation_hash"] != item["fingerprint"]:
                     revision.update(revision=revision["revision"]+1, last_observation_hash=item["fingerprint"])
-                    self.state.save()
+                    self.state.save(("observations",))
                 item["revision"] = revision["revision"]
             normalized.append(item)
         if census["reservations"]:
@@ -497,7 +506,7 @@ class KisBrokerPort:
                         revision["revision"] += 1
                         revision["last_observation_hash"] = fingerprint
                     item["revision"] = revision["revision"]
-                    self.state.save()
+                    self.state.save(("observations",))
                 normalized.append(item)
             return {"complete": not errors,"ownership_complete": not errors and ownership_complete,"strategy_quantities":strategy,
                     "strategy_sellable_quantities": {key:min(quantity,sellable.get(key,0)) for key,quantity in strategy.items()},
@@ -524,6 +533,7 @@ class ExternalRuntime:
         self.publish_lock = threading.RLock()
         self.quote_subscription_lock = threading.RLock()
         self.entry_quote_symbols = set()
+        self.instrument_names = {}
 
     def _instruments(self, now):
         mapping = self.manifest["normalization"]["instruments"]
@@ -545,6 +555,8 @@ class ExternalRuntime:
                     kind = "common_stock" if row.get("group") in mapping["common_groups"] and not true("etp") and not true("spac") and not true("preferred") else "excluded_instrument"
                     status = "UNKNOWN" if not codes_known else "HALTED" if true("halted") else "DELISTING" if true("liquidation") else "ADMINISTRATIVE" if true("managed") else "NORMAL"
                 issuer = mapping["issuer_by_symbol"].get(ticker)
+                if isinstance(row.get("name"), str) and row["name"].strip():
+                    self.instrument_names["KRX:" + ticker] = row["name"].strip()
                 sector = mapping["sector_by_industry"].get(row.get("industry"))
                 instruments.append(Instrument(instrument_id="KRX:"+ticker,issuer_id=issuer or "UNVERIFIED:"+ticker,
                     board=board,kind=kind,venue="KRX",sector=sector,status=status,status_verified=codes_known and bool(issuer),
@@ -746,10 +758,13 @@ class ExternalRuntime:
                 self.state.data["disclosure_last_poll"] = now.isoformat()
                 self.state.data["disclosure_coverage"] = coverage
                 self.state.data["disclosure_diagnostics"] = self.disclosure_diagnostics
-                self.state.save()
+                self.state.save(("events", "disclosure_records", "disclosure_cursor_date", "disclosure_last_poll",
+                                 "disclosure_coverage", "disclosure_diagnostics") if "disclosure_cursor_date" in self.state.data else
+                                ("events", "disclosure_records", "disclosure_last_poll", "disclosure_coverage", "disclosure_diagnostics"))
         held = set()
-        if self.state.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='holdings'").fetchone():
-            held = {row[0] for row in self.state.db.execute("SELECT instrument_id FROM holdings WHERE owner='strategy' AND quantity>0")}
+        with self.state.lock:
+            if self.state.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='holdings'").fetchone():
+                held = {row[0] for row in self.state.db.execute("SELECT instrument_id FROM holdings WHERE owner='strategy' AND quantity>0")}
         current = self.calendar.available_session(now)
         events,facts,documents = [],[],{}
         for record in cached.values():
@@ -978,7 +993,8 @@ class ExternalRuntime:
                 "sessions":[session.model_dump(mode="json") for session in self.calendar.sessions],"calendar_source":self.manifest["calendar"]["source"],
                 "calendar_verified":True,"tick_bands":ticks["bands"],"tick_source":ticks["source"],"ticks_verified":True,
                 "tick_effective_at":ticks["effective_at"],"tick_expires_at":ticks["expires_at"],"costs":self.manifest["costs"],
-                "instruments":[item.model_dump(mode="json") for item in instruments],"quotes":[item.model_dump(mode="json") for item in quotes],
+                "instruments":[item.model_dump(mode="json") for item in instruments],"instrument_names":dict(self.instrument_names),
+                "quotes":[item.model_dump(mode="json") for item in quotes],
                 "bars":{key:[bar.model_dump(mode="json") for bar in values] for key,values in bars.items()},
                 "index_bars":{key:[bar.model_dump(mode="json") for bar in values] for key,values in index_bars.items()},
                 "events":[event.model_dump(mode="json") for event in events],"facts":[fact.model_dump(mode="json") for fact in facts],
@@ -1028,8 +1044,9 @@ class ExternalRuntime:
             raise AdapterError("MODEL_"+result.status)
         return result.decision.model_dump(mode="json") if hasattr(result.decision,"model_dump") else result.decision
 
-    def chat(self, *, request_id, session_id, messages):
-        """Text-only conversation using the same isolated, metered model runner."""
+    def chat(self, *, request_id, session_id, messages, account_context=None, attachments=None,
+             on_progress=None, cancel=None):
+        """A frozen read-only account view, without broker or settings authority."""
         self.config.assert_current()
         self.config.require_external("model_call", self.approval)
         store = getattr(self.broker, "store", None)
@@ -1039,12 +1056,16 @@ class ExternalRuntime:
                   "created_at": self.clock().isoformat(), "strategy_hash": self.config.strategy_hash,
                   "code_id": code_identity(), "config_hash": self.config.config_hash, "conversation": messages,
                   "tool_scope": {"instrument_ids": []}, "tool_records": {}}
+        if account_context is not None:
+            frozen["account_context"] = account_context
+        if attachments:
+            frozen["attachments"] = attachments
         frozen["input_snapshot_id"] = digest(frozen)
-        schema = {"type": "object", "properties": {"reply_text": {"type": "string", "minLength": 1, "maxLength": 3500}},
+        schema = {"type": "object", "properties": {"reply_text": {"type": "string", "minLength": 1, "maxLength": 12000}},
                   "required": ["reply_text"], "additionalProperties": False}
         def validate_reply(value):
             if (not isinstance(value, dict) or set(value) != {"reply_text"} or
-                    not isinstance(value["reply_text"], str) or not 1 <= len(value["reply_text"].strip()) <= 3500):
+                    not isinstance(value["reply_text"], str) or not 1 <= len(value["reply_text"].strip()) <= 12000):
                 raise ValueError("INVALID_CHAT_REPLY")
             reject_credentials(value)
             return value
@@ -1053,11 +1074,17 @@ class ExternalRuntime:
         result = self.codex.run(frozen, schema, attempt_root=attempt_root,
             prompt=(ROOT / "prompts/general_chat.md").read_text(), validate_schema=validate_reply,
             validate_semantic=lambda _value: True,
-            expires_at=started_at + timedelta(seconds=self.config.app["model"]["timeout_seconds"]))
+            expires_at=started_at + timedelta(seconds=self.config.app["model"]["timeout_seconds"]),
+            on_progress=on_progress, cancel=cancel)
         self._record_model_result(store, frozen, call_id, attempt_root, started_at, result, purpose="chat")
         if result.status != "SUCCESS":
             return {"status": "MODEL_" + result.status, "session_id": session_id,
-                    "reply_text": "대화 응답을 완료하지 못했습니다. /usage에서 모델 상태를 확인할 수 있습니다.",
+                    "reply_text": {"CANCELED": "현재 대화 응답을 중단했습니다. 보호 감시는 계속됩니다.",
+                        "AUTH_FAILED": "Codex 로그인 검증에 실패했습니다. /status에서 인증 상태를 확인해 주세요.",
+                        "QUOTA_CIRCUIT_OPEN": "Codex 사용 한도가 막혀 있습니다. /usage에서 남은 한도와 초기화 시각을 확인해 주세요.",
+                        "QUOTA_EXHAUSTED": "Codex 사용 한도를 소진했습니다. /usage에서 초기화 시각을 확인해 주세요.",
+                        "TIMEOUT": "모델 응답 시간이 초과되었습니다. 보호 감시는 계속됩니다."
+                    }.get(result.status, "Codex 응답을 완료하지 못했습니다. 로그인 여부와 별도로 실행 오류를 기록했습니다. /status에서 확인해 주세요."),
                     "model_called": result.attempts > 0, "orders_created": False}
         value = validate_reply(result.decision)
         return {"status": "CHAT_COMPLETE", "session_id": session_id, "reply_text": value["reply_text"],
@@ -1068,11 +1095,14 @@ class ExternalRuntime:
         for path in sorted(attempt_root.glob("*/result.json"),key=lambda item:(item.stat().st_mtime_ns,str(item))):
             record = _json(path)
             attempts.append({"attempt_id":path.parent.name,"status":record["status"],"usage":record.get("usage"),
+                             "diagnostic": record.get("diagnostic"),
                              "input_sha256":record["input_sha256"],"provenance":record.get("provenance")})
         metadata = {"call_id":call_id,"input_snapshot_id":frozen["input_snapshot_id"],"model_id":self.codex.model_id,
                     "provider":"codex_cli","reasoning_effort":self.codex.reasoning_effort,"purpose":purpose,
                     **{key: frozen[key] for key in ("created_at", "strategy_hash", "config_hash", "code_id") if key in frozen}}
         with store.transaction():
+            store.set("model_health", {"status": result.status, "checked_at": self.clock().isoformat(),
+                "purpose": purpose, "diagnostic": attempts[-1].get("diagnostic") if attempts else None})
             for index,attempt in enumerate(attempts,1):
                 store.event(frozen["run_id"],"MODEL_ATTEMPT",{**metadata,**attempt,"record_type":"MODEL_ATTEMPT",
                     "attempt_number":index,"usage_scope":"attempt"})
@@ -1090,7 +1120,7 @@ class PaperBrokerPort:
         self.runtime,self.state = runtime,runtime.state
         with self.state.lock:
             self.state.data.setdefault("paper",{"orders":{},"quantities":{},"cash":runtime.profile["capital_krw"]})
-            self.state.save()
+            self.state.save(("paper",))
 
     def bind_store(self,store):
         self.store = store
@@ -1105,7 +1135,7 @@ class PaperBrokerPort:
                 "created_at":now.isoformat(),"cumulative_quantity":0,"cumulative_notional":"0","cumulative_fees":"0",
                 "observed_at":now.isoformat(),"revision":0,"last_quote_at":None,
                 "first_fill_at":None,"fill_time_quality":"UNKNOWN","fill_session_id":None})
-            self.state.save()
+            self.state.save(("paper",))
         return {"status":"ACKNOWLEDGED","broker_id":identifier,"namespace":namespace}
 
     def cancel(self,request):
@@ -1115,7 +1145,7 @@ class PaperBrokerPort:
                 raise ValueError("PAPER_ORDER_NAMESPACE_MISMATCH")
             order["state"] = "CANCELED"
             order["revision"] += 1
-            self.state.save()
+            self.state.save(("paper",))
         return {"status":"ACKNOWLEDGED"}
 
     def snapshot(self,*,bundle=None):
@@ -1162,7 +1192,7 @@ class PaperBrokerPort:
                              fill_session_id=quote.observed_at.astimezone(SEOUL).date().isoformat())
                 ledger["quantities"][order["instrument_id"]] = ledger["quantities"].get(order["instrument_id"],0)+(quantity if buy else -quantity)
                 ledger["cash"] = str(cash-quantity*price-fees if buy else cash+quantity*price-fees)
-            self.state.save()
+            self.state.save(("paper",))
             return {"complete":True,"ownership_complete":True,"orders":list(ledger["orders"].values()),
                     "strategy_quantities":dict(ledger["quantities"]),"broker_available_cash":ledger["cash"],
                     "strategy_sellable_quantities":dict(ledger["quantities"]),"provenance":"PAPER_QUOTE_CONSTRAINED_SIMULATION"}
@@ -1301,7 +1331,7 @@ def build_external_runtime(config,trusted_approval,*,kis_transport=None,dart_tra
     def persist_circuit(circuit):
         with state.lock:
             state.data["circuit"] = circuit
-            state.save()
+            state.save(("circuit",))
     def model_authorize(_operation,model,effort,auth_mode):
         config.require_external("model_call",trusted_approval)
         if (model,effort,auth_mode) != (model_settings["model_id"],model_settings["reasoning_effort"],model_settings["auth_mode"]):

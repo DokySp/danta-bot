@@ -223,7 +223,8 @@ class ServiceIntegrationTests(unittest.TestCase):
         self.fail_send = False
         self.assertTrue(self.service.outbox_once())
         self.assertEqual(self.app.review_calls, 1)
-        self.assertEqual(self.sent[0], self.sent[1])
+        messages = [body for url, body in zip(self.sent_urls, self.sent) if url.endswith("/sendMessage")]
+        self.assertEqual(messages[0], messages[1])
         self.assertEqual(self.app.store.db.execute('SELECT attempts FROM outbox').fetchone()[0], 2)
 
     def test_report_document_survives_overwrite_retry_and_restart_without_duplicate_text(self):
@@ -461,7 +462,10 @@ class ServiceIntegrationTests(unittest.TestCase):
         for update, text in enumerate(('/add_portfolio_ticker', '/remove_portfolio_except_ticker ONE TWO'), 10):
             self.receive(text, update=update)
             self.service.run_once()
-            self.assertEqual(self.last_result()['error_type'], 'ValueError')
+            if len(text.split()) == 1:
+                self.assertIn('005930', self.last_result()['reply_text'])
+            else:
+                self.assertEqual(self.last_result()['error_type'], 'ValueError')
         self.assertEqual(len(self.app.candidate_updates), 4)
         self.assertEqual(self.app.review_calls, 0)
         self.assertEqual(self.app.store.db.execute('SELECT COUNT(*) FROM intents').fetchone()[0], 0)
@@ -589,7 +593,8 @@ class ServiceIntegrationTests(unittest.TestCase):
                 self.assertFalse(any(thread.name.startswith('danta-') for thread in threading.enumerate()))
         failures = [json.loads(row[0]) for row in self.app.store.db.execute(
             "SELECT payload FROM journal WHERE kind='SERVICE_WORKER_FAILED'")]
-        self.assertEqual(failures, [{'error_type': 'RuntimeError'}] * 2)
+        self.assertEqual([row['error_type'] for row in failures], ['RuntimeError'] * 2)
+        self.assertTrue(all(row['frames'] and all(set(frame) == {'file', 'line', 'function'} for frame in row['frames']) for row in failures))
 
 
 if __name__ == '__main__':

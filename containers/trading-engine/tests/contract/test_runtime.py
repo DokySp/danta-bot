@@ -604,7 +604,7 @@ class ExternalRuntimeContracts(unittest.TestCase):
         self.assertIsNone(outcome["usage"])
         service = Service(app)
         usage = service._dispatch({"kind":"telegram","command":"usage","text":"/usage","route":"1","chat_id":"2","user_id":"3"},"usage-request")
-        self.assertEqual(usage["status"],"RECORDED_ATTEMPTS")
+        self.assertEqual(usage["status"],"USAGE")
         self.assertEqual(len(usage["attempts"]),4)
         self.assertTrue(all(record["record_type"] in {"MODEL_ATTEMPT","MODEL_OUTCOME"} for record in usage["attempts"]))
 

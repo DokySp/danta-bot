@@ -13,6 +13,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, build_opener, ProxyHandler
 
 from danta.config import ROOT, load_config
+from danta.adapters.telegram import MAX_REQUEST_BYTES
 from danta.service import serve
 
 
@@ -108,7 +109,7 @@ class DeploymentHTTPTest(unittest.TestCase):
     def test_ingress_limits_apply_even_before_runtime_is_ready(self):
         with self.running(Mock()) as logs:
             self.assertEqual(self.request('/telegram', b'{}', 'text/plain')[0], 403)
-            self.assertEqual(self.request('/telegram', b'x' * 65537)[0], 403)
+            self.assertEqual(self.request('/telegram', b'x' * (MAX_REQUEST_BYTES + 1))[0], 403)
         self.assertIn('INGRESS_REJECTED', logs.getvalue())
 
     def test_stop_during_initialization_never_starts_trading_workers(self):

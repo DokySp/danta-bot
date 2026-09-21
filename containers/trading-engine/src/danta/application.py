@@ -270,7 +270,7 @@ class Application:
                 raise ValueError("CURRENT_SELLABLE_QUANTITY_EXCEEDED")
 
     def theses(self) -> list[InvestmentThesis]:
-        return [InvestmentThesis.model_validate_json(row[0]) for row in self.store.db.execute("SELECT payload FROM theses")]
+        return [InvestmentThesis.model_validate_json(row[0]) for row in self.store.read("SELECT payload FROM theses")]
 
     def portfolio(self, *, exclude_intent_id: str | None = None) -> PortfolioSnapshot:
         bundle = self.bundle
@@ -385,6 +385,7 @@ class Application:
                 with self.store.transaction():
                     newly_degraded = not self.store.get("monitor_degraded", False)
                     self.store.set("monitor_degraded", True)
+                    self.store.set("monitor_healthy_since", None)
                     if newly_degraded:
                         self.store.event("protection", "MONITOR_DEGRADED", plan.model_dump(mode="json"), notify=True)
             if plan.cancel_pending_entries:
@@ -399,7 +400,8 @@ class Application:
                     if self.store.working(holding.instrument_id):
                         continue
                     plan_id = digest([thesis.thesis_id, plan.action, thesis.reduced_quantity])
-                    previous = self.store.db.execute("SELECT * FROM intents WHERE plan_id=? AND side='SELL' ORDER BY rowid DESC LIMIT 1", (plan_id,)).fetchone()
+                    previous = self.store.read("SELECT * FROM intents WHERE plan_id=? AND side='SELL' ORDER BY rowid DESC LIMIT 1", (plan_id,))
+                    previous = previous[0] if previous else None
                     revision = 1
                     if previous:
                         if previous["state"] not in {"REJECTED", "CANCELED", "PARTIAL_CANCELED", "EXPIRED", "INVALIDATED"}:
@@ -418,8 +420,14 @@ class Application:
         if self.store.get("reconciled") and all(item["action"] not in {"MONITOR_DEGRADED", "RECONCILE_REQUIRED"} for item in results):
             with self.store.transaction():
                 if self.store.get("monitor_degraded", False):
-                    self.store.set("monitor_degraded", False)
-                    self.store.event("protection", "MONITOR_RECOVERED", {}, notify=True)
+                    healthy_since = self.store.get("monitor_healthy_since")
+                    if not healthy_since:
+                        self.store.set("monitor_healthy_since", bundle.now.isoformat())
+                    elif (bundle.now - aware_time(healthy_since)).total_seconds() >= 60:
+                        self.store.set("monitor_degraded", False)
+                        self.store.event("protection", "MONITOR_RECOVERED", {}, notify=True)
+        else:
+            self.store.set("monitor_healthy_since", None)
         return results
 
     def record_nav(self) -> dict:
@@ -544,6 +552,7 @@ class Application:
                     with self.store.transaction():
                         newly_degraded = not self.store.get("monitor_degraded", False)
                         self.store.set("monitor_degraded", True)
+                        self.store.set("monitor_healthy_since", None)
                         if newly_degraded:
                             self.store.event("monitor", "MONITOR_DEGRADED", {"error_type": type(error).__name__}, notify=True)
         self.monitor_thread = threading.Thread(target=loop, name="danta-protection", daemon=True)
@@ -561,7 +570,8 @@ class Application:
         key = request_key or "manual:" + str(uuid4())
         run_id, new = self.store.accept_request(key, {"kind": kind, "event_id": event_id})
         if not new:
-            previous = self.store.db.execute("SELECT result FROM requests WHERE request_id=?", (run_id,)).fetchone()
+            previous = self.store.read("SELECT result FROM requests WHERE request_id=?", (run_id,))
+            previous = previous[0] if previous else None
             return json.loads(previous[0]) if previous and previous[0] else {"run_id": run_id, "status": "ALREADY_ACCEPTED"}
         metadata = {"schema_version": 1, "run_id": run_id, "created_at": bundle.now.isoformat(), "config_hash": self.config.config_hash,
                     "strategy_hash": self.config.strategy_hash, "code_id": self.code_id, "mode": self.config.mode,
@@ -696,7 +706,7 @@ class Application:
                 self.store.set("material_hash", frozen["material_hash"])
             save("plan.json", {"plans": plans, "protection": protection})
             orders = [self.store.order(order["id"]) for order in orders]
-            save("execution.json", {"orders": orders, "journal": [dict(row) for row in self.store.db.execute("SELECT * FROM journal WHERE run_id=?", (run_id,))]})
+            save("execution.json", {"orders": orders, "journal": [dict(row) for row in self.store.read("SELECT * FROM journal WHERE run_id=?", (run_id,))]})
             states = {order["state"] for order in orders}
             order_status = next(iter(states)) if len(states) == 1 else "MIXED" if states else "NONE"
             if self.config.mode == "shadow":
@@ -778,7 +788,17 @@ class Application:
         return result
 
     def status(self) -> dict:
+        health = self.store.get("model_health", {})
         return {"mode": self.config.mode, "config_hash": self.config.config_hash, "code_id": self.code_id,
+                "as_of": self.bundle.now.isoformat(),
+                "authentication": health['status'] if health.get("status", "").startswith("AUTH_") else
+                    "AUTHENTICATED_AT_STARTUP" if self.config.mode != 'offline' else "UNVERIFIED",
+                "model_status": health.get("status", "NOT_CALLED"), "model_diagnostic": health.get("diagnostic"),
+                "account_status": "COMPLETE" if self.store.get("reconciled") else "ACCOUNT_INCOMPLETE",
+                "account_diagnostics": self.store.get("account_diagnostics", []),
+                "monitor_status": "MONITOR_DEGRADED" if self.store.get("monitor_degraded", False) else
+                    "RUNNING" if self.monitor_thread and self.monitor_thread.is_alive() else "NOT_RUNNING",
+                "review_status": "PAUSED" if self.store.get("paused") or self.store.get("drawdown_paused", False) else "ENABLED",
                 "paused": self.store.get("paused"), "reconciled": self.store.get("reconciled"),
                 "cash_krw": self.store.get("cash_krw"), "holdings": self.store.holdings(), "working_orders": self.store.working(),
                 "costs_complete": self.store.get("costs_complete", True), "performance": self.store.get("performance"),

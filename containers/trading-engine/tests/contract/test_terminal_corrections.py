@@ -35,6 +35,8 @@ class TerminalCorrections(unittest.TestCase):
                 broker.fill(order["broker_id"], 2, D(100), D(0), first)
                 executor.reconcile()
                 evidence = json.loads(store.db.execute("SELECT payload FROM observations WHERE kind='FIRST_FILL'").fetchone()[0])
+                fill_event = json.loads(store.read("SELECT payload FROM journal WHERE kind='CUMULATIVE_FILL'")[0][0])
+                self.assertTrue(fill_event['fees_confirmed'])
                 self.assertEqual(aware_time(evidence["first_fill_at"]), first)
                 cash, version = store.get("cash_krw"), store.get("account_version")
                 observed = broker.orders[order["broker_id"]]
@@ -80,6 +82,8 @@ class TerminalCorrections(unittest.TestCase):
                 self.assertEqual(provisional.first_fill_time_quality,"FIRST_OBSERVED")
                 self.assertEqual(provisional.first_fill_session,first_session.session_id)
                 self.assertFalse(store.get("costs_complete"))
+                fill_event = json.loads(store.read("SELECT payload FROM journal WHERE kind='CUMULATIVE_FILL'")[0][0])
+                self.assertFalse(fill_event['fees_confirmed'])
                 cash,version = store.get("cash_krw"),store.get("account_version")
                 revision.update(first_fill_at=exact.isoformat(),fill_time_quality="EXACT",revision=revision["revision"]+1)
                 executor.reconcile()
@@ -166,6 +170,12 @@ class TerminalCorrections(unittest.TestCase):
                 self.assertEqual(store.get("cash_krw"),"9499")
                 self.assertTrue(store.get("costs_complete"))
                 self.assertFalse(store.get("unconfirmed_cost:"+order["id"]))
+                store.apply_cumulative_fill(order['id'], quantity=0, notional=D(0), fees=None,
+                    revision=100, observed_at=now.isoformat(), correction=True)
+                correction = json.loads(store.read("SELECT payload FROM journal WHERE kind='FILL_CORRECTION'")[-1][0])
+                self.assertFalse(correction['fees_confirmed'])
+                self.assertEqual(store.quantity('TEST:AAA'), 0)
+                self.assertEqual(store.get('cash_krw'), '9999')
 
     def test_closed_confirmed_order_accepts_later_correction_and_missing_history(self):
         for quantity in (10,3):
