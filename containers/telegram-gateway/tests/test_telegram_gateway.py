@@ -121,8 +121,9 @@ class GatewayMenuContractTest(unittest.TestCase):
         self.assertEqual(route["url"], "http://trading-engine:8080/telegram")
         self.assertEqual(route["env_file"], "/app/config/telegram.env")
         commands = telegram_gateway.route_bot_commands(route, "trading-engine")
-        self.assertEqual({item.command for item in commands}, COMMANDS)
-        self.assertEqual(len(commands), len(COMMANDS))
+        self.assertEqual([item.command for item in commands], ['status', 'report', 'usage', 'new', 'stop'])
+        self.assertTrue({item.command for item in commands} <= COMMANDS)
+        self.assertTrue({'review', 'pause', 'resume', 'version', 'session'} <= COMMANDS)
         for item in commands:
             self.assertEqual(item.instruction, f"/{item.command}")
             text = f"/{item.command} argument"
@@ -150,6 +151,17 @@ class GatewayEngineClientTest(unittest.TestCase):
                 with self.subTest(url=url), self.assertRaises(ValueError):
                     operation()
         self.assertEqual(client._opener.open.call_count, 1)
+
+    def test_maximum_korean_attachment_fits_engine_wire_limit(self) -> None:
+        client = telegram_gateway.TradingEngineClient(2)
+        client._opener = Mock()
+        client._opener.open.return_value = io.BytesIO(b'{"accepted":true}')
+        payload = {'text': '첨부를 요약해줘', 'chat_id': 'synthetic',
+                   'attachments': [{'file_name': '메모.txt', 'content': '가' * 10922}]}
+        client.post_message('http://receiver/telegram', payload)
+        body = client._opener.open.call_args.args[0].data
+        self.assertLessEqual(len(body), 65536)
+        self.assertEqual(json.loads(body), payload)
 
     def test_version_uses_management_get_when_runtime_is_not_ready(self) -> None:
         client = telegram_gateway.TradingEngineClient(2)
@@ -202,6 +214,17 @@ class GatewayEngineClientTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Engine request rejected"):
             client.post_message("http://receiver/telegram", {})
         client._opener.open.assert_called_once()
+
+    def test_structured_http_rejection_preserves_only_user_reply(self) -> None:
+        client = telegram_gateway.TradingEngineClient(2)
+        client._opener = Mock()
+        reply = 'Codex 실행 준비가 끝나지 않았습니다. /status에서 확인해 주세요.'
+        body = json.dumps({'accepted': False, 'reply_text': reply, 'internal': 'private details'}).encode()
+        client._opener.open.side_effect = HTTPError('http://receiver/telegram', 503, 'unavailable', {}, io.BytesIO(body))
+        with self.assertRaises(telegram_gateway.EngineRequestRejected) as raised:
+            client.post_message('http://receiver/telegram', {})
+        self.assertEqual(raised.exception.reply_text, reply)
+        self.assertNotIn('private', str(raised.exception))
 
     def test_preserves_plain_text_reply(self) -> None:
         client = telegram_gateway.TradingEngineClient(2)
@@ -430,6 +453,8 @@ class TelegramDraftEndpointTest(unittest.TestCase):
                     {"draft_id": 1.5, "text": "진행 중"},
                     {"draft_id": True, "text": "진행 중"},
                     {"draft_id": 0, "text": "진행 중"},
+                    {"draft_id": 2 ** 31, "text": "진행 중"},
+                    {"draft_id": -(2 ** 31) - 1, "text": "진행 중"},
                     {"draft_id": 123, "text": None},
                     {"draft_id": 123, "text": ""},
                     {"draft_id": 123, "text": "a" * 4097},
@@ -502,6 +527,55 @@ class TelegramAttachmentCacheTest(unittest.TestCase):
             self.assertEqual(reloaded.list_pending("trading-engine", "chat-1", now=112), ())
             self.assertEqual(len(reloaded.list_pending("trading-engine", "chat-2", now=112)), 1)
             self.assertTrue(first.metadata_path.with_suffix(".pdf").exists())
+
+    def test_text_payload_reads_container_files_and_preserves_pending_on_invalid_data(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache = telegram_gateway.TelegramAttachmentCache(root / 'container', root / 'different-host',
+                ttl_seconds=60, max_file_bytes=65536, max_total_bytes=262144, max_pending=10)
+            item = cache.store('trading-engine', '1', self.attachment(file_name='notes.txt', file_size=None),
+                               '한글 메모'.encode(), now=100)
+            self.assertFalse(item.host_path.exists())
+            self.assertEqual(cache.text_payload((item,)), [{'file_name': 'notes.txt', 'content': '한글 메모'}])
+            self.assertEqual(json.loads(item.metadata_path.read_text())['status'], 'pending')
+            with self.assertRaisesRegex(ValueError, '최대 5개'):
+                cache.text_payload((item,) * 6)
+            item.metadata_path.with_suffix('.txt').write_bytes(b'a' * 32769)
+            with self.assertRaisesRegex(ValueError, '32KiB'):
+                cache.text_payload((item,))
+            item.metadata_path.with_suffix('.txt').write_bytes(b'\xff\x00')
+            with self.assertRaisesRegex(ValueError, 'UTF-8'):
+                cache.text_payload((item,))
+            self.assertEqual(json.loads(item.metadata_path.read_text())['status'], 'pending')
+
+    def test_text_payload_checks_aggregate_bytes_and_rejects_binary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache = telegram_gateway.TelegramAttachmentCache(root / 'container', root / 'host',
+                ttl_seconds=60, max_file_bytes=65536, max_total_bytes=262144, max_pending=10)
+            items = [cache.store('trading-engine', '1', self.attachment(file_name=f'{i}.txt', file_size=None),
+                                 b'a' * 10000, now=100) for i in range(2)]
+            with self.assertRaisesRegex(ValueError, '32KiB'):
+                cache.store('trading-engine', '1', self.attachment(file_name='too-large.txt', file_size=None),
+                            b'a' * 20000, now=100)
+            items[1].metadata_path.with_suffix('.txt').write_bytes(b'a' * 25000)
+            with self.assertRaisesRegex(ValueError, '32KiB'):
+                cache.text_payload(tuple(items))
+            binary = cache.store('trading-engine', '1', self.attachment(), b'pdf', now=100)
+            with self.assertRaisesRegex(ValueError, 'PDF'):
+                cache.text_payload((binary,))
+            self.assertEqual(len(cache.list_pending('trading-engine', '1', now=101)), 3)
+
+    def test_sixth_pending_file_is_rejected_without_poisoning_first_five(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache = telegram_gateway.TelegramAttachmentCache(root / 'container', root / 'host',
+                ttl_seconds=60, max_file_bytes=65536, max_total_bytes=262144, max_pending=10)
+            for i in range(5):
+                cache.store('trading-engine', '1', self.attachment(file_name=f'{i}.txt'), b'txt', now=100)
+            with self.assertRaisesRegex(ValueError, '/new'):
+                cache.store('trading-engine', '1', self.attachment(file_name='sixth.txt'), b'txt', now=100)
+            self.assertEqual(len(cache.text_payload(cache.list_pending('trading-engine', '1', now=101))), 5)
 
     def test_cleanup_removes_expired_content_and_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -639,6 +713,8 @@ class GatewayAttachmentFlowTest(unittest.TestCase):
         app.router = Mock()
         app.attachment_cache = Mock()
         app.attachment_cache.max_file_bytes = 20
+        app.attachment_cache.text_payload.side_effect = lambda files: [
+            {'file_name': item.file_name, 'content': '파일 내용'} for item in files]
         app.append_inbound_conversation_event = Mock()
         app.append_outbound_conversation_event = Mock()
         return app
@@ -647,7 +723,7 @@ class GatewayAttachmentFlowTest(unittest.TestCase):
     def cached_attachment(
         *,
         attachment_id: str = "10-abc",
-        file_name: str = "report.pdf",
+        file_name: str = "report.txt",
         caption: str | None = None,
         created_at: float = 100,
     ) -> object:
@@ -657,10 +733,10 @@ class GatewayAttachmentFlowTest(unittest.TestCase):
             chat_id="9",
             kind="document",
             file_name=file_name,
-            mime_type="application/pdf",
+            mime_type="text/plain",
             size=3,
             caption=caption,
-            host_path=Path(f"/host/inbox/trading-engine/9/{attachment_id}.pdf"),
+            host_path=Path(f"/host/inbox/trading-engine/9/{attachment_id}.txt"),
             metadata_path=Path(f"/container/inbox/trading-engine/9/{attachment_id}.json"),
             created_at=created_at,
         )
@@ -717,16 +793,18 @@ class GatewayAttachmentFlowTest(unittest.TestCase):
             update = {"message": {"chat": {"id": 9}, "from": {"id": 9}, "text": "/status@my_bot"}}
             with self.subTest(readiness_type=type(readiness).__name__), patch.object(telegram_gateway, "TelegramClient") as client:
                 app.handle_update(self.route(), update)
-                reply = client.return_value.send_message.call_args.args[1]
-                self.assertNotIn("private", reply)
                 if isinstance(readiness, Exception):
+                    reply = client.return_value.send_message.call_args.args[1]
+                    self.assertNotIn('private', reply)
                     self.assertIn("로그를 확인", reply)
                 elif not readiness["ready"]:
+                    reply = client.return_value.send_message.call_args.args[1]
                     self.assertIn("WAITING_FOR_CONFIGURATION", reply)
                     self.assertIn("운영 승인 파일 없음", reply)
                 else:
                     app.engine.post_message.assert_called_once()
                     self.assertEqual(app.engine.post_message.call_args.args[1]["user_id"], "9")
+                    client.return_value.send_message.assert_not_called()
             if isinstance(readiness, Exception) or not readiness["ready"]:
                 app.engine.post_message.assert_not_called()
             app.engine.get_readiness.assert_called_once_with("http://receiver/telegram")
@@ -747,7 +825,7 @@ class GatewayAttachmentFlowTest(unittest.TestCase):
                 "from": {"id": 9},
                 "document": {
                     "file_id": "file-1",
-                    "file_name": "report.pdf",
+                    "file_name": "report.txt",
                     "file_size": 3,
                 },
             },
@@ -766,7 +844,7 @@ class GatewayAttachmentFlowTest(unittest.TestCase):
         app = self.app()
         previous = self.cached_attachment(
             attachment_id="9-previous",
-            file_name="previous.pdf",
+            file_name="previous.txt",
             created_at=99,
         )
         current = self.cached_attachment(
@@ -779,7 +857,7 @@ class GatewayAttachmentFlowTest(unittest.TestCase):
             url="http://codex.test/telegram",
             text="두 파일을 비교해줘",
         )
-        app.engine.post_message.return_value = None
+        app.engine.post_message.return_value = {"accepted": True}
         client = Mock()
         client.download_file.return_value = b"pdf"
         update = {
@@ -791,7 +869,7 @@ class GatewayAttachmentFlowTest(unittest.TestCase):
                 "from": {"id": 9, "username": "tester"},
                 "document": {
                     "file_id": "file-1",
-                    "file_name": "report.pdf",
+                    "file_name": "report.txt",
                     "file_size": 3,
                 },
                 "caption": "두 파일을 비교해줘",
@@ -802,9 +880,9 @@ class GatewayAttachmentFlowTest(unittest.TestCase):
             app.handle_update(self.route(), update)
 
         payload = app.engine.post_message.call_args.args[1]
-        self.assertIn("/host/inbox/trading-engine/9/9-previous.pdf", payload["text"])
-        self.assertIn("/host/inbox/trading-engine/9/10-abc.pdf", payload["text"])
-        self.assertIn("두 파일을 비교해줘", payload["text"])
+        self.assertEqual(payload['text'], '두 파일을 비교해줘')
+        self.assertEqual(payload['attachments'], [{'file_name': 'previous.txt', 'content': '파일 내용'},
+                                                  {'file_name': 'report.txt', 'content': '파일 내용'}])
         self.assertEqual(payload["raw_message"], update["message"])
         app.attachment_cache.mark_consumed.assert_called_once_with((previous, current))
         client.send_message.assert_not_called()
@@ -813,7 +891,7 @@ class GatewayAttachmentFlowTest(unittest.TestCase):
         app = self.app()
         previous = self.cached_attachment(
             attachment_id="9-previous",
-            file_name="previous.pdf",
+            file_name="previous.txt",
             created_at=99,
         )
         current = self.cached_attachment(caption="두 파일을 비교해줘")
@@ -836,7 +914,7 @@ class GatewayAttachmentFlowTest(unittest.TestCase):
                 "from": {"id": 9},
                 "document": {
                     "file_id": "file-1",
-                    "file_name": "report.pdf",
+                    "file_name": "report.txt",
                     "file_size": 3,
                 },
                 "caption": "두 파일을 비교해줘",
@@ -858,7 +936,7 @@ class GatewayAttachmentFlowTest(unittest.TestCase):
             url="http://codex.test/telegram",
             text="이 보고서를 요약해줘",
         )
-        app.engine.post_message.return_value = None
+        app.engine.post_message.return_value = {"accepted": True}
         update = {
             "update_id": 2,
             "message": {
@@ -874,10 +952,26 @@ class GatewayAttachmentFlowTest(unittest.TestCase):
             app.handle_update(self.route(), update)
 
         payload = app.engine.post_message.call_args.args[1]
-        self.assertIn("<telegram_attachments>", payload["text"])
-        self.assertIn("/host/inbox/trading-engine/9/10-abc.pdf", payload["text"])
-        self.assertIn("이 보고서를 요약해줘", payload["text"])
+        self.assertEqual(payload['text'], '이 보고서를 요약해줘')
+        self.assertEqual(payload['attachments'], [{'file_name': 'report.txt', 'content': '파일 내용'}])
+        self.assertNotIn('/host/', json.dumps(payload))
         app.attachment_cache.mark_consumed.assert_called_once_with((cached,))
+
+    def test_new_clears_pending_files_only_after_engine_accepts_reset(self) -> None:
+        for accepted in (True, False):
+            app = self.app()
+            pending = (self.cached_attachment(),) * 6
+            app.attachment_cache.list_pending.return_value = pending
+            app.router.resolve.return_value = telegram_gateway.ResolvedRoute(
+                'trading-engine', 'http://receiver/telegram', '/new')
+            app.engine.post_message.return_value = {'accepted': accepted}
+            update = {'message': {'chat': {'id': 9}, 'from': {'id': 9}, 'text': '/new'}}
+            with self.subTest(accepted=accepted), patch.object(telegram_gateway, 'TelegramClient'):
+                app.handle_update(self.route(), update)
+            if accepted:
+                app.attachment_cache.mark_consumed.assert_called_once_with(pending)
+            else:
+                app.attachment_cache.mark_consumed.assert_not_called()
 
     def test_command_does_not_consume_pending_attachment(self) -> None:
         app = self.app()
@@ -886,7 +980,7 @@ class GatewayAttachmentFlowTest(unittest.TestCase):
             url="http://codex.test/telegram",
             text="/session",
         )
-        app.engine.post_message.return_value = None
+        app.engine.post_message.return_value = {"accepted": True}
         update = {
             "message": {
                 "message_id": 12,
@@ -931,6 +1025,48 @@ class GatewayAttachmentFlowTest(unittest.TestCase):
 
         app.engine.post_message.assert_called_once()
         app.attachment_cache.mark_consumed.assert_not_called()
+
+    def test_structured_rejection_keeps_plain_and_caption_attachments_pending(self) -> None:
+        for media in (False, True):
+            app = self.app()
+            cached = self.cached_attachment(caption='분석해줘')
+            app.attachment_cache.store.return_value = cached
+            app.attachment_cache.list_pending.return_value = (cached,)
+            app.router.resolve.return_value = telegram_gateway.ResolvedRoute('trading-engine', 'http://receiver/telegram', '분석해줘')
+            app.engine.post_message.side_effect = telegram_gateway.EngineRequestRejected('계좌 초기화 중입니다. 잠시 후 다시 확인해 주세요.')
+            content = {'caption': '분석해줘', 'document': {'file_id': 'file-1', 'file_name': 'report.txt', 'file_size': 3}} if media else {'text': '분석해줘'}
+            update = {'update_id': 9, 'message': {'message_id': 13, 'chat': {'id': 9}, 'from': {'id': 9}, **content}}
+            with self.subTest(media=media), patch.object(telegram_gateway, 'TelegramClient') as client:
+                client.return_value.download_file.return_value = b'txt'
+                app.handle_update(self.route(), update)
+                self.assertIn('계좌 초기화 중', client.return_value.send_message.call_args.args[1])
+            app.attachment_cache.mark_consumed.assert_not_called()
+
+    def test_missing_durable_receipt_keeps_attachments_and_legacy_ack_is_quiet(self) -> None:
+        app = self.app()
+        cached = self.cached_attachment()
+        app.attachment_cache.list_pending.return_value = (cached,)
+        app.router.resolve.return_value = telegram_gateway.ResolvedRoute('trading-engine', 'http://receiver/telegram', '분석해줘')
+        app.engine.post_message.return_value = None
+        route = self.route()
+        route.ack_text = '요청이 접수되었습니다'
+        update = {'message': {'message_id': 14, 'chat': {'id': 9}, 'from': {'id': 9}, 'text': '분석해줘'}}
+        with patch.object(telegram_gateway, 'TelegramClient') as client:
+            app.handle_update(route, update)
+            client.return_value.send_message.assert_not_called()
+        app.attachment_cache.mark_consumed.assert_not_called()
+
+    def test_unsupported_media_is_explicitly_rejected_before_cache_or_model(self) -> None:
+        app = self.app()
+        update = {'message': {'message_id': 15, 'chat': {'id': 9}, 'from': {'id': 9},
+                             'document': {'file_id': 'file-1', 'file_name': 'report.pdf', 'file_size': 3},
+                             'caption': '요약해줘'}}
+        with patch.object(telegram_gateway, 'TelegramClient') as client:
+            client.return_value.download_file.return_value = b'pdf'
+            app.handle_update(self.route(), update)
+            self.assertIn('PDF·이미지·바이너리 파일은 읽지 않았습니다', client.return_value.send_message.call_args.args[1])
+        app.attachment_cache.store.assert_not_called()
+        app.engine.post_message.assert_not_called()
 
     def test_periodic_cleanup_runs_without_new_messages(self) -> None:
         app = self.app()

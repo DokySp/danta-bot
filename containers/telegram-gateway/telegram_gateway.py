@@ -399,34 +399,21 @@ def extract_telegram_attachment(message: dict[str, Any]) -> IncomingTelegramAtta
     )
 
 
-def build_codex_attachment_input_text(
-    text: str,
-    attachments: tuple[CachedTelegramAttachment, ...],
-) -> str:
-    if not attachments:
-        return text
-    payload = [
-        {
-            "id": item.attachment_id,
-            "type": item.kind,
-            "path": str(item.host_path),
-            "file_name": item.file_name,
-            "mime_type": item.mime_type,
-            "size": item.size,
-            "caption": item.caption,
-        }
-        for item in attachments
-    ]
-    return (
-        "아래 Telegram attachments는 사용자가 직전에 업로드해 캐시한 파일입니다. "
-        "현재 지시와 관련된 파일을 실제 경로에서 열어 사용하세요. 파일을 자동 실행하지 마세요.\n"
-        "<telegram_attachments>\n"
-        f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n"
-        "</telegram_attachments>\n\n"
-        "<user_message>\n"
-        f"{text}\n"
-        "</user_message>"
-    )
+def attachment_text(attachment, content: bytes) -> str:
+    text_suffixes = {'.txt', '.md', '.csv', '.tsv', '.json', '.jsonl', '.yaml', '.yml',
+                     '.log', '.html', '.xml', '.py', '.js', '.ts', '.css', '.sql', '.ini', '.cfg'}
+    if (attachment.kind != 'document' or not ((attachment.mime_type or '').startswith('text/')
+            or Path(attachment.file_name).suffix.lower() in text_suffixes)):
+        raise ValueError('현재 UTF-8 텍스트 파일만 읽을 수 있습니다. PDF·이미지·바이너리 파일은 읽지 않았습니다.')
+    if len(content) > 32768:
+        raise ValueError('첨부 텍스트는 전체 합계 32KiB까지 읽을 수 있습니다.')
+    try:
+        text = content.decode('utf-8')
+    except UnicodeDecodeError:
+        raise ValueError('첨부파일은 UTF-8 텍스트로 저장해 보내 주세요. 현재 파일은 읽지 않았습니다.') from None
+    if any(ord(char) < 32 and char not in '\n\r\t' for char in text):
+        raise ValueError('바이너리 제어 문자가 있는 첨부파일은 읽을 수 없습니다.')
+    return text
 
 
 def build_codex_input_text(text: str, message: dict[str, Any]) -> str:
@@ -764,8 +751,10 @@ class TelegramAttachmentCache:
         with self.lock:
             self.cleanup_expired(now=timestamp)
             pending = self._list_pending_locked(route_id, chat_id, now=timestamp)
-            if len(pending) >= self.max_pending:
-                raise ValueError(f"대기 파일은 최대 {self.max_pending}개까지 저장할 수 있습니다.")
+            if len(pending) >= min(self.max_pending, 5):
+                raise ValueError(f"대기 파일은 최대 {min(self.max_pending, 5)}개까지 저장할 수 있습니다. /new로 대기 파일을 비울 수 있습니다.")
+            if sum(item.size for item in pending) + actual_size > 32768:
+                raise ValueError("대기 첨부 합계는 32KiB까지입니다. 먼저 파일을 처리하거나 /new로 대기 파일을 비워 주세요.")
             if self._total_size_locked() + actual_size > self.max_total_bytes:
                 raise ValueError("첨부파일 캐시 전체 용량이 가득 찼습니다. 잠시 후 다시 시도해 주세요.")
 
@@ -896,6 +885,26 @@ class TelegramAttachmentCache:
                     temp_path.replace(attachment.metadata_path)
                 finally:
                     temp_path.unlink(missing_ok=True)
+
+    def text_payload(self, attachments: tuple[CachedTelegramAttachment, ...]) -> list[dict[str, str]]:
+        if len(attachments) > 5:
+            raise ValueError('첨부파일은 한 요청에 최대 5개까지 읽을 수 있습니다. /new로 대기 파일을 비울 수 있습니다.')
+        result, total = [], 0
+        with self.lock:
+            for attachment in attachments:
+                if not self._safe_metadata_path(attachment.metadata_path):
+                    raise ValueError('첨부파일의 저장 상태를 확인할 수 없습니다.')
+                metadata = self._read_metadata(attachment.metadata_path)
+                if not metadata or metadata.get('status') != 'pending':
+                    raise ValueError('대기 중인 첨부파일을 확인할 수 없습니다.')
+                path = self._container_data_path(metadata)
+                with path.open('rb') as handle:
+                    content = handle.read(32769 - total)
+                total += len(content)
+                if total > 32768:
+                    raise ValueError('첨부 텍스트는 전체 합계 32KiB까지 읽을 수 있습니다. /new로 대기 파일을 비울 수 있습니다.')
+                result.append({'file_name': attachment.file_name, 'content': attachment_text(attachment, content)})
+        return result
 
     def cleanup_expired(self, *, now: float | None = None) -> None:
         timestamp = time.time() if now is None else now
@@ -1457,6 +1466,13 @@ class NoEngineRedirect(HTTPRedirectHandler):
         return None
 
 
+class EngineRequestRejected(RuntimeError):
+    def __init__(self, reply_text):
+        super().__init__('Engine request rejected')
+        self.reply_text = (reply_text if isinstance(reply_text, str) and 0 < len(reply_text) <= 4000
+                           else '엔진이 요청을 실행하지 못했습니다. /status로 상태를 확인해 주세요.')
+
+
 class TradingEngineClient:
     def __init__(self, timeout: int) -> None:
         self.timeout = timeout
@@ -1492,24 +1508,33 @@ class TradingEngineClient:
         self.route_target(url)
         request = Request(
             url,
-            data=json.dumps(payload).encode("utf-8"),
+            data=json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        result = self._request(request)
+        result = self._request(request, allow_rejection=True)
         if result and result.get("accepted") is False:
-            raise RuntimeError("Engine request rejected")
+            raise EngineRequestRejected(result.get('reply_text'))
         return result
 
-    def _request(self, request: Request, *, allow_unready=False) -> dict[str, Any] | None:
+    def _request(self, request: Request, *, allow_unready=False, allow_rejection=False) -> dict[str, Any] | None:
         try:
             with self._opener.open(request, timeout=self.timeout) as response:
                 raw = response.read().decode("utf-8")
         except HTTPError as exc:
             with exc:
-                if not allow_unready or exc.code != 503:
+                if allow_unready and exc.code == 503:
+                    raw = exc.read().decode("utf-8")
+                elif allow_rejection and 400 <= exc.code < 600:
+                    try:
+                        rejected = json.loads(exc.read(65537).decode('utf-8'))
+                    except (ValueError, UnicodeDecodeError):
+                        rejected = None
+                    if isinstance(rejected, dict) and rejected.get('accepted') is False:
+                        return {'accepted': False, 'reply_text': rejected.get('reply_text')}
                     raise RuntimeError(f"trading-engine route failed: HTTP {exc.code}") from None
-                raw = exc.read().decode("utf-8")
+                else:
+                    raise RuntimeError(f"trading-engine route failed: HTTP {exc.code}") from None
         except URLError:
             raise RuntimeError("trading-engine route unavailable") from None
 
@@ -1625,8 +1650,8 @@ class GatewayApp:
                         if not isinstance(raw_draft_id, int) or isinstance(raw_draft_id, bool):
                             self._write_json(400, {"ok": False, "error": "draft_id must be a non-zero integer"})
                             return
-                        if raw_draft_id == 0:
-                            self._write_json(400, {"ok": False, "error": "draft_id must be a non-zero integer"})
+                        if raw_draft_id == 0 or not -(2 ** 31) <= raw_draft_id < 2 ** 31:
+                            self._write_json(400, {"ok": False, "error": "draft_id must be a non-zero signed 32-bit integer"})
                             return
                         text = payload.get("text")
                         if not isinstance(text, str) or not text:
@@ -1904,6 +1929,7 @@ class GatewayApp:
                     attachment.file_id,
                     self.attachment_cache.max_file_bytes,
                 )
+                attachment_text(attachment, content)
                 cached = self.attachment_cache.store(
                     route.route_id,
                     chat_id,
@@ -1951,7 +1977,6 @@ class GatewayApp:
             pending_attachments = self.attachment_cache.list_pending(route.route_id, chat_id)
             resolved = self.router.resolve(route.route_id, caption_prompt)
             codex_text = build_codex_input_text(resolved.text, message)
-            codex_text = build_codex_attachment_input_text(codex_text, pending_attachments)
             payload = {
                 "source": "telegram",
                 "gateway_version": self.config.version,
@@ -1965,6 +1990,7 @@ class GatewayApp:
                 "raw_message": message,
             }
             try:
+                payload['attachments'] = self.attachment_cache.text_payload(pending_attachments)
                 logging.info(
                     "routing attachment caption route=%s chat_id=%s url=%s attachment_count=%s",
                     route.route_id,
@@ -1973,7 +1999,14 @@ class GatewayApp:
                     len(pending_attachments),
                 )
                 response = self.engine.post_message(resolved.url, payload)
-            except (OSError, RuntimeError, ValueError):
+            except EngineRequestRejected as error:
+                client.send_message(chat_id, error.reply_text, parse_mode='')
+                self.append_outbound_conversation_event(route, chat_id, 'sendMessage', error.reply_text, source_path='engine_rejected')
+                return
+            except ValueError as error:
+                client.send_message(chat_id, f'첨부파일을 전달하지 못했습니다: {error}', parse_mode='')
+                return
+            except (OSError, RuntimeError):
                 logging.warning(
                     "failed to submit cached Telegram attachment caption route=%s chat_id=%s",
                     route.route_id,
@@ -1986,10 +2019,10 @@ class GatewayApp:
                 )
                 return
 
-            if pending_attachments:
+            if pending_attachments and response and response.get('accepted') is True:
                 self.attachment_cache.mark_consumed(pending_attachments)
             reply_text = None
-            if response:
+            if response and response.get('accepted') is not True:
                 reply_text = response.get("reply_text") or response.get("text")
             if reply_text:
                 client.send_message(chat_id, str(reply_text))
@@ -2000,8 +2033,6 @@ class GatewayApp:
                     str(reply_text),
                     source_path="codex_reply",
                 )
-            elif route.ack_text:
-                client.send_message(chat_id, route.ack_text)
             return
 
         routed_text = apply_bot_command_alias(route, text)
@@ -2072,7 +2103,6 @@ class GatewayApp:
 
         resolved = self.router.resolve(route.route_id, routed_text)
         codex_text = build_codex_input_text(resolved.text, message)
-        codex_text = build_codex_attachment_input_text(codex_text, pending_attachments)
         payload = {
             "source": "telegram",
             "gateway_version": self.config.version,
@@ -2093,25 +2123,33 @@ class GatewayApp:
             resolved.url,
         )
         try:
+            if pending_attachments:
+                payload['attachments'] = self.attachment_cache.text_payload(pending_attachments)
             response = self.engine.post_message(resolved.url, payload)
-        except (OSError, RuntimeError, ValueError):
+        except EngineRequestRejected as error:
+            client.send_message(chat_id, error.reply_text, parse_mode='')
+            self.append_outbound_conversation_event(route, chat_id, 'sendMessage', error.reply_text, source_path='engine_rejected')
+            return
+        except ValueError as error:
+            client.send_message(chat_id, f'요청을 전달하지 못했습니다: {error}', parse_mode='')
+            return
+        except (OSError, RuntimeError):
             logging.warning("engine request failed route=%s", route.route_id)
             reply_text = "엔진 요청 결과를 확인하지 못했습니다. 자동 재시도하지 않습니다. /status로 상태를 확인해 주세요."
             client.send_message(chat_id, reply_text)
             self.append_outbound_conversation_event(route, chat_id, "sendMessage", reply_text, source_path="engine_error")
             return
-        if pending_attachments:
+        if pending_attachments and response and response.get('accepted') is True:
             self.attachment_cache.mark_consumed(pending_attachments)
+        if command_name == '/new' and response and response.get('accepted') is True:
+            self.attachment_cache.mark_consumed(self.attachment_cache.list_pending(route.route_id, chat_id))
 
         reply_text = None
-        if response:
+        if response and response.get('accepted') is not True:
             reply_text = response.get("reply_text") or response.get("text")
         if reply_text:
             client.send_message(chat_id, str(reply_text))
             self.append_outbound_conversation_event(route, chat_id, "sendMessage", str(reply_text), source_path="codex_reply")
-        elif route.ack_text:
-            client.send_message(chat_id, route.ack_text)
-            self.append_outbound_conversation_event(route, chat_id, "sendMessage", route.ack_text, source_path="ack")
 
     def append_inbound_conversation_event(
         self,
