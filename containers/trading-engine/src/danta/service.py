@@ -118,10 +118,10 @@ class Service:
                 'telegram_request_id': request.request_id, 'route': request.route,
                 'chat_id': request.chat_id, 'user_id': request.user_id, 'text': request.text,
                 'attachments': body.get('attachments', [])}
-            queue_id, fresh = self.store.accept_request('service:telegram:' + request.request_id, payload)
+            queue_id, fresh = self.store.accept_request('service:telegram:' + request.request_id, payload,
+                deadline=(self.clock() + timedelta(seconds=120)).isoformat())
             with self.store.transaction():
                 if fresh:
-                    self.store.set('service_deadline:' + queue_id, (self.clock() + timedelta(seconds=120)).isoformat())
                     self.store.db.execute("UPDATE telegram_requests SET status='QUEUED' WHERE request_id=?", (request.request_id,))
         return acknowledgement
 
@@ -168,10 +168,10 @@ class Service:
                 continue
             payload = {'source': 'scheduler', 'kind': intent.kind, **intent.payload,
                        'due_at': intent.due_at.isoformat(), 'expires_at': intent.expires_at.isoformat()}
-            request_id, fresh = self.store.accept_request('service:schedule:' + intent.key, payload)
+            # A worker must not claim the request before its deadline is durable.
+            request_id, fresh = self.store.accept_request('service:schedule:' + intent.key, payload,
+                deadline=intent.expires_at.isoformat())
             if fresh:
-                with self.store.transaction():
-                    self.store.set('service_deadline:' + request_id, intent.expires_at.isoformat())
                 queued += 1
         return queued
 

@@ -432,6 +432,23 @@ class ServiceIntegrationTests(unittest.TestCase):
         self.assertTrue(any(row['kind'] == 'full_review' for row in rows))
         self.assertTrue(all('expires_at' in row for row in rows))
 
+    def test_scheduled_review_deadline_is_durable_before_worker_claim(self):
+        self.service.scheduler['enabled'] = True
+        accept = self.app.store.accept_request
+        def claim_immediately(key, payload, **kwargs):
+            result = accept(key, payload, **kwargs)
+            if payload['kind'] == 'full_review':
+                self.assertTrue(self.service.run_once(review=True, chat=False))
+            return result
+        with patch.object(self.app.store, 'accept_request', side_effect=claim_immediately):
+            self.service.queue_tick()
+        self.assertEqual(self.app.review_calls, 1)
+        self.assertEqual(self.service.queue_tick(), 0)
+        with patch.object(self.app.store, 'set', side_effect=RuntimeError('synthetic deadline write failure')):
+            with self.assertRaises(RuntimeError):
+                accept('service:atomic-failure', {'kind': 'full_review'}, deadline=self.now.isoformat())
+        self.assertFalse(self.app.store.read("SELECT 1 FROM requests WHERE request_key='service:atomic-failure'"))
+
     def test_event_schedule_accepts_first_collected_but_rejects_uncertain_or_unavailable(self):
         self.service.scheduler['enabled'] = True
         self.app.bundle.events = [SimpleNamespace(event_id=identity, official=official,

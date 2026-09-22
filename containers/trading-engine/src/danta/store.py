@@ -176,7 +176,7 @@ class Store:
         self.db.execute("INSERT OR IGNORE INTO outbox(event_key,payload) VALUES (?,?)",
             (event_key, canonical({"route": route, "chat_id": chat_id, "document": document})))
 
-    def accept_request(self, key: str, payload: dict) -> tuple[str, bool]:
+    def accept_request(self, key: str, payload: dict, *, deadline: str | None = None) -> tuple[str, bool]:
         body_hash = digest(payload)
         with self.transaction():
             previous = self.db.execute("SELECT * FROM requests WHERE request_key=?", (key,)).fetchone()
@@ -186,6 +186,8 @@ class Store:
                 return previous["request_id"], False
             request_id = str(uuid4())
             self.db.execute("INSERT INTO requests VALUES (?,?,?,?,?,NULL)", (key, body_hash, request_id, canonical(payload), "ACCEPTED"))
+            if deadline is not None:
+                self.set('service_deadline:' + request_id, deadline)
             self.event(request_id, "REQUEST_ACCEPTED", {"request_key": key})
             return request_id, True
 
