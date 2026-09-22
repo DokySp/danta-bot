@@ -58,6 +58,9 @@ def parse_records(raw):
 
 
 def provider_time(record, now):
+    # A delayed halt/non-regular packet must never authorize REST fallback.
+    if record["MARKET_CLS_CODE"] != "2" or record["HOUR_CLS_CODE"] != "0" or record["TRHT_YN"] != "N":
+        raise AdapterError("STREAM_SESSION_INVALID")
     day, hour = record["BSOP_DATE"], record["STCK_CNTG_HOUR"]
     if not re.fullmatch(r"[0-9]{8}", day) or not re.fullmatch(r"[0-9]{6}", hour):
         raise AdapterError("STREAM_TIMESTAMP_INVALID")
@@ -67,8 +70,6 @@ def provider_time(record, now):
         raise AdapterError("STREAM_TIMESTAMP_INVALID") from None
     if stamp.date() != now.astimezone(SEOUL).date() or not 0 <= (now - stamp).total_seconds() <= 5:
         raise AdapterError("STREAM_QUOTE_STALE")
-    if record["MARKET_CLS_CODE"] != "2" or record["HOUR_CLS_CODE"] != "0" or record["TRHT_YN"] != "N":
-        raise AdapterError("STREAM_SESSION_INVALID")
     return stamp
 
 
@@ -132,6 +133,16 @@ class KisQuoteStream:
             self.latest.clear()
             self.errors.clear()
             self.error = error
+
+    def session_date(self, ticker):
+        """A REST book may borrow only a verified date from this live session."""
+        with self.lock:
+            stamp = self.latest.get(ticker)
+            if (self.closed or not self.connected or ticker not in self.active or ticker not in self.targets
+                    or self.errors.get(ticker) != "STREAM_QUOTE_STALE" or stamp is None
+                    or stamp.date() != self.clock().astimezone(SEOUL).date()):
+                raise AdapterError("STREAM_SESSION_UNVERIFIED")
+            return stamp.date().isoformat()
 
     def _receive(self, ws, pending=None):
         import websocket

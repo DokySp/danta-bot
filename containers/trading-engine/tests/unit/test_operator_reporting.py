@@ -9,6 +9,16 @@ from danta.safety import CredentialError
 
 
 class OperatorReportingTests(unittest.TestCase):
+    def test_monitor_cause_identifies_symbol_and_underlying_quote_failure(self):
+        value = {'kind': 'MONITOR_DEGRADED', 'action': 'MONITOR_DEGRADED',
+                 'instrument_id': 'KRX:021240', 'reasons': ['PRICE_UNVERIFIED']}
+        text = render_notification(value, symbols={'KRX:021240': '코웨이'})
+        self.assertIn('코웨이 (021240): 현재 가격 미확인', text)
+        value['diagnostics'] = [{'instrument_id': 'KRX:021240', 'scope': 'PROTECTION',
+                                 'reason': 'MONITOR_DEGRADED', 'detail': 'STALE_QUOTE'}]
+        text = render_notification(value, symbols={'KRX:021240': '코웨이'})
+        self.assertIn('코웨이 (021240): 증권사 호가 시각이 오래되어 사용 불가', text)
+
     def test_html_shows_current_monitor_cause_even_without_history(self):
         data = {'date': '2026-09-21', 'status': {'holdings': [], 'monitor_status': 'MONITOR_DEGRADED',
                 'account_succeeded_at': '2026-09-21T10:00:00+00:00',

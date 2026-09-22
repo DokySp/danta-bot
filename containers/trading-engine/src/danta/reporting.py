@@ -134,6 +134,10 @@ STATES = {
     'BROKER_PAGINATION_INCOMPLETE': '증권사 계좌 조회가 끝까지 완료되지 않음',
     'ACCOUNT_INCOMPLETE': '계좌 조회 불완전', 'ORDER_RECONCILIATION_REQUIRED': '주문·체결 대조 필요',
     'RECONCILE_REQUIRED': '계좌·체결 대조 필요', 'PRICE_UNVERIFIED': '현재 가격 미확인',
+    'STALE_QUOTE': '증권사 호가 시각이 오래되어 사용 불가',
+    'STREAM_QUOTE_STALE': '최근 체결 시세 없음', 'STREAM_SESSION_UNVERIFIED': '현재 시세 연결의 거래일 확인 불가',
+    'STREAM_NOT_READY': '실시간 시세 첫 수신 대기', 'STREAM_CONNECTION_FAILED': '실시간 시세 연결 끊김',
+    'STREAM_SESSION_INVALID': '정규장 시세 조건 불일치',
     'PROCESS_FAILED': 'Codex 실행 실패', 'MODEL_FAILED': '모델 실행 실패', 'CODEX_LOGIN_REQUIRED': 'Codex 로그인 확인 필요',
     'AUTHENTICATED': '로그인 확인됨', 'QUOTA_EXHAUSTED': '모델 사용 한도 소진', 'TIMEOUT': '응답 시간 초과',
     'AUTHENTICATED_AT_STARTUP': '시작 시 로그인 확인됨', 'AUTH_FAILED': '인증 확인 실패',
@@ -251,7 +255,7 @@ def reported_fee(data):
     return value if data.get('fees_confirmed', _number(value) not in (None, 0)) else None
 
 
-def diagnostic_text(data):
+def diagnostic_text(data, *, symbols=None):
     """Describe the observation; an exception class is not an operator instruction."""
     rows = data.get('diagnostics') or []
     if rows:
@@ -260,12 +264,15 @@ def diagnostic_text(data):
             if isinstance(row, str):
                 parts.append(_value(row))
                 continue
-            text = _value(row.get('endpoint', row.get('scope', '조회'))) + ': ' + _value(row.get('reason'))
+            subject = _name(row, symbols) if row.get('instrument_id') else _value(row.get('endpoint', row.get('scope', '조회')))
+            text = subject + ': ' + _value(row.get('detail') or row.get('reason'))
             evidence = [str(row[key]) for key in ('http_status', 'provider_code') if row.get(key) is not None]
             if row.get('transport_error'):
                 evidence.append(_value(row['transport_error']))
             parts.append(text + (' (' + ', '.join(evidence) + ')' if evidence else ''))
         return '; '.join(parts)
+    if data.get('reasons'):
+        return ((_name(data, symbols) + ': ') if data.get('instrument_id') else '') + ', '.join(_value(reason) for reason in data['reasons'])
     reason = data.get('reason') or data.get('action')
     prefix = 'External account observations incomplete: '
     if isinstance(reason, str) and reason.startswith(prefix):
@@ -293,7 +300,7 @@ def render_notification(payload, *, symbols=None) -> str:
         title = '계좌 조회 재확인 중' if kind == 'ACCOUNT_INCOMPLETE' else '보호 감시 재확인 중'
         impact = ('계좌 확인 전까지 신규 투자 판단을 보류합니다.' if kind == 'ACCOUNT_INCOMPLETE' else
                   '현재 자료로 보호 조건을 모두 확인하지 못했습니다. 신규 위험을 늘리지 않습니다.')
-        return '\n'.join([title, '확인된 문제: ' + diagnostic_text(data), '영향: ' + impact,
+        return '\n'.join([title, '확인된 문제: ' + diagnostic_text(data, symbols=symbols), '영향: ' + impact,
                           '자동으로 다시 확인합니다. /status에서 현재 상태와 확인 시각을 볼 수 있습니다.'])
     if kind in {'ACCOUNT_RECOVERED', 'MONITOR_RECOVERED'}:
         return (('계좌 조회가 복구되었습니다. 잔고·주문 자료 대조를 마쳤습니다.' if kind == 'ACCOUNT_RECOVERED' else
@@ -347,7 +354,7 @@ def render_notification(payload, *, symbols=None) -> str:
         if data.get('account_diagnostics'):
             lines.append('현재 계좌 문제: ' + diagnostic_text({'diagnostics': data['account_diagnostics']}))
         if data.get('monitor_status') == 'MONITOR_DEGRADED':
-            lines.append('현재 감시 문제: ' + diagnostic_text(data.get('monitor_diagnostic') or {}))
+            lines.append('현재 감시 문제: ' + diagnostic_text(data.get('monitor_diagnostic') or {}, symbols=symbols))
         diagnostic = data.get('model_diagnostic') or {}
         if data.get('model_status') not in {'SUCCESS', 'NOT_CALLED', None} and diagnostic:
             lines.append('모델 진단: ' + _value(diagnostic.get('category')) + ' / 종료 코드 ' + str(diagnostic.get('exit_code', '미확인')))
@@ -514,7 +521,7 @@ def _operational_report(data):
         if status.get('account_diagnostics'):
             body += '<p class="notice">' + html.escape(diagnostic_text({'diagnostics': status['account_diagnostics']})) + '</p>'
         if status.get('monitor_status') == 'MONITOR_DEGRADED':
-            body += '<p class="notice">현재 보호 감시 문제: ' + html.escape(diagnostic_text(status.get('monitor_diagnostic') or {})) + '</p>'
+            body += '<p class="notice">현재 보호 감시 문제: ' + html.escape(diagnostic_text(status.get('monitor_diagnostic') or {}, symbols=symbols)) + '</p>'
         body += '<p class="muted">일반 대화 성공은 투자 판단 완료를 뜻하지 않습니다. 상태별 확인 시각과 아래 과거 사건을 구분해 보세요.</p>'
     body += '</section><section id="holdings"><h2>보유 종목</h2>'
     body += _table(['종목', '보유 수량', '평가 단가', '평가 금액', '가격 기준 시각'],

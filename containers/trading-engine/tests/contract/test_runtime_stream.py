@@ -3,8 +3,9 @@ import hashlib
 import unittest
 from datetime import timedelta
 from types import SimpleNamespace
+from unittest.mock import patch
 
-from danta.adapters import FetchResult
+from danta.adapters import AdapterError, FetchResult
 from danta.config import HumanRequired
 from danta.runtime import ExternalRuntime, RuntimeState
 from tests.contract import test_runtime as contracts
@@ -65,6 +66,30 @@ class RuntimeStreamContracts(unittest.TestCase):
                 self.kis.raw["MARKET_CLS_CODE"] = market
                 with self.assertRaisesRegex(ValueError, "QUOTE_MARKET_IS_NOT_REGULAR"):
                     self.runtime._quote(self.instrument)
+
+    def test_stale_trade_uses_fresh_book_without_relabeling_its_timestamp(self):
+        book = {'session_date': self.now.date().isoformat(), 'asking': {
+            'aspr_acpt_hour': self.now.strftime('%H%M%S'), 'bidp1': '9998', 'askp1': '10001',
+            'bidp_rsqn1': '7', 'askp_rsqn1': '8'}}
+        result = FetchResult((book,), 'COMPLETE', self.now, metadata={'source': 'SYNTHETIC_REST_BOOK'})
+        with patch.object(self.kis, 'stream_quote', side_effect=AdapterError('STREAM_QUOTE_STALE')), \
+                patch.object(self.kis, 'poll_quote', return_value=result, create=True) as poll:
+            quote = self.runtime._quote(self.instrument)
+            self.assertEqual(str(quote.bid), '9998')
+            self.assertEqual(quote.source, 'SYNTHETIC_REST_BOOK')
+            self.assertEqual(quote.observed_at, self.now)
+            book['asking']['aspr_acpt_hour'] = (self.now - timedelta(seconds=6)).strftime('%H%M%S')
+            with self.assertRaisesRegex(ValueError, 'STALE_QUOTE'):
+                self.runtime._quote(self.instrument)
+            book['asking']['aspr_acpt_hour'] = (self.now + timedelta(seconds=1)).strftime('%H%M%S')
+            with self.assertRaisesRegex(ValueError, 'quote observation follows reception'):
+                self.runtime._quote(self.instrument)
+            self.assertEqual(poll.call_count, 3)
+        with patch.object(self.kis, 'stream_quote', side_effect=AdapterError('STREAM_SESSION_INVALID')), \
+                patch.object(self.kis, 'poll_quote', create=True) as poll:
+            with self.assertRaisesRegex(AdapterError, 'STREAM_SESSION_INVALID'):
+                self.runtime._quote(self.instrument)
+            poll.assert_not_called()
 
     def test_aftermarket_time_cannot_extend_regular_calendar(self):
         self.kis.raw["STCK_CNTG_HOUR"] = "160001"

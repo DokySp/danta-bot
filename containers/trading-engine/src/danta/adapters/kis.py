@@ -544,6 +544,23 @@ class KisAdapter:
             raise AdapterError("STREAM_NOT_READY")
         return self._stream.quote(symbol(ticker))
 
+    def poll_quote(self, ticker):
+        """Refresh an inactive trade feed with an independently timestamped KRX book."""
+        ticker = symbol(ticker)
+        self._permit("market_read")
+        if self._stream is None:
+            raise AdapterError("STREAM_NOT_READY")
+        day = self._stream.session_date(ticker)
+        data, _ = self._request(QUOTATIONS + "inquire-asking-price-exp-ccn", "FHKST01010200",
+            {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker})
+        asking = data.get("output1")
+        if not isinstance(asking, dict):
+            raise AdapterError("MALFORMED_RESPONSE")
+        if self._stream.session_date(ticker) != day:
+            raise AdapterError("STREAM_SESSION_UNVERIFIED")
+        return FetchResult(({"session_date": day, "asking": asking},), "COMPLETE", self.clock(),
+            metadata={"source": "KIS:FHKST01010200;session_date=H0STCNT0"})
+
     def close(self):
         with self._stream_lock:
             self._closed, stream = True, self._stream

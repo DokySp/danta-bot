@@ -168,6 +168,11 @@ explicit paths into the provider's `{asking, price}` record for recorded contrac
 An actual exchange observation date and time must be supported by the verified
 provider contract. Receipt time is kept separately and is never copied
 onto an old price. Missing date/time fields do not produce a verified quote.
+When a connected trade feed expires, a REST KRX book may supply `aspr_acpt_hour`,
+bid/ask and quantities. Its date must remain verified by a regular-market packet
+from the same live stream session, before and after the read. Disconnection,
+halt/non-regular packets, missing dates and books older than five seconds still
+fail closed. Receipt time never replaces the book's observation time.
 
 `normalization.account` explicitly maps `symbol`, `quantity`,
 `sellable_quantity`, `available_cash`, and the instrument/price used for the

@@ -179,6 +179,41 @@ class KisStreamTests(unittest.TestCase):
         with self.assertRaisesRegex(AdapterError, "STREAM_QUOTE_STALE"):
             self.adapter.stream_quote("005930")
 
+    def test_rest_book_requires_verified_live_date_before_and_after_read(self):
+        ws = self.start()
+        with self.assertRaisesRegex(AdapterError, 'STREAM_SESSION_UNVERIFIED'):
+            self.adapter.poll_quote('005930')
+        ws.incoming.put(frame(record()))
+        self.until(self.quote_ready)
+        self.now += timedelta(seconds=6)
+        with self.assertRaisesRegex(AdapterError, 'STREAM_QUOTE_STALE'):
+            self.adapter.stream_quote('005930')
+        def book(*args, **kwargs):
+            self.assertEqual(args[2], {'FID_COND_MRKT_DIV_CODE': 'J', 'FID_INPUT_ISCD': '005930'})
+            return {'output1': {'aspr_acpt_hour': '100006', 'bidp1': '70000'}}, {}
+        with patch.object(self.adapter, '_request', side_effect=book):
+            result = self.adapter.poll_quote('005930')
+        self.assertEqual(result.records[0]['session_date'], '2026-09-18')
+        self.assertEqual(result.records[0]['asking']['aspr_acpt_hour'], '100006')
+        for flags in ({'TRHT_YN': 'Y'}, {'MARKET_CLS_CODE': '3'}, {'HOUR_CLS_CODE': 'C'}):
+            ws.incoming.put(frame(record(**flags)))  # Old timestamp plus invalid session.
+            self.until(lambda: self.adapter._stream.errors.get('005930') == 'STREAM_SESSION_INVALID')
+            with patch.object(self.adapter, '_request') as request:
+                with self.assertRaisesRegex(AdapterError, 'STREAM_SESSION_UNVERIFIED'):
+                    self.adapter.poll_quote('005930')
+                request.assert_not_called()
+            ws.incoming.put(frame(record(STCK_CNTG_HOUR=self.now.astimezone(timezone(timedelta(hours=9))).strftime('%H%M%S'))))
+            self.until(self.quote_ready)
+            self.now += timedelta(seconds=6)
+            with self.assertRaisesRegex(AdapterError, 'STREAM_QUOTE_STALE'):
+                self.adapter.stream_quote('005930')
+        def disconnect(*args, **kwargs):
+            self.adapter._stream._reset('STREAM_CONNECTION_FAILED')
+            return book(*args, **kwargs)
+        with patch.object(self.adapter, '_request', side_effect=disconnect):
+            with self.assertRaisesRegex(AdapterError, 'STREAM_SESSION_UNVERIFIED'):
+                self.adapter.poll_quote('005930')
+
     def test_delta_keeps_other_cache_and_waits_for_unsubscribe_ack(self):
         ws = self.start(("005930", "000660"))
         ws.incoming.put(frame(record(), record("000660")))

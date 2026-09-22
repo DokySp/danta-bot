@@ -384,14 +384,17 @@ class Application:
             if self.config.mode == "shadow":
                 continue
             if plan.action == "MONITOR_DEGRADED":
+                diagnostic = {**plan.model_dump(mode='json'), 'diagnostics': [row for row in
+                    bundle.data.get('runtime_diagnostics', []) if row.get('instrument_id') == holding.instrument_id
+                    and row.get('scope') == 'PROTECTION']}
                 with self.store.transaction():
                     newly_degraded = not self.store.get("monitor_degraded", False)
                     self.store.set("monitor_degraded", True)
-                    self.store.set('monitor_diagnostic', plan.model_dump(mode='json'))
+                    self.store.set('monitor_diagnostic', diagnostic)
                     self.store.set('monitor_checked_at', bundle.now.isoformat())
                     self.store.set("monitor_healthy_since", None)
                     if newly_degraded:
-                        self.store.event("protection", "MONITOR_DEGRADED", plan.model_dump(mode="json"), notify=True)
+                        self.store.event("protection", "MONITOR_DEGRADED", diagnostic, notify=True)
             if plan.cancel_pending_entries:
                 self.executor.invalidate_unsubmitted_entries("protection", plan.action)
                 opposite = [row for row in self.store.working(holding.instrument_id) if row["side"] == "BUY"]

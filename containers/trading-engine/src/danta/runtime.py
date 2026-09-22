@@ -595,7 +595,20 @@ class ExternalRuntime:
         fields = self.manifest["normalization"]["quote"]
         streaming = fields.get("transport", "rest") == "websocket"
         read = self.kis.stream_quote if streaming else self.kis.quote
-        result = read(instrument.instrument_id.removeprefix("KRX:"))
+        ticker = instrument.instrument_id.removeprefix("KRX:")
+        polled = False
+        try:
+            result = read(ticker)
+        except AdapterError as error:
+            if not streaming or error.code != "STREAM_QUOTE_STALE":
+                raise
+            result = self.kis.poll_quote(ticker)
+            polled = True
+            streaming = False
+            fields = {"session_date": "session_date", "observed_time": "asking.aspr_acpt_hour",
+                      "bid": "asking.bidp1", "ask": "asking.askp1",
+                      "bid_quantity": "asking.bidp_rsqn1", "ask_quantity": "asking.askp_rsqn1",
+                      "source": result.metadata["source"]}
         if result.quality != "COMPLETE" or len(result.records) != 1:
             raise ValueError("QUOTE_FETCH_INCOMPLETE")
         raw = result.records[0]
@@ -608,8 +621,11 @@ class ExternalRuntime:
         (self.quote_depth if depth is None else depth)[instrument.instrument_id] = {
             "bid":_quantity(_field(raw,fields["bid_quantity"])) if fields.get("bid_quantity") else 0,
             "ask":_quantity(_field(raw,fields["ask_quantity"])) if fields.get("ask_quantity") else 0}
-        return Quote(instrument_id=instrument.instrument_id,venue="KRX",observed_at=observed,received_at=result.retrieved_at,
+        quote = Quote(instrument_id=instrument.instrument_id,venue="KRX",observed_at=observed,received_at=result.retrieved_at,
                      bid=_decimal(_field(raw,fields["bid"])),ask=_decimal(_field(raw,fields["ask"])),source=fields["source"])
+        if polled and not quote_fresh(quote,self.clock(),self.profile["orders"]["quote_max_age_seconds"]):
+            raise ValueError("STALE_QUOTE")
+        return quote
 
     def _subscribe_quotes(self, account, candidates=None):
         if self.manifest["normalization"]["quote"].get("transport", "rest") != "websocket":
