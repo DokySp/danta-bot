@@ -98,13 +98,17 @@ def probe(model_id="gpt-5.6-sol"):
         assert completed.returncode == 0, "Local mock CLI failed"
         assert len(captured) == 2, "Unexpected provider calls"
         exposed = [tool for item in captured[0]["input"] if item.get("type") == "additional_tools" for tool in item["tools"]]
-        assert [tool["name"] for tool in exposed] == ["functions"]
-        names = {tool["name"] for tool in exposed[0]["tools"]}
-        assert names == {"exec", "wait", "request_user_input"}, names
+        namespaces = {tool['name']: tool['tools'] for tool in exposed}
+        assert len(namespaces) == len(exposed) and {'functions'} <= set(namespaces) <= {'functions', 'clock'}
+        names = {tool['name'] for tool in namespaces['functions']}
+        assert {'exec', 'wait', 'request_user_input'} <= names <= {'exec', 'wait', 'request_user_input', 'request_user_input_async'}, names
+        if 'clock' in namespaces:
+            assert {tool['name'] for tool in namespaces['clock']} == {'sleep'}
         outputs = {item["call_id"]: item["output"] for item in captured[1]["input"] if item.get("type") in {"function_call_output", "custom_tool_call_output"}}
         code_output = [item["text"] for item in outputs["call_code"] if item.get("type") == "input_text"]
         inventory = json.loads(code_output[1])
-        assert set(inventory["tools"]) == {"mcp__market__" + tool for tool in TOOLS}
+        market_tools = {'mcp__market__' + tool for tool in TOOLS}
+        assert market_tools <= set(inventory['tools']) <= market_tools | {'clock__curr_time'}
         assert all(value == "undefined" for value in inventory["globals"].values())
         assert set(code_output[2:6]) == {"IMPORT_DENIED", "apply_patch:DENIED", "exec_command:DENIED", "read_mcp_resource:DENIED"}
         assert "unsupported call" in outputs["call_exec"]

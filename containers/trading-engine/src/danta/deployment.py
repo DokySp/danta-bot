@@ -81,7 +81,11 @@ def model_evidence(config, secrets):
         env={"PATH": os.environ.get("PATH", ""), "HOME": auth, "CODEX_HOME": auth}, shell=False)
     if result.returncode:
         raise HumanRequired("CODEX_LOGIN_REQUIRED")
-    evidence = probe(settings["model_id"])
+    try:
+        evidence = probe(settings["model_id"])
+    except AssertionError:
+        from .adapters import AdapterError
+        raise AdapterError('MODEL_ISOLATION_PROBE_FAILED') from None
     return {"source": "runtime local-loopback isolation probe", "isolation_verified": True,
             "executable_sha256": hashlib.sha256(Path(executable).read_bytes()).hexdigest(),
             "auth_home_env": "DANTA_CODEX_AUTH_HOME", "probe": evidence}
