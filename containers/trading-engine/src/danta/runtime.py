@@ -155,6 +155,14 @@ class KisBrokerPort:
         self.environment = "live" if adapter.environment == "real" else "demo"
         self.store = None
         self.latest_bundle = None
+        self.snapshot_lock = threading.RLock()
+        self.snapshot_cache = None
+        self.snapshot_generation = 0
+
+    def _invalidate_snapshot(self):
+        with self.snapshot_lock:
+            self.snapshot_generation += 1
+            self.snapshot_cache = None
 
     def bind_store(self,store):
         self.store = store
@@ -163,6 +171,7 @@ class KisBrokerPort:
         return f"{self.adapter.environment}:{self.manifest['account_alias']}:{session_date}:{venue}"
 
     def submit(self, intent):
+        self._invalidate_snapshot()
         instrument = intent["instrument_id"]
         ticker = instrument.removeprefix("KRX:")
         quote = self.latest_bundle.quotes.get(instrument) if self.latest_bundle else None
@@ -190,6 +199,7 @@ class KisBrokerPort:
                 "metadata":{"organization":result.organization}}
 
     def cancel(self, request):
+        self._invalidate_snapshot()
         known = self.state.known_order(request["namespace"],request["broker_id"])
         if known is None:
             raise HumanRequired("Order organization/ownership requires reconciliation")
@@ -291,7 +301,7 @@ class KisBrokerPort:
             account = self.adapter.read_account()
             failures = [{"endpoint": name, "quality": result.quality,
                          "reason": result.metadata.get("error", "BROKER_PAGINATION_INCOMPLETE"),
-                         **{key: result.metadata[key] for key in ('http_status', 'provider_code', 'transport_error', 'failed_page') if key in result.metadata}}
+                        **{key: result.metadata[key] for key in ('http_status', 'provider_code', 'provider_message', 'requested_at', 'elapsed_seconds', 'attempt_count', 'transport_error', 'failed_page') if key in result.metadata}}
                         for name, result in (("balance", account), ("orders", orders),
                                              ("cancelable", cancelable), ("reservations", reservations))
                         if result.quality != "COMPLETE"]
@@ -426,7 +436,32 @@ class KisBrokerPort:
                                  "source": "KIS:inquire-balance:prvs_rcdl_excc_amt", "daily_costs": census["daily_costs"],
                                  "cost_quality": census["cost_quality"]}}
 
-    def snapshot(self):
+    def snapshot(self, *, maximum_age_seconds=0):
+        # Do not hold a cache lock across provider I/O or ledger locks. Fresh
+        # protection and review reads must be able to finish independently.
+        ledger_version = self.store.get('account_version') if self.store else None
+        working = bool(self.store and self.store.working())
+        observed_at, refresh_order = self.clock(), time.monotonic_ns()
+        with self.snapshot_lock:
+            cached = self.snapshot_cache
+            if (maximum_age_seconds > 0 and cached and not working and
+                    0 <= (observed_at-aware_time(cached['observed_at'])).total_seconds() < maximum_age_seconds and
+                    cached.get('ledger_version') == ledger_version and
+                    not any(row['state'] not in {'FILLED','CANCELED','REJECTED','EXPIRED','PARTIAL_CANCELED'} for row in cached.get('orders', []))):
+                return cached
+            self.snapshot_generation += 1
+            generation = self.snapshot_generation
+            self.snapshot_cache = None
+        value = self._snapshot()
+        value.update(observed_at=observed_at.isoformat(), refresh_order=refresh_order, ledger_version=ledger_version)
+        current_version = self.store.get('account_version') if self.store else None
+        with self.snapshot_lock:
+            if (generation == self.snapshot_generation and current_version == ledger_version and
+                    value.get('complete') and value.get('ownership_complete')):
+                self.snapshot_cache = value
+        return value
+
+    def _snapshot(self):
         if self.manifest["bootstrap"].get("whole_account") is True:
             return self._whole_snapshot()
         now = self.clock()
@@ -438,7 +473,7 @@ class KisBrokerPort:
         if account.quality != "COMPLETE" or orders.quality != "COMPLETE":
             failures = [{'endpoint': name, 'quality': result.quality,
                          'reason': result.metadata.get('error', 'BROKER_PAGINATION_INCOMPLETE'),
-                         **{key: result.metadata[key] for key in ('http_status', 'provider_code', 'transport_error', 'failed_page') if key in result.metadata}}
+                         **{key: result.metadata[key] for key in ('http_status', 'provider_code', 'provider_message', 'requested_at', 'elapsed_seconds', 'attempt_count', 'transport_error', 'failed_page') if key in result.metadata}}
                         for name, result in (('balance', account), ('orders', orders)) if result.quality != 'COMPLETE']
             return {"complete": False, "ownership_complete": False, "orders": [],
                     "errors": sorted({item['reason'] for item in failures}), 'diagnostics': failures}
@@ -803,9 +838,10 @@ class ExternalRuntime:
                 coverage[event.instrument_id] = "PARTIAL"
         return events,facts,coverage,documents
 
-    def _account(self):
+    def _account(self, *, allow_idle=False):
         self.config.require_external("account_read",self.approval)
-        account = self.broker.snapshot()
+        account = (self.broker.snapshot(maximum_age_seconds=self.config.app['monitoring']['account_poll_idle_seconds'])
+                   if allow_idle and isinstance(self.broker,KisBrokerPort) else self.broker.snapshot())
         store = getattr(self.broker, 'store', None)
         if account.get("complete") is not True or account.get("ownership_complete") is not True:
             if store is not None:
@@ -815,7 +851,7 @@ class ExternalRuntime:
                     store.set('account_checked_at', self.clock().isoformat())
                     store.set('account_diagnostics', account.get('diagnostics') or account.get('errors', []))
             raise HumanRequired("External account observations incomplete: "+",".join(account.get("errors",[])))
-        return account,time.monotonic_ns()
+        return account,account.get('refresh_order',time.monotonic_ns())
 
     def _protection_symbols(self,account):
         symbols = {key for key,value in account.get("strategy_quantities",{}).items() if value}
@@ -868,14 +904,14 @@ class ExternalRuntime:
                 self.broker.latest_bundle = bundle
             return bundle
 
-    def refresh_protection(self):
+    def refresh_protection(self, *, allow_idle_account=False):
         self.config.assert_current()
         self.config.require_external("market_read",self.approval)
         with self.publish_lock:
             previous = self.latest_bundle
         if previous is None:
             raise HumanRequired("MONITOR_DEGRADED: VERIFIED_PROTECTION_REFERENCE_UNAVAILABLE")
-        account,account_order = self._account()
+        account,account_order = self._account(allow_idle=allow_idle_account)
         excluded = self._subscribe_quotes(account)
         quotes,depth,orders,diagnostics = {},{},{},[]
         for symbol in sorted(self._protection_symbols(account)):

@@ -10,6 +10,26 @@ from danta.adapters.kis import KisAdapter, KisCredentials
 
 
 class KisPaginationContracts(unittest.TestCase):
+    @patch('danta.adapters.kis.time.sleep')
+    def test_server_error_preserves_redacted_message_timing_and_bounded_retries(self, sleep):
+        calls = []
+        private = 'private-' + 'z'*32
+        def transport(*args):
+            calls.append(args[0])
+            return HttpResponse(500,json.dumps({'msg_cd':'EGW00215','msg1':'처리 오류 계좌 12345678 '+private}).encode())
+        transport.fixture_only = True
+        adapter = KisAdapter(environment='real',credentials=KisCredentials('12345678','00',private,private,private),transport=transport)
+        result = adapter.read_account()
+        self.assertEqual(calls,['GET']*3)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list],[0.5,1.0])
+        self.assertEqual(result.metadata['provider_code'],'EGW00215')
+        self.assertEqual(result.metadata['attempt_count'],3)
+        self.assertIn('처리 오류',result.metadata['provider_message'])
+        self.assertNotIn(private,str(result.metadata))
+        self.assertNotIn('12345678',str(result.metadata))
+        self.assertIn('requested_at',result.metadata)
+        self.assertIn('elapsed_seconds',result.metadata)
+
     def adapter(self, pages, **options):
         calls = []
 
@@ -80,7 +100,7 @@ class KisPaginationContracts(unittest.TestCase):
 
     @patch('danta.adapters.kis.time.sleep')
     def test_exhausted_read_preserves_safe_diagnostics_and_auth_is_not_retried(self, sleep):
-        for code, status, count in [('TRANSIENT_FAILURE', 503, 2), ('AUTH_FAILED', 401, 1)]:
+        for code, status, count in [('TRANSIENT_FAILURE', 503, 3), ('AUTH_FAILED', 401, 1)]:
             adapter, calls = self.adapter([AdapterError(code, diagnostic={'http_status': status, 'provider_code': 'EGW00201'})])
             result = adapter.read_account()
             self.assertEqual(len(calls), count)

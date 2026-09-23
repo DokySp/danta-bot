@@ -346,11 +346,11 @@ class Application:
                     self.store.set("concentration_targets", {})
         return result
 
-    def protect(self) -> list[dict]:
+    def protect(self, *, allow_idle_account=False) -> list[dict]:
         """Called independently of the review thread and model quota circuit."""
         refresh = self.protection_refresh or self.refresh
         if refresh:
-            self.bundle = refresh()
+            self.bundle = refresh(allow_idle_account=True) if allow_idle_account and self.protection_refresh else refresh()
             if "account_snapshot" in self.bundle.data:
                 self.executor.reconcile(self.bundle.data["account_snapshot"])
                 self._sync_theses()
@@ -559,7 +559,10 @@ class Application:
                         self.reconcile()
                     if self.config.mode != "shadow":
                         self.executor.expire_entries(self.clock())
-                    self.protect()
+                    if self.protection_refresh:
+                        self.protect(allow_idle_account=True)
+                    else:
+                        self.protect()
                 except Exception as error:
                     reason = str(error)[:500]
                     try:

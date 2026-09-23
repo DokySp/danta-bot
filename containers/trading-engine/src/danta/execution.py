@@ -225,7 +225,7 @@ class Executor:
         """Snapshot has complete broker observations; never infer fills from prose."""
         with self.dispatch_lock:
             snapshot = snapshot if snapshot is not None else self.broker.snapshot()
-            checked_at = utcnow().isoformat()
+            checked_at = snapshot.get('observed_at') or utcnow().isoformat()
             if snapshot.get("complete") is not True:
                 with self.store.transaction():
                     self.store.set('account_checked_at', checked_at)

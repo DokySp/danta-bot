@@ -19,6 +19,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from . import AdapterError, FetchResult, http_transport, require_http_ok, utcnow
+from ..safety import CREDENTIAL_TEXT, reject_credentials
 
 BASE_URLS = {"real": "https://openapi.koreainvestment.com:9443", "demo": "https://openapivts.koreainvestment.com:29443"}
 MASTER_ORIGIN = "https://new.real.download.dws.co.kr"
@@ -257,12 +258,33 @@ class KisAdapter:
                 raise
         args = ("POST" if post else "GET", self.base_url + path + ("" if post else "?" + urlencode(params)),
                 headers, json.dumps(params).encode() if post else None, 15)
-        if post and hasattr(self.transport, "request_checked"):
-            response = self.transport.request_checked(*args, before_send=before_send)
-        else:
-            before_send()
-            response = self.transport(*args)
-        require_http_ok(response)
+        started, requested_at = time.monotonic(), self.clock().isoformat()
+        response = None
+        try:
+            if post and hasattr(self.transport, "request_checked"):
+                response = self.transport.request_checked(*args, before_send=before_send)
+            else:
+                before_send()
+                response = self.transport(*args)
+            require_http_ok(response)
+        except AdapterError as error:
+            error.diagnostic.update(endpoint=path.rsplit('/',1)[-1], requested_at=requested_at,
+                                    elapsed_seconds=round(time.monotonic()-started,3))
+            if response is not None:
+                try:
+                    message = response.json().get('msg1')
+                    if isinstance(message,str):
+                        for private in (c.account,c.app_key,c.app_secret,c.token,token):
+                            if private:
+                                message = message.replace(private,'[비공개]')
+                        message = CREDENTIAL_TEXT.sub('[비공개]',message)
+                        message = re.sub(r'https?://\S+|[A-Za-z0-9_.~-]{24,}|\d{6,}', '[비공개]', message)
+                        message = ' '.join(message.split())[:240]
+                        reject_credentials(message)
+                        error.diagnostic['provider_message'] = message
+                except (AdapterError,AttributeError,ValueError):
+                    pass
+            raise
         data = response.json()
         if not isinstance(data, dict) or "rt_cd" not in data:
             raise AdapterError("MALFORMED_RESPONSE")
@@ -286,16 +308,18 @@ class KisAdapter:
                 if cursor in seen:
                     raise AdapterError("REPEATED_CURSOR")
                 seen.add(cursor)
-                for attempt in range(2):
+                for attempt in range(3):
                     try:
                         data, headers = self._request(path, tr, {**params, f"CTX_AREA_FK{cursor_width}": cursor[0], f"CTX_AREA_NK{cursor_width}": cursor[1]}, continuation="N" if any(cursor) else "")
                         break
                     except (AdapterError, OSError) as error:
                         code = error.code if isinstance(error, AdapterError) else 'TRANSPORT_FAILED'
                         details = getattr(error, 'diagnostic', {})
-                        delay = details.get('retry_after_seconds', 0.5)
+                        delay = details.get('retry_after_seconds', 0.5 * (2 ** attempt))
                         # Replay only the failed read page; submissions are never retried here.
-                        if attempt or code not in {'TRANSIENT_FAILURE', 'TRANSPORT_FAILED', 'RATE_LIMITED', 'BROKER_REJECTED:EGW00201'} or delay > 2:
+                        if isinstance(error,AdapterError):
+                            error.diagnostic['attempt_count'] = attempt + 1
+                        if attempt == 2 or code not in {'TRANSIENT_FAILURE', 'TRANSPORT_FAILED', 'RATE_LIMITED', 'BROKER_REJECTED:EGW00201'} or delay > 2:
                             raise
                         time.sleep(delay)
                 if not isinstance(data.get(rows_key), list) or any(not isinstance(row, dict) for row in data[rows_key]):

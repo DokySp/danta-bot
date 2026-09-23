@@ -164,7 +164,7 @@ STATES = {
     'UNALLOCATED': '전략에 귀속되지 않은 자산 존재', 'FLOW_VALUATION_MISSING': '입출금 시점 평가 누락',
     'offline': '오프라인 검증', 'paper': '모의 거래', 'shadow': '관찰', 'live': '실거래',
     'strategy_entry': '전략 진입', 'inherited': '기존 보유 종목 편입',
-    'FETCH_FAILED': '조회 실패', 'TRANSIENT_FAILURE': '증권사 서버의 일시 오류',
+    'FETCH_FAILED': '조회 실패', 'TRANSIENT_FAILURE': '증권사 서버 오류',
     'TRANSPORT_FAILED': '증권사 연결 실패', 'RATE_LIMITED': '조회 요청 한도 초과',
     'NETWORK_FAILURE': '네트워크 통신 실패', 'DNS_FAILURE': '서버 주소 확인 실패',
     'TLS_FAILURE': '보안 연결 실패', 'CONNECTION_FAILURE': '연결 끊김 또는 접속 실패',
@@ -284,6 +284,10 @@ def diagnostic_text(data, *, symbols=None):
             evidence = [str(row[key]) for key in ('http_status', 'provider_code') if row.get(key) is not None]
             if row.get('transport_error'):
                 evidence.append(_value(row['transport_error']))
+            if row.get('provider_message'):
+                evidence.append('증권사 응답: ' + row['provider_message'])
+            if row.get('elapsed_seconds') is not None:
+                evidence.append(str(row['elapsed_seconds']) + '초')
             parts.append(text + (' (' + ', '.join(evidence) + ')' if evidence else ''))
         return '; '.join(parts)
     if data.get('reasons'):
