@@ -989,11 +989,15 @@ class ExternalRuntime:
                             continue
                         features = calculate_features(bars[instrument.instrument_id],index_bars[instrument.board],
                             instrument_id=instrument.instrument_id,board=instrument.board,as_of=self.clock(),research_profile=self.profile)
-                        eligible = (instrument.instrument_id in recent and
-                                    features.adtv20 >= Decimal(self.profile["universe"]["minimum_adtv_krw"]) and
-                                    features.close > features.sma60 and features.sma20 >= features.sma20_five_sessions_ago and
-                                    features.rs20 > 0 and features.index_close >= features.index_sma60)
-                        if not eligible:
+                        reasons = [reason for failed,reason in (
+                            (instrument.instrument_id not in recent, 'NO_VALID_RECENT_OFFICIAL_EVENT'),
+                            (features.adtv20 < Decimal(self.profile['universe']['minimum_adtv_krw']), 'INSUFFICIENT_LIQUIDITY'),
+                            (not (features.close > features.sma60 and features.sma20 >= features.sma20_five_sessions_ago), 'TREND_GATE_FAILED'),
+                            (features.rs20 <= 0, 'RELATIVE_STRENGTH_GATE_FAILED'),
+                            (features.index_close < features.index_sma60, 'BOARD_INDEX_GATE_FAILED')) if failed]
+                        if reasons:
+                            diagnostics.append({'scope':'SCREENING', 'instrument_id':instrument.instrument_id,
+                                                'reason':reasons[0], 'reasons':reasons})
                             continue
                     quote_instruments.append(instrument)
                 except (ValueError,KeyError,AdapterError) as error:
@@ -1003,7 +1007,7 @@ class ExternalRuntime:
                     diagnostics.append({"instrument_id":instrument.instrument_id,"reason":getattr(error,"code",str(error))})
             excluded = self._subscribe_quotes(account, {item.instrument_id for item in quote_instruments})
             for instrument_id in sorted(excluded):
-                diagnostics.append({"instrument_id":instrument_id,"reason":"STREAM_SUBSCRIPTION_CAPACITY_EXCEEDED"})
+                diagnostics.append({'scope':'PROTECTION' if instrument_id in protected else 'ENTRY',"instrument_id":instrument_id,"reason":"STREAM_SUBSCRIPTION_CAPACITY_EXCEEDED"})
                 quote_orders[instrument_id] = time.monotonic_ns()
             quote_instruments = [item for item in quote_instruments if item.instrument_id not in excluded]
             self._wait_for_stream_quotes(quote_instruments)
@@ -1013,7 +1017,7 @@ class ExternalRuntime:
                 except (ValueError,KeyError,AdapterError) as error:
                     if isinstance(error,HumanRequired) or isinstance(error,AdapterError) and error.code in AUTH_ERRORS:
                         raise
-                    diagnostics.append({"instrument_id":instrument.instrument_id,"reason":getattr(error,"code",str(error))})
+                    diagnostics.append({'scope':'PROTECTION' if instrument.instrument_id in protected else 'ENTRY',"instrument_id":instrument.instrument_id,"reason":getattr(error,"code",str(error))})
                 quote_orders[instrument.instrument_id] = time.monotonic_ns()
             now = self.clock()
             ticks = self.manifest["ticks"]

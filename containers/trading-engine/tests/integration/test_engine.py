@@ -21,6 +21,38 @@ from danta.store import Store
 
 
 class EngineCase(unittest.TestCase):
+    def test_review_reports_every_prefilter(self):
+        app = Application(self.config,self.bundle)
+        try:
+            for symbol,quote in app.bundle.quotes.items():
+                app.bundle.quotes[symbol] = quote.model_copy(update={'observed_at':app.bundle.now-timedelta(seconds=6)})
+            blocked = app.review()
+            self.assertEqual(blocked['reason'],'NO_ELIGIBLE_CANDIDATES')
+            self.assertTrue(blocked['review_details'])
+            self.assertIn('STALE_OR_INVALID_QUOTE',blocked['review_details'][0]['filter_reasons'])
+            self.assertEqual(blocked['review_details'][0]['quote_age_seconds'],6)
+            self.assertIsNone(blocked['review_details'][0]['ai'])
+        finally:
+            app.close()
+
+    def test_failed_review_reports_an_already_persisted_order(self):
+        app = Application(self.config,self.bundle)
+        submit = app.executor.submit
+        def fail_after_submit(*args, **kwargs):
+            submit(*args, **kwargs)
+            raise RuntimeError('fixture after accepted order')
+        try:
+            with patch.object(app.executor, 'submit', side_effect=fail_after_submit):
+                with self.assertRaisesRegex(RuntimeError, 'fixture after accepted order'):
+                    app.review()
+            result = json.loads(next(self.config.state_dir.glob('runs/*/*/result.json')).read_text())
+            self.assertEqual(result['run_status'],'FAILED')
+            self.assertEqual(result['order_status'],'ACKNOWLEDGED')
+            self.assertTrue(any(row['orders'] for row in result['review_details']))
+            self.assertTrue(list(self.config.state_dir.glob('runs/*/*/execution.json')))
+        finally:
+            app.close()
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)

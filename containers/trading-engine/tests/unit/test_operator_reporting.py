@@ -9,6 +9,24 @@ from danta.safety import CredentialError
 
 
 class OperatorReportingTests(unittest.TestCase):
+    def test_review_details_reach_telegram_and_daily_html_with_safe_source_links(self):
+        row = {'instrument_id':'KRX:005930','name':'삼성전자','scope':'NEW','stage':'PREFILTERED',
+               'filter_reasons':['STALE_OR_INVALID_QUOTE','SPREAD_TOO_WIDE'],'quote_age_seconds':6,
+               'evaluated_at':'2026-09-23T00:20:00Z','evidence':[{'family':'earnings_quality',
+               'source_uri':'https://dart.fss.or.kr/test?x=1&y=2','facts':{'profit':'<verified>'},
+               'comparison_basis':'전년 동기 대비'}], 'ai':None}
+        run = {'run_status':'COMPLETE','reason':'NO_ELIGIBLE_CANDIDATES','review_details':[row]}
+        text = render_notification(run)
+        for phrase in ('삼성전자 (005930)','AI 검토 전 제외','호가 차이 한도 초과','첨부 HTML'):
+            self.assertIn(phrase,text)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)/'daily.html'
+            write_report({'status':{},'runs':[run]},Path(tmp)/'daily.json',path)
+            rendered = path.read_text()
+        for phrase in ('삼성전자 (005930)','시세 경과 시간','6초','&lt;verified&gt;',
+                       '공식 공시 원문','https://dart.fss.or.kr/test?x=1&amp;y=2','AI 판단이 수행되지 않았거나'):
+            self.assertIn(phrase,rendered)
+
     def test_monitor_cause_identifies_symbol_and_underlying_quote_failure(self):
         value = {'kind': 'MONITOR_DEGRADED', 'action': 'MONITOR_DEGRADED',
                  'instrument_id': 'KRX:021240', 'reasons': ['PRICE_UNVERIFIED']}

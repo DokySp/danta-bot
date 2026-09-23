@@ -110,6 +110,21 @@ LABELS = {
     'status_checked_at': '상태 확인 시각', 'monitor_diagnostic': '현재 감시 문제', 'account_diagnostics': '현재 계좌 문제',
 }
 STATES = {
+    'DAILY_HISTORY_NOT_COLLECTED': '일봉 미수집으로 지표 검토 미진행',
+    'NO_ELIGIBLE_CANDIDATES': '신규 후보가 사전 검사에서 모두 제외됨',
+    'OPERATOR_EXCLUDED': '사용자 설정으로 신규 매수 제외',
+    'PREFILTERED': 'AI 검토 전 제외', 'AWAITING_AI': 'AI 판단 미완료', 'NOT_REVIEWED': '검토 미완료',
+    'ACCEPT': '매수 검토 승인', 'VETO': '매수 거부', 'WATCH': '관찰', 'INSUFFICIENT_DATA': '자료 부족',
+    'ABSTAIN': '판단 유보', 'KEEP': '보유 유지',
+    'STALE_OR_INVALID_QUOTE': '시세가 오래되었거나 유효하지 않음', 'MISSING_QUOTE': '시세 없음',
+    'EXISTING_THESIS': '기존 보유 종목으로 추가 매수 제외', 'INELIGIBLE_UNIVERSE': '거래 대상 조건 불충족',
+    'STALE_OR_INCOMPLETE_FEATURES': '일봉 자료가 오래되었거나 부족함', 'INSUFFICIENT_LIQUIDITY': '거래대금 기준 미달',
+    'MISSING_EXECUTABLE_QUOTE': '매수·매도 호가 없음', 'SPREAD_TOO_WIDE': '호가 차이 한도 초과',
+    'NO_VALID_RECENT_OFFICIAL_EVENT': '유효한 최근 공식 공시 근거 없음', 'TREND_GATE_FAILED': '이동평균 추세 조건 미달',
+    'RELATIVE_STRENGTH_GATE_FAILED': '시장 대비 수익률 조건 미달', 'BOARD_INDEX_GATE_FAILED': '시장 지수 추세 조건 미달',
+    'WAIT_PRICE': '추격 매수 가격 한도 초과', 'INVALID_INITIAL_STOP': '손절 가격 조건 불충족',
+    'OUTSIDE_ENTRY_WINDOW': '신규 진입 시간 아님', 'NO_FEASIBLE_SIZE': '현금·위험·비중 한도 내 주문 수량 없음',
+    'ROUNDTRIP_FRICTION_TOO_HIGH': '손절 위험 대비 거래비용 과다', 'SIZED': '주문 가능 수량 산정',
     'READY': '초기 검사 통과', 'SUCCESS': '성공', 'SUCCEEDED': '성공', 'COMPLETE': '완료',
     'RUNNING': '진행 중', 'FAILED': '실패', 'BLOCKED': '중단', 'UNKNOWN': '확인 불가',
     'UNCONFIRMED': '미확인', 'UNVERIFIED': '미검증', 'NONE': '없음', 'NOT_CALLED': '호출하지 않음',
@@ -391,6 +406,12 @@ def render_notification(payload, *, symbols=None) -> str:
         for key in ('run_status', 'reason', 'model_status', 'decision_status', 'order_status'):
             if key in data:
                 lines.append(LABELS[key] + ': ' + _value(data[key], key))
+        for row in data.get('review_details', []):
+            lines.append('• ' + _name(row, symbols) + ' — ' + _review_outcome(row))
+        if data.get('feature_exclusions'):
+            lines.append('기초 자료·지표 단계의 제외 기록 ' + str(len(data['feature_exclusions'])) + '건은 첨부 HTML에서 확인할 수 있습니다.')
+        if data.get('review_details'):
+            lines.append('공시 원문·지표·시세 기준 시각과 상세 판단은 첨부 HTML에 있습니다.')
         lines.append('보호 매도 등 당일 전체 거래는 /report 에 포함됩니다.')
         return '\n'.join(lines)
     titles = {'MONITOR_DEGRADED': '보호 감시에 문제가 생겼습니다.', 'MONITOR_RECOVERED': '보호 감시가 복구되었습니다.',
@@ -493,6 +514,78 @@ def _nav_chart(points):
     return svg + f'<p>기록 범위: {html.escape(_amount(low))} ~ {html.escape(_amount(high))}</p>' + f'<p class="muted">제공된 평가 기록 {len(valid)}개 · 품질 미확인/불완전 {uncertain}개. 자산 증감에는 입출금이 포함될 수 있으며 수익률을 뜻하지 않습니다.</p>'
 
 
+def _review_outcome(row):
+    ai, plan = row.get('ai') or {}, row.get('plan') or {}
+    if ai:
+        text = _value(ai.get('verdict', ai.get('action'))) + ': ' + str(ai.get('reason') or ai.get('economic_path') or MISSING)
+    else:
+        text = _value(row.get('stage')) + ': ' + ', '.join(_value(reason) for reason in row.get('filter_reasons', []))
+    if plan:
+        text += ' / 주문 계획: ' + _value(plan.get('reason')) + ' · ' + _amount(plan.get('quantity'), '주')
+    elif not row.get('orders'):
+        text += ' / 이 검토의 주문 없음'
+    if row.get('orders'):
+        text += ' / ' + ', '.join(_value(order.get('state')) + ' ' + _amount(order.get('quantity'), '주') for order in row['orders'])
+    return text
+
+
+def _review_html(run, symbols):
+    body = ''
+    for row in run.get('review_details', []):
+        body += '<article class="thesis"><h3>' + html.escape(_name(row, symbols)) + '</h3>'
+        body += '<p>' + html.escape(('기존 보유' if row.get('scope') == 'HOLDING' else '신규 후보') + ' · ' + _review_outcome(row)) + '</p>'
+        body += '<p class="metadata">검사 시각: ' + html.escape(_time(row.get('evaluated_at'))) + '</p>'
+        features, quote = row.get('features') or {}, row.get('quote') or {}
+        criteria = run.get('entry_criteria', {})
+        universe, signal, order_policy = (criteria.get(key, {}) for key in ('universe', 'signal', 'orders'))
+        measurements = [
+            ['시세 경과 시간', _amount(row.get('quote_age_seconds'), '초'), _amount(order_policy.get('quote_max_age_seconds'), '초') + ' 이내'],
+            ['호가 관측 / 수신', _time(quote.get('observed_at')) + ' / ' + _time(quote.get('received_at')), str(quote.get('source') or MISSING)],
+            ['매수 / 매도 호가', _amount(quote.get('bid')) + ' / ' + _amount(quote.get('ask')), '호가 차이 ' + _amount(universe.get('maximum_spread_bps'), 'bp') + ' 이하'],
+            ['완성 일봉', _amount(features.get('bars'), '개'), _amount(universe.get('minimum_completed_bars'), '개') + ' 이상'],
+            ['20일 거래대금 중앙값', _amount(features.get('adtv20')), _amount(universe.get('minimum_adtv_krw')) + ' 이상'],
+            ['종가 / 60일선', _amount(features.get('close')) + ' / ' + _amount(features.get('sma60')), '종가 > 60일선'],
+            ['20일선 / 5거래일 전', _amount(features.get('sma20')) + ' / ' + _amount(features.get('sma20_five_sessions_ago')), '현재 20일선 ≥ 5거래일 전'],
+            ['시장 대비 20일 수익률', _value(features.get('rs20')), '> ' + str(signal.get('relative_strength_min_exclusive', MISSING))],
+            ['시장 지수 / 60일선', _value(features.get('index_close')) + ' / ' + _value(features.get('index_sma60')), '지수 ≥ 60일선'],
+            ['가격 변동폭 ATR', _amount(features.get('atr14')), '매수할 매도호가 ≤ 전일 종가 + ' + str(signal.get('chase_above_previous_close_atr', MISSING)) + 'ATR, 20일선 + ' + str(signal.get('chase_above_sma20_atr', MISSING)) + 'ATR'],
+        ]
+        body += '<p>지표 기준: ' + html.escape(_time(features.get('as_of'))) + ' · 마지막 일봉: ' + html.escape(str(features.get('last_session_id', MISSING))) + '</p>'
+        body += _table(['검사 항목', '관측값', '기준'], measurements)
+        order_quote = row.get('order_quote')
+        if order_quote:
+            current = order_quote.get('quote') or {}
+            body += '<h4>주문 계획 직전 시세</h4>' + _table(['검사 시각','매수 / 매도 호가','관측 / 수신 시각','경과 시간'], [[
+                _time(order_quote.get('checked_at')), _amount(current.get('bid')) + ' / ' + _amount(current.get('ask')),
+                _time(current.get('observed_at')) + ' / ' + _time(current.get('received_at')), _amount(order_quote.get('quote_age_seconds'),'초')]])
+        if row.get('filter_reasons'):
+            body += '<p>사전 검사: ' + html.escape(', '.join(_value(reason) for reason in row['filter_reasons'])) + '</p>'
+        body += '<h4>공식 공시 근거</h4>'
+        for event in row.get('evidence', []):
+            body += '<p>' + html.escape(str(event.get('family', '공시')) + ' · 이용 가능 시각: ' + _time(event.get('available_at'))) + '</p>'
+            uri = event.get('source_uri', '')
+            if isinstance(uri, str) and uri.startswith(('https://', 'http://')):
+                body += '<p><a href="' + html.escape(uri, quote=True) + '">공식 공시 원문</a></p>'
+            body += _table(['추출 사실', '값'], [[str(key), str(value)] for key, value in event.get('facts', {}).items()])
+            body += '<p>비교 근거: ' + html.escape(str(event.get('comparison_basis') or MISSING)) + '</p>'
+        if not row.get('evidence'):
+            body += '<p>이 검토에 제공된 공식 공시 근거가 없습니다.</p>'
+        if row.get('facts'):
+            body += _table(['근거 참조', '관측 사실', '단위', '출처'], [[str(fact.get('fact_id','')),
+                str(fact.get('value',MISSING)),str(fact.get('unit','')),str(fact.get('source',''))] for fact in row['facts']])
+        ai = row.get('ai') or {}
+        body += _table(['AI 판단 근거', '내용'], [[label, _value(ai[key])] for key, label in (
+            ('priority', '검토 우선순위'), ('economic_path', '투자 근거'), ('horizon_case', '예상 기간'),
+            ('priced_in_case', '가격 반영 여부'), ('counterevidence_fact_ids', '반대 근거 참조'),
+            ('invalidation_case', '판단 무효 조건'), ('uncertainties', '불확실성'), ('reason', '보유 판단 이유')) if key in ai],
+            empty='AI 판단이 수행되지 않았거나 완료되지 않았습니다.')
+        protection = row.get('protection') or {}
+        if protection:
+            body += '<p>보호 판단: ' + html.escape(_value(protection.get('action')) + ' · ' + ', '.join(_value(x) for x in protection.get('reasons', []))) + '</p>'
+        body += '</article>'
+    return body
+
+
 def _operational_report(data):
     daily = isinstance(data.get('status'), dict)
     status = data['status'] if daily else data.get('portfolio', {})
@@ -534,6 +627,13 @@ def _operational_report(data):
           _value(run.get('decision_status')), _value(run.get('order_status')), _value(run.get('reason'))] for run in runs],
         empty='기록된 투자 검토가 없습니다. 보호 매도 여부는 아래 주문·체결 장부에서 별도로 확인합니다.')
     body += '<p class="muted">위 주문 결과는 해당 투자 검토의 범위입니다. 보호 규칙으로 발생한 매도를 포함한 전체 거래는 주문·체결 장부에 표시합니다.</p>'
+    for run in runs:
+        if run.get('feature_exclusions'):
+            body += '<details><summary>기초 자료·지표 사전 제외 기록 (' + str(len(run['feature_exclusions'])) + '건)</summary>'
+            body += _table(['종목 또는 출처','제외 이유'], [[_name(row,symbols) if row.get('instrument_id') else str(row.get('source','자료 수집')),
+                ', '.join(_value(reason) for reason in row.get('reasons') or [row.get('reason')])] for row in run['feature_exclusions']]) + '</details>'
+        if run.get('review_details'):
+            body += '<h3>' + html.escape(_time(run.get('created_at'))) + ' 종목별 검토</h3>' + _review_html(run, symbols)
     for thesis in data.get('theses', []):
         body += '<article class="thesis"><h3>' + html.escape(_name(thesis, symbols)) + '</h3><dl>'
         for key in ('economic_path', 'horizon_case', 'counterevidence', 'invalidation_case', 'current_stop', 'max_holding_sessions', 'origin', 'exit_reason'):

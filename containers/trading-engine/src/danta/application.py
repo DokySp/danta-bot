@@ -604,6 +604,7 @@ class Application:
         save("config.snapshot.json", self.config.data)
         result = {**metadata, "run_status": "RUNNING", "model_status": "NOT_CALLED", "decision_status": "NOT_REACHED",
                   "order_status": "NONE", "performance_status": "STRATEGY_UNPROVEN", "live_status": "LIVE_NOT_AUTHORIZED" if self.config.mode != "live" else "OPERATOR_AUTHORIZED"}
+        details, plans, orders, protection = {}, [], [], []
         try:
             if on_progress:
                 on_progress('계좌·주문 상태와 보호 조건을 확인하고 있습니다.')
@@ -615,10 +616,11 @@ class Application:
             if self.store.get("paused") or self.store.get("drawdown_paused", False):
                 result.update(run_status="BLOCKED", decision_status="NEW_RISK_PAUSED")
                 return result
-            portfolio = self.portfolio()
             theses = [thesis for thesis in self.theses() if thesis.exited_at is None and (self.store.quantity(thesis.instrument_id) or self.store.working(thesis.instrument_id))]
             candidates = bundle.candidates
             controls = self.store.get("candidate_controls", {"removed": [], "excluded": []})
+            controlled = set(controls['removed']) | set(controls['excluded'])
+            excluded_candidates = [candidate for candidate in candidates if candidate.instrument.instrument_id in controlled]
             candidates = [candidate for candidate in candidates if candidate.instrument.instrument_id not in
                           set(controls["removed"]) | set(controls["excluded"])]
             affected = None
@@ -627,10 +629,34 @@ class Application:
                 if event is None:
                     raise ValueError("UNKNOWN_EVENT")
                 candidates = [candidate for candidate in candidates if candidate.instrument.instrument_id == event.instrument_id]
+                excluded_candidates = [candidate for candidate in excluded_candidates if candidate.instrument.instrument_id == event.instrument_id]
                 affected = [thesis.instrument_id for thesis in theses if thesis.instrument_id == event.instrument_id]
             held_ids = {thesis.instrument_id for thesis in theses}
             prefilters = []
             eligible = []
+            details = {}
+            result['review_details'] = []
+            result['feature_exclusions'] = [{**row, 'reason':'DAILY_HISTORY_NOT_COLLECTED' if row.get('reason') == repr(row.get('instrument_id')) else row.get('reason')}
+                for row in bundle.exclusions if kind == 'full_review' or row.get('instrument_id') == event.instrument_id]
+            result['entry_criteria'] = {key: self.profile[key] for key in ('universe', 'signal', 'orders')}
+            failed_quotes = {row['instrument_id']: row.get('detail',row['reason']) for row in bundle.data.get('runtime_diagnostics',[])
+                             if row.get('scope') == 'ENTRY' and row.get('instrument_id') and
+                             (kind == 'full_review' or row['instrument_id'] == event.instrument_id)}
+            for symbol in sorted({c.instrument.instrument_id for c in candidates+excluded_candidates} | held_ids | set(failed_quotes)):
+                quote, features = bundle.quotes.get(symbol), bundle.features.get(symbol)
+                row = {'instrument_id': symbol, 'name': bundle.data.get('instrument_names', {}).get(symbol),
+                       'scope': 'HOLDING' if symbol in held_ids else 'NEW', 'stage': 'NOT_REVIEWED',
+                       'evaluated_at': bundle.now.isoformat(),
+                       'quote': quote.model_dump(mode='json') if quote else None,
+                       'quote_age_seconds': (bundle.now-quote.observed_at).total_seconds() if quote else None,
+                       'features': features.model_dump(mode='json') if features else None,
+                       'evidence': [event.model_dump(mode='json') for event in bundle.events if event.instrument_id == symbol],
+                       'facts': [fact.model_dump(mode='json') for fact in bundle.facts if fact.instrument_id == symbol],
+                       'filter_reasons': [], 'ai': None, 'plan': None, 'orders': []}
+                details[symbol] = row
+                result['review_details'].append(row)
+                if symbol not in held_ids and (symbol in controlled or symbol in failed_quotes):
+                    row.update(stage='PREFILTERED',filter_reasons=['OPERATOR_EXCLUDED'] if symbol in controlled else [failed_quotes[symbol]])
             for candidate in candidates:
                 symbol = candidate.instrument.instrument_id
                 quote = bundle.quotes.get(symbol)
@@ -638,21 +664,26 @@ class Application:
                     synthetic=bundle.synthetic, require_ai=False) if quote else None
                 if symbol not in held_ids and gate and gate.allowed:
                     eligible.append(candidate)
+                    details[symbol]['stage'] = 'AWAITING_AI'
                 else:
-                    prefilters.append({"instrument_id": symbol, "reason": "EXISTING_THESIS" if symbol in held_ids else gate.reason if gate else "MISSING_QUOTE"})
+                    reasons = ['EXISTING_THESIS'] if symbol in held_ids else gate.reasons if gate else ['MISSING_QUOTE']
+                    details[symbol].update(stage='AWAITING_AI' if symbol in held_ids else 'PREFILTERED', filter_reasons=reasons)
+                    prefilters.append({'instrument_id': symbol, 'reason': reasons[0], 'reasons': reasons,
+                                      'quote_age_seconds': details[symbol]['quote_age_seconds']})
             candidates = eligible
             session = bundle.calendar.active(bundle.now)
             if session is None:
                 result.update(run_status="BLOCKED", decision_status="OUTSIDE_SESSION")
                 return result
             frozen = freeze_input(run_id=run_id, config_hash=self.config.config_hash, strategy_hash=self.config.strategy_hash, code_id=self.code_id,
-                now=bundle.now, session_id=session.session_id, profile=self.profile, portfolio=portfolio, candidates=candidates, events=bundle.events,
+                now=bundle.now, session_id=session.session_id, profile=self.profile, portfolio=self.portfolio(), candidates=candidates, events=bundle.events,
                 facts=bundle.facts, theses=theses, scope="FULL" if kind == "full_review" else "PARTIAL", reviewed_positions=affected)
             save("input.snapshot.json", frozen)
             save("candidates.json", {"total_universe": bundle.total_universe, "feature_exclusions": bundle.exclusions,
                 "candidate_controls": controls, "candidate_controls_hash": digest(controls), "prefilters": prefilters, "candidates": candidates})
             if not candidates and not frozen["reviewed_positions"]:
-                result.update(run_status="COMPLETE", decision_status="NO_CANDIDATES", reason="NO_CANDIDATES", performance=self.record_nav())
+                result.update(run_status="COMPLETE", decision_status="NO_CANDIDATES",
+                              reason="NO_ELIGIBLE_CANDIDATES" if details else "NO_CANDIDATES", performance=self.record_nav())
                 return result
             if self.store.get("material_hash") == frozen["material_hash"] and self.store.working():
                 result.update(run_status="COMPLETE", decision_status="KEEP_EXISTING_PLAN")
@@ -681,6 +712,8 @@ class Application:
             save("decision.json", {"proposal": decision, "completed_at": completed_at, "valid_until": decision_deadline,
                 "validation": "VALID", "unreviewed": unreviewed_positions(frozen)})
             result["decision_status"] = "VALID"
+            for review in [*decision.candidate_reviews, *decision.position_reviews]:
+                details[review.instrument_id].update(stage='AI_REVIEWED', ai=review.model_dump(mode='json'))
             if not bundle.synthetic:
                 result["model_status"] = "SUCCEEDED"
             plans, orders = [], []
@@ -690,10 +723,16 @@ class Application:
                     thesis = next(thesis for thesis in theses if thesis.thesis_id == review.thesis_id)
                     with self.store.transaction():
                         self._save_thesis(thesis.model_copy(update={"invalidating_event_ids": review.changed_event_ids}))
-            self.protect()
+            protection = self.protect()
             for candidate in rank_candidates([candidate.model_copy(update={"priority": verdicts[candidate.instrument.instrument_id].priority}) for candidate in candidates]):
                 instrument_id = candidate.instrument.instrument_id
-                quote = self.bundle.quotes[instrument_id]
+                quote = self.bundle.quotes.get(instrument_id)
+                details[instrument_id]['order_quote'] = {'checked_at':self.bundle.now.isoformat(),
+                    'quote':quote.model_dump(mode='json') if quote else None,
+                    'quote_age_seconds':(self.bundle.now-quote.observed_at).total_seconds() if quote else None}
+                if quote is None:
+                    plans.append({'instrument_id':instrument_id,'reason':'MISSING_QUOTE','quantity':0})
+                    continue
                 gate = assess_entry(candidate, quote, self.bundle.events, self.bundle.calendar, self.bundle.ticks, self.bundle.now,
                     self.profile, verdicts[instrument_id].verdict, synthetic=bundle.synthetic)
                 previous = [thesis for thesis in self.theses() if thesis.instrument_id == instrument_id]
@@ -703,7 +742,8 @@ class Application:
                         plans.append({"instrument_id": instrument_id, "reason": reentry.reason, "quantity": 0})
                         continue
                 if not gate.allowed:
-                    plans.append({"instrument_id": instrument_id, "reason": gate.reason, "reasons": gate.reasons, "quantity": 0})
+                    plans.append({"instrument_id": instrument_id, "reason": gate.reason, "reasons": gate.reasons, "quantity": 0,
+                                  'checked_at':self.bundle.now.isoformat(),'quote':quote.model_dump(mode='json')})
                     continue
                 plan = size_entry(candidate, quote, gate.stop_price, self.portfolio(), bundle.costs, self.bundle.now, self.profile)
                 plans.append(plan.model_dump(mode="json"))
@@ -732,9 +772,7 @@ class Application:
                     self.reconcile()
             with self.store.transaction():
                 self.store.set("material_hash", frozen["material_hash"])
-            save("plan.json", {"plans": plans, "protection": protection})
             orders = [self.store.order(order["id"]) for order in orders]
-            save("execution.json", {"orders": orders, "journal": [dict(row) for row in self.store.read("SELECT * FROM journal WHERE run_id=?", (run_id,))]})
             states = {order["state"] for order in orders}
             order_status = next(iter(states)) if len(states) == 1 else "MIXED" if states else "NONE"
             if self.config.mode == "shadow":
@@ -743,7 +781,8 @@ class Application:
                 order_status = "FIXTURE_FILLED"
             reason = ("ORDER_RECONCILIATION_REQUIRED" if "UNKNOWN" in states else
                       "ORDER_" + order_status if states and not states <= {"ACKNOWLEDGED", "PARTIALLY_FILLED", "FILLED"} else
-                      "ENTRY_ACCEPTED" if orders else plans[0]["reason"] if plans else "NO_CANDIDATES")
+                      "ENTRY_ACCEPTED" if orders else plans[0]["reason"] if plans else
+                      "NO_ELIGIBLE_CANDIDATES" if any(row['scope'] == 'NEW' for row in details.values()) else "NO_CANDIDATES")
             result.update(run_status="COMPLETE", order_status=order_status,
                 order_states={state: sum(order["state"] == state for order in orders) for state in sorted(states)},
                 reason=reason, portfolio=self.portfolio().model_dump(mode="json"), performance=self.record_nav())
@@ -757,6 +796,27 @@ class Application:
                 result["model_status"] = "MODEL_FAILED"
             raise
         finally:
+            # A later failure must not hide earlier persisted submissions.
+            orders = [dict(row) for row in self.store.read(
+                "SELECT * FROM intents WHERE json_extract(payload,'$.run_id')=?", (run_id,))]
+            for plan in plans:
+                if plan['instrument_id'] in details:
+                    details[plan['instrument_id']]['plan'] = plan
+            for order in orders:
+                if order['instrument_id'] in details:
+                    details[order['instrument_id']]['orders'].append({key: order[key] for key in
+                        ('side', 'quantity', 'state', 'cumulative_quantity', 'cumulative_notional')})
+            for plan in protection:
+                if plan['instrument_id'] in details:
+                    details[plan['instrument_id']]['protection'] = plan
+            if plans or protection or result['decision_status'] == 'VALID':
+                save('plan.json', {'plans':plans, 'protection':protection})
+            if orders or result['decision_status'] == 'VALID':
+                save('execution.json', {'orders':orders, 'journal':[dict(row) for row in self.store.read('SELECT * FROM journal WHERE run_id=?',(run_id,))]})
+            if orders and result['run_status'] != 'COMPLETE':
+                states = {order['state'] for order in orders}
+                result.update(order_status=next(iter(states)) if len(states) == 1 else 'MIXED',
+                              order_states={state:sum(order['state'] == state for order in orders) for state in sorted(states)})
             save("manifest.json", {"kind": kind, "input_source_hash": digest(bundle.data), "generated_artifacts": sorted(path.name for path in directory.iterdir()),
                 "unreached_stages": [name for name in ("input.snapshot.json", "candidates.json", "decision.json", "plan.json", "execution.json") if not (directory / name).exists()],
                 "result": result})
