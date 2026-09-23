@@ -28,6 +28,16 @@ MARKDOWN_V2_SPECIALS = r"_*[]()~`>#+-=|{}.!"
 BOT_COMMAND_RE = re.compile(r"^[a-z0-9_]{1,32}$")
 KST = timezone(timedelta(hours=9), "KST")
 TELEGRAM_MESSAGE_BREAK = "<!--telegram-message-break-->"
+VERSION_FILE = Path('/app/VERSION')
+
+
+def app_version() -> str:
+    # NAS container updates may retain APP_VERSION from the previous image.
+    try:
+        version = VERSION_FILE.read_text(encoding='utf-8').strip()
+    except (OSError, UnicodeError):
+        version = ''
+    return version or os.getenv('APP_VERSION', '').strip() or '1.0.0'
 
 
 def env_int(name: str, default: int) -> int:
@@ -1104,7 +1114,7 @@ class Config:
     @classmethod
     def from_env(cls) -> "Config":
         return cls(
-            version=os.getenv("APP_VERSION", "1.0.0"),
+            version=app_version(),
             http_timeout=env_int("HTTP_TIMEOUT", 10),
             gateway_host=os.getenv("GATEWAY_HOST", "0.0.0.0"),
             gateway_port=env_int("GATEWAY_PORT", 8080),

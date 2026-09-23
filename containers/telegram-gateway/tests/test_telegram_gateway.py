@@ -66,6 +66,21 @@ def visible_text(value: str) -> str:
 
 
 class TelegramGatewayHtmlSplitTest(unittest.TestCase):
+    def test_config_version_prefers_image_file_then_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            version_file = Path(tmp) / 'VERSION'
+            with patch.object(telegram_gateway, 'VERSION_FILE', version_file), patch.dict(os.environ, APP_VERSION=' stale-env '):
+                version_file.write_text('v20260923-002\n')
+                self.assertEqual(telegram_gateway.Config.from_env().version, 'v20260923-002')
+                for content in (b'', b'\xff', None):
+                    if content is None:
+                        version_file.unlink()
+                    else:
+                        version_file.write_bytes(content)
+                    self.assertEqual(telegram_gateway.Config.from_env().version, 'stale-env')
+                with patch.dict(os.environ, APP_VERSION=' '):
+                    self.assertEqual(telegram_gateway.Config.from_env().version, '1.0.0')
+
     def test_split_reopens_tags_without_breaking_closing_tag(self) -> None:
         text = telegram_gateway.sanitize_telegram_html(f"<code>{'한' * 70}</code>")
 

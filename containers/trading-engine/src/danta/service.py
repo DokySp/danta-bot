@@ -29,6 +29,16 @@ PORTFOLIO_CONTROLS = frozenset({'add_portfolio_ticker', 'remove_portfolio_ticker
 CONTROLS = frozenset({'pause', 'stop', 'schedule_on', 'schedule_off', 'new', 'resume'}) | PORTFOLIO_CONTROLS
 PROTECTION = frozenset({'risk_monitor', 'reconcile', 'time_limit_exit'})
 REVIEWS = frozenset({'full_review', 'event_review'})
+VERSION_FILE = Path('/app/VERSION')
+
+
+def app_version():
+    # NAS container updates may retain APP_VERSION from the previous image.
+    try:
+        version = VERSION_FILE.read_text(encoding='utf-8').strip()
+    except (OSError, UnicodeError):
+        version = ''
+    return version or os.environ.get('APP_VERSION', '').strip() or 'dev'
 
 
 def log_event(event, **fields):
@@ -435,7 +445,7 @@ class Service:
                             [('medium 변경 요청', '/reasoning_effort medium'), ('xhigh 변경 요청', '/reasoning_effort xhigh')]])}
                 state = self.app.status()
                 scheduled = self.store.get('discretionary_schedule', self.scheduler['enabled'])
-                return {**state, 'version': os.environ.get('APP_VERSION', 'dev'),
+                return {**state, 'version': app_version(),
                     'scheduler_status': 'SCHEDULE_ON' if scheduled else 'SCHEDULE_OFF',
                     'reasoning_effort': self.config.app['model']['reasoning_effort'],
                     'session_active': bool(self.store.get('chat_session:' + self._chat_key(payload))),
@@ -692,7 +702,7 @@ class RuntimeHost:
                 'issues': self.issues, 'components': components}
 
     def version(self):
-        return {'version': os.environ.get('APP_VERSION', 'dev'), 'code_id': self.code_id,
+        return {'version': app_version(), 'code_id': self.code_id,
                 'config_hash': self.config.config_hash, 'strategy_hash': self.config.strategy_hash,
                 'runtime_status': self.health()['status']}
 

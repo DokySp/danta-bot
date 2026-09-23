@@ -6,6 +6,7 @@ import base64
 import html
 import io
 import json
+import os
 import sqlite3
 from pathlib import Path
 import tempfile
@@ -23,7 +24,7 @@ from danta.config import HumanRequired, ROOT, canonical, load_config, utcnow
 from danta.market import SessionCalendar
 from danta.models import Session
 from danta.safety import CredentialError
-from danta.service import Service, serve
+from danta.service import RuntimeHost, Service, app_version, serve
 from danta.store import Store
 
 
@@ -156,6 +157,23 @@ class ServiceIntegrationTests(unittest.TestCase):
     def last_result(self):
         row = self.app.store.db.execute("SELECT result FROM requests WHERE request_key LIKE 'service:%' ORDER BY rowid DESC LIMIT 1").fetchone()
         return json.loads(row[0])
+
+    def test_image_version_overrides_retained_environment_on_both_status_paths(self):
+        version_file = Path(self.tmp.name) / 'VERSION'
+        with patch('danta.service.VERSION_FILE', version_file), patch.dict(os.environ, APP_VERSION=' stale-env '):
+            version_file.write_text('v20260923-002\n')
+            self.receive('/status')
+            self.service.run_once()
+            self.assertEqual(self.last_result()['version'], 'v20260923-002')
+            self.assertEqual(RuntimeHost(self.config).version()['version'], 'v20260923-002')
+            for content in (b'', b'\xff', None):
+                if content is None:
+                    version_file.unlink()
+                else:
+                    version_file.write_bytes(content)
+                self.assertEqual(app_version(), 'stale-env')
+            with patch.dict(os.environ, APP_VERSION=' '):
+                self.assertEqual(app_version(), 'dev')
 
     def test_auth_durable_receipt_and_identical_update_deduplication(self):
         first = self.receive()

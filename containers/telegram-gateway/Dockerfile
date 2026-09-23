@@ -19,6 +19,7 @@ WORKDIR /app
 RUN groupadd --system app \
   && useradd --system --gid app --create-home app \
   && mkdir -p /app/config \
+  && printf '%s\n' "$APP_VERSION" > /app/VERSION \
   && chown -R app:app /app
 
 RUN pip install --no-cache-dir PyYAML==6.0.2
