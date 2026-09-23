@@ -175,6 +175,19 @@ class ServiceIntegrationTests(unittest.TestCase):
             with patch.dict(os.environ, APP_VERSION=' '):
                 self.assertEqual(app_version(), 'dev')
 
+    def test_management_status_remains_available_when_policy_changes(self):
+        host = RuntimeHost(self.config)
+        host.service, host.status = self.service, 'READY'
+        data = self.config.data['app']
+        data['execution']['enabled'] = not data['execution']['enabled']
+        (self.directory / 'app.yaml').write_text(yaml.safe_dump(data))
+        with patch.object(self.app, 'status', side_effect=HumanRequired('POLICY_CHANGED')) as status:
+            health = host.health()
+            self.assertFalse(health['ready'])
+            self.assertEqual(health['status'], 'CONFIGURATION_CHANGED_OR_APPROVAL_EXPIRED')
+            self.assertEqual(host.version()['runtime_status'], health['status'])
+            status.assert_not_called()
+
     def test_pending_operational_alerts_show_original_journal_time_on_retry(self):
         for kind in ('SERVICE_WORKER_FAILED', 'MONITOR_DEGRADED', 'ACCOUNT_INCOMPLETE'):
             with self.subTest(kind=kind), self.app.store.transaction():

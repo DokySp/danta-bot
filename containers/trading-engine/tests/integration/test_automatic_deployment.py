@@ -67,6 +67,13 @@ class AutomaticDeploymentTests(unittest.TestCase):
                     app.store.set('monitor_healthy_since', (app.bundle.now - timedelta(seconds=61)).isoformat())
                     app.protect()
                     self.assertFalse(app.store.get('monitor_degraded'))
+                    changed = dict(data, model={**data['model'], 'model_id': 'gpt-5.6-luna', 'reasoning_effort': 'medium'})
+                    (config_dir/'app.yaml').write_text(yaml.safe_dump(changed))
+                    app.config.assert_current()
+                    self.assertEqual(app.status()['model_id'], 'gpt-5.6-luna')
+                    app.protect()
+                    self.assertFalse(app.store.get('monitor_degraded'))
+                    (config_dir/'app.yaml').write_text(yaml.safe_dump(data))
                 finally:
                     app.close()
                 app = prepare_application(source, clock=lambda:fixture.NOW)

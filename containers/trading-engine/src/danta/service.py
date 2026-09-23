@@ -401,7 +401,7 @@ class Service:
                         'strategy_hash': self.config.strategy_hash}
             if command == 'reasoning_effort':
                 arguments = payload['text'].split()[1:]
-                current = self.config.app['model']['reasoning_effort']
+                current = self.config.model_settings()['reasoning_effort']
                 if not arguments:
                     return {'reasoning_effort': current, 'changed': False}
                 self.config.require_external('telegram_control', self.app.approval)
@@ -440,14 +440,14 @@ class Service:
                         '_reply_markup': self._keyboard([[('후보 복원', '/add_portfolio_ticker'), ('후보 제거', '/remove_portfolio_ticker')],
                             [('매수 제외', '/add_portfolio_except_ticker'), ('제외 해제', '/remove_portfolio_except_ticker')]])}
                 if arguments == ['effort']:
-                    return {'reasoning_effort': self.config.app['model']['reasoning_effort'], 'changed': False,
+                    return {'reasoning_effort': self.config.model_settings()['reasoning_effort'], 'changed': False,
                         '_reply_markup': self._keyboard([[('현재 수준 유지', '/status'), ('high 변경 요청', '/reasoning_effort high')],
                             [('medium 변경 요청', '/reasoning_effort medium'), ('xhigh 변경 요청', '/reasoning_effort xhigh')]])}
                 state = self.app.status()
                 scheduled = self.store.get('discretionary_schedule', self.scheduler['enabled'])
                 return {**state, 'version': app_version(),
                     'scheduler_status': 'SCHEDULE_ON' if scheduled else 'SCHEDULE_OFF',
-                    'reasoning_effort': self.config.app['model']['reasoning_effort'],
+                    'reasoning_effort': self.config.model_settings()['reasoning_effort'],
                     'session_active': bool(self.store.get('chat_session:' + self._chat_key(payload))),
                     '_reply_markup': self._keyboard([[('전체 투자 검토', '/review'), ('투자 재개' if state.get('paused') else '투자 일시정지', '/resume' if state.get('paused') else '/pause')],
                         [('예약 검토 끄기' if scheduled else '예약 검토 켜기', '/schedule_off' if scheduled else '/schedule_on'), ('후보·제외 종목', '/status candidates')],
@@ -688,6 +688,7 @@ class RuntimeHost:
 
     def health(self):
         status = self.status
+        components = {}
         if self.stop.is_set():
             status = 'STOPPING'
         elif self.service and (self.service.stop.is_set() or self.service.worker_failed):
@@ -696,12 +697,10 @@ class RuntimeHost:
             try:
                 self.service.config.assert_current()
                 self.service.config.require_external('telegram_ingress', self.service.app.approval)
+                health = self.service.app.status()
+                components = {key: health.get(key) for key in ('authentication', 'model_status', 'account_status', 'monitor_status', 'review_status')}
             except (HumanRequired, ValueError, OSError):
                 status = 'CONFIGURATION_CHANGED_OR_APPROVAL_EXPIRED'
-        components = {}
-        if self.service:
-            health = self.service.app.status()
-            components = {key: health.get(key) for key in ('authentication', 'model_status', 'account_status', 'monitor_status', 'review_status')}
         return {'status': status, 'ready': status == 'READY', 'mode': self.config.mode,
                 'issues': self.issues, 'components': components}
 

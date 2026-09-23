@@ -60,7 +60,9 @@ def resolved_config(source, capital, secrets):
             tg[key] = [value.strip() for value in secrets.get(env, "").split(",") if value.strip()]
         if tg["enabled"] and (not tg[key] or any(not re.fullmatch(pattern, value) for value in tg[key])):
             raise HumanRequired("TELEGRAM_ALLOWLIST_REQUIRED_IN_SECRETS")
-    return Config(canonical(data), digest(data), strategy_hash, source.directory, source.config_hash)
+    from .config import model_reload_hash
+    return Config(canonical(data), digest(data), strategy_hash, source.directory, source.config_hash,
+                  model_reload_hash(source.data))
 
 
 def model_evidence(config, secrets):

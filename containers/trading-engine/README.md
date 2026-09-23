@@ -757,6 +757,8 @@ DART 인증이 필요한 API에는 별도 `DART_API_KEY` 참조를 사용한다.
 
 실험값의 승인 없이 live 복사, 모드 한 줄 변경으로 실거래 활성화, CLI에서 `--force-live` 같은 우회는 금지한다. 각 실행은 설정·프롬프트·모델·도구 정의를 snapshot으로 고정하고 hash를 기록한다. 거래 의미가 바뀌는 설정/코드 변경은 새 승인 또는 실험 manifest가 필요하다.
 
+자동 운영 배포에서는 `app.yaml`의 `model.model_id`와 `model.reasoning_effort`를 변경하면 재시작 없이 다음 AI 호출부터 적용한다. 진행 중인 호출은 기존 모델·추론 수준을 유지하고, 호출 기록에도 실제 사용한 값을 남긴다. Luna·Terra·Sol·Astra를 선택할 수 있으며, 모델을 처음 바꿀 때 로컬 격리 검사를 수행한다. 계좌·위험 정책·인증·실행 파일 등 나머지 설정은 기존 변경 감지를 유지한다. 별도 hash 승인 파일을 사용하는 실행에는 이 자동 적용을 허용하지 않는다.
+
 ### 12.2 app.yaml
 
 ```yaml
@@ -773,7 +775,7 @@ app:
 model:
   provider: codex_cli
   executable: codex
-  model_id: gpt-5.6-sol
+  model_id: gpt-6-astra
   reasoning_effort: xhigh
   auth_mode: chatgpt
   timeout_seconds: 180

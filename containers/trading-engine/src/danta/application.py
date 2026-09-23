@@ -903,7 +903,7 @@ class Application:
         return {"mode": self.config.mode, "config_hash": self.config.config_hash, "code_id": self.code_id,
                 "as_of": self.bundle.now.isoformat(),
                 'status_checked_at': self.clock().isoformat(),
-                'model_id': self.config.app['model']['model_id'],
+                'model_id': self.config.model_settings()['model_id'],
                 'model_checked_at': health.get('checked_at'), 'model_purpose': health.get('purpose'),
                 'chat_model': self.store.get('model_health:chat', health if health.get('purpose') == 'chat' else {}),
                 'review_model': self.store.get('model_health:review', health if health.get('purpose') == 'review' else {}),

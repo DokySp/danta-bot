@@ -15,6 +15,11 @@ danta --config-dir ./config config diff --against ./config.snapshot.json
 승인이나 재시작을 수행하지 않는다. 상대 `app.state_dir`는 설정 디렉터리의 부모를 기준으로
 해석한다. 환경변수로 전략 비율을 덮어쓰는 경로는 없다.
 
+자동 운영 배포의 `model.model_id`·`model.reasoning_effort`는 다음 AI 호출부터 다시 읽는다.
+Luna·Terra·Sol·Astra 전환에 재시작이 필요 없고, 진행 중인 호출과 그 기록은 이전 값을 유지한다.
+새 모델은 처음 사용할 때 로컬 격리 검사를 통과해야 한다. 나머지 설정 변경과 별도 hash 승인
+실행에는 이 예외를 적용하지 않으며, 기존 정책 변경 차단을 유지한다.
+
 후보 목록은 `danta candidates add|remove|exclude|include <ticker>` 또는 승인된 Telegram
 명령으로 변경한다. 현재 검증된 universe 안의 후보 범위만 변경하며 SQLite에 범위/hash,
 account version과 변경 journal을 보존한다. 세 YAML의 위험 정책을 덮어쓰지 않는다.
@@ -34,7 +39,7 @@ hash를 고정한다. 파일이 바뀐 진행 실행은 기존 hash로 새 권�
 | 영역 | 기본값 / 의미 | 외부 실행에서 필요한 확인 |
 |---|---|---|
 | app | `offline`, `Asia/Seoul`, 계좌 별칭 null, `127.0.0.1:8080` | 실제 모드/계좌와 bind/수신 경계 |
-| model | `codex_cli`, `gpt-5.6-sol`/`xhigh`/`chatgpt`, timeout 180초 | 기존 모델 설정을 재사용. 실제 로그인·모델 접근·격리 증거·모델 사용 승인 검증 |
+| model | `codex_cli`, `gpt-6-astra`/`xhigh`/`chatgpt`, timeout 180초 | 다음 호출에서 모델·추론 설정 적용. 실제 로그인·모델 접근·격리 증거·모델 사용 승인 검증 |
 | model 재시도 | transient 1회/5초, schema 교정 1회, fallback false | quota reset 미확인은 운영자 확인, 다른 모델 자동 교체 없음 |
 | broker | `kis`, 환경/manifest/rate-limit null | 모의/실전 endpoint, 계좌 귀속, 제공자 필드·한도 검증 |
 | broker 비밀 참조 | `KIS_ACCOUNT_REF`, `KIS_APP_KEY`, `KIS_APP_SECRET` 이름 | 값은 private secrets.yaml에서만 읽으며 정책 YAML·image에는 넣지 않음 |

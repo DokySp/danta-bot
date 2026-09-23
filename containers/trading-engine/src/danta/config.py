@@ -182,6 +182,14 @@ def _validate_semantics(data: dict) -> None:
         raise ConfigurationError("Telegram route must be trading-engine")
 
 
+def model_reload_hash(data):
+    """Only the model selector and effort may change inside a deployed runtime."""
+    data = json.loads(canonical(data))
+    for key in ('model_id', 'reasoning_effort'):
+        data['app']['model'].pop(key)
+    return digest(data)
+
+
 @dataclass(frozen=True)
 class Config:
     snapshot_json: str
@@ -189,6 +197,7 @@ class Config:
     strategy_hash: str
     directory: Path
     source_config_hash: str | None = None
+    model_reload_baseline: str | None = None
 
     @property
     def data(self) -> dict:
@@ -212,8 +221,19 @@ class Config:
         return path if path.is_absolute() else (self.directory.parent / path).resolve()
 
     def assert_current(self) -> None:
-        if load_config(self.directory).config_hash != (self.source_config_hash or self.config_hash):
-            raise HumanRequired("POLICY_CHANGED: frozen run cannot acquire new authority")
+        self._current_source()
+
+    def _current_source(self):
+        current = load_config(self.directory)
+        if current.config_hash == (self.source_config_hash or self.config_hash):
+            return current
+        if self.model_reload_baseline and model_reload_hash(current.data) == self.model_reload_baseline:
+            return current
+        raise HumanRequired("POLICY_CHANGED: frozen run cannot acquire new authority")
+
+    def model_settings(self):
+        current = self._current_source()
+        return current.app['model'] if self.model_reload_baseline else self.app['model']
 
     def require_external(self, capability: str, approval: dict | None = None) -> None:
         if self.mode == "offline":

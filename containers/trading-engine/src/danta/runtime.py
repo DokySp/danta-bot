@@ -594,6 +594,34 @@ class ExternalRuntime:
         self.quote_subscription_lock = threading.RLock()
         self.entry_quote_symbols = set()
         self.instrument_names = {}
+        self.verified_models = {config.app['model']['model_id']}
+        self.model_probe_lock = threading.Lock()
+
+    def _model_for_call(self):
+        if not self.config.model_reload_baseline:
+            return self.codex
+        settings = self.config.model_settings()
+        if not settings['model_id'] or not settings['reasoning_effort']:
+            raise AdapterError('MODEL_CONFIGURATION_UNSET')
+        # Each call owns its selection; another chat/review or config edit cannot mutate it.
+        adapter = copy(self.codex)
+        adapter.model_id, adapter.reasoning_effort = settings['model_id'], settings['reasoning_effort']
+        with self.model_probe_lock:
+            if adapter.model_id not in self.verified_models:
+                from .adapters.isolation_probe import probe
+                try:
+                    probe(adapter.model_id)
+                except AssertionError:
+                    raise AdapterError('MODEL_ISOLATION_PROBE_FAILED') from None
+                self.verified_models.add(adapter.model_id)
+        expected = (adapter.model_id, adapter.reasoning_effort, adapter.auth_mode)
+        def authorize(_operation, model, effort, auth_mode):
+            self.config.assert_current()
+            self.config.require_external('model_call', self.approval)
+            if (model, effort, auth_mode) != expected:
+                raise HumanRequired('Runtime model identity changed')
+        adapter.authorize = authorize
+        return adapter
 
     def _instruments(self, now):
         mapping = self.manifest["normalization"]["instruments"]
@@ -1107,6 +1135,7 @@ class ExternalRuntime:
 
     def decide(self,frozen,*,on_progress=None):
         self.config.require_external("model_call",self.approval)
+        codex = self._model_for_call()
         store = getattr(self.broker,"store",None)
         if store is None:
             raise AdapterError("MODEL_JOURNAL_STORE_UNBOUND")
@@ -1133,11 +1162,11 @@ class ExternalRuntime:
             completed_at = self.clock()
             return validate_proposal(value,frozen,current_account_version=frozen["portfolio"]["account_state_version"],
                 current_facts_hash=digest([frozen["events"],frozen["facts"]]),completed_at=completed_at,now=completed_at)
-        result = self.codex.run(enriched,DecisionProposal.model_json_schema(),attempt_root=attempt_root,
+        result = codex.run(enriched,DecisionProposal.model_json_schema(),attempt_root=attempt_root,
             prompt=(ROOT/"prompts/portfolio_decision.md").read_text(),validate_schema=lambda value:DecisionProposal.model_validate(value),
             validate_semantic=validate_at_completion,on_progress=on_progress,
             expires_at=started_at+timedelta(seconds=self.config.app["model"]["timeout_seconds"]+self.profile["orders"]["decision_max_age_seconds"]))
-        self._record_model_result(store, frozen, call_id, attempt_root, started_at, result, purpose="review")
+        self._record_model_result(store, frozen, call_id, attempt_root, started_at, result, purpose="review", codex=codex)
         if result.status != "SUCCESS":
             raise AdapterError("MODEL_"+result.status)
         return result.decision.model_dump(mode="json") if hasattr(result.decision,"model_dump") else result.decision
@@ -1147,6 +1176,7 @@ class ExternalRuntime:
         """A frozen read-only account view, without broker or settings authority."""
         self.config.assert_current()
         self.config.require_external("model_call", self.approval)
+        codex = self._model_for_call()
         store = getattr(self.broker, "store", None)
         if store is None:
             raise AdapterError("MODEL_JOURNAL_STORE_UNBOUND")
@@ -1169,12 +1199,12 @@ class ExternalRuntime:
             return value
         call_id, started_at = str(uuid4()), self.clock()
         attempt_root = self.config.state_dir / "model-attempts" / call_id
-        result = self.codex.run(frozen, schema, attempt_root=attempt_root,
+        result = codex.run(frozen, schema, attempt_root=attempt_root,
             prompt=(ROOT / "prompts/general_chat.md").read_text(), validate_schema=validate_reply,
             validate_semantic=lambda _value: True,
             expires_at=started_at + timedelta(seconds=self.config.app["model"]["timeout_seconds"]),
             on_progress=on_progress, cancel=cancel)
-        self._record_model_result(store, frozen, call_id, attempt_root, started_at, result, purpose="chat")
+        self._record_model_result(store, frozen, call_id, attempt_root, started_at, result, purpose="chat", codex=codex)
         if result.status != "SUCCESS":
             return {"status": "MODEL_" + result.status, "session_id": session_id,
                     "reply_text": {"CANCELED": "현재 대화 응답을 중단했습니다. 보호 감시는 계속됩니다.",
@@ -1188,15 +1218,15 @@ class ExternalRuntime:
         return {"status": "CHAT_COMPLETE", "session_id": session_id, "reply_text": value["reply_text"],
                 "model_called": result.attempts > 0, "orders_created": False}
 
-    def _record_model_result(self, store, frozen, call_id, attempt_root, started_at, result, *, purpose):
+    def _record_model_result(self, store, frozen, call_id, attempt_root, started_at, result, *, purpose, codex):
         attempts = []
         for path in sorted(attempt_root.glob("*/result.json"),key=lambda item:(item.stat().st_mtime_ns,str(item))):
             record = _json(path)
             attempts.append({"attempt_id":path.parent.name,"status":record["status"],"usage":record.get("usage"),
                              "diagnostic": record.get("diagnostic"),
                              "input_sha256":record["input_sha256"],"provenance":record.get("provenance")})
-        metadata = {"call_id":call_id,"input_snapshot_id":frozen["input_snapshot_id"],"model_id":self.codex.model_id,
-                    "provider":"codex_cli","reasoning_effort":self.codex.reasoning_effort,"purpose":purpose,
+        metadata = {"call_id":call_id,"input_snapshot_id":frozen["input_snapshot_id"],"model_id":codex.model_id,
+                    "provider":"codex_cli","reasoning_effort":codex.reasoning_effort,"purpose":purpose,
                     **{key: frozen[key] for key in ("created_at", "strategy_hash", "config_hash", "code_id") if key in frozen}}
         with store.transaction():
             health = {"status": result.status, "checked_at": self.clock().isoformat(),
