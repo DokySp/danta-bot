@@ -9,10 +9,17 @@ from unittest.mock import patch
 
 from danta.adapters import AdapterError, HttpResponse
 from danta.adapters.kis import KisAdapter, KisCredentials
-from danta.adapters.kis_stream import COLUMNS, BOOK_COLUMNS, connect, parse_records
+from danta.adapters.kis_stream import COLUMNS, connect, parse_records
 
 
 NOW = datetime(2026, 9, 18, 1, 0, 0, tzinfo=timezone.utc)
+# Synthetic 63-field H0STASP0 payload in portal order, independent of production columns.
+BOOK_PAYLOAD = ('005930^100006^0^'
+                '70200^70300^70400^70500^70600^70700^70800^70900^71000^71100^'
+                '70100^70000^69900^69800^69700^69600^69500^69400^69300^69200^'
+                '3^4^5^6^7^8^9^10^11^12^'
+                '4^5^6^7^8^9^10^11^12^13^'
+                '100^200^0^0^0^0^0^0^0^0^900^0^0^0^0^0^70150^7^1^2')
 
 
 def record(ticker="005930", **changes):
@@ -89,16 +96,38 @@ class Transport:
 
 
 class KisStreamTests(unittest.TestCase):
+    def test_portal_book_schema_maps_multiple_records_and_rejects_wrong_lengths(self):
+        self.assertEqual(len(BOOK_PAYLOAD.split('^')), 63)
+        rows = parse_records('0|H0STASP0|002|' + BOOK_PAYLOAD + '^' + BOOK_PAYLOAD.replace('005930', '000660'))
+        self.assertEqual(rows[1]['MKSC_SHRN_ISCD'], '000660')
+        self.assertEqual({key: rows[0][key] for key in ('ASKP1', 'BIDP1', 'ASKP_RSQN1', 'BIDP_RSQN1',
+            'MID_PRC', 'MIDP_TOTAL_RSQN', 'MIDP_CLS_CODE', 'MARKET_CLS_CODE')},
+            dict(ASKP1='70200', BIDP1='70100', ASKP_RSQN1='3', BIDP_RSQN1='4',
+                 MID_PRC='70150', MIDP_TOTAL_RSQN='7', MIDP_CLS_CODE='1', MARKET_CLS_CODE='2'))
+        for values in (BOOK_PAYLOAD.split('^')[:59], BOOK_PAYLOAD.split('^')[:62], BOOK_PAYLOAD.split('^') + ['0']):
+            with self.subTest(fields=len(values)), self.assertRaisesRegex(AdapterError, 'STREAM_FIELD_COUNT_INVALID'):
+                parse_records('0|H0STASP0|001|' + '^'.join(values))
+
+    def test_nonregular_book_cannot_override_fresh_regular_trade(self):
+        ws = self.start()
+        self.until(lambda: '005930' in self.adapter._stream.book_active)
+        self.now += timedelta(seconds=6)
+        ws.incoming.put(frame(record(STCK_CNTG_HOUR='100006')))
+        self.until(self.quote_ready)
+        for market in ('1', '3', '5', ''):
+            with self.subTest(market=market):
+                ws.incoming.put('0|H0STASP0|001|' + BOOK_PAYLOAD.rsplit('^', 1)[0] + '^' + market)
+                self.until(lambda: self.adapter._stream.books.get('005930', ({}, None))[0].get('MARKET_CLS_CODE') == market)
+                with self.assertRaisesRegex(AdapterError, 'STREAM_SESSION_INVALID'):
+                    self.adapter.stream_quote('005930')
+
     def test_fresh_book_survives_trade_silence_but_not_halt_or_disconnect(self):
         ws = self.start()
         ws.incoming.put(frame(record()))
         self.until(self.quote_ready)
         self.until(lambda:'005930' in self.adapter._stream.book_active)
         self.now += timedelta(seconds=6)
-        book = {field:'0' for field in BOOK_COLUMNS}
-        book.update(MKSC_SHRN_ISCD='005930',BSOP_HOUR='100006',HOUR_CLS_CODE='0',
-                    ASKP1='70200',BIDP1='70100',ASKP_RSQN1='3',BIDP_RSQN1='4')
-        ws.incoming.put('0|H0STASP0|001|'+'^'.join(book[field] for field in BOOK_COLUMNS))
+        ws.incoming.put('0|H0STASP0|001|' + BOOK_PAYLOAD)
         self.until(lambda:'005930' in self.adapter._stream.books)
         quote = self.adapter.stream_quote('005930')
         self.assertEqual(quote.metadata['tr_id'],'H0STASP0')

@@ -23,10 +23,11 @@ PRDY_VOL_VRSS_ACML_VOL_RATE OPRC_HOUR OPRC_VRSS_PRPR_SIGN OPRC_VRSS_PRPR HGPR_HO
 HGPR_VRSS_PRPR LWPR_HOUR LWPR_VRSS_PRPR_SIGN LWPR_VRSS_PRPR BSOP_DATE NEW_MKOP_CLS_CODE TRHT_YN
 ASKP_RSQN1 BIDP_RSQN1 TOTAL_ASKP_RSQN TOTAL_BIDP_RSQN VOL_TNRT PRDY_SMNS_HOUR_ACML_VOL
 PRDY_SMNS_HOUR_ACML_VOL_RATE HOUR_CLS_CODE MRKT_TRTM_CLS_CODE VI_STND_PRC MARKET_CLS_CODE""".split())
-# KIS official examples_llm/domestic_stock/asking_price_krx/asking_price_krx.py
+# KIS portal H0STASP0, updated 2026-09-11: 63 fields (GitHub's sample still has 59).
+# https://apiportal.koreainvestment.com/apiservice-apiservice?/tryitout/H0STASP0
 BOOK_COLUMNS = (('MKSC_SHRN_ISCD','BSOP_HOUR','HOUR_CLS_CODE') +
                 tuple(f'{prefix}{i}' for prefix in ('ASKP','BIDP','ASKP_RSQN','BIDP_RSQN') for i in range(1,11)) +
-                tuple('TOTAL_ASKP_RSQN TOTAL_BIDP_RSQN OVTM_TOTAL_ASKP_RSQN OVTM_TOTAL_BIDP_RSQN ANTC_CNPR ANTC_CNQN ANTC_VOL ANTC_CNTG_VRSS ANTC_CNTG_VRSS_SIGN ANTC_CNTG_PRDY_CTRT ACML_VOL TOTAL_ASKP_RSQN_ICDC TOTAL_BIDP_RSQN_ICDC OVTM_TOTAL_ASKP_ICDC OVTM_TOTAL_BIDP_ICDC STCK_DEAL_CLS_CODE'.split()))
+                tuple('TOTAL_ASKP_RSQN TOTAL_BIDP_RSQN OVTM_TOTAL_ASKP_RSQN OVTM_TOTAL_BIDP_RSQN ANTC_CNPR ANTC_CNQN ANTC_VOL ANTC_CNTG_VRSS ANTC_CNTG_VRSS_SIGN ANTC_CNTG_PRDY_CTRT ACML_VOL TOTAL_ASKP_RSQN_ICDC TOTAL_BIDP_RSQN_ICDC OVTM_TOTAL_ASKP_ICDC OVTM_TOTAL_BIDP_ICDC STCK_DEAL_CLS_CODE MID_PRC MIDP_TOTAL_RSQN MIDP_CLS_CODE MARKET_CLS_CODE'.split()))
 
 
 def connect(url):
@@ -123,10 +124,10 @@ class KisQuoteStream:
                 book, received = self.books[ticker]
                 try:
                     stamp = datetime.strptime(self.latest[ticker].strftime('%Y%m%d')+book['BSOP_HOUR'],'%Y%m%d%H%M%S').replace(tzinfo=SEOUL)
-                    if book['HOUR_CLS_CODE'] != '0':
+                    if book['HOUR_CLS_CODE'] != '0' or book['MARKET_CLS_CODE'] != '2':
                         raise AdapterError('STREAM_SESSION_INVALID')
                     if 0 <= (now-stamp).total_seconds() <= 5 and 0 <= (now-received).total_seconds() <= 5:
-                        return FetchResult(({**book,'BSOP_DATE':stamp.strftime('%Y%m%d'),'MARKET_CLS_CODE':'2'},),
+                        return FetchResult(({**book,'BSOP_DATE':stamp.strftime('%Y%m%d')},),
                                            'COMPLETE',received,metadata={'tr_id':'H0STASP0','source':'KIS:H0STASP0'})
                 except ValueError:
                     raise AdapterError('STREAM_TIMESTAMP_INVALID') from None
