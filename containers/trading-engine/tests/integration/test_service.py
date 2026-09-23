@@ -6,6 +6,7 @@ import base64
 import html
 import io
 import json
+import sqlite3
 from pathlib import Path
 import tempfile
 import threading
@@ -98,6 +99,11 @@ class FakeApp:
 
 
 class ServiceIntegrationTests(unittest.TestCase):
+    def test_idle_worker_does_not_take_ledger_writer_lock(self):
+        with patch.object(self.app.store,'transaction',side_effect=AssertionError('idle writer lock')):
+            self.assertFalse(self.service.run_once(review=True))
+            self.assertFalse(self.service.run_once())
+
     def setUp(self):
         self.no_network = patch('socket.socket', side_effect=AssertionError('Network forbidden in service tests'))
         self.no_network.start()
@@ -581,6 +587,16 @@ class ServiceIntegrationTests(unittest.TestCase):
             self.assertEqual(main(['--config-dir', str(self.directory), 'serve']), 0)
             self.assertEqual(json.loads(output.getvalue()), {'status': 'STOPPED'})
             close.assert_not_called()
+
+    def test_worker_stops_even_if_failure_journal_cannot_be_written(self):
+        with patch.object(self.service,'queue_tick',side_effect=sqlite3.OperationalError('fixture')), \
+                patch.object(self.service.store,'event',side_effect=sqlite3.OperationalError('fixture journal')):
+            self.service.start()
+            try:
+                self.assertTrue(self.service.stop.wait(3))
+                self.assertTrue(self.service.worker_failed)
+            finally:
+                self.service.close()
 
     def test_worker_failure_reaches_serve_and_cli_after_cleanup_without_error_text(self):
         data = self.config.data

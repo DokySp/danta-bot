@@ -87,8 +87,23 @@ class RuntimeState:
         self.lock = threading.RLock()
         self.db = sqlite3.connect(self.path,timeout=30,isolation_level=None,check_same_thread=False)
         self.db.row_factory = sqlite3.Row
-        self.db.execute("CREATE TABLE IF NOT EXISTS runtime_cache(namespace TEXT PRIMARY KEY,payload TEXT NOT NULL)")
-        self.data = {row["namespace"]:json.loads(row["payload"]) for row in self.db.execute("SELECT namespace,payload FROM runtime_cache")}
+        # Large disclosure documents must not hold the trading ledger's writer lock.
+        cache_path = self.path.with_name(self.path.stem+'-cache.sqlite')
+        self.cache_db = sqlite3.connect(cache_path,timeout=30,
+                                       isolation_level=None,check_same_thread=False)
+        cache_path.chmod(0o600)
+        self.cache_db.execute("CREATE TABLE IF NOT EXISTS runtime_cache(namespace TEXT PRIMARY KEY,payload TEXT NOT NULL)")
+        if (not self.cache_db.execute('SELECT 1 FROM runtime_cache LIMIT 1').fetchone() and
+                self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='runtime_cache'").fetchone()):
+            self.cache_db.execute('BEGIN IMMEDIATE')
+            try:
+                self.cache_db.executemany('INSERT INTO runtime_cache VALUES (?,?)',
+                                         self.db.execute('SELECT namespace,payload FROM runtime_cache').fetchall())
+                self.cache_db.execute('COMMIT')
+            except BaseException:
+                self.cache_db.execute('ROLLBACK')
+                raise
+        self.data = {row[0]:json.loads(row[1]) for row in self.cache_db.execute("SELECT namespace,payload FROM runtime_cache")}
         for namespace in ("observations","events","circuit"):
             self.data.setdefault(namespace,{})
 
@@ -96,14 +111,18 @@ class RuntimeState:
         with self.lock:
             # Serialize only changed namespaces, before taking SQLite's writer lock.
             values = [(key, canonical(self.data[key])) for key in (namespaces if namespaces is not None else self.data)]
-            self.db.execute("BEGIN IMMEDIATE")
+            self.cache_db.execute("BEGIN IMMEDIATE")
             try:
-                self.db.executemany("INSERT INTO runtime_cache VALUES (?,?) ON CONFLICT(namespace) DO UPDATE SET payload=excluded.payload",
+                self.cache_db.executemany("INSERT INTO runtime_cache VALUES (?,?) ON CONFLICT(namespace) DO UPDATE SET payload=excluded.payload",
                                     values)
-                self.db.execute("COMMIT")
-            except Exception:
-                self.db.execute("ROLLBACK")
+                self.cache_db.execute("COMMIT")
+            except BaseException:
+                self.cache_db.execute("ROLLBACK")
                 raise
+
+    def close(self):
+        self.cache_db.close()
+        self.db.close()
 
     def known_order(self,namespace,broker_id):
         with self.lock:
@@ -708,7 +727,7 @@ class ExternalRuntime:
 
     def close(self):
         self.kis.close()
-        self.state.db.close()
+        self.state.close()
 
     def _events(self,instruments,now):
         self.disclosure_diagnostics = list(self.state.data.get("disclosure_diagnostics",[]))

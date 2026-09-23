@@ -273,7 +273,7 @@ class ExternalRuntimeContracts(unittest.TestCase):
     def test_targeted_quote_refresh_does_not_repeat_account_or_other_holdings(self):
         bundle,_broker,decide,_refresh = self._factory()
         runtime = decide.__self__
-        self.addCleanup(runtime.state.db.close)
+        self.addCleanup(runtime.state.close)
         with patch.object(runtime,'_account',side_effect=AssertionError('unneeded account read')), \
                 patch.object(runtime,'_protection_symbols',return_value={'KRX:000002'}), \
                 patch.object(runtime,'_subscribe_quotes',return_value=set()), \

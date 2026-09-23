@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
 import json
+import sqlite3
 import os
 from pathlib import Path
 import signal
@@ -138,7 +139,7 @@ class Service:
         if session is None:
             return 0
         queued = 0
-        with self.store.transaction():
+        with self.store.lock:
             discretionary = self.store.get('discretionary_schedule', self.scheduler['enabled']) and not self.store.get('paused', False)
             scheduled = self.store.db.execute(
                 "SELECT request_id,request_key,status,result FROM requests WHERE request_key LIKE 'service:schedule:%'").fetchall()
@@ -181,13 +182,21 @@ class Service:
 
     def run_once(self, *, review=False, chat=None):
         row = None
+        # Idle workers are readers. Take the writer lock only to claim actual work.
+        candidates = self.store.read("SELECT * FROM requests WHERE request_key LIKE 'service:%' AND status='ACCEPTED' ORDER BY rowid")
+        candidates = [candidate for candidate in candidates if
+                      self._review_job(json.loads(candidate['payload'])) == review and
+                      (chat is None or (json.loads(candidate['payload']).get('command') == 'chat') == chat)]
+        if not candidates:
+            return False
         with self.store.transaction():
-            for candidate in self.store.db.execute("SELECT * FROM requests WHERE request_key LIKE 'service:%' AND status='ACCEPTED' ORDER BY rowid").fetchall():
+            for candidate in candidates:
                 payload = json.loads(candidate['payload'])
                 if self._review_job(payload) == review and (chat is None or (payload.get('command') == 'chat') == chat):
-                    row = dict(candidate)
-                    self.store.db.execute("UPDATE requests SET status='RUNNING' WHERE request_id=?", (row['request_id'],))
-                    break
+                    claimed = self.store.db.execute("UPDATE requests SET status='RUNNING' WHERE request_id=? AND status='ACCEPTED'", (candidate['request_id'],))
+                    if claimed.rowcount:
+                        row = dict(candidate)
+                        break
         if row is None:
             return False
         payload = json.loads(row['payload'])
@@ -618,10 +627,16 @@ class Service:
                     frames = [{'file': Path(frame.filename).name, 'line': frame.lineno, 'function': frame.name}
                               for frame in traceback.extract_tb(error.__traceback__)[-5:]]
                     detail = {'error_type': type(error).__name__, 'frames': frames}
+                    if isinstance(error,sqlite3.Error):
+                        detail['sqlite_error'] = getattr(error,'sqlite_errorname','UNKNOWN')
                     log_event('SERVICE_WORKER_FAILED', **detail)
-                    with self.store.transaction():
-                        self.store.event('service', 'SERVICE_WORKER_FAILED', detail, notify=True)
-                    self.stop.set()
+                    try:
+                        with self.store.transaction():
+                            self.store.event('service', 'SERVICE_WORKER_FAILED', detail, notify=True)
+                    except sqlite3.Error as journal_error:
+                        log_event('SERVICE_FAILURE_RECORD_FAILED', sqlite_error=getattr(journal_error,'sqlite_errorname','UNKNOWN'))
+                    finally:
+                        self.stop.set()
         def notify():
             while not self.stop.wait(1):
                 try:
