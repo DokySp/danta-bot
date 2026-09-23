@@ -571,8 +571,12 @@ class Service:
             if row is None:
                 return False
             row = dict(row)
+            payload = json.loads(row['payload'])
+            if row['event_key'].isdigit():
+                event = self.store.db.execute('SELECT created_at FROM journal WHERE sequence=?', (row['event_key'],)).fetchone()
+                if event:
+                    payload['occurred_at'] = event['created_at']
             self.store.db.execute("UPDATE outbox SET state='SENDING',attempts=attempts+1 WHERE id=?", (row['id'],))
-        payload = json.loads(row['payload'])
         tg = self.config.app['telegram']
         route = payload.get('route') or tg['route']
         chat = payload.get('chat_id')

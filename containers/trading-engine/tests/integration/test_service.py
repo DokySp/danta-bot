@@ -175,6 +175,19 @@ class ServiceIntegrationTests(unittest.TestCase):
             with patch.dict(os.environ, APP_VERSION=' '):
                 self.assertEqual(app_version(), 'dev')
 
+    def test_pending_operational_alerts_show_original_journal_time_on_retry(self):
+        for kind in ('SERVICE_WORKER_FAILED', 'MONITOR_DEGRADED', 'ACCOUNT_INCOMPLETE'):
+            with self.subTest(kind=kind), self.app.store.transaction():
+                event_id = self.app.store.event('service', kind, {'error_type': 'OperationalError'}, notify=True)
+                self.app.store.db.execute('UPDATE journal SET created_at=? WHERE sequence=?',
+                    ('2026-09-23T02:06:50+00:00', event_id))
+            self.fail_send = True
+            self.assertFalse(self.service.outbox_once())
+            self.fail_send = False
+            self.assertTrue(self.service.outbox_once())
+            self.assertIn('발생 시각: 2026-09-23 11:06:50 KST', self.sent[-1]['text'])
+            self.assertEqual(self.sent[-1], self.sent[-2])
+
     def test_auth_durable_receipt_and_identical_update_deduplication(self):
         first = self.receive()
         duplicate = self.receive()

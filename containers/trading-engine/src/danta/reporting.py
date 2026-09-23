@@ -86,7 +86,7 @@ LABELS = {
     'fee_delta_krw': '추가 수수료·세금', 'cumulative_notional': '누적 체결 금액', 'amount_krw': '체결 금액',
     'fee_krw': '수수료·세금', 'price': '현재가', 'mark': '평가 단가', 'value': '평가 금액',
     'average_entry': '평균 매입가', 'current_stop': '보호 기준가', 'initial_stop': '최초 보호 기준가',
-    'created_at': '생성 시각', 'at': '시각', 'as_of': '기준 시각', 'observed_at': '관측 시각',
+    'created_at': '생성 시각', 'occurred_at': '발생 시각', 'at': '시각', 'as_of': '기준 시각', 'observed_at': '관측 시각',
     'updated_at': '갱신 시각', 'retry_at': '재시도 예정', 'expires_at': '만료 시각', 'resets_at': '한도 초기화',
     'completed': '마감 확정', 'quality': '자료 품질', 'valuation_quality': '평가 품질', 'coverage': '자료 완결성',
     'nav': '전략 자산', 'pnl': '누적 손익', 'twr': '누적 시간가중 수익률', 'max_drawdown': '최대 낙폭',
@@ -319,12 +319,15 @@ def render_notification(payload, *, symbols=None) -> str:
         title = '계좌 조회 재확인 중' if kind == 'ACCOUNT_INCOMPLETE' else '보호 감시 재확인 중'
         impact = ('계좌 확인 전까지 신규 투자 판단을 보류합니다.' if kind == 'ACCOUNT_INCOMPLETE' else
                   '현재 자료로 보호 조건을 모두 확인하지 못했습니다. 신규 위험을 늘리지 않습니다.')
+        if data.get('occurred_at'):
+            title += '\n발생 시각: ' + _time(data['occurred_at'])
         return '\n'.join([title, '확인된 문제: ' + diagnostic_text(data, symbols=symbols), '영향: ' + impact,
                           '자동으로 다시 확인합니다. /status에서 현재 상태와 확인 시각을 볼 수 있습니다.'])
     if kind in {'ACCOUNT_RECOVERED', 'MONITOR_RECOVERED'}:
         return (('계좌 조회가 복구되었습니다. 잔고·주문 자료 대조를 마쳤습니다.' if kind == 'ACCOUNT_RECOVERED' else
                  '보호 감시가 복구되었습니다. 60초 동안 정상 확인이 이어졌습니다.') +
-                ('\n확인 시각: ' + _time(data['checked_at']) if data.get('checked_at') else ''))
+                ('\n확인 시각: ' + _time(data.get('checked_at') or data['occurred_at'])
+                 if data.get('checked_at') or data.get('occurred_at') else ''))
     if kind == 'SERVICE_REQUEST_RECOVERED':
         return '재시작으로 중단된 이전 작업은 자동 재실행하지 않았습니다.\n계좌·주문은 감시 루프에서 자동으로 대조합니다. 현재 상태는 /status에서 확인할 수 있습니다.'
     if status == 'CANDIDATE_CONTROLS':
@@ -421,7 +424,7 @@ def render_notification(payload, *, symbols=None) -> str:
     titles = {'MONITOR_DEGRADED': '보호 감시에 문제가 생겼습니다.', 'MONITOR_RECOVERED': '보호 감시가 복구되었습니다.',
               'ACCOUNT_INCOMPLETE': '계좌 조회가 완료되지 않았습니다.', 'DISCRETIONARY_PAUSED': '신규 투자 판단이 일시정지되었습니다.',
               'DRAWDOWN_PAUSED': '낙폭 한도에 도달해 신규 투자를 일시정지했습니다.',
-              'SERVICE_WORKER_FAILED': '서비스 작업이 중단되었습니다.', 'SERVICE_REQUEST_RECOVERED': '재시작 후 이전 작업 상태를 확인했습니다.',
+              'SERVICE_WORKER_FAILED': '서비스 작업 중단 기록입니다.', 'SERVICE_REQUEST_RECOVERED': '재시작 후 이전 작업 상태를 확인했습니다.',
               'NOTIFY_BLOCKED': '알림 전송이 중단되었습니다.'}
     title = titles.get(kind, '운영 상태' if 'mode' in data and 'holdings' in data else '처리 결과')
     lines = _lines({key: value for key, value in data.items() if key != 'kind'}, symbols=symbols)
