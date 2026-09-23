@@ -270,6 +270,19 @@ class ExternalRuntimeContracts(unittest.TestCase):
         self.assertEqual(protected.candidates,bundle.candidates)
         self.assertEqual(protected.candidates[0].coverage,"PARTIAL")
 
+    def test_targeted_quote_refresh_does_not_repeat_account_or_other_holdings(self):
+        bundle,_broker,decide,_refresh = self._factory()
+        runtime = decide.__self__
+        self.addCleanup(runtime.state.db.close)
+        with patch.object(runtime,'_account',side_effect=AssertionError('unneeded account read')), \
+                patch.object(runtime,'_protection_symbols',return_value={'KRX:000002'}), \
+                patch.object(runtime,'_subscribe_quotes',return_value=set()), \
+                patch.object(runtime,'_quote',wraps=runtime._quote) as quote, \
+                patch('danta.adapters.kis.utcnow',return_value=self.now):
+            refreshed = runtime.refresh_quotes(['KRX:000001'])
+        self.assertEqual([call.args[0].instrument_id for call in quote.call_args_list],['KRX:000001'])
+        self.assertIn('KRX:000001',refreshed.quotes)
+
     def test_protection_refresh_finishes_while_disclosure_collection_is_blocked(self):
         bundle,broker,decide,refresh = self._factory()
         runtime = decide.__self__

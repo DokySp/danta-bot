@@ -104,11 +104,13 @@ class Application:
                  decide: Callable[[dict], dict] | None = None, approval: dict | None = None,
                  refresh: Callable[[], MarketBundle] | None = None,
                  protection_refresh: Callable[[], MarketBundle] | None = None,
+                 quote_refresh: Callable[..., MarketBundle] | None = None,
                  chat: Callable[..., dict] | None = None,
                  clock: Callable[[], datetime] | None = None):
         self.config, self.bundle, self.approval, self.refresh = config, bundle, approval, refresh
         self.chat = chat
         self.protection_refresh = protection_refresh
+        self.quote_refresh = quote_refresh
         self.clock = clock or ((lambda: self.bundle.now) if bundle.synthetic else
                                getattr(getattr(decide, "__self__", None), "clock", utcnow))
         self.profile = config.research if config.mode != "live" else config.data["strategy"]["strategy"]["live_mandate"]["accepted_risk_policy"]
@@ -235,6 +237,8 @@ class Application:
                         raise ValueError("STALE_ACCOUNT_VERSION")
                     self.executor.reconcile(self.bundle.data["account_snapshot"])
                     self._sync_theses()
+        if self.quote_refresh:
+            self.bundle = self.quote_refresh([intent.instrument_id])
         self._validate_order(intent, now)
 
     def _validate_order(self, intent: OrderIntent, now: datetime) -> None:
@@ -615,6 +619,8 @@ class Application:
             if self.protection_refresh and self.refresh:
                 self.bundle = self.refresh()
             protection = self.protect()
+            if self.quote_refresh:
+                self.bundle = self.quote_refresh([candidate.instrument.instrument_id for candidate in self.bundle.candidates])
             bundle = self.bundle
             if self.store.get("paused") or self.store.get("drawdown_paused", False):
                 result.update(run_status="BLOCKED", decision_status="NEW_RISK_PAUSED")
@@ -663,6 +669,11 @@ class Application:
             for candidate in candidates:
                 symbol = candidate.instrument.instrument_id
                 quote = bundle.quotes.get(symbol)
+                if self.quote_refresh and (quote is None or not quote_fresh(quote,self.clock(),self.profile['orders']['quote_max_age_seconds'])):
+                    bundle = self.bundle = self.quote_refresh([symbol])
+                    quote = bundle.quotes.get(symbol)
+                    details[symbol].update(evaluated_at=bundle.now.isoformat(),quote=quote.model_dump(mode='json') if quote else None,
+                                           quote_age_seconds=(bundle.now-quote.observed_at).total_seconds() if quote else None)
                 gate = assess_entry(candidate, quote, bundle.events, bundle.calendar, bundle.ticks, bundle.now, self.profile,
                     synthetic=bundle.synthetic, require_ai=False) if quote else None
                 if symbol not in held_ids and gate and gate.allowed:
@@ -727,9 +738,14 @@ class Application:
                     with self.store.transaction():
                         self._save_thesis(thesis.model_copy(update={"invalidating_event_ids": review.changed_event_ids}))
             protection = self.protect()
+            if self.quote_refresh:
+                self.bundle = self.quote_refresh([candidate.instrument.instrument_id for candidate in candidates])
             for candidate in rank_candidates([candidate.model_copy(update={"priority": verdicts[candidate.instrument.instrument_id].priority}) for candidate in candidates]):
                 instrument_id = candidate.instrument.instrument_id
                 quote = self.bundle.quotes.get(instrument_id)
+                if self.quote_refresh and (quote is None or not quote_fresh(quote,self.clock(),self.profile['orders']['quote_max_age_seconds'])):
+                    self.bundle = self.quote_refresh([instrument_id])
+                    quote = self.bundle.quotes.get(instrument_id)
                 details[instrument_id]['order_quote'] = {'checked_at':self.bundle.now.isoformat(),
                     'quote':quote.model_dump(mode='json') if quote else None,
                     'quote_age_seconds':(self.bundle.now-quote.observed_at).total_seconds() if quote else None}

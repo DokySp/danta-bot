@@ -23,6 +23,10 @@ PRDY_VOL_VRSS_ACML_VOL_RATE OPRC_HOUR OPRC_VRSS_PRPR_SIGN OPRC_VRSS_PRPR HGPR_HO
 HGPR_VRSS_PRPR LWPR_HOUR LWPR_VRSS_PRPR_SIGN LWPR_VRSS_PRPR BSOP_DATE NEW_MKOP_CLS_CODE TRHT_YN
 ASKP_RSQN1 BIDP_RSQN1 TOTAL_ASKP_RSQN TOTAL_BIDP_RSQN VOL_TNRT PRDY_SMNS_HOUR_ACML_VOL
 PRDY_SMNS_HOUR_ACML_VOL_RATE HOUR_CLS_CODE MRKT_TRTM_CLS_CODE VI_STND_PRC MARKET_CLS_CODE""".split())
+# KIS official examples_llm/domestic_stock/asking_price_krx/asking_price_krx.py
+BOOK_COLUMNS = (('MKSC_SHRN_ISCD','BSOP_HOUR','HOUR_CLS_CODE') +
+                tuple(f'{prefix}{i}' for prefix in ('ASKP','BIDP','ASKP_RSQN','BIDP_RSQN') for i in range(1,11)) +
+                tuple('TOTAL_ASKP_RSQN TOTAL_BIDP_RSQN OVTM_TOTAL_ASKP_RSQN OVTM_TOTAL_BIDP_RSQN ANTC_CNPR ANTC_CNQN ANTC_VOL ANTC_CNTG_VRSS ANTC_CNTG_VRSS_SIGN ANTC_CNTG_PRDY_CTRT ACML_VOL TOTAL_ASKP_RSQN_ICDC TOTAL_BIDP_RSQN_ICDC OVTM_TOTAL_ASKP_ICDC OVTM_TOTAL_BIDP_ICDC STCK_DEAL_CLS_CODE'.split()))
 
 
 def connect(url):
@@ -49,12 +53,13 @@ def parse_records(raw):
     if not isinstance(raw, str) or len(raw) > 1024 * 1024:
         raise AdapterError("STREAM_FRAME_INVALID")
     parts = raw.split("|")
-    if len(parts) != 4 or parts[:2] != ["0", "H0STCNT0"] or not re.fullmatch(r"[0-9]{3}", parts[2]):
+    if len(parts) != 4 or parts[0] != '0' or parts[1] not in {'H0STCNT0','H0STASP0'} or not re.fullmatch(r"[0-9]{3}", parts[2]):
         raise AdapterError("STREAM_FRAME_INVALID")
+    columns = COLUMNS if parts[1] == 'H0STCNT0' else BOOK_COLUMNS
     count, values = int(parts[2]), parts[3].split("^")
-    if count < 1 or len(values) != count * len(COLUMNS):
+    if count < 1 or len(values) != count * len(columns):
         raise AdapterError("STREAM_FIELD_COUNT_INVALID")
-    return tuple(dict(zip(COLUMNS, values[index:index + len(COLUMNS)])) for index in range(0, len(values), len(COLUMNS)))
+    return tuple(dict(zip(columns, values[index:index + len(columns)])) for index in range(0, len(values), len(columns)))
 
 
 def provider_time(record, now):
@@ -80,6 +85,7 @@ class KisQuoteStream:
         self.lock = threading.Lock()
         self.stop, self.wake = threading.Event(), threading.Event()
         self.targets, self.active = set(), set()
+        self.book_active, self.books = set(), {}
         self.cache, self.latest, self.errors = {}, {}, {}
         self.thread, self.ws = None, None
         self.connected, self.closed = False, False
@@ -94,6 +100,7 @@ class KisQuoteStream:
                 self.cache.pop(ticker, None)
             self.latest = {ticker: stamp for ticker, stamp in self.latest.items() if ticker in self.targets}
             self.errors = {ticker: error for ticker, error in self.errors.items() if ticker in self.targets}
+            self.books = {ticker: value for ticker,value in self.books.items() if ticker in self.targets}
             if self.targets and self.thread is None:
                 self.thread = threading.Thread(target=self._run, name="kis-quotes", daemon=True)
                 self.thread.start()
@@ -107,17 +114,32 @@ class KisQuoteStream:
                 raise AdapterError("STREAM_SYMBOL_NOT_SUBSCRIBED")
             if not self.connected:
                 raise AdapterError(self.error)
-            if ticker not in self.active or ticker not in self.cache:
+            if ticker not in self.active:
+                raise AdapterError(self.errors.get(ticker, "STREAM_NOT_READY"))
+            now = self.clock()
+            if (ticker in self.book_active and ticker in self.books and ticker in self.latest and
+                    self.latest[ticker].date() == now.astimezone(SEOUL).date() and
+                    self.errors.get(ticker) in {None,'STREAM_QUOTE_STALE'}):
+                book, received = self.books[ticker]
+                try:
+                    stamp = datetime.strptime(self.latest[ticker].strftime('%Y%m%d')+book['BSOP_HOUR'],'%Y%m%d%H%M%S').replace(tzinfo=SEOUL)
+                    if book['HOUR_CLS_CODE'] != '0':
+                        raise AdapterError('STREAM_SESSION_INVALID')
+                    if 0 <= (now-stamp).total_seconds() <= 5 and 0 <= (now-received).total_seconds() <= 5:
+                        return FetchResult(({**book,'BSOP_DATE':stamp.strftime('%Y%m%d'),'MARKET_CLS_CODE':'2'},),
+                                           'COMPLETE',received,metadata={'tr_id':'H0STASP0','source':'KIS:H0STASP0'})
+                except ValueError:
+                    raise AdapterError('STREAM_TIMESTAMP_INVALID') from None
+            if ticker not in self.cache:
                 raise AdapterError(self.errors.get(ticker, "STREAM_NOT_READY"))
             record, received = self.cache[ticker]
-            now = self.clock()
             try:
                 provider_time(record, now)
                 if not 0 <= (now - received).total_seconds() <= 5:
                     raise AdapterError("STREAM_QUOTE_STALE")
-            except AdapterError:
+            except AdapterError as error:
                 self.cache.pop(ticker, None)
-                self.errors[ticker] = "STREAM_QUOTE_STALE"
+                self.errors[ticker] = error.code
                 raise
             except (TypeError, ValueError, AttributeError):
                 self.cache.pop(ticker, None)
@@ -129,6 +151,8 @@ class KisQuoteStream:
         with self.lock:
             self.connected = False
             self.active.clear()
+            self.book_active.clear()
+            self.books.clear()
             self.cache.clear()
             self.latest.clear()
             self.errors.clear()
@@ -166,28 +190,42 @@ class KisQuoteStream:
                 if body["rt_cd"] != "0":
                     raise AdapterError("STREAM_SUBSCRIPTION_REJECTED")
                 expected = "SUBSCRIBE SUCCESS" if pending and pending[0] == "1" else "UNSUBSCRIBE SUCCESS"
-                if pending is None or header["tr_id"] != "H0STCNT0" or header["tr_key"] != pending[1] or body["msg1"] != expected:
+                if pending is None or header["tr_id"] != pending[2] or header["tr_key"] != pending[1] or body["msg1"] != expected:
                     raise AdapterError("STREAM_ACK_INVALID")
                 with self.lock:
+                    active = self.active if pending[2] == 'H0STCNT0' else self.book_active
                     if pending[0] == "1":
-                        self.active.add(pending[1])
+                        active.add(pending[1])
                     else:
-                        self.active.discard(pending[1])
-                        self.cache.pop(pending[1], None)
-                        self.latest.pop(pending[1], None)
+                        active.discard(pending[1])
+                        if pending[2] == 'H0STCNT0':
+                            self.cache.pop(pending[1], None)
+                            self.latest.pop(pending[1], None)
+                        else:
+                            self.books.pop(pending[1],None)
                 return True
             except (ValueError, TypeError, KeyError):
                 raise AdapterError("STREAM_ACK_INVALID") from None
         records, received = parse_records(raw), self.clock()
+        tr_id = raw.split('|',2)[1]
         with self.lock:
             for record in records:
                 ticker = record["MKSC_SHRN_ISCD"]
                 # Removed subscriptions can still deliver until their unsubscribe ACK.
-                if ticker not in self.active:
-                    if pending == ("1", ticker):
+                active = self.active if tr_id == 'H0STCNT0' else self.book_active
+                if ticker not in active:
+                    if pending == ("1", ticker, tr_id):
                         continue
                     raise AdapterError("STREAM_SYMBOL_UNEXPECTED")
                 if ticker not in self.targets:
+                    continue
+                if tr_id == 'H0STASP0':
+                    if not re.fullmatch(r'\d{6}',record['BSOP_HOUR']):
+                        raise AdapterError('STREAM_TIMESTAMP_INVALID')
+                    previous = self.books.get(ticker)
+                    if previous and record['BSOP_HOUR'] < previous[0]['BSOP_HOUR']:
+                        continue
+                    self.books[ticker] = (record,received)
                     continue
                 try:
                     stamp = provider_time(record, received)
@@ -202,13 +240,13 @@ class KisQuoteStream:
                 self.errors.pop(ticker, None)
         return False
 
-    def _change(self, ws, key, operation, ticker):
+    def _change(self, ws, key, operation, ticker, tr_id='H0STCNT0'):
         self.permit()
         ws.send(json.dumps({"header": {"approval_key": key, "custtype": "P", "tr_type": operation, "content-type": "utf-8"},
-                            "body": {"input": {"tr_id": "H0STCNT0", "tr_key": ticker}}}))
+                            "body": {"input": {"tr_id": tr_id, "tr_key": ticker}}}))
         deadline = time.monotonic() + 5
         while not self.stop.is_set() and time.monotonic() < deadline:
-            if self._receive(ws, (operation, ticker)):
+            if self._receive(ws, (operation, ticker, tr_id)):
                 self.stop.wait(0.1)
                 return
         raise AdapterError("STREAM_ACK_TIMEOUT")
@@ -236,10 +274,19 @@ class KisQuoteStream:
                     with self.lock:
                         removed = self.active - self.targets
                         added = self.targets - self.active
-                    if removed:
+                        # Preserve all 41 trade registrations; remaining slots carry
+                        # independent books. Uncovered books retain the REST fallback.
+                        book_targets = set(sorted(self.targets)[:max(0,41-len(self.targets))])
+                        removed_books = self.book_active-book_targets
+                        added_books = book_targets-self.book_active
+                    if removed_books:
+                        self._change(ws,key,'2',sorted(removed_books)[0],'H0STASP0')
+                    elif removed:
                         self._change(ws, key, "2", sorted(removed)[0])
                     elif added:
                         self._change(ws, key, "1", sorted(added)[0])
+                    elif added_books:
+                        self._change(ws,key,'1',sorted(added_books)[0],'H0STASP0')
                     else:
                         delay = 1
                         self._receive(ws)

@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from danta.adapters import AdapterError, HttpResponse
 from danta.adapters.kis import KisAdapter, KisCredentials
-from danta.adapters.kis_stream import COLUMNS, connect, parse_records
+from danta.adapters.kis_stream import COLUMNS, BOOK_COLUMNS, connect, parse_records
 
 
 NOW = datetime(2026, 9, 18, 1, 0, 0, tzinfo=timezone.utc)
@@ -28,8 +28,8 @@ def frame(*records):
     return "0|H0STCNT0|" + f"{len(records):03}" + "|" + "^".join(row[field] for row in records for field in COLUMNS)
 
 
-def ack(operation, ticker, success=True):
-    return json.dumps({"header": {"tr_id": "H0STCNT0", "tr_key": ticker},
+def ack(operation, ticker, success=True, tr_id='H0STCNT0'):
+    return json.dumps({"header": {"tr_id": tr_id, "tr_key": ticker},
                        "body": {"rt_cd": "0" if success else "1",
                                 "msg1": "SUBSCRIBE SUCCESS" if operation == "1" else "UNSUBSCRIBE SUCCESS"}})
 
@@ -45,8 +45,9 @@ class Socket:
         data = json.loads(raw)
         self.sent.append(data)
         operation, ticker = data["header"]["tr_type"], data["body"]["input"]["tr_key"]
-        if operation == "1" or self.auto_unsubscribe:
-            self.incoming.put(ack(operation, ticker))
+        tr_id = data['body']['input']['tr_id']
+        if operation == "1" or self.auto_unsubscribe or tr_id == 'H0STASP0':
+            self.incoming.put(ack(operation, ticker, tr_id=tr_id))
 
     def recv(self):
         try:
@@ -88,6 +89,30 @@ class Transport:
 
 
 class KisStreamTests(unittest.TestCase):
+    def test_fresh_book_survives_trade_silence_but_not_halt_or_disconnect(self):
+        ws = self.start()
+        ws.incoming.put(frame(record()))
+        self.until(self.quote_ready)
+        self.until(lambda:'005930' in self.adapter._stream.book_active)
+        self.now += timedelta(seconds=6)
+        book = {field:'0' for field in BOOK_COLUMNS}
+        book.update(MKSC_SHRN_ISCD='005930',BSOP_HOUR='100006',HOUR_CLS_CODE='0',
+                    ASKP1='70200',BIDP1='70100',ASKP_RSQN1='3',BIDP_RSQN1='4')
+        ws.incoming.put('0|H0STASP0|001|'+'^'.join(book[field] for field in BOOK_COLUMNS))
+        self.until(lambda:'005930' in self.adapter._stream.books)
+        quote = self.adapter.stream_quote('005930')
+        self.assertEqual(quote.metadata['tr_id'],'H0STASP0')
+        self.assertEqual(quote.records[0]['BIDP1'],'70100')
+        self.assertEqual(quote.retrieved_at,self.now)
+        ws.incoming.put(frame(record(TRHT_YN='Y',STCK_CNTG_HOUR='100006')))
+        self.until(lambda:self.adapter._stream.errors.get('005930') == 'STREAM_SESSION_INVALID')
+        with self.assertRaisesRegex(AdapterError,'STREAM_SESSION_INVALID'):
+            self.adapter.stream_quote('005930')
+        self.adapter._stream._reset('STREAM_CONNECTION_FAILED')
+        self.assertFalse(self.adapter._stream.books)
+        with self.assertRaisesRegex(AdapterError,'STREAM_CONNECTION_FAILED'):
+            self.adapter.stream_quote('005930')
+
     def setUp(self):
         self.now = NOW
         self.connector, self.transport = Connector(), Transport()

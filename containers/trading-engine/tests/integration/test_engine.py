@@ -35,6 +35,31 @@ class EngineCase(unittest.TestCase):
         finally:
             app.close()
 
+    def test_review_refreshes_after_slow_protection(self):
+        app = Application(self.config,self.bundle)
+        try:
+            calls = []
+            def slow_protection(**kwargs):
+                app.bundle.now += timedelta(seconds=6)
+                return app.bundle
+            def fresh_quotes(symbols):
+                calls.append(list(symbols))
+                for symbol in symbols:
+                    app.bundle.quotes[symbol] = app.bundle.quotes[symbol].model_copy(update={
+                        'observed_at':app.bundle.now,'received_at':app.bundle.now})
+                return app.bundle
+            app.protection_refresh,app.quote_refresh = slow_protection,fresh_quotes
+            result = app.review()
+            self.assertGreaterEqual(len(calls),2)
+            self.assertEqual(result['model_status'],'FIXTURE_RECORDED_RESPONSE')
+            row = result['review_details'][0]
+            self.assertEqual(row['stage'],'AI_REVIEWED')
+            self.assertTrue(row['ai'])
+            self.assertEqual(row['quote_age_seconds'],0)
+            self.assertTrue(row['evidence'])
+        finally:
+            app.close()
+
     def test_failed_review_reports_an_already_persisted_order(self):
         app = Application(self.config,self.bundle)
         submit = app.executor.submit

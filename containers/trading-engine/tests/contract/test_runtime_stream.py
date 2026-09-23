@@ -33,6 +33,14 @@ class QuoteCache:
 
 
 class RuntimeStreamContracts(unittest.TestCase):
+    def test_stream_book_uses_its_own_time_and_source(self):
+        raw = {**self.kis.raw,'BSOP_HOUR':self.now.strftime('%H%M%S')}
+        raw['STCK_CNTG_HOUR'] = (self.now-timedelta(seconds=30)).strftime('%H%M%S')
+        with patch.object(self.kis,'stream_quote',return_value=FetchResult((raw,),'COMPLETE',self.now,metadata={'tr_id':'H0STASP0'})):
+            quote = self.runtime._quote(self.instrument)
+        self.assertEqual(quote.observed_at,self.now)
+        self.assertEqual(quote.source,'KIS:H0STASP0')
+
     def setUp(self):
         self.fixture = contracts.ExternalRuntimeContracts(methodName="runTest")
         self.fixture.setUp()

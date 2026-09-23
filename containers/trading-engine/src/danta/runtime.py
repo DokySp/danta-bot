@@ -647,6 +647,8 @@ class ExternalRuntime:
         if result.quality != "COMPLETE" or len(result.records) != 1:
             raise ValueError("QUOTE_FETCH_INCOMPLETE")
         raw = result.records[0]
+        if result.metadata.get('tr_id') == 'H0STASP0':
+            fields = {**fields,'observed_time':'BSOP_HOUR','source':'KIS:H0STASP0'}
         if streaming and raw.get("MARKET_CLS_CODE") != "2":
             raise ValueError("QUOTE_MARKET_IS_NOT_REGULAR")
         observed = _timestamp(_field(raw,fields["session_date"]),_field(raw,fields["observed_time"]))
@@ -871,7 +873,8 @@ class ExternalRuntime:
                 bundle = copy(latest)
                 bundle.data = dict(latest.data)
                 bundle.data["runtime_diagnostics"] = [row for row in latest.data["runtime_diagnostics"]
-                                                       if row.get("scope") != "PROTECTION"]+incoming.data["runtime_diagnostics"]
+                    if row.get('scope') not in {'PROTECTION','ENTRY'} or
+                    row.get('instrument_id') not in incoming.data.get('quote_refresh_order',{})]+incoming.data["runtime_diagnostics"]
             observations = [item for item in (latest,incoming) if item is not None]
             account = max(observations,key=lambda item:item.data.get("account_refresh_order",0))
             for key in ("account_snapshot","broker_available_cash","strategy_sellable_quantities","account_refresh_order"):
@@ -905,16 +908,23 @@ class ExternalRuntime:
             return bundle
 
     def refresh_protection(self, *, allow_idle_account=False):
+        account,account_order = self._account(allow_idle=allow_idle_account)
+        return self.refresh_quotes(account=account,account_order=account_order)
+
+    def refresh_quotes(self, symbols=(), *, account=None, account_order=None):
+        """Read current quotes at their point of use; retain frozen evidence/account age."""
         self.config.assert_current()
         self.config.require_external("market_read",self.approval)
         with self.publish_lock:
             previous = self.latest_bundle
         if previous is None:
             raise HumanRequired("MONITOR_DEGRADED: VERIFIED_PROTECTION_REFERENCE_UNAVAILABLE")
-        account,account_order = self._account(allow_idle=allow_idle_account)
+        if account is None:
+            account,account_order = previous.data['account_snapshot'],previous.data['account_refresh_order']
         excluded = self._subscribe_quotes(account)
         quotes,depth,orders,diagnostics = {},{},{},[]
-        for symbol in sorted(self._protection_symbols(account)):
+        protected = self._protection_symbols(account)
+        for symbol in sorted(set(symbols) if symbols else protected):
             try:
                 if symbol in excluded:
                     raise ValueError("PROTECTED_STREAM_CAPACITY_EXCEEDED")
@@ -927,7 +937,7 @@ class ExternalRuntime:
             except (ValueError,KeyError,AdapterError) as error:
                 if isinstance(error,HumanRequired) or isinstance(error,AdapterError) and error.code in AUTH_ERRORS:
                     raise
-                diagnostics.append({"scope":"PROTECTION","instrument_id":symbol,"reason":"MONITOR_DEGRADED",
+                diagnostics.append({"scope":"PROTECTION" if symbol in protected else "ENTRY","instrument_id":symbol,"reason":"MONITOR_DEGRADED",
                                     "detail":getattr(error,"code",str(error))})
             orders[symbol] = time.monotonic_ns()
         bundle = copy(previous)
