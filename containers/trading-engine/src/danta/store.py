@@ -20,6 +20,16 @@ TERMINAL = {"FILLED", "CANCELED", "REJECTED", "EXPIRED", "PARTIAL_CANCELED", "IN
 WORKING = {"PLANNED", "VALIDATED", "SUBMITTING", "ACKNOWLEDGED", "PARTIALLY_FILLED", "UNKNOWN", "CANCEL_REQUESTED"}
 
 
+def _notice_identity(value):
+    # Timing changes on every failed attempt; the underlying incident may be identical.
+    if isinstance(value, dict):
+        return {key: _notice_identity(item) for key, item in value.items()
+                if key not in {'requested_at', 'elapsed_seconds', 'occurred_at', 'checked_at'}}
+    if isinstance(value, list):
+        return [_notice_identity(item) for item in value]
+    return value
+
+
 def locked(method):
     @wraps(method)
     def call(self, *args, **kwargs):
@@ -149,7 +159,7 @@ class Store:
         if notify and kind in {"ACCOUNT_INCOMPLETE", "RECONCILIATION", "MONITOR_DEGRADED", "SERVICE_WORKER_FAILED"}:
             key = "notice:" + kind
             previous = self.get(key, {})
-            fingerprint, now = digest(payload), utcnow()
+            fingerprint, now = digest(_notice_identity(payload)), utcnow()
             if (previous.get("fingerprint") == fingerprint and previous.get("at")
                     and (now - aware_time(previous["at"])).total_seconds() < 900):
                 notify = False

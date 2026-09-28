@@ -112,6 +112,20 @@ class OperatorExperienceTests(unittest.TestCase):
         self.assertEqual(store.read("SELECT COUNT(*) FROM journal WHERE kind='ACCOUNT_INCOMPLETE'")[0][0], 20)
         self.assertEqual(store.read('SELECT COUNT(*) FROM outbox')[0][0], 1)
 
+    def test_error_timestamps_do_not_repeat_notices_but_changed_causes_are_retained(self):
+        store = self.case.app.store
+        with store.transaction():
+            for index in range(3):
+                store.event('reconcile', 'ACCOUNT_INCOMPLETE', {'diagnostics': [{
+                    'endpoint':'inquire-psbl-order', 'reason':'TRANSIENT_FAILURE', 'http_status':500,
+                    'provider_code':'EGW00215', 'requested_at':str(index), 'elapsed_seconds':index}]}, notify=True)
+            store.event('reconcile', 'ACCOUNT_INCOMPLETE', {'diagnostics': [{
+                'endpoint':'inquire-psbl-order', 'reason':'AUTH_FAILED', 'http_status':401}]}, notify=True)
+        rows = store.read("SELECT payload FROM journal WHERE kind='ACCOUNT_INCOMPLETE'")
+        self.assertEqual(len(rows), 4)
+        self.assertEqual([json.loads(row[0])['diagnostics'][0]['requested_at'] for row in rows[:3]], ['0','1','2'])
+        self.assertEqual(store.read('SELECT COUNT(*) FROM outbox')[0][0], 2)
+
     def test_suppressed_failure_does_not_send_an_unpaired_recovery(self):
         store = self.case.app.store
         with store.transaction():

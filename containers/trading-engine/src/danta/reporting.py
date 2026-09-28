@@ -103,6 +103,9 @@ LABELS = {
     'cached_input_tokens': '재사용 입력 토큰', 'usage': '토큰 사용량', 'usage_status': '사용량 조회',
     'kind': '종류', 'count': '건수', 'scope': '대상', 'source': '출처', 'version': '버전',
     'endpoint': '조회 항목', 'http_status': '서버 응답 코드', 'provider_code': '증권사 오류 코드',
+    'provider_message': '증권사 응답', 'requested_at': '조회 시작 시각', 'elapsed_seconds': '소요 시간(초)',
+    'method': '요청 방식', 'tr_id': '증권사 조회 코드', 'field': '응답 항목',
+    'request_stage': '실패 단계',
     'transport_error': '통신 오류', 'failed_page': '실패한 조회 페이지', 'stable_seconds': '연속 정상 확인 시간(초)',
     'checked_at': '확인 시각', 'account_checked_at': '계좌 조회 시각', 'account_succeeded_at': '계좌 최근 성공',
     'monitor_checked_at': '감시 확인 시각', 'model_checked_at': '모델 최근 실행', 'model_id': '사용 모델',
@@ -158,6 +161,11 @@ STATES = {
     'ENTRY_ACCEPTED': '진입 조건 충족', 'KEEP_QUANTITY': '보유 수량 유지', 'UNEXECUTABLE': '현재 주문 실행 불가',
     'MONITOR_DEGRADED': '보호 감시 장애', 'MONITOR_RECOVERED': '보호 감시 복구',
     'BROKER_PAGINATION_INCOMPLETE': '증권사 계좌 조회가 끝까지 완료되지 않음',
+    'NO_MARGIN_BUYING_POWER_UNVERIFIED': '미수 없는 매수 가능 금액 확인 실패',
+    'NO_MARGIN_BUYING_POWER_EXCEEDED': '미수 없는 매수 가능 금액·수량 초과',
+    'PROVIDER_FIELD_MISSING': '증권사 응답에 필수 항목이 없음',
+    'PROVIDER_FIELD_UNVERIFIED': '증권사 응답값을 해석하지 못함',
+    'MALFORMED_RESPONSE': '증권사 응답 형식이 올바르지 않음',
     'ACCOUNT_INCOMPLETE': '계좌 조회 불완전', 'ORDER_RECONCILIATION_REQUIRED': '주문·체결 대조 필요',
     'RECONCILE_REQUIRED': '계좌·체결 대조 필요', 'PRICE_UNVERIFIED': '현재 가격 미확인',
     'STALE_QUOTE': '증권사 호가 시각이 오래되어 사용 불가',
@@ -182,6 +190,10 @@ STATES = {
     'OUTSIDE_SESSION': '장 운영 시간 밖 · 다음 거래 시간 대기',
     'HumanRequired': '자동 처리를 완료하지 못함', 'ACCOUNT_RECOVERED': '계좌 조회 복구',
     'balance': '잔고', 'orders': '주문·체결', 'cancelable': '취소 가능한 주문', 'reservations': '예약 주문',
+    'inquire-psbl-order': '미수 없는 매수 가능 금액 조회', 'inquire-balance': '잔고 조회',
+    'inquire-daily-ccld': '주문·체결 조회', 'inquire-psbl-rvsecncl': '취소 가능 주문 조회',
+    'order-resv-ccnl': '예약 주문 조회', 'account_normalization': '계좌 응답값 대조',
+    'AUTHORIZATION_CHECK': '권한 확인', 'TOKEN_PREPARATION': '인증 토큰 준비', 'BROKER_REQUEST': '증권사 요청·응답',
     'chat': '일반 대화', 'review': '투자 판단',
     'INTERRUPTED_RECONCILE_REQUIRED': '재시작으로 중단된 이전 작업 · 계좌 자동 대조 중',
     'OWNERSHIP_RECONCILIATION_REQUIRED': '보유 자산의 전략 귀속 확인 필요',
@@ -292,7 +304,14 @@ def diagnostic_text(data, *, symbols=None):
                 continue
             subject = _name(row, symbols) if row.get('instrument_id') else _value(row.get('endpoint', row.get('scope', '조회')))
             text = subject + ': ' + _value(row.get('detail') or row.get('reason'))
-            evidence = [str(row[key]) for key in ('http_status', 'provider_code') if row.get(key) is not None]
+            evidence = [label + str(row[key]) for key, label in (('http_status', 'HTTP '), ('provider_code', '증권사 코드 '))
+                        if row.get(key) is not None]
+            if row.get('field'):
+                evidence.append('응답 항목: ' + row['field'])
+            if row.get('request_stage'):
+                evidence.append('단계: ' + _value(row['request_stage']))
+            if row.get('error_type'):
+                evidence.append('예외: ' + row['error_type'])
             if row.get('transport_error'):
                 evidence.append(_value(row['transport_error']))
             if row.get('provider_message'):
@@ -431,6 +450,8 @@ def render_notification(payload, *, symbols=None) -> str:
                 for name,rows in _screening_groups(data['feature_exclusions']).items() if rows) + '. 상세는 첨부 HTML에 있습니다.')
         if data.get('review_details'):
             lines.append('공시 원문·지표·시세 기준 시각과 상세 판단은 첨부 HTML에 있습니다.')
+        if data.get('diagnostics'):
+            lines.append('상세 원인: ' + diagnostic_text(data, symbols=symbols))
         lines.append('보호 매도 등 당일 전체 거래는 /report 에 포함됩니다.')
         return '\n'.join(lines)
     titles = {'MONITOR_DEGRADED': '보호 감시에 문제가 생겼습니다.', 'MONITOR_RECOVERED': '보호 감시가 복구되었습니다.',

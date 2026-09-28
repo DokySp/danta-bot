@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import sys
 import threading
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -408,8 +409,7 @@ class Application:
                     self.store.set('monitor_diagnostic', diagnostic)
                     self.store.set('monitor_checked_at', bundle.now.isoformat())
                     self.store.set("monitor_healthy_since", None)
-                    if newly_degraded:
-                        self.store.event("protection", "MONITOR_DEGRADED", diagnostic, notify=True)
+                    self.store.event("protection", "MONITOR_DEGRADED", diagnostic, notify=newly_degraded)
             if plan.cancel_pending_entries:
                 self.executor.invalidate_unsubmitted_entries("protection", plan.action)
                 opposite = [row for row in self.store.working(holding.instrument_id) if row["side"] == "BUY"]
@@ -585,15 +585,19 @@ class Application:
                     except ValueError:
                         reason = 'PRIVATE_DIAGNOSTIC_REDACTED'
                     diagnostic = {'error_type': type(error).__name__, 'reason': reason,
-                                  'diagnostics': self.store.get('account_diagnostics', []) if not self.store.get('reconciled') else []}
+                                  'diagnostics': getattr(error, 'diagnostics', None) or
+                                      ([{'reason': getattr(error, 'code', type(error).__name__), **error.diagnostic}]
+                                      if getattr(error, 'diagnostic', None) else
+                                      self.store.get('account_diagnostics', []) if not self.store.get('reconciled') else [])}
                     with self.store.transaction():
                         newly_degraded = not self.store.get("monitor_degraded", False)
                         self.store.set("monitor_degraded", True)
                         self.store.set("monitor_healthy_since", None)
                         self.store.set('monitor_checked_at', self.clock().isoformat())
                         self.store.set('monitor_diagnostic', diagnostic)
-                        if newly_degraded:
-                            self.store.event("monitor", "MONITOR_DEGRADED", diagnostic, notify=True)
+                        self.store.event("monitor", "MONITOR_DEGRADED", diagnostic, notify=newly_degraded)
+                    print(canonical({'event': 'MONITOR_CHECK_FAILED', 'occurred_at': self.clock().isoformat(), **diagnostic}),
+                          file=sys.stderr, flush=True)
         self.monitor_thread = threading.Thread(target=loop, name="danta-protection", daemon=True)
         self.monitor_thread.start()
 
@@ -829,11 +833,15 @@ class Application:
             return result
         except HumanRequired as error:
             result.update(run_status=error.state, reason=str(error))
+            if getattr(error, 'diagnostics', None):
+                result['diagnostics'] = error.diagnostics
             if result['decision_status'] == 'REVALIDATING':
                 result['decision_status'] = 'REVALIDATION_FAILED'
             raise
         except Exception as error:
             result.update(run_status="FAILED", reason=str(error), error_type=type(error).__name__)
+            if getattr(error, 'diagnostic', None):
+                result['diagnostics'] = [{'reason': getattr(error, 'code', type(error).__name__), **error.diagnostic}]
             if result["model_status"] == "RUNNING":
                 result["model_status"] = "MODEL_FAILED"
             if result['decision_status'] == 'REVALIDATING':

@@ -147,7 +147,8 @@ class Executor:
                 if response.get("status") == "NOT_SENT":
                     self.store.db.execute("UPDATE intents SET state='INVALIDATED',reserve_cash='0',reserve_risk='0' WHERE id=?", (intent.id,))
                     self.store.bump_version()
-                    self.store.event(intent.run_id, "ORDER_NOT_SENT", {"intent_id": intent.id, "reason": response.get("reason", "LOCAL_PRE_SEND_FAILURE")}, notify=True)
+                    self.store.event(intent.run_id, "ORDER_NOT_SENT", {"intent_id": intent.id, "reason": response.get("reason", "LOCAL_PRE_SEND_FAILURE"),
+                        **({'diagnostics': response['diagnostics']} if response.get('diagnostics') else {})}, notify=True)
                 elif response.get("status") == "REJECTED":
                     self.store.db.execute("UPDATE intents SET state='REJECTED',reserve_cash='0',reserve_risk='0' WHERE id=?", (intent.id,))
                     self.store.event(intent.run_id, "ORDER_REJECTED", {"intent_id": intent.id, "reason": response.get("reason", "BROKER_REJECTED")}, notify=True)
@@ -197,7 +198,8 @@ class Executor:
                 if response.get("status") in {"NOT_SENT", "REJECTED", "NO_REMAINING_QUANTITY"}:
                     with self.store.transaction():
                         self.store.db.execute("UPDATE intents SET state=? WHERE id=?", (order["state"], intent_id))
-                        self.store.event(intent.run_id, "CANCEL_NOT_SENT", {"intent_id": intent_id, "reason": response.get("reason", response["status"])}, notify=True)
+                        self.store.event(intent.run_id, "CANCEL_NOT_SENT", {"intent_id": intent_id, "reason": response.get("reason", response["status"]),
+                            **({'diagnostics': response['diagnostics']} if response.get('diagnostics') else {})}, notify=True)
                 elif response.get("status") != "ACKNOWLEDGED":
                     self._unknown(intent_id, "CANCEL_OUTCOME_UNCONFIRMED")
             except Exception as error:

@@ -2,25 +2,71 @@
 from __future__ import annotations
 
 import json
+import io
 import shutil
 import socket
 import tempfile
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import redirect_stderr
 from datetime import timedelta
 from decimal import Decimal as D
 from pathlib import Path
 from unittest.mock import patch
 import yaml
 
+from danta.adapters import AdapterError
 from danta.application import Application, MarketBundle, fixture_decision
 from danta.config import ConfigurationError, HumanRequired, ROOT, canonical, load_config, utcnow
 from danta.execution import Executor, FixtureBroker, OrderIntent, needed_quantity
+from danta.reporting import render_notification
 from danta.store import Store
 
 
 class EngineCase(unittest.TestCase):
+    def test_review_failure_keeps_provider_details_in_result_and_notification(self):
+        app = Application(self.config, self.bundle)
+        try:
+            error = HumanRequired('External account observations incomplete: NO_MARGIN_BUYING_POWER_UNVERIFIED')
+            error.diagnostics = [{'endpoint':'inquire-psbl-order', 'reason':'TRANSIENT_FAILURE',
+                                  'http_status':500, 'provider_code':'EGW00215', 'provider_message':'합성 오류 원문'}]
+            with patch.object(app, 'reconcile', side_effect=error), self.assertRaises(HumanRequired):
+                app.review(request_key='diagnostic-review')
+            result = json.loads(app.store.read("SELECT result FROM requests WHERE request_key='diagnostic-review'")[0][0])
+            self.assertEqual(result['diagnostics'], error.diagnostics)
+            text = render_notification(result)
+            self.assertIn('HTTP 500', text)
+            self.assertIn('EGW00215', text)
+            self.assertIn('합성 오류 원문', text)
+        finally:
+            app.close()
+
+    def test_monitor_retains_each_failed_check_after_recovery_without_extra_alerts(self):
+        app = Application(self.config, self.bundle)
+        try:
+            output = io.StringIO()
+            errors = [AdapterError('TRANSIENT_FAILURE', diagnostic={'endpoint':'inquire-psbl-order',
+                'http_status':code, 'provider_message':'합성 조회 오류'}) for code in (500, 503)]
+            with patch.object(app.monitor_stop, 'wait', side_effect=[False, False, True]), \
+                 patch.object(app, 'protect', side_effect=errors), redirect_stderr(output):
+                app.start_monitor(0.001)
+                app.monitor_thread.join(3)
+                self.assertFalse(app.monitor_thread.is_alive())
+            events = [json.loads(row[0]) for row in app.store.read("SELECT payload FROM journal WHERE kind='MONITOR_DEGRADED'")]
+            self.assertEqual([row['diagnostics'][0]['http_status'] for row in events], [500, 503])
+            notices = [json.loads(row[0]) for row in app.store.read('SELECT payload FROM outbox')]
+            self.assertEqual(sum(row.get('kind') == 'MONITOR_DEGRADED' for row in notices), 1)
+            self.assertEqual([json.loads(line)['diagnostics'][0]['http_status'] for line in output.getvalue().splitlines()], [500, 503])
+            app.protect()
+            app.bundle.now += timedelta(seconds=61)
+            app.protect()
+            self.assertFalse(app.store.get('monitor_degraded'))
+            self.assertIsNone(app.store.get('monitor_diagnostic'))
+            self.assertEqual(app.store.read("SELECT COUNT(*) FROM journal WHERE kind='MONITOR_DEGRADED'")[0][0], 2)
+        finally:
+            app.close()
+
     def test_review_reports_every_prefilter(self):
         app = Application(self.config,self.bundle)
         try:

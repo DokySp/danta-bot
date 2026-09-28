@@ -6,12 +6,15 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal as D
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
-from danta.adapters import FetchResult, HttpResponse
+from danta.adapters import AdapterError, FetchResult, HttpResponse
 from danta.adapters.kis import BrokerResult, KisAdapter, KisCredentials
 from danta.execution import Executor, FixtureBroker, OrderIntent
-from danta.runtime import KisBrokerPort
+from danta.runtime import ExternalRuntime, KisBrokerPort
+from danta.config import HumanRequired
+from danta.reporting import render_notification
 from danta.store import Store
 
 
@@ -60,6 +63,57 @@ def order(**changes):
 
 
 class KisAccountContracts(unittest.TestCase):
+    def test_buying_power_failure_reaches_account_order_and_operator_diagnostics(self):
+        port = self.port()
+        port.latest_bundle = SimpleNamespace(quotes={'KRX:000002':SimpleNamespace(observed_at=NOW)},
+            calendar=SimpleNamespace(active=lambda _:SimpleNamespace(closes_at=NOW+timedelta(hours=1))))
+        error = AdapterError('TRANSIENT_FAILURE', diagnostic={'http_status':500, 'provider_code':'EGW00215',
+            'provider_message':'요청 처리 중 오류', 'requested_at':NOW.isoformat(), 'elapsed_seconds':1.2})
+        with patch.object(port.adapter, 'read_buying_power', side_effect=error):
+            account = port.snapshot()
+            result = port.submit({'instrument_id':'KRX:000002', 'side':'BUY', 'quantity':1, 'limit_price':'100'})
+        self.assertFalse(account['complete'])
+        self.assertEqual(result['status'], 'NOT_SENT')
+        self.assertEqual(port.adapter.writes, [])
+        port.state.known_order = lambda *_: {'side':'BUY'}
+        with patch.object(port.adapter, 'read_cancelable_orders', return_value=FetchResult((), 'FETCH_FAILED', NOW,
+            metadata={'error':error.code, **error.diagnostic})):
+            canceled = port.cancel({'broker_id':'123', 'namespace':'fake', 'remaining_quantity':1, 'metadata':{'organization':'001'}})
+        self.assertEqual(canceled['status'], 'NOT_SENT')
+        self.assertEqual(canceled['diagnostics'][0]['provider_code'], 'EGW00215')
+        self.assertEqual(canceled['diagnostics'][0]['endpoint'], 'inquire-psbl-rvsecncl')
+        for value in (account, result):
+            detail = value['diagnostics'][0]
+            self.assertEqual(detail['reason'], 'NO_MARGIN_BUYING_POWER_UNVERIFIED')
+            self.assertEqual(detail['detail'], 'TRANSIENT_FAILURE')
+            text = render_notification({'kind':'MONITOR_DEGRADED', 'diagnostics':value['diagnostics']})
+            for item in ('미수 없는 매수 가능 금액 조회', 'HTTP 500', 'EGW00215', '요청 처리 중 오류'):
+                self.assertIn(item, text)
+        for power, code, kind in (({}, 'PROVIDER_FIELD_MISSING', 'KeyError'),
+                                  ({'nrcvb_buy_amt':'not-a-number'}, 'PROVIDER_FIELD_UNVERIFIED', 'InvalidOperation')):
+            port.adapter.power = power
+            detail = port.snapshot()['diagnostics'][0]
+            self.assertEqual((detail['field'], detail['detail'], detail['error_type']), ('nrcvb_buy_amt', code, kind))
+        port.adapter.power = {'nrcvb_buy_amt':'0', 'nrcvb_buy_qty':'0'}
+        self.assertTrue(port.snapshot()['complete'], 'A verified zero balance is not a lookup failure')
+
+    def test_failed_account_refresh_records_details_before_monitor_runs(self):
+        port = self.port()
+        with tempfile.TemporaryDirectory() as directory, Store(Path(directory)/'state.sqlite', mode='offline',
+                account_identity=directory, initial_cash=D(1000)) as store:
+            port.bind_store(store)
+            runtime = SimpleNamespace(broker=port, config=SimpleNamespace(require_external=lambda *_:None),
+                                      approval={}, clock=lambda:NOW)
+            error = AdapterError('TRANSIENT_FAILURE', diagnostic={'http_status':500, 'provider_code':'EGW00215'})
+            with patch.object(port.adapter, 'read_buying_power', side_effect=error), self.assertRaises(HumanRequired) as raised:
+                ExternalRuntime._account(runtime)
+            self.assertEqual(raised.exception.diagnostics[0]['provider_code'], 'EGW00215')
+            journal = store.read("SELECT payload FROM journal WHERE kind='ACCOUNT_INCOMPLETE'")
+            self.assertEqual(len(journal), 1)
+            self.assertEqual(json.loads(journal[0][0])['diagnostics'], raised.exception.diagnostics)
+            self.assertEqual(store.read('SELECT COUNT(*) FROM outbox')[0][0], 0)
+
+
     def port(self):
         adapter = AccountFixture()
         manifest = {"account_alias":"FAKE_ACCOUNT", "bootstrap":{"whole_account":True, "orders_since":"2026-09-01",

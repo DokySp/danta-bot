@@ -7,6 +7,7 @@ import json
 import os
 import re
 import stat
+import sys
 import threading
 import time
 import zipfile
@@ -237,16 +238,7 @@ class KisAdapter:
 
     def _request(self, path, tr_id, params, *, post=False, continuation="", valid_until=None):
         operation = "broker_write" if post else "broker_read" if path.startswith(TRADING) else "market_read"
-        self._permit(operation)
         c = self.credentials
-        try:
-            token = self.token_provider(allow_refresh=not post) if self.token_provider is not None else c.token
-        except Exception as error:
-            if post:
-                raise OrderNotSent(getattr(error, "code", type(error).__name__)) from None
-            raise
-        headers = {"content-type": "application/json; charset=utf-8", "authorization": "Bearer " + token,
-                   "appkey": c.app_key, "appsecret": c.app_secret, "custtype": "P", "tr_id": tr_id, "tr_cont": continuation}
         def before_send():
             try:
                 self._permit(operation)
@@ -254,43 +246,70 @@ class KisAdapter:
                     raise AdapterError("ORDER_VALIDITY_EXPIRED")
             except Exception as error:
                 if post:
-                    raise OrderNotSent(getattr(error, "code", type(error).__name__)) from None
+                    raise OrderNotSent(getattr(error, "code", type(error).__name__),
+                                       diagnostic=getattr(error, 'diagnostic', None)) from None
                 raise
-        args = ("POST" if post else "GET", self.base_url + path + ("" if post else "?" + urlencode(params)),
-                headers, json.dumps(params).encode() if post else None, 15)
         started, requested_at = time.monotonic(), self.clock().isoformat()
-        response = None
+        response, token, stage = None, c.token, 'AUTHORIZATION_CHECK'
         try:
+            self._permit(operation)
+            stage = 'TOKEN_PREPARATION'
+            try:
+                token = self.token_provider(allow_refresh=not post) if self.token_provider is not None else c.token
+            except Exception as error:
+                if post:
+                    raise OrderNotSent(getattr(error, "code", type(error).__name__),
+                                       diagnostic=getattr(error, 'diagnostic', None)) from None
+                raise
+            stage = 'BROKER_REQUEST'
+            headers = {"content-type": "application/json; charset=utf-8", "authorization": "Bearer " + token,
+                       "appkey": c.app_key, "appsecret": c.app_secret, "custtype": "P", "tr_id": tr_id, "tr_cont": continuation}
+            args = ("POST" if post else "GET", self.base_url + path + ("" if post else "?" + urlencode(params)),
+                    headers, json.dumps(params).encode() if post else None, 15)
             if post and hasattr(self.transport, "request_checked"):
                 response = self.transport.request_checked(*args, before_send=before_send)
             else:
                 before_send()
                 response = self.transport(*args)
             require_http_ok(response)
+            data = response.json()
+            if not isinstance(data, dict) or "rt_cd" not in data:
+                raise AdapterError("MALFORMED_RESPONSE")
+            if data["rt_cd"] != "0":
+                code = data.get('msg_cd')
+                code = code if isinstance(code, str) and re.fullmatch(r'[A-Z][A-Z0-9_]{1,31}', code) else 'UNKNOWN'
+                # A broker rejection is different from a lost POST response.
+                raise AdapterError("BROKER_REJECTED:" + code)
         except AdapterError as error:
             error.diagnostic.update(endpoint=path.rsplit('/',1)[-1], requested_at=requested_at,
+                                    method='POST' if post else 'GET', tr_id=tr_id, request_stage=stage,
                                     elapsed_seconds=round(time.monotonic()-started,3))
             if response is not None:
+                error.diagnostic['http_status'] = response.status
                 try:
-                    message = response.json().get('msg1')
+                    data = response.json()
+                    code = data.get('msg_cd')
+                    if isinstance(code, str) and re.fullmatch(r'[A-Z][A-Z0-9_]{1,31}', code):
+                        error.diagnostic['provider_code'] = code
+                    message = data.get('msg1')
                     if isinstance(message,str):
+                        message = re.sub(r'https?://\S+', '[비공개]', message)
+                        message = re.sub(r'[\s./-]*'.join(c.account), '[비공개]', message)
                         for private in (c.account,c.app_key,c.app_secret,c.token,token):
                             if private:
                                 message = message.replace(private,'[비공개]')
                         message = CREDENTIAL_TEXT.sub('[비공개]',message)
-                        message = re.sub(r'https?://\S+|[A-Za-z0-9_.~-]{24,}|\d{6,}', '[비공개]', message)
+                        message = re.sub(r'[A-Za-z0-9_.~-]{24,}|\d{6,}', '[비공개]', message)
                         message = ' '.join(message.split())[:240]
                         reject_credentials(message)
                         error.diagnostic['provider_message'] = message
                 except (AdapterError,AttributeError,ValueError):
                     pass
+            # Log only selected, redacted metadata; request headers and bodies stay private.
+            print(json.dumps({'event':'KIS_REQUEST_FAILED', 'reason':error.code,
+                              'error_type':type(error).__name__, **error.diagnostic}, ensure_ascii=False),
+                  file=sys.stderr, flush=True)
             raise
-        data = response.json()
-        if not isinstance(data, dict) or "rt_cd" not in data:
-            raise AdapterError("MALFORMED_RESPONSE")
-        if data["rt_cd"] != "0":
-            # A well-formed broker rejection is different from a lost POST response.
-            raise AdapterError("BROKER_REJECTED:" + str(data.get("msg_cd", "UNKNOWN")))
         return data, {k.lower(): v for k, v in response.headers.items()}
 
     def _tr(self, suffix):
@@ -323,7 +342,7 @@ class KisAdapter:
                             raise
                         time.sleep(delay)
                 if not isinstance(data.get(rows_key), list) or any(not isinstance(row, dict) for row in data[rows_key]):
-                    raise AdapterError("MALFORMED_RESPONSE")
+                    raise AdapterError("MALFORMED_RESPONSE", diagnostic={'http_status':200, 'field':rows_key})
                 rows.extend(data[rows_key])
                 summaries.append(data.get("output2"))
                 continuation = headers.get("tr_cont", "")
@@ -354,8 +373,13 @@ class KisAdapter:
             try:
                 data, _ = self._request(TRADING + "inquire-psbl-order", self._tr("TTC8908R"), {**self._account_params(),
                     "PDNO": symbol(resource_symbol), "ORD_UNPR": str(resource_price), "ORD_DVSN": "00", "CMA_EVLU_AMT_ICLD_YN": "N", "OVRS_ICLD_YN": "N"})
+                if not isinstance(data.get('output'), dict):
+                    raise AdapterError('MALFORMED_RESPONSE', diagnostic={'endpoint':'inquire-psbl-order', 'http_status':200, 'field':'output'})
                 metadata.update(orderable_resources=data["output"], resources_quality="COMPLETE")
-            except (AdapterError, KeyError):
+            except (AdapterError, KeyError) as error:
+                if quality == 'COMPLETE':
+                    metadata.update(error=getattr(error, 'code', 'PROVIDER_FIELD_UNVERIFIED'),
+                                    **getattr(error, 'diagnostic', {}))
                 quality = "PARTIAL"
                 metadata["resources_quality"] = "FETCH_FAILED"
         return FetchResult(result.records, quality, result.retrieved_at, result.next_cursor, metadata)
@@ -366,7 +390,7 @@ class KisAdapter:
             **self._account_params(), "PDNO": symbol(ticker), "ORD_UNPR": str(order_price(price)),
             "ORD_DVSN": "01", "CMA_EVLU_AMT_ICLD_YN": "N", "OVRS_ICLD_YN": "N"})
         if not isinstance(data.get("output"), dict):
-            raise AdapterError("MALFORMED_RESPONSE")
+            raise AdapterError("MALFORMED_RESPONSE", diagnostic={'endpoint':'inquire-psbl-order', 'http_status':200, 'field':'output'})
         return data["output"]
 
     def read_cancelable_orders(self):
@@ -410,8 +434,9 @@ class KisAdapter:
         params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": symbol(ticker)}
         quote, _ = self._request(QUOTATIONS + "inquire-asking-price-exp-ccn", "FHKST01010200", params)
         price, _ = self._request(QUOTATIONS + "inquire-price", "FHKST01010100", params)
-        if not isinstance(quote.get("output1"), dict) or not isinstance(price.get("output"), dict):
-            raise AdapterError("MALFORMED_RESPONSE")
+        for data, field, endpoint in ((quote, 'output1', 'inquire-asking-price-exp-ccn'), (price, 'output', 'inquire-price')):
+            if not isinstance(data.get(field), dict):
+                raise AdapterError("MALFORMED_RESPONSE", diagnostic={'endpoint':endpoint, 'http_status':200, 'field':field})
         return FetchResult(({"symbol": ticker, "asking": quote["output1"], "price": price["output"]},), "COMPLETE", utcnow(),
                            metadata={"venue": "KRX", "provider_time_field": "aspr_acpt_hour", "tick_field": "aspr_unit", "exchange_session_date_required": True})
 

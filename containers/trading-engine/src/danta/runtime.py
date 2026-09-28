@@ -34,6 +34,22 @@ from .safety import reject_credentials
 
 SEOUL = ZoneInfo("Asia/Seoul")
 AUTH_ERRORS = {"AUTH_FAILED", "AUTHORIZATION_REQUIRED", "AUTH_CREDENTIALS_REQUIRED", "DART_AUTH_REQUIRED", "OFFLINE_NETWORK_BLOCKED"}
+DIAGNOSTIC_FIELDS = ('endpoint', 'http_status', 'provider_code', 'provider_message', 'requested_at',
+                     'elapsed_seconds', 'attempt_count', 'transport_error', 'failed_page', 'method', 'tr_id', 'request_stage', 'field')
+
+
+def _failure_diagnostic(error, endpoint, *, reason=None, field=None):
+    detail = getattr(error, 'code', 'PROVIDER_FIELD_MISSING' if isinstance(error, KeyError) else 'PROVIDER_FIELD_UNVERIFIED')
+    if not isinstance(error, AdapterError) and isinstance(error, ValueError) and re.fullmatch(r'[A-Z][A-Z_]{1,79}', str(error)):
+        detail = str(error)
+    diagnostic = {'endpoint': endpoint, 'reason': reason or detail, 'detail': detail,
+                  'error_type': type(error).__name__, **{key: value for key, value in
+                    getattr(error, 'diagnostic', {}).items() if key in DIAGNOSTIC_FIELDS}}
+    if field is None and isinstance(error, KeyError) and error.args:
+        field = error.args[0]
+    if isinstance(field, str) and re.fullmatch(r'[a-z][a-z0-9_.]{0,63}', field):
+        diagnostic['field'] = field
+    return diagnostic
 
 
 def _decimal(value):
@@ -201,13 +217,19 @@ class KisBrokerPort:
         if intent.get("expires_at"):
             deadline = min(deadline, aware_time(intent["expires_at"]))
         if intent["side"] == "BUY":
+            field = None
             try:
                 power = self.adapter.read_buying_power(ticker, intent["limit_price"])
-                if (_quantity(power["nrcvb_buy_qty"]) < intent["quantity"] or
-                        _decimal(power["nrcvb_buy_amt"]) < intent["quantity"] * _decimal(intent["limit_price"])):
+                field = 'nrcvb_buy_qty'
+                if _quantity(power[field]) < intent["quantity"]:
                     return {"status":"NOT_SENT", "reason":"NO_MARGIN_BUYING_POWER_EXCEEDED"}
-            except (AdapterError, ValueError, KeyError, TypeError, ArithmeticError):
-                return {"status":"NOT_SENT", "reason":"NO_MARGIN_BUYING_POWER_UNVERIFIED"}
+                field = 'nrcvb_buy_amt'
+                if _decimal(power[field]) < intent["quantity"] * _decimal(intent["limit_price"]):
+                    return {"status":"NOT_SENT", "reason":"NO_MARGIN_BUYING_POWER_EXCEEDED"}
+            except (AdapterError, ValueError, KeyError, TypeError, ArithmeticError) as error:
+                return {"status":"NOT_SENT", "reason":"NO_MARGIN_BUYING_POWER_UNVERIFIED",
+                        "diagnostics": [_failure_diagnostic(error, 'inquire-psbl-order',
+                            reason='NO_MARGIN_BUYING_POWER_UNVERIFIED', field=field)]}
         result = self.adapter.submit(ticker, intent["side"], intent["quantity"], limit_price=intent["limit_price"], valid_until=deadline)
         if result.status != "ACKNOWLEDGED":
             return {"status": result.status, "reason": result.code}
@@ -230,15 +252,20 @@ class KisBrokerPort:
             raise HumanRequired("Broker organization metadata is unverified")
         try:
             result = self.adapter.read_cancelable_orders()
+            if result.quality != 'COMPLETE':
+                error = AdapterError(result.metadata.get('error', 'BROKER_PAGINATION_INCOMPLETE'), diagnostic=result.metadata)
+                return {'status':'NOT_SENT', 'reason':'CANCELABLE_ORDER_UNVERIFIED',
+                        'diagnostics':[_failure_diagnostic(error, 'inquire-psbl-rvsecncl', reason='CANCELABLE_ORDER_UNVERIFIED')]}
             matches = [row for row in result.records if str(row.get("odno")) == request["broker_id"]
                        and str(row.get("ord_gno_brno")) == metadata["organization"]]
-            if result.quality != "COMPLETE" or len(matches) != 1:
+            if len(matches) != 1:
                 return {"status":"NOT_SENT", "reason":"CANCELABLE_ORDER_UNVERIFIED"}
             possible = _quantity(matches[0]["psbl_qty"])
             if possible < quantity:
                 return {"status":"NOT_SENT", "reason":"CANCELABLE_QUANTITY_CHANGED"}
-        except (AdapterError, ValueError, KeyError, TypeError, ArithmeticError):
-            return {"status":"NOT_SENT", "reason":"CANCELABLE_ORDER_UNVERIFIED"}
+        except (AdapterError, ValueError, KeyError, TypeError, ArithmeticError) as error:
+            return {"status":"NOT_SENT", "reason":"CANCELABLE_ORDER_UNVERIFIED",
+                    "diagnostics": [_failure_diagnostic(error, 'inquire-psbl-rvsecncl', reason='CANCELABLE_ORDER_UNVERIFIED')]}
         result = self.adapter.cancel(request["broker_id"], metadata["organization"], quantity,
                                      order_type="00" if known["side"] == "BUY" else "01")
         return {"status": result.status, "reason": result.code}
@@ -320,7 +347,7 @@ class KisBrokerPort:
             account = self.adapter.read_account()
             failures = [{"endpoint": name, "quality": result.quality,
                          "reason": result.metadata.get("error", "BROKER_PAGINATION_INCOMPLETE"),
-                        **{key: result.metadata[key] for key in ('http_status', 'provider_code', 'provider_message', 'requested_at', 'elapsed_seconds', 'attempt_count', 'transport_error', 'failed_page') if key in result.metadata}}
+                        **{key: result.metadata[key] for key in DIAGNOSTIC_FIELDS if key in result.metadata}}
                         for name, result in (("balance", account), ("orders", orders),
                                              ("cancelable", cancelable), ("reservations", reservations))
                         if result.quality != "COMPLETE"]
@@ -412,6 +439,7 @@ class KisBrokerPort:
                     "reservations": [row for row in reservations.records if self._active_reservation(row, today)]}
         except (AdapterError, ValueError, KeyError, TypeError, ArithmeticError) as error:
             return {"complete": False, "errors": [getattr(error, "code", str(error) if isinstance(error, ValueError) else "PROVIDER_FIELD_UNVERIFIED")],
+                    "diagnostics": [_failure_diagnostic(error, 'account_normalization')],
                     "orders": [], "reservations": []}
 
     def _whole_snapshot(self):
@@ -441,14 +469,18 @@ class KisBrokerPort:
             normalized.append(item)
         if census["reservations"]:
             errors.append("ACTIVE_RESERVATION_ORDER")
-        available = Decimal(0)
+        available, field, diagnostics = Decimal(0), None, []
         try:
             fields = self.manifest.get("normalization", {}).get("account", {})
             power = self.adapter.read_buying_power(fields.get("resource_symbol", "005930"), fields.get("resource_price", "1"))
+            field = 'nrcvb_buy_amt'
             available = min(_decimal(census["economic_cash"]), _decimal(power["nrcvb_buy_amt"]))
-        except (AdapterError, ValueError, KeyError, TypeError, ArithmeticError):
+        except (AdapterError, ValueError, KeyError, TypeError, ArithmeticError) as error:
             errors.append("NO_MARGIN_BUYING_POWER_UNVERIFIED")
+            diagnostics.append(_failure_diagnostic(error, 'inquire-psbl-order',
+                reason='NO_MARGIN_BUYING_POWER_UNVERIFIED', field=field))
         return {"complete": not errors, "ownership_complete": not errors, "errors": errors,
+                "diagnostics": diagnostics + [reason for reason in errors if reason != 'NO_MARGIN_BUYING_POWER_UNVERIFIED'],
                 "orders": normalized, "strategy_quantities": census["quantities"], "strategy_sellable_quantities": census["sellable_quantities"],
                 "broker_available_cash": str(available), "whole_account": True,
                 "account_cash": {"cash_krw": census["economic_cash"], "observed_at": census["account_observed_at"],
@@ -492,7 +524,7 @@ class KisBrokerPort:
         if account.quality != "COMPLETE" or orders.quality != "COMPLETE":
             failures = [{'endpoint': name, 'quality': result.quality,
                          'reason': result.metadata.get('error', 'BROKER_PAGINATION_INCOMPLETE'),
-                         **{key: result.metadata[key] for key in ('http_status', 'provider_code', 'provider_message', 'requested_at', 'elapsed_seconds', 'attempt_count', 'transport_error', 'failed_page') if key in result.metadata}}
+                         **{key: result.metadata[key] for key in DIAGNOSTIC_FIELDS if key in result.metadata}}
                         for name, result in (('balance', account), ('orders', orders)) if result.quality != 'COMPLETE']
             return {"complete": False, "ownership_complete": False, "orders": [],
                     "errors": sorted({item['reason'] for item in failures}), 'diagnostics': failures}
@@ -573,6 +605,7 @@ class KisBrokerPort:
                     "orders":normalized,"errors":errors,"broker_available_cash":str(resources)}
         except (ValueError,KeyError,TypeError,AdapterError) as error:
             return {"complete":False,"ownership_complete":False,"orders":normalized,
+                    "diagnostics": [_failure_diagnostic(error, 'account_normalization')],
                     "errors":[getattr(error,"code",str(error) if isinstance(error,ValueError) else "PROVIDER_FIELD_UNVERIFIED")]}
 
 
@@ -963,13 +996,17 @@ class ExternalRuntime:
                    if allow_idle and isinstance(self.broker,KisBrokerPort) else self.broker.snapshot())
         store = getattr(self.broker, 'store', None)
         if account.get("complete") is not True or account.get("ownership_complete") is not True:
+            diagnostics = account.get('diagnostics') or account.get('errors', [])
             if store is not None:
                 with store.transaction():
                     store.set('reconciled', False)
                     store.set('account_cash_reconciled', False)
                     store.set('account_checked_at', self.clock().isoformat())
-                    store.set('account_diagnostics', account.get('diagnostics') or account.get('errors', []))
-            raise HumanRequired("External account observations incomplete: "+",".join(account.get("errors",[])))
+                    store.set('account_diagnostics', diagnostics)
+                    store.event('account', 'ACCOUNT_INCOMPLETE', {'diagnostics': diagnostics})
+            error = HumanRequired("External account observations incomplete: "+",".join(account.get("errors",[])))
+            error.diagnostics = diagnostics
+            raise error
         return account,account.get('refresh_order',time.monotonic_ns())
 
     def _protection_symbols(self,account):
@@ -1057,7 +1094,7 @@ class ExternalRuntime:
                 if isinstance(error,HumanRequired) or isinstance(error,AdapterError) and error.code in AUTH_ERRORS:
                     raise
                 diagnostics.append({"scope":"PROTECTION" if symbol in protected else "ENTRY","instrument_id":symbol,"reason":"MONITOR_DEGRADED",
-                                    "detail":getattr(error,"code",str(error))})
+                                    "detail":getattr(error,"code",str(error)), **getattr(error, 'diagnostic', {})})
             orders[symbol] = time.monotonic_ns()
         bundle = copy(previous)
         bundle.now = self.clock()
@@ -1184,7 +1221,8 @@ class ExternalRuntime:
                 except (ValueError,KeyError,AdapterError) as error:
                     if isinstance(error,HumanRequired) or isinstance(error,AdapterError) and error.code in AUTH_ERRORS:
                         raise
-                    diagnostics.append({'scope':'PROTECTION' if instrument.instrument_id in protected else 'ENTRY',"instrument_id":instrument.instrument_id,"reason":getattr(error,"code",str(error))})
+                    diagnostics.append({'scope':'PROTECTION' if instrument.instrument_id in protected else 'ENTRY',"instrument_id":instrument.instrument_id,
+                                        "reason":getattr(error,"code",str(error)), **getattr(error, 'diagnostic', {})})
                 quote_orders[instrument.instrument_id] = time.monotonic_ns()
             now = self.clock()
             ticks = self.manifest["ticks"]
