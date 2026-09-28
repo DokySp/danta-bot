@@ -18,7 +18,7 @@ from unittest.mock import patch
 import yaml
 
 from danta.adapters import AdapterError, HttpResponse
-from danta.adapters.telegram import TelegramAdapter
+from danta.adapters.telegram import COMMANDS, TelegramAdapter
 from danta.cli import main
 from danta.config import HumanRequired, ROOT, canonical, load_config, utcnow
 from danta.market import SessionCalendar
@@ -214,6 +214,48 @@ class ServiceIntegrationTests(unittest.TestCase):
         self.assertEqual(self.app.store.db.execute('SELECT status FROM telegram_requests').fetchone()[0], 'COMPLETE')
         with self.assertRaises(AdapterError):
             self.receive('/pause')
+
+    def test_all_commands_reject_a_second_pending_request_without_queueing_it(self):
+        for index, command in enumerate(sorted(COMMANDS)):
+            with self.subTest(command=command):
+                first = self.receive('/' + command, update=100 + index * 2)
+                self.assertTrue(first['accepted'])
+                busy = self.receive('/' + command, update=101 + index * 2)
+                self.assertFalse(busy['accepted'])
+                self.assertIn('이미 같은 작업', busy['reply_text'])
+        self.assertEqual(self.app.store.db.execute("SELECT COUNT(*) FROM requests WHERE request_key LIKE 'service:%'").fetchone()[0], len(COMMANDS))
+        self.now += timedelta(seconds=121)
+        self.assertTrue(self.receive('/status', update=999)['accepted'])
+        self.assertFalse(self.receive('/status', update=101 + sorted(COMMANDS).index('status') * 2)['accepted'])
+
+    def test_running_automatic_review_rejects_manual_duplicate_but_keeps_controls(self):
+        self.service.scheduler['enabled'] = True
+        self.app.review_release.clear()
+        self.app.store.accept_request('service:schedule:fixture-review', {'source':'scheduler','kind':'full_review'},
+            deadline=(self.now + timedelta(hours=1)).isoformat())
+        worker = threading.Thread(target=self.service.run_once, kwargs={'review':True, 'chat':False})
+        worker.start()
+        try:
+            self.assertTrue(self.app.review_entered.wait(1))
+            self.assertFalse(self.receive('/review')['accepted'])
+            for index, command in enumerate(('/status','/stop','/pause'), 2):
+                self.assertTrue(self.receive(command, update=index)['accepted'])
+                self.assertTrue(self.service.run_once())
+            self.assertTrue(worker.is_alive())
+            self.assertTrue(self.app.store.get('paused'))
+        finally:
+            self.app.review_release.set()
+            worker.join(2)
+        self.assertFalse(self.receive('/review')['accepted'])  # Retransmission stays rejected.
+        self.assertTrue(self.receive('/review', update=5)['accepted'])
+
+    def test_collect_disclosures_queue_does_not_grow_behind_a_running_collection(self):
+        self.service.scheduler['enabled'] = True
+        self.service.queue_tick()
+        self.now += timedelta(minutes=3)
+        self.service.queue_tick()
+        rows = self.app.store.read("SELECT payload FROM requests WHERE status='ACCEPTED'")
+        self.assertEqual(sum(json.loads(row['payload'])['kind'] == 'collect_disclosures' for row in rows), 1)
 
     def test_unsigned_ingress_still_checks_sender_chat_route_and_payload(self):
         for overrides in ({'user_id': 'not-allowed'}, {'chat_id': 'not-allowed'},

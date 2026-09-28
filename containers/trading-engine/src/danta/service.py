@@ -129,12 +129,36 @@ class Service:
                 'telegram_request_id': request.request_id, 'route': request.route,
                 'chat_id': request.chat_id, 'user_id': request.user_id, 'text': request.text,
                 'attachments': body.get('attachments', [])}
+            existing = self.store.db.execute('SELECT 1 FROM requests WHERE request_key=?',
+                ('service:telegram:' + request.request_id,)).fetchone()
+            if receipt['status'] == 'BUSY' or (not existing and self._busy(payload)):
+                with self.store.transaction():
+                    self.store.db.execute("UPDATE telegram_requests SET status='BUSY' WHERE request_id=?", (request.request_id,))
+                return {'accepted': False, 'status': 'BUSY',
+                        'reply_text': '이미 같은 작업이 진행 중이거나 실행 대기 중입니다. 완료 후 다시 요청해 주세요.'}
             queue_id, fresh = self.store.accept_request('service:telegram:' + request.request_id, payload,
                 deadline=(self.clock() + timedelta(seconds=120)).isoformat())
             with self.store.transaction():
                 if fresh:
                     self.store.db.execute("UPDATE telegram_requests SET status='QUEUED' WHERE request_id=?", (request.request_id,))
         return acknowledgement
+
+    def _busy(self, payload):
+        for row in self.store.read("SELECT request_id,payload,status FROM requests WHERE request_key LIKE 'service:%' AND status IN ('ACCEPTED','RUNNING')"):
+            if row['status'] == 'ACCEPTED':
+                deadline = self.store.get('service_deadline:' + row['request_id'])
+                if not deadline or self.clock() >= aware_time(deadline):
+                    continue
+            active = json.loads(row['payload'])
+            command = payload.get('command')
+            if command == 'review' and self._review_job(active) and active.get('command') != 'chat':
+                return True
+            if command and command == active.get('command'):
+                if command != 'chat' or self._chat_key(payload) == self._chat_key(active):
+                    return True
+            if not command and payload['kind'] == active['kind']:
+                return True
+        return False
 
     def queue_tick(self):
         """Calendar job identity is durable; no catch-up review after its deadline."""
@@ -180,8 +204,11 @@ class Service:
             payload = {'source': 'scheduler', 'kind': intent.kind, **intent.payload,
                        'due_at': intent.due_at.isoformat(), 'expires_at': intent.expires_at.isoformat()}
             # A worker must not claim the request before its deadline is durable.
-            request_id, fresh = self.store.accept_request('service:schedule:' + intent.key, payload,
-                deadline=intent.expires_at.isoformat())
+            with self.store.lock:
+                if payload['kind'] == 'collect_disclosures' and self._busy(payload):
+                    continue
+                request_id, fresh = self.store.accept_request('service:schedule:' + intent.key, payload,
+                    deadline=intent.expires_at.isoformat())
             if fresh:
                 queued += 1
         return queued

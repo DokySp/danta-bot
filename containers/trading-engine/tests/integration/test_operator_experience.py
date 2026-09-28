@@ -162,6 +162,7 @@ class OperatorExperienceTests(unittest.TestCase):
         case.service.receive_http(canonical(body).encode())
         stored = json.loads(case.app.store.read('SELECT payload FROM requests')[0][0])
         self.assertEqual(stored['attachments'], body['attachments'])
+        case.service.run_once(review=True, chat=True)
         # Legal Telegram emoji text plus escaped attachment content and raw metadata.
         large = {**body, 'update_id': 21, 'text': '😀' * 4096, 'raw_message': {'text': '😀' * 4096},
                  'attachments': [{'file_name': 'lines.txt', 'content': '\n' * 32768}]}
