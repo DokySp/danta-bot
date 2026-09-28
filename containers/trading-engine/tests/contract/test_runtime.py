@@ -502,6 +502,63 @@ class ExternalRuntimeContracts(unittest.TestCase):
         broker = KisBrokerPort(FakeAdapter(),self.manifest,state,clock=lambda:self.now)
         self.assertFalse(broker.snapshot()["complete"])
 
+    def test_disclosure_page_limit_continues_and_document_retry_does_not_rewind_listing(self):
+        bundle, _, decide, _ = self._factory()
+        runtime = decide.__self__
+        self.addCleanup(runtime.close)
+        runtime.manifest['automatic'] = True
+        runtime.manifest['disclosures']['instrument_by_corp_code'] = {'00000001':'KRX:000001'}
+        runtime.manifest['disclosures']['start_date'] = (self.now.date() - timedelta(days=30)).isoformat()
+        runtime.state.data['disclosure_last_poll'] = None
+        rows = [{'rcept_no':self.now.strftime('%Y%m%d') + f'{index:06}', 'rcept_dt':self.now.strftime('%Y%m%d'),
+                 'corp_code':'00000001','report_nm':'영업실적 공시'} for index in (1,2)]
+        content = b'<p>synthetic unclassified disclosure</p>'
+        calls, document_calls = [], []
+        class Dart:
+            first = True
+            def list_disclosures(inner, start, end, **kwargs):
+                calls.append((start,end,kwargs))
+                if not inner.first:
+                    return FetchResult((), 'COMPLETE_NO_EVENT', self.now)
+                if not kwargs:
+                    return FetchResult((rows[0],), 'PARTIAL', self.now, 101, {'error':'PAGE_LIMIT'})
+                return FetchResult((rows[1],), 'COMPLETE', self.now)
+            def read_disclosure(inner, receipt):
+                document_calls.append(receipt)
+                if inner.first and receipt == rows[0]['rcept_no']:
+                    raise AdapterError('DOCUMENT_NOT_AVAILABLE')
+                return FetchResult(({'content':content,'sha256':hashlib.sha256(content).hexdigest()},), 'COMPLETE', self.now)
+        runtime.dart = Dart()
+        runtime._events(list(bundle.instruments.values()), self.now)
+        self.assertEqual(calls[1][2], {'cursor':101})
+        self.assertEqual(runtime.state.data['disclosure_cursor_date'], self.now.date().isoformat())
+        self.assertEqual(list(runtime.state.data['disclosure_pending_documents']), [rows[0]['rcept_no']])
+        runtime.dart.first = False
+        later = self.now + timedelta(days=1)
+        runtime._events(list(bundle.instruments.values()), later)
+        self.assertEqual(calls[-1][0], self.now.date())
+        self.assertEqual(document_calls.count(rows[0]['rcept_no']), 2)
+        self.assertEqual(document_calls.count(rows[1]['rcept_no']), 1)
+        self.assertFalse(runtime.state.data['disclosure_pending_documents'])
+
+    def test_decision_rechecks_only_its_issuers_without_rebuilding_universe(self):
+        bundle, _, decide, _ = self._factory()
+        runtime = decide.__self__
+        self.addCleanup(runtime.close)
+        runtime.manifest['disclosures']['instrument_by_corp_code'] = {'00000001':'KRX:000001'}
+        frozen = {'created_at':self.now.isoformat(), 'events':[], 'facts':[], 'candidates':[],
+                  'reviewed_positions':['KRX:000001']}
+        last_poll = runtime.state.data['disclosure_last_poll']
+        with patch.object(runtime.dart, 'list_disclosures', return_value=FetchResult((), 'COMPLETE_NO_EVENT', self.now)) as listing, \
+                patch.object(runtime, '_instruments', side_effect=AssertionError('full universe reread')):
+            result = runtime.refresh_decision(frozen)
+        listing.assert_called_once_with(self.now.date(), self.now.date(), corp_code='00000001')
+        self.assertEqual(runtime.state.data['disclosure_last_poll'], last_poll)
+        self.assertEqual(result.instruments, bundle.instruments)
+        with patch.object(runtime.dart, 'list_disclosures', return_value=FetchResult((), 'FETCH_FAILED', self.now, metadata={'error':'TRANSPORT_FAILED'})):
+            with self.assertRaisesRegex(AdapterError, 'DECISION_EVIDENCE_REFRESH_INCOMPLETE'):
+                runtime.refresh_decision(frozen)
+
     def test_supported_official_parser_and_next_day_cursor_preserve_first_availability(self):
         bundle,broker,decide,refresh = self._factory()
         runtime = decide.__self__

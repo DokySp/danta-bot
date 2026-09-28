@@ -75,16 +75,24 @@ class DartAdapter:
                 if page >= data["total_page"]:
                     if cursor == 1 and len(records) != expected_total:
                         raise AdapterError("DISCLOSURE_COUNT_MISMATCH")
-                    return FetchResult(tuple(records), "COMPLETE", utcnow(), metadata={"next_success_cursor": {"end_date": end.isoformat(), "receipt_ids": [r["rcept_no"] for r in records]}, "intraday_time_verified": False})
+                    return FetchResult(tuple(records), "COMPLETE", utcnow(), metadata={"next_success_cursor": {"end_date": end.isoformat(), "receipt_ids": [r["rcept_no"] for r in records]}, "intraday_time_verified": False, 'total_count':expected_total})
                 page += 1
         except (AdapterError, KeyError, TypeError) as exc:
             return FetchResult(tuple(records), "PARTIAL" if records else "FETCH_FAILED", utcnow(), page, {"error": getattr(exc, "code", "MALFORMED_RESPONSE")})
-        return FetchResult(tuple(records), "PARTIAL", utcnow(), page, {"error": "PAGE_LIMIT"})
+        return FetchResult(tuple(records), "PARTIAL", utcnow(), page, {"error": "PAGE_LIMIT", 'total_count':expected_total})
 
     def read_disclosure(self, receipt_no):
         if not isinstance(receipt_no, str) or not re.fullmatch(r"\d{14}", receipt_no):
             raise AdapterError("INVALID_RECEIPT_NO")
         content = self._api("document.xml", {"rcept_no": receipt_no}).body
+        if not content.startswith(b'PK'):
+            try:
+                status = ElementTree.fromstring(content).findtext('status')
+            except ElementTree.ParseError:
+                status = None
+            raise AdapterError({'010':'AUTH_FAILED','011':'AUTH_FAILED','012':'AUTH_FAILED','901':'AUTH_FAILED',
+                '013':'DOCUMENT_NOT_AVAILABLE','014':'DOCUMENT_NOT_AVAILABLE','020':'RATE_LIMITED',
+                '800':'DART_SERVICE_UNAVAILABLE'}.get(status, 'DOCUMENT_FETCH_FAILED'))
         documents = unpack_documents(content)
         return FetchResult(tuple({"receipt_no": receipt_no, "filename": name, "content": body,
                                  "sha256": hashlib.sha256(body).hexdigest(), "original_public_at": None} for name, body in documents),

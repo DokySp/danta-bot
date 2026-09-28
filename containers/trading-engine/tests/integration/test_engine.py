@@ -677,11 +677,46 @@ class EngineCase(unittest.TestCase):
                         with self.assertRaisesRegex(ValueError, "STALE_DECISION"):
                             app.review()
                         self.assertEqual(app.broker.submissions, 0)
+                        recorded = json.loads(next(self.config.state_dir.glob('runs/*/*/result.json')).read_text())
+                        self.assertEqual(recorded['model_status'], 'FIXTURE_RECORDED_RESPONSE')
+                        self.assertEqual(recorded['decision_status'], 'REVALIDATION_FAILED')
+                        self.assertTrue(recorded['review_details'][0]['ai'])
+                        self.assertTrue(list(self.config.state_dir.glob('runs/*/*/proposal.json')))
                     else:
                         self.assertEqual(app.review()["order_status"], "FIXTURE_FILLED")
                 finally:
                     app.close()
                     shutil.rmtree(self.config.state_dir)
+
+    def test_post_model_validation_uses_scoped_refresh(self):
+        app = Application(self.config, self.bundle)
+        try:
+            scoped = []
+            def refresh_decision(frozen):
+                scoped.append(frozen['run_id'])
+                return app.bundle
+            app.decision_refresh = refresh_decision
+            result = app.review()
+            self.assertEqual(scoped, [result['run_id']])
+            self.assertEqual(result['decision_status'], 'VALID')
+        finally:
+            app.close()
+
+    def test_uncollected_history_does_not_duplicate_excluded_instruments(self):
+        data = json.loads(json.dumps(self.data))
+        instrument = data['instruments'][0]
+        instrument.update(kind='excluded_instrument')
+        data['bars'] = {}
+        data['history_requested'] = []
+        excluded = MarketBundle(data, self.config.research, mode='offline')
+        reasons = [row['reason'] for row in excluded.exclusions if row['instrument_id'] == instrument['instrument_id']]
+        self.assertEqual(reasons, ['UNIVERSE_STATUS_OR_CLASSIFICATION_EXCLUDED'])
+        instrument.update(kind='common_stock')
+        outside_scope = MarketBundle(data, self.config.research, mode='offline')
+        self.assertEqual(outside_scope.exclusions[0]['reason'], 'NO_RECENT_EVENT_TO_REVIEW')
+        data['history_requested'] = [instrument['instrument_id']]
+        missing = MarketBundle(data, self.config.research, mode='offline')
+        self.assertEqual(missing.exclusions[0]['reason'], 'DAILY_HISTORY_NOT_COLLECTED')
 
     def test_candidate_controls_are_durable_and_do_not_change_held_quantity(self):
         app = Application(self.config, self.bundle)

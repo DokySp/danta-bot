@@ -168,6 +168,15 @@ class AdapterContracts(unittest.TestCase):
             with self.assertRaises(AdapterError):
                 adapter.read_official_ir(url)
 
+    def test_document_xml_error_codes_are_not_mislabeled_as_corrupt_archives(self):
+        for status, expected in (('010','AUTH_FAILED'),('014','DOCUMENT_NOT_AVAILABLE'),
+                                 ('020','RATE_LIMITED'),('800','DART_SERVICE_UNAVAILABLE')):
+            with self.subTest(status=status):
+                transport = FixtureTransport(HttpResponse(200, f'<result><status>{status}</status><message>provider text</message></result>'.encode()))
+                adapter = DartAdapter(api_key='fixture', transport=transport)
+                with self.assertRaisesRegex(AdapterError, '^' + expected + '$'):
+                    adapter.read_disclosure('20260901000001')
+
     def test_telegram_durable_dedup_conflicts_and_wire(self):
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / "requests.sqlite")

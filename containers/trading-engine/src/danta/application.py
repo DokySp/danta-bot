@@ -62,6 +62,15 @@ class MarketBundle:
         self.features = {}
         self.candidates, self.exclusions = [], []
         for instrument_id, instrument in self.instruments.items():
+            if (instrument.kind != 'common_stock' or instrument.status != 'NORMAL' or
+                    not instrument.status_verified or not instrument.sector):
+                self.exclusions.append({'instrument_id':instrument_id, 'reason':'UNIVERSE_STATUS_OR_CLASSIFICATION_EXCLUDED'})
+                continue
+            if instrument_id not in self.bars:
+                reason = ('NO_RECENT_EVENT_TO_REVIEW' if 'history_requested' in data and instrument_id not in data['history_requested']
+                          else 'DAILY_HISTORY_NOT_COLLECTED')
+                self.exclusions.append({'instrument_id':instrument_id, 'reason':reason})
+                continue
             try:
                 features = calculate_features(self.bars[instrument_id], self.index_bars[instrument.board],
                     instrument_id=instrument_id, board=instrument.board, as_of=self.now, research_profile=profile)
@@ -105,12 +114,14 @@ class Application:
                  refresh: Callable[[], MarketBundle] | None = None,
                  protection_refresh: Callable[[], MarketBundle] | None = None,
                  quote_refresh: Callable[..., MarketBundle] | None = None,
+                 decision_refresh: Callable[[dict], MarketBundle] | None = None,
                  chat: Callable[..., dict] | None = None,
                  clock: Callable[[], datetime] | None = None):
         self.config, self.bundle, self.approval, self.refresh = config, bundle, approval, refresh
         self.chat = chat
         self.protection_refresh = protection_refresh
         self.quote_refresh = quote_refresh
+        self.decision_refresh = decision_refresh
         self.clock = clock or ((lambda: self.bundle.now) if bundle.synthetic else
                                getattr(getattr(decide, "__self__", None), "clock", utcnow))
         self.profile = config.research if config.mode != "live" else config.data["strategy"]["strategy"]["live_mandate"]["accepted_risk_policy"]
@@ -707,15 +718,23 @@ class Application:
                 on_progress('확인한 계좌와 후보 자료로 투자 판단을 요청하고 있습니다.')
             supports_progress = on_progress and 'on_progress' in inspect.signature(self.decide).parameters
             proposal_value = self.decide(frozen, on_progress=on_progress) if on_progress and supports_progress else self.decide(frozen)
+            completed_at = self.clock()
+            proposal = DecisionProposal.model_validate(proposal_value)
+            result['model_status'] = 'FIXTURE_RECORDED_RESPONSE' if bundle.synthetic else 'SUCCEEDED'
+            result['decision_status'] = 'REVALIDATING'
+            save('proposal.json', {'proposal':proposal, 'completed_at':completed_at, 'validation':'PENDING'})
+            for review in [*proposal.candidate_reviews, *proposal.position_reviews]:
+                if review.instrument_id in details:
+                    details[review.instrument_id].update(stage='AI_PROPOSED', ai=review.model_dump(mode='json'))
             if on_progress:
                 on_progress('모델의 판단을 현재 계좌·주문 조건과 대조하고 있습니다.')
-            completed_at = self.clock()
             from datetime import timedelta
             decision_deadline = completed_at + timedelta(seconds=self.profile["orders"]["decision_max_age_seconds"])
             if self.store.get("paused") or self.store.get("drawdown_paused", False):
                 result.update(run_status="PAUSED", decision_status="DISCARDED_AFTER_PAUSE", reason="NEW_RISK_PAUSED")
                 return result
-            current_bundle = self.refresh() if self.refresh else self.bundle
+            current_bundle = (self.decision_refresh(frozen) if self.decision_refresh else
+                              self.refresh() if self.refresh else self.bundle)
             evidence_scope = {event["instrument_id"] for event in frozen["events"]} | {fact["instrument_id"] for fact in frozen["facts"]} | held_ids | {candidate.instrument.instrument_id for candidate in candidates}
             current_facts_hash = digest([[event for event in current_bundle.events if event.instrument_id in evidence_scope],
                 [fact for fact in current_bundle.facts if fact.instrument_id in evidence_scope]])
@@ -808,11 +827,15 @@ class Application:
             return result
         except HumanRequired as error:
             result.update(run_status=error.state, reason=str(error))
+            if result['decision_status'] == 'REVALIDATING':
+                result['decision_status'] = 'REVALIDATION_FAILED'
             raise
         except Exception as error:
             result.update(run_status="FAILED", reason=str(error), error_type=type(error).__name__)
             if result["model_status"] == "RUNNING":
                 result["model_status"] = "MODEL_FAILED"
+            if result['decision_status'] == 'REVALIDATING':
+                result['decision_status'] = 'REVALIDATION_FAILED'
             raise
         finally:
             # A later failure must not hide earlier persisted submissions.

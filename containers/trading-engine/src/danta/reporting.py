@@ -110,6 +110,17 @@ LABELS = {
     'status_checked_at': '상태 확인 시각', 'monitor_diagnostic': '현재 감시 문제', 'account_diagnostics': '현재 계좌 문제',
 }
 STATES = {
+    'NO_RECENT_EVENT_TO_REVIEW': '검토할 최근 공시가 없어 일봉 수집 대상에서 제외',
+    'UNIVERSE_STATUS_OR_CLASSIFICATION_EXCLUDED': '보통주·정상거래·분류 확인 조건에 맞지 않아 제외',
+    'EVENT_COVERAGE_PARTIAL': '공시 수집 또는 원문 확인이 불완전함',
+    'PAGE_LIMIT': '공시 목록의 다음 페이지 수집이 필요함',
+    'DOCUMENT_FETCH_FAILED': '공시 원문 응답을 읽지 못함',
+    'DOCUMENT_NOT_AVAILABLE': '공시 제공처에 원본 파일이 없음 · 재확인 대기',
+    'DART_SERVICE_UNAVAILABLE': '공시 제공처 서비스가 일시 중단됨',
+    'REVALIDATING': 'AI 응답 완료 · 최신 조건 대조 중',
+    'REVALIDATION_FAILED': 'AI 응답 후 최신 조건 대조 실패 · 주문 미실행',
+    'STALE_DECISION': '판단 유효시간이 지났거나 공시 근거가 변경됨',
+    'DECISION_EVIDENCE_REFRESH_INCOMPLETE': '판단 대상 공시의 최신 상태를 확인하지 못함',
     'DAILY_HISTORY_NOT_COLLECTED': '일봉 미수집으로 지표 검토 미진행',
     'NO_ELIGIBLE_CANDIDATES': '신규 후보가 사전 검사에서 모두 제외됨',
     'OPERATOR_EXCLUDED': '사용자 설정으로 신규 매수 제외',
@@ -416,7 +427,8 @@ def render_notification(payload, *, symbols=None) -> str:
         for row in data.get('review_details', []):
             lines.append('• ' + _name(row, symbols) + ' — ' + _review_outcome(row))
         if data.get('feature_exclusions'):
-            lines.append('기초 자료·지표 단계의 제외 기록 ' + str(len(data['feature_exclusions'])) + '건은 첨부 HTML에서 확인할 수 있습니다.')
+            lines.append('사전 검사: ' + ' · '.join(name + ' ' + str(len(rows)) + '건'
+                for name,rows in _screening_groups(data['feature_exclusions']).items() if rows) + '. 상세는 첨부 HTML에 있습니다.')
         if data.get('review_details'):
             lines.append('공시 원문·지표·시세 기준 시각과 상세 판단은 첨부 HTML에 있습니다.')
         lines.append('보호 매도 등 당일 전체 거래는 /report 에 포함됩니다.')
@@ -525,6 +537,8 @@ def _review_outcome(row):
     ai, plan = row.get('ai') or {}, row.get('plan') or {}
     if ai:
         text = _value(ai.get('verdict', ai.get('action'))) + ': ' + str(ai.get('reason') or ai.get('economic_path') or MISSING)
+        if row.get('stage') == 'AI_PROPOSED':
+            text = 'AI 응답 (실행 검증 미완료) · ' + text
     else:
         text = _value(row.get('stage')) + ': ' + ', '.join(_value(reason) for reason in row.get('filter_reasons', []))
     if plan:
@@ -534,6 +548,18 @@ def _review_outcome(row):
     if row.get('orders'):
         text += ' / ' + ', '.join(_value(order.get('state')) + ' ' + _amount(order.get('quantity'), '주') for order in row['orders'])
     return text
+
+
+def _screening_groups(rows):
+    groups = {'자료 확인 실패':[], '시세 수신 대기':[], '전략 조건 제외':[], '수집 대상 아님':[]}
+    for row in rows:
+        reason = row.get('reason')
+        group = ('수집 대상 아님' if reason in {'NO_RECENT_EVENT_TO_REVIEW','UNIVERSE_STATUS_OR_CLASSIFICATION_EXCLUDED'} else
+                 '시세 수신 대기' if reason == 'STREAM_NOT_READY' else
+                 '전략 조건 제외' if reason in {'NO_VALID_RECENT_OFFICIAL_EVENT','INSUFFICIENT_LIQUIDITY','TREND_GATE_FAILED','RELATIVE_STRENGTH_GATE_FAILED','BOARD_INDEX_GATE_FAILED'} else
+                 '자료 확인 실패')
+        groups[group].append(row)
+    return groups
 
 
 def _review_html(run, symbols):
@@ -636,9 +662,11 @@ def _operational_report(data):
     body += '<p class="muted">위 주문 결과는 해당 투자 검토의 범위입니다. 보호 규칙으로 발생한 매도를 포함한 전체 거래는 주문·체결 장부에 표시합니다.</p>'
     for run in runs:
         if run.get('feature_exclusions'):
-            body += '<details><summary>기초 자료·지표 사전 제외 기록 (' + str(len(run['feature_exclusions'])) + '건)</summary>'
-            body += _table(['종목 또는 출처','제외 이유'], [[_name(row,symbols) if row.get('instrument_id') else str(row.get('source','자료 수집')),
-                ', '.join(_value(reason) for reason in row.get('reasons') or [row.get('reason')])] for row in run['feature_exclusions']]) + '</details>'
+            for group,rows in _screening_groups(run['feature_exclusions']).items():
+                if rows:
+                    body += '<details><summary>' + group + ' (' + str(len(rows)) + '건)</summary>'
+                    body += _table(['종목 또는 출처','이유'], [[_name(row,symbols) if row.get('instrument_id') else str(row.get('source','자료 수집')),
+                        ', '.join(_value(reason) for reason in row.get('reasons') or [row.get('reason')])] for row in rows]) + '</details>'
         if run.get('review_details'):
             body += '<h3>' + html.escape(_time(run.get('created_at'))) + ' 종목별 검토</h3>' + _review_html(run, symbols)
     for thesis in data.get('theses', []):

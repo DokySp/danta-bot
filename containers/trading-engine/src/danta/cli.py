@@ -65,6 +65,7 @@ def make_application(config, args):
     try:
         app = Application(config, bundle, broker=broker, decide=decide, refresh=refresh,
                           protection_refresh=refresh.__self__.refresh_protection, quote_refresh=refresh.__self__.refresh_quotes, approval=approval,
+                          decision_refresh=refresh.__self__.refresh_decision,
                           chat=refresh.__self__.chat)
         app.adopt_account(refresh.__self__.manifest["bootstrap"])
         return app

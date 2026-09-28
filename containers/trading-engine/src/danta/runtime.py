@@ -26,7 +26,7 @@ from .adapters.kis import BASE_URLS, MASTER_ORIGIN, KisAdapter, KisCredentials, 
 from .application import MarketBundle, code_identity
 from .config import HumanRequired, ROOT, aware_time, canonical, digest, load_secrets, utcnow
 from .decision import DecisionProposal, validate_proposal
-from .market import SessionCalendar, calculate_features
+from .market import EventRegistry, SessionCalendar, calculate_features
 from .models import CostSchedule, DailyBar, EventRecord, Instrument, MarketFact, Quote, Session
 from .portfolio import buy_commission, sell_cost, slippage
 from .strategy import quote_fresh
@@ -757,39 +757,64 @@ class ExternalRuntime:
         self.kis.close()
         self.state.close()
 
-    def _events(self,instruments,now):
+    def _events(self,instruments,now,*,since=None):
         self.disclosure_diagnostics = list(self.state.data.get("disclosure_diagnostics",[]))
         settings = self.manifest["disclosures"]
         cached = self.state.data.setdefault("disclosure_records",{})
+        pending = self.state.data.setdefault('disclosure_pending_documents', {})
         last_poll = self.state.data.get("disclosure_last_poll")
         coverage = dict(self.state.data.get("disclosure_coverage",{}))
-        poll_due = last_poll is None or (now-aware_time(last_poll)).total_seconds() >= 180
+        scope = {item.instrument_id for item in instruments}
+        scoped = since is not None
+        poll_due = scoped or last_poll is None or (now-aware_time(last_poll)).total_seconds() >= 180
         if poll_due:
             self.disclosure_diagnostics = []
             with self.state.lock:
-                start = date.fromisoformat(self.state.data.get("disclosure_cursor_date",settings["start_date"]))
+                start = since or date.fromisoformat(self.state.data.get("disclosure_cursor_date",settings["start_date"]))
             # A resumed cursor is never silently truncated; DART range requests are split.
             result_rows, qualities = [],[]
             upper = now.astimezone(SEOUL).date()
+            corporations = sorted(code for code, symbol in settings['instrument_by_corp_code'].items() if symbol in scope) if scoped else [None]
+            if scoped and {settings['instrument_by_corp_code'][code] for code in corporations} != scope:
+                raise HumanRequired('DISCLOSURE_CORPORATION_UNVERIFIED')
             while start <= upper:
                 end = min(upper,start+timedelta(days=89))
-                try:
-                    result = self.dart.list_disclosures(start,end)
-                    if result.metadata.get("error") in AUTH_ERRORS:
-                        raise AdapterError(result.metadata["error"])
-                    result_rows.extend(result.records)
-                    qualities.append(result.quality)
-                    if result.quality not in {"COMPLETE","COMPLETE_NO_EVENT"}:
-                        self.disclosure_diagnostics.append({"source":"DART","reason":result.metadata.get("error","DISCLOSURE_FETCH_INCOMPLETE")})
-                except (AdapterError,ValueError,KeyError,TypeError) as error:
-                    if isinstance(error,HumanRequired) or isinstance(error,AdapterError) and error.code in AUTH_ERRORS:
-                        raise
-                    qualities.append("FETCH_FAILED")
-                    self.disclosure_diagnostics.append({"source":"DART","reason":getattr(error,"code","MALFORMED_RESPONSE")})
+                for corporation in corporations:
+                    try:
+                        arguments = {'corp_code': corporation} if corporation else {}
+                        listed_ids, expected_total = set(), None
+                        while True:
+                            result = self.dart.list_disclosures(start,end,**arguments)
+                            if result.metadata.get('error') in AUTH_ERRORS:
+                                raise AdapterError(result.metadata['error'])
+                            total = result.metadata.get('total_count')
+                            if expected_total is not None and total != expected_total:
+                                raise AdapterError('DISCLOSURE_PAGINATION_CHANGED')
+                            expected_total = total
+                            ids = {row['rcept_no'] for row in result.records}
+                            if listed_ids & ids:
+                                raise AdapterError('DISCLOSURE_DUPLICATE_PAGE')
+                            listed_ids.update(ids)
+                            result_rows.extend(result.records)
+                            if result.metadata.get('error') != 'PAGE_LIMIT':
+                                break
+                            if type(result.next_cursor) is not int or result.next_cursor <= arguments.get('cursor', 1):
+                                raise AdapterError('DISCLOSURE_PAGINATION_STALLED')
+                            arguments['cursor'] = result.next_cursor
+                        if result.quality == 'COMPLETE' and expected_total is not None and len(listed_ids) != expected_total:
+                            raise AdapterError('DISCLOSURE_COUNT_MISMATCH')
+                        qualities.append(result.quality)
+                        if result.quality not in {'COMPLETE','COMPLETE_NO_EVENT'}:
+                            self.disclosure_diagnostics.append({'source':'DART','reason':result.metadata.get('error','DISCLOSURE_FETCH_INCOMPLETE')})
+                    except (AdapterError,ValueError,KeyError,TypeError) as error:
+                        if isinstance(error,HumanRequired) or isinstance(error,AdapterError) and error.code in AUTH_ERRORS:
+                            raise
+                        qualities.append('FETCH_FAILED')
+                        self.disclosure_diagnostics.append({'source':'DART','reason':getattr(error,'code','MALFORMED_RESPONSE')})
                 start = end+timedelta(days=1)
             all_complete = all(quality in {"COMPLETE","COMPLETE_NO_EVENT"} for quality in qualities)
             quality = "COMPLETE" if result_rows and all_complete else "COMPLETE_NO_EVENT" if all_complete else "PARTIAL"
-            coverage = {instrument.instrument_id:quality for instrument in instruments}
+            coverage = {instrument.instrument_id:(quality if not scoped or coverage.get(instrument.instrument_id) in {'COMPLETE','COMPLETE_NO_EVENT'} else 'PARTIAL') for instrument in instruments}
             verified_events = []
             if settings.get("verified_events_path"):
                 extraction_path = Path(settings["verified_events_path"])
@@ -798,7 +823,9 @@ class ExternalRuntime:
                 verified_events = _json(extraction_path)["events"]
             by_receipt = {event["official_id"]:event for event in verified_events}
             corporation_map = settings["instrument_by_corp_code"]
-            for row in result_rows:
+            rows = {row['rcept_no']: row for row in [*pending.values(), *result_rows]}
+            documents_changed = False
+            for row in rows.values():
                 instrument_id = corporation_map.get(row["corp_code"])
                 if instrument_id not in coverage:
                     continue
@@ -851,22 +878,29 @@ class ExternalRuntime:
                                 official=True,primary_source_complete=False,timing_quality=timing,polarity="UNKNOWN")
                     cached[receipt] = {"event":event.model_dump(mode="json"),"facts":[fact.model_dump(mode="json") for fact in facts],
                                        "documents":documents,"document_hashes":document_hashes,"parse_reason":reason}
+                    pending.pop(receipt, None)
+                    documents_changed = True
                 except (ValueError,KeyError,AdapterError) as error:
                     if isinstance(error,HumanRequired) or isinstance(error,AdapterError) and error.code in AUTH_ERRORS:
                         raise
                     coverage[instrument_id] = "PARTIAL"
-                    all_complete = False
+                    pending[receipt] = row
                     self.disclosure_diagnostics.append({"source":"DART","instrument_id":instrument_id,
-                                                       "reason":getattr(error,"code","PRIMARY_SOURCE_FETCH_FAILED")})
+                                                       "receipt_id":receipt,"reason":getattr(error,"code","PRIMARY_SOURCE_FETCH_FAILED")})
             with self.state.lock:
-                if all_complete:
+                if all_complete and not scoped:
                     self.state.data["disclosure_cursor_date"] = upper.isoformat()
-                self.state.data["disclosure_last_poll"] = now.isoformat()
-                self.state.data["disclosure_coverage"] = coverage
-                self.state.data["disclosure_diagnostics"] = self.disclosure_diagnostics
-                self.state.save(("events", "disclosure_records", "disclosure_cursor_date", "disclosure_last_poll",
-                                 "disclosure_coverage", "disclosure_diagnostics") if "disclosure_cursor_date" in self.state.data else
-                                ("events", "disclosure_records", "disclosure_last_poll", "disclosure_coverage", "disclosure_diagnostics"))
+                if not scoped:
+                    self.state.data['disclosure_last_poll'] = self.clock().isoformat()
+                self.state.data.setdefault('disclosure_coverage', {}).update(coverage)
+                previous = [row for row in self.state.data.get('disclosure_diagnostics', [])
+                            if scoped and row.get('instrument_id') not in scope]
+                self.state.data['disclosure_diagnostics'] = previous + self.disclosure_diagnostics
+                keys = ['disclosure_pending_documents', 'disclosure_coverage', 'disclosure_diagnostics']
+                keys += [key for key in ('disclosure_cursor_date','disclosure_last_poll') if not scoped and key in self.state.data]
+                if documents_changed:
+                    keys += ['events','disclosure_records']
+                self.state.save(keys)
         held = set()
         with self.state.lock:
             if self.state.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='holdings'").fetchone():
@@ -875,6 +909,8 @@ class ExternalRuntime:
         events,facts,documents = [],[],{}
         for record in cached.values():
             event = EventRecord.model_validate_json(canonical(record["event"]))
+            if event.instrument_id not in scope:
+                continue
             age = self.calendar.event_age(event,current.session_id)
             if event.instrument_id not in held and not 1 <= age <= self.profile["signal"]["max_event_age_sessions"]:
                 continue
@@ -886,6 +922,28 @@ class ExternalRuntime:
             if not event.primary_source_complete or event.timing_quality == "UNCERTAIN":
                 coverage[event.instrument_id] = "PARTIAL"
         return events,facts,coverage,documents
+
+    def refresh_decision(self, frozen):
+        """Recheck the decision's issuers and account without rebuilding the universe."""
+        with self.collect_lock:
+            self.config.assert_current()
+            scope = ({row['instrument_id'] for row in frozen['events'] + frozen['facts']} |
+                     {row['instrument']['instrument_id'] for row in frozen['candidates']} |
+                     set(frozen['reviewed_positions']))
+            current = self.refresh_protection()
+            instruments = [current.instruments[symbol] for symbol in sorted(scope)]
+            events, facts, coverage, documents = self._events(instruments, self.clock(),
+                since=aware_time(frozen['created_at']).astimezone(SEOUL).date())
+            if self.disclosure_diagnostics:
+                raise AdapterError('DECISION_EVIDENCE_REFRESH_INCOMPLETE')
+            bundle = copy(current)
+            bundle.events = list(EventRegistry([row for row in current.events if row.instrument_id not in scope] + events).records.values())
+            bundle.facts = [row for row in current.facts if row.instrument_id not in scope] + facts
+            bundle.data = {**current.data, 'events':[row.model_dump(mode='json') for row in bundle.events],
+                'facts':[row.model_dump(mode='json') for row in bundle.facts],
+                'coverage':{**current.data['coverage'], **coverage},
+                'raw_documents':{**current.data['raw_documents'], **documents}}
+            return self._publish(bundle)
 
     def _account(self, *, allow_idle=False):
         self.config.require_external("account_read",self.approval)
@@ -1124,13 +1182,15 @@ class ExternalRuntime:
                 "bars":{key:[bar.model_dump(mode="json") for bar in values] for key,values in bars.items()},
                 "index_bars":{key:[bar.model_dump(mode="json") for bar in values] for key,values in index_bars.items()},
                 "events":[event.model_dump(mode="json") for event in events],"facts":[fact.model_dump(mode="json") for fact in facts],
+                'history_requested':sorted(needed) if self.manifest.get('automatic') else sorted(item.instrument_id for item in instruments),
                 "coverage":coverage,"runtime_diagnostics":diagnostics,"raw_documents":documents,"account_snapshot":account,
                 "quote_depth":depth,"quote_refresh_order":quote_orders,"account_refresh_order":account_order,
                 "strategy_sellable_quantities":account.get("strategy_sellable_quantities",{})}
             bundle = MarketBundle(data,self.profile,mode=self.config.mode)
             quoted = set(bundle.quotes)
             bundle.candidates = [candidate for candidate in bundle.candidates if candidate.instrument.instrument_id in quoted]
-            bundle.exclusions.extend(diagnostics)
+            bundle.exclusions = list({(row.get('source'),row.get('instrument_id'),row['reason']):row
+                                      for row in [*bundle.exclusions,*diagnostics]}.values())
             return self._publish(bundle)
 
     def decide(self,frozen,*,on_progress=None):

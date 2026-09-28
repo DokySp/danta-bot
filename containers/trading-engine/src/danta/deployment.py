@@ -209,7 +209,8 @@ def prepare_application(source, *, kis_transport=None, dart_transport=None, mode
         runtime = refresh.__self__
         broker.bind_store(store)
         app = Application(current, bundle, broker=broker, decide=decide, refresh=refresh,
-            protection_refresh=runtime.refresh_protection, quote_refresh=runtime.refresh_quotes, approval=grant, chat=runtime.chat)
+            protection_refresh=runtime.refresh_protection, quote_refresh=runtime.refresh_quotes,
+            decision_refresh=runtime.refresh_decision, approval=grant, chat=runtime.chat)
         app.adopt_account(bootstrap, deployment_bootstrap={"source_config_hash": source.config_hash,
             "account_identity": identity, "capital": str(capital), "bootstrap": bootstrap})
         if not saved:

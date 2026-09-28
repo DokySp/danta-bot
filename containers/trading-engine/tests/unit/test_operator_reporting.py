@@ -9,6 +9,27 @@ from danta.safety import CredentialError
 
 
 class OperatorReportingTests(unittest.TestCase):
+    def test_successful_ai_with_failed_revalidation_and_screening_groups_are_distinct(self):
+        run = {'run_status':'FAILED','model_status':'SUCCEEDED','decision_status':'REVALIDATION_FAILED',
+               'reason':'STALE_DECISION','order_status':'NONE',
+               'review_details':[{'instrument_id':'KRX:005930','stage':'AI_PROPOSED',
+                                  'ai':{'action':'ABSTAIN','reason':'확인 근거 부족'}}],
+               'feature_exclusions':[{'instrument_id':'KRX:000001','reason':'NO_RECENT_EVENT_TO_REVIEW'},
+                                     {'instrument_id':'KRX:000002','reason':'INSUFFICIENT_LIQUIDITY'},
+                                     {'instrument_id':'KRX:000003','reason':'STREAM_NOT_READY'},
+                                     {'instrument_id':'KRX:000004','reason':'DOCUMENT_FETCH_FAILED'},
+                                     {'instrument_id':'KRX:000005','reason':'NO_VALID_RECENT_OFFICIAL_EVENT'}]}
+        text = render_notification(run)
+        for expected in ('모델 실행: 성공','최신 조건 대조 실패','판단 유보','실행 검증 미완료',
+                         '자료 확인 실패 1건','시세 수신 대기 1건','전략 조건 제외 2건','수집 대상 아님 1건'):
+            self.assertIn(expected,text)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)/'report.html'
+            write_report({'status':{},'runs':[run]},Path(tmp)/'report.json',path)
+            html = path.read_text()
+        for expected in ('자료 확인 실패 (1건)','시세 수신 대기 (1건)','전략 조건 제외 (2건)','수집 대상 아님 (1건)'):
+            self.assertIn(expected,html)
+
     def test_review_details_reach_telegram_and_daily_html_with_safe_source_links(self):
         row = {'instrument_id':'KRX:005930','name':'삼성전자','scope':'NEW','stage':'PREFILTERED',
                'filter_reasons':['STALE_OR_INVALID_QUOTE','SPREAD_TOO_WIDE'],'quote_age_seconds':6,
