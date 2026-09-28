@@ -354,6 +354,8 @@ S_next = max(S_current, 최근 진입 후 완성 세션 최고 종가 - 2*ATR14(
 
 ### 6.3 판단 지연과 변경 없는 실행
 
+보호 감시·보유 평가의 호가 허용시간은 `strategy.research_profile.orders.monitor_quote_max_age_seconds`(기본 60초)다. 신규 진입 검토와 실제 매수·매도 주문 직전에는 기존 `quote_max_age_seconds`(5초)로 재조회·검증한다. 이 값은 호가 원래 시각의 허용 나이이며, 5초 목표 감시 주기나 60초 연속 정상 확인 후의 복구 알림과는 별개다. 감시 값이 없는 기존 설정은 주문용 허용시간을 그대로 사용한다. 운영 NAS에는 `config/strategy.yaml`에 새 항목을 반영한 뒤 엔진을 재시작해야 한다.
+
 모델 1회 시도 timeout은 연구 기본 180초다. 시점에 민감한 가격 조건은 모델이 오래 생각해도 유효해지지 않는다. 결정은 완료 후 120초 내에만 계획으로 사용할 수 있고, 주문 직전 호가·계좌·정책을 재검증한다. 입력과 사실이 변해 자격이 사라지면 주문 없이 `STALE_DECISION`으로 끝낸다.
 
 응답 후 재검증은 판단 대상 회사의 새 공시와 현재 계좌를 확인하며 전체 시장·일봉을 다시 수집하지 않는다. AI 원응답은 `proposal.json`에 즉시 보존하고, 이후 검증 실패는 모델 성공과 구분해 보고한다. 공시 목록은 페이지 한도 이후에도 이어 읽고, 원문 조회 실패는 해당 접수번호만 재시도한다. 사전 검사 보고는 자료 확인 실패·시세 수신 대기·전략 조건 제외·수집 대상 아님을 구분한다.
@@ -926,6 +928,7 @@ strategy:
       exit_type: market_in_valid_session
       decision_max_age_seconds: 120
       quote_max_age_seconds: 5
+      monitor_quote_max_age_seconds: 60
       maximum_roundtrip_friction_to_initial_r: '0.15'
       respect_pending_orders: true
     costs:

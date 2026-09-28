@@ -398,6 +398,63 @@ class EngineCase(unittest.TestCase):
         self.assertEqual(ex.broker.submissions, 1)
         self.assertEqual(ex.store.reservation(), intent.reserve_cash)
 
+    def test_monitor_tolerates_one_minute_but_dispatch_still_requires_fresh_quotes(self):
+        path = self.config_dir / 'strategy.yaml'
+        settings = yaml.safe_load(path.read_text())
+        settings['strategy']['research_profile']['orders']['monitor_quote_max_age_seconds'] = 60
+        path.write_text(yaml.safe_dump(settings))
+        config = load_config(self.config_dir)
+        app = Application(config, MarketBundle(self.data, config.research, mode='offline'))
+        try:
+            app.review()
+            original = app.bundle.now
+            for age in (6, 30, 60):
+                with self.subTest(age=age):
+                    app.bundle.now = original + timedelta(seconds=age)
+                    self.assertTrue(app.portfolio().complete)
+                    self.assertEqual(app.protect()[0]['action'], 'KEEP_QUANTITY')
+                    if age == 30:
+                        def strict_quotes(symbols):
+                            for symbol in symbols:
+                                app.bundle.quotes.pop(symbol, None)
+                            return app.bundle
+                        with patch.object(app, 'quote_refresh', side_effect=strict_quotes):
+                            app.review()
+                        self.assertTrue(app.portfolio().complete)
+                    for side in ('BUY', 'SELL'):
+                        with self.assertRaisesRegex(ValueError, 'MONITOR_DEGRADED'):
+                            app._validate_order(self.intent(app.executor, side=side), app.bundle.now)
+            self.assertFalse(app.store.get('monitor_degraded', False))
+            app.bundle.now = original + timedelta(seconds=61)
+            self.assertFalse(app.portfolio().complete)
+            self.assertEqual(app.protect()[0]['action'], 'MONITOR_DEGRADED')
+            # Recovery still needs 60 seconds of valid observations, independent of quote age.
+            for elapsed in (0, 59, 60):
+                app.bundle.now = original + timedelta(seconds=62 + elapsed)
+                app.bundle.quotes = {symbol: quote.model_copy(update={
+                    'observed_at':app.bundle.now, 'received_at':app.bundle.now})
+                    for symbol,quote in app.bundle.quotes.items()}
+                app.protect()
+                self.assertEqual(app.store.get('monitor_degraded'), elapsed < 60)
+            self.assertEqual(app.store.db.execute("SELECT COUNT(*) FROM journal WHERE kind='MONITOR_RECOVERED'").fetchone()[0], 1)
+        finally:
+            app.close()
+
+    def test_monitor_quote_config_preserves_legacy_limit_and_validates_new_value(self):
+        self.assertEqual(self.config.research['orders']['monitor_quote_max_age_seconds'], 5)
+        path = self.config_dir / 'strategy.yaml'
+        original = path.read_text()
+        for value in ('60', '0', 'true'):
+            path.write_text(original.replace('      quote_max_age_seconds: 5',
+                '      quote_max_age_seconds: 5\n      monitor_quote_max_age_seconds: ' + value))
+            if value == '60':
+                config = load_config(self.config_dir)
+                self.assertEqual(config.research['orders']['monitor_quote_max_age_seconds'], 60)
+                self.assertEqual(config.research['orders']['quote_max_age_seconds'], 5)
+            else:
+                with self.assertRaises(ConfigurationError):
+                    load_config(self.config_dir)
+
     def test_stale_and_missing_holding_quote_never_certify_nav_or_disable_clock(self):
         app = Application(self.config, self.bundle)
         try:

@@ -89,10 +89,16 @@ class RuntimeStreamContracts(unittest.TestCase):
             book['asking']['aspr_acpt_hour'] = (self.now - timedelta(seconds=6)).strftime('%H%M%S')
             with self.assertRaisesRegex(ValueError, 'STALE_QUOTE'):
                 self.runtime._quote(self.instrument)
+            # The same fallback keeps the provider timestamp when protection permits 60 seconds.
+            self.assertEqual(self.runtime._quote(self.instrument, maximum_age_seconds=60).observed_at,
+                             self.now - timedelta(seconds=6))
+            book['asking']['aspr_acpt_hour'] = (self.now - timedelta(seconds=61)).strftime('%H%M%S')
+            with self.assertRaisesRegex(ValueError, 'STALE_QUOTE'):
+                self.runtime._quote(self.instrument, maximum_age_seconds=60)
             book['asking']['aspr_acpt_hour'] = (self.now + timedelta(seconds=1)).strftime('%H%M%S')
             with self.assertRaisesRegex(ValueError, 'quote observation follows reception'):
                 self.runtime._quote(self.instrument)
-            self.assertEqual(poll.call_count, 3)
+            self.assertEqual(poll.call_count, 5)
         with patch.object(self.kis, 'stream_quote', side_effect=AdapterError('STREAM_SESSION_INVALID')), \
                 patch.object(self.kis, 'poll_quote', create=True) as poll:
             with self.assertRaisesRegex(AdapterError, 'STREAM_SESSION_INVALID'):

@@ -83,6 +83,7 @@ strategy:
       exit_type: market_in_valid_session
       decision_max_age_seconds: 120
       quote_max_age_seconds: 5
+      monitor_quote_max_age_seconds: 60
       maximum_roundtrip_friction_to_initial_r: '0.15'
       respect_pending_orders: true
     costs:

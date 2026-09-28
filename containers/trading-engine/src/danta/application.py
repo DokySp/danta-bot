@@ -23,7 +23,7 @@ from .reporting import write_report
 from .risk import ConcentrationMonitor, DrawdownCircuit, evaluate_exit, update_trailing_stop
 from .safety import reject_credentials
 from .store import Store
-from .strategy import assess_entry, quote_fresh, rank_candidates, reentry_eligibility
+from .strategy import assess_entry, monitor_quote_max_age, quote_fresh, rank_candidates, reentry_eligibility
 
 
 def code_identity() -> str:
@@ -178,7 +178,7 @@ class Application:
                 raise HumanRequired("INHERITED_POSITION_MARKET_DATA_UNAVAILABLE")
             quote = bundle.quotes.get(symbol)
             mark = (quote.bid if quote and quote.bid is not None and
-                    quote_fresh(quote, bundle.now, self.profile["orders"]["quote_max_age_seconds"])
+                    quote_fresh(quote, bundle.now, monitor_quote_max_age(self.profile))
                     else features.close if bundle.calendar.active(bundle.now) is None else None)
             if mark is None or not bundle.ticks.is_valid(mark):
                 raise HumanRequired("INHERITED_POSITION_VALUATION_UNAVAILABLE")
@@ -296,7 +296,7 @@ class Application:
         for row in self.store.holdings():
             thesis = theses[row["thesis_id"]]
             instrument, quote, features = bundle.instruments.get(row["instrument_id"]), bundle.quotes.get(row["instrument_id"]), bundle.features.get(row["instrument_id"])
-            fresh = quote is not None and quote.bid is not None and quote_fresh(quote, bundle.now, self.profile["orders"]["quote_max_age_seconds"])
+            fresh = quote is not None and quote.bid is not None and quote_fresh(quote, bundle.now, monitor_quote_max_age(self.profile))
             market_complete = market_complete and fresh and instrument is not None and features is not None
             holdings.append(Holding(instrument_id=row["instrument_id"], issuer_id=instrument.issuer_id if instrument else row["instrument_id"], sector=instrument.sector if instrument else "UNVERIFIED",
                 thesis_id=thesis.thesis_id, quantity=row["quantity"], sellable_quantity=min(row["quantity"], bundle.data.get("strategy_sellable_quantities", {}).get(row["instrument_id"], row["quantity"] if bundle.synthetic else 0)),
@@ -385,7 +385,7 @@ class Application:
             features = bundle.features.get(holding.instrument_id)
             if features is not None:
                 thesis = update_trailing_stop(thesis, features, bundle.bars.get(holding.instrument_id, []), bundle.ticks,
-                    self.profile, observed_price=quote.bid if quote and quote_fresh(quote, bundle.now, self.profile["orders"]["quote_max_age_seconds"]) and
+                    self.profile, observed_price=quote.bid if quote and quote_fresh(quote, bundle.now, monitor_quote_max_age(self.profile)) and
                         (thesis.protection_started_at is None or quote.observed_at >= thesis.protection_started_at) else None)
             with self.store.transaction():
                 self._save_thesis(thesis)
@@ -630,13 +630,15 @@ class Application:
             if self.protection_refresh and self.refresh:
                 self.bundle = self.refresh()
             protection = self.protect()
+            theses = [thesis for thesis in self.theses() if thesis.exited_at is None and (self.store.quantity(thesis.instrument_id) or self.store.working(thesis.instrument_id))]
+            held_ids = {thesis.instrument_id for thesis in theses}
             if self.quote_refresh:
-                self.bundle = self.quote_refresh([candidate.instrument.instrument_id for candidate in self.bundle.candidates])
+                self.bundle = self.quote_refresh([candidate.instrument.instrument_id for candidate in self.bundle.candidates
+                                                 if candidate.instrument.instrument_id not in held_ids])
             bundle = self.bundle
             if self.store.get("paused") or self.store.get("drawdown_paused", False):
                 result.update(run_status="BLOCKED", decision_status="NEW_RISK_PAUSED")
                 return result
-            theses = [thesis for thesis in self.theses() if thesis.exited_at is None and (self.store.quantity(thesis.instrument_id) or self.store.working(thesis.instrument_id))]
             candidates = bundle.candidates
             controls = self.store.get("candidate_controls", {"removed": [], "excluded": []})
             controlled = set(controls['removed']) | set(controls['excluded'])
@@ -651,7 +653,6 @@ class Application:
                 candidates = [candidate for candidate in candidates if candidate.instrument.instrument_id == event.instrument_id]
                 excluded_candidates = [candidate for candidate in excluded_candidates if candidate.instrument.instrument_id == event.instrument_id]
                 affected = [thesis.instrument_id for thesis in theses if thesis.instrument_id == event.instrument_id]
-            held_ids = {thesis.instrument_id for thesis in theses}
             prefilters = []
             eligible = []
             details = {}
@@ -680,7 +681,7 @@ class Application:
             for candidate in candidates:
                 symbol = candidate.instrument.instrument_id
                 quote = bundle.quotes.get(symbol)
-                if self.quote_refresh and (quote is None or not quote_fresh(quote,self.clock(),self.profile['orders']['quote_max_age_seconds'])):
+                if symbol not in held_ids and self.quote_refresh and (quote is None or not quote_fresh(quote,self.clock(),self.profile['orders']['quote_max_age_seconds'])):
                     bundle = self.bundle = self.quote_refresh([symbol])
                     quote = bundle.quotes.get(symbol)
                     details[symbol].update(evaluated_at=bundle.now.isoformat(),quote=quote.model_dump(mode='json') if quote else None,

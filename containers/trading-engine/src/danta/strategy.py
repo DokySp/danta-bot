@@ -25,6 +25,11 @@ def initial_stop(entry: Decimal, features: FeatureSnapshot, ticks: TickTable,
     return stop
 
 
+def monitor_quote_max_age(profile: dict) -> int:
+    orders = profile['orders']
+    return orders.get('monitor_quote_max_age_seconds', orders['quote_max_age_seconds'])
+
+
 def quote_fresh(quote: Quote, now: datetime, maximum_age_seconds: int) -> bool:
     return (quote.valid and quote.venue == "KRX" and quote.received_at <= now and
             0 <= (now - quote.observed_at).total_seconds() <= maximum_age_seconds)

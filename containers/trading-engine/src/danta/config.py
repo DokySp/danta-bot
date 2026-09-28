@@ -251,6 +251,12 @@ def load_config(directory: str | Path | None = None) -> Config:
     try:
         for name in ("app", "strategy", "schedules"):
             data[name] = yaml.load((directory / f"{name}.yaml").read_text(), Loader=StrictLoader)
+            if name == 'strategy':
+                try:
+                    orders = data[name]['strategy']['research_profile']['orders']
+                    orders.setdefault('monitor_quote_max_age_seconds', orders['quote_max_age_seconds'])
+                except (KeyError, TypeError, AttributeError):
+                    pass  # The shape validator reports malformed legacy configurations.
             _validate_shape(data[name], contract[name], name)
     except (yaml.YAMLError, OSError) as error:
         raise ConfigurationError(f"Configuration could not be loaded: {type(error).__name__}") from error

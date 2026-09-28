@@ -283,6 +283,25 @@ class ExternalRuntimeContracts(unittest.TestCase):
         self.assertEqual([call.args[0].instrument_id for call in quote.call_args_list],['KRX:000001'])
         self.assertIn('KRX:000001',refreshed.quotes)
 
+    def test_monitor_quote_limit_is_separate_from_targeted_order_refresh(self):
+        bundle, _broker, decide, _refresh = self._factory()
+        runtime = decide.__self__
+        self.addCleanup(runtime.close)
+        runtime.profile['orders']['monitor_quote_max_age_seconds'] = 60
+        runtime.state.data['paper']['quantities'] = {'KRX:000001':1}
+        self.now += timedelta(seconds=30)
+        stale_quote = {'scope':'PROTECTION', 'instrument_id':'KRX:000001',
+                       'reason':'MONITOR_DEGRADED', 'detail':'STALE_QUOTE'}
+        with patch('danta.adapters.kis.utcnow', side_effect=lambda:self.now):
+            protected = runtime.refresh_protection()
+            self.assertFalse([row for row in protected.data['runtime_diagnostics']
+                              if row.get('scope') in {'PROTECTION', 'ENTRY'}])
+            order = runtime.refresh_quotes(['KRX:000001'])
+            self.assertIn(stale_quote, order.data['runtime_diagnostics'])
+            self.now += timedelta(seconds=31)
+            stale = runtime.refresh_protection()
+            self.assertIn(stale_quote, stale.data['runtime_diagnostics'])
+
     def test_protection_refresh_finishes_while_disclosure_collection_is_blocked(self):
         bundle,broker,decide,refresh = self._factory()
         runtime = decide.__self__

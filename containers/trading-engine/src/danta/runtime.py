@@ -29,7 +29,7 @@ from .decision import DecisionProposal, validate_proposal
 from .market import EventRegistry, SessionCalendar, calculate_features
 from .models import CostSchedule, DailyBar, EventRecord, Instrument, MarketFact, Quote, Session
 from .portfolio import buy_commission, sell_cost, slippage
-from .strategy import quote_fresh
+from .strategy import monitor_quote_max_age, quote_fresh
 from .safety import reject_credentials
 
 SEOUL = ZoneInfo("Asia/Seoul")
@@ -673,7 +673,9 @@ class ExternalRuntime:
                 ohlc_consistently_adjusted=basis["consistent_ohlc_verified"],source=basis["source"]))
         return sorted(rows,key=lambda bar:bar.closes_at)
 
-    def _quote(self,instrument,*,depth=None):
+    def _quote(self,instrument,*,depth=None,maximum_age_seconds=None):
+        if maximum_age_seconds is None:
+            maximum_age_seconds = self.profile["orders"]["quote_max_age_seconds"]
         fields = self.manifest["normalization"]["quote"]
         streaming = fields.get("transport", "rest") == "websocket"
         read = self.kis.stream_quote if streaming else self.kis.quote
@@ -717,7 +719,7 @@ class ExternalRuntime:
             "ask":_quantity(_field(raw,fields["ask_quantity"])) if fields.get("ask_quantity") else 0}
         quote = Quote(instrument_id=instrument.instrument_id,venue="KRX",observed_at=observed,received_at=result.retrieved_at,
                      bid=_decimal(_field(raw,fields["bid"])),ask=_decimal(_field(raw,fields["ask"])),source=fields["source"])
-        if polled and not quote_fresh(quote,self.clock(),self.profile["orders"]["quote_max_age_seconds"]):
+        if polled and not quote_fresh(quote,self.clock(),maximum_age_seconds):
             raise ValueError("STALE_QUOTE")
         return quote
 
@@ -1039,15 +1041,17 @@ class ExternalRuntime:
         excluded = self._subscribe_quotes(account)
         quotes,depth,orders,diagnostics = {},{},{},[]
         protected = self._protection_symbols(account)
-        for symbol in sorted(set(symbols) if symbols else protected):
+        symbols = set(symbols)
+        maximum_age = self.profile['orders']['quote_max_age_seconds'] if symbols else monitor_quote_max_age(self.profile)
+        for symbol in sorted(symbols or protected):
             try:
                 if symbol in excluded:
                     raise ValueError("PROTECTED_STREAM_CAPACITY_EXCEEDED")
                 instrument = previous.instruments.get(symbol)
                 if instrument is None:
                     raise ValueError("VERIFIED_INSTRUMENT_UNAVAILABLE")
-                quotes[symbol] = self._quote(instrument,depth=depth)
-                if not quote_fresh(quotes[symbol],self.clock(),self.profile["orders"]["quote_max_age_seconds"]):
+                quotes[symbol] = self._quote(instrument,depth=depth,maximum_age_seconds=maximum_age)
+                if not quote_fresh(quotes[symbol],self.clock(),maximum_age):
                     raise ValueError("STALE_QUOTE")
             except (ValueError,KeyError,AdapterError) as error:
                 if isinstance(error,HumanRequired) or isinstance(error,AdapterError) and error.code in AUTH_ERRORS:
@@ -1174,7 +1178,9 @@ class ExternalRuntime:
             self._wait_for_stream_quotes(quote_instruments)
             for instrument in quote_instruments:
                 try:
-                    quotes.append(self._quote(instrument,depth=depth))
+                    maximum_age = (monitor_quote_max_age(self.profile) if instrument.instrument_id in protected
+                                   else self.profile['orders']['quote_max_age_seconds'])
+                    quotes.append(self._quote(instrument,depth=depth,maximum_age_seconds=maximum_age))
                 except (ValueError,KeyError,AdapterError) as error:
                     if isinstance(error,HumanRequired) or isinstance(error,AdapterError) and error.code in AUTH_ERRORS:
                         raise

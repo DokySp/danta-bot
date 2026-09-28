@@ -7,7 +7,7 @@ from decimal import Decimal, ROUND_CEILING
 from .market import SessionCalendar, TickTable
 from .models import DailyBar, EventRecord, ExitPlan, FeatureSnapshot, Holding, InvestmentThesis, PortfolioSnapshot, Quote, Reduction
 from .portfolio import exposures, snapshot_valid
-from .strategy import quote_fresh
+from .strategy import monitor_quote_max_age, quote_fresh
 
 
 def update_trailing_stop(thesis: InvestmentThesis, features: FeatureSnapshot,
@@ -49,7 +49,7 @@ def evaluate_exit(thesis: InvestmentThesis, holding: Holding, quote: Quote | Non
     if not account_complete or not orders_known or not holding.source_verified:
         return result("RECONCILE_REQUIRED")
     session = calendar.active(now)
-    max_age = research_profile["orders"]["quote_max_age_seconds"]
+    max_age = monitor_quote_max_age(research_profile)
     fresh_bid = (quote is not None and quote.instrument_id == holding.instrument_id and
                  quote_fresh(quote, now, max_age) and quote.bid is not None)
     fresh_trade = (quote is not None and quote.instrument_id == holding.instrument_id and quote.valid and

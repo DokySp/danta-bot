@@ -559,8 +559,8 @@ class Service:
                 holding['name'] = symbols.get(holding['instrument_id'])
                 quote = getattr(self.app.bundle, 'quotes', {}).get(holding['instrument_id'])
                 if quote:
-                    from .strategy import quote_fresh
-                    if quote_fresh(quote, now, self.app.profile['orders']['quote_max_age_seconds']):
+                    from .strategy import monitor_quote_max_age, quote_fresh
+                    if quote_fresh(quote, now, monitor_quote_max_age(self.app.profile)):
                         holding.update(price=str(quote.bid), value=str(quote.bid * holding['quantity']),
                             price_observed_at=quote.observed_at.isoformat(), valuation_quality='EXACT')
                     else:
