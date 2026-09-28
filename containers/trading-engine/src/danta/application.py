@@ -598,13 +598,14 @@ class Application:
         self.monitor_thread.start()
 
     def review(self, *, kind: str = "full_review", event_id: str | None = None,
-               request_key: str | None = None, on_progress=None) -> dict:
+               request_key: str | None = None, on_progress=None, notification_target=None) -> dict:
         if kind not in {"full_review", "event_review"}:
             raise ValueError("Unknown review kind")
         with self.review_lock:
-            return self._review(kind, event_id, request_key, on_progress)
+            return self._review(kind, event_id, request_key, on_progress, notification_target)
 
-    def _review(self, kind: str, event_id: str | None, request_key: str | None, on_progress=None) -> dict:
+    def _review(self, kind: str, event_id: str | None, request_key: str | None, on_progress=None,
+                notification_target=None) -> dict:
         bundle = self.bundle
         key = request_key or "manual:" + str(uuid4())
         run_id, new = self.store.accept_request(key, {"kind": kind, "event_id": event_id})
@@ -867,15 +868,16 @@ class Application:
             write_report(result, directory / "summary.json", directory / "summary.html", "거래 판단·실행 결과")
             with self.store.transaction():
                 self.store.db.execute("UPDATE requests SET status=?,result=? WHERE request_id=?", (result["run_status"], canonical(result), run_id))
-                self.store.event(run_id, "RUN_OUTCOME", result, notify=True)
+                self.store.event(run_id, "RUN_OUTCOME", {**result, **(notification_target or {})}, notify=True)
                 self.store.queue_document("report:" + run_id,
-                    f"summary-{directory.parent.name}-{run_id}.html", (directory / "summary.html").read_text(encoding="utf-8"))
+                    f"summary-{directory.parent.name}-{run_id}.html", (directory / "summary.html").read_text(encoding="utf-8"),
+                    **(notification_target or {}))
 
-    def pause(self) -> dict:
+    def pause(self, *, notify: bool = True) -> dict:
         with self.store.transaction():
             self.store.set("paused", True)
             self.store.bump_version()
-            self.store.event("operator", "DISCRETIONARY_PAUSED", {"protection": "CONTINUES"}, notify=True)
+            self.store.event("operator", "DISCRETIONARY_PAUSED", {"protection": "CONTINUES"}, notify=notify)
         return {"status": "PAUSED", "protection": "CONTINUES"}
 
     def resume(self) -> dict:

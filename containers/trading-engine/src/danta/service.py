@@ -86,6 +86,10 @@ class Service:
         elif command not in READ_COMMANDS:
             raise HumanRequired('This command requires the trusted local operator configuration/approval workflow')
 
+    def _workflow_result(self, request_id):
+        rows = self.store.read('SELECT result FROM requests WHERE request_key=?', ('workflow:' + request_id,))
+        return json.loads(rows[0]['result']) if rows and rows[0]['result'] else None
+
     def _recover(self):
         with self.store.transaction():
             rows = self.store.db.execute("SELECT request_id,payload FROM requests WHERE request_key LIKE 'service:%' AND status='RUNNING'").fetchall()
@@ -97,13 +101,12 @@ class Service:
                     self.store.db.execute("UPDATE requests SET status='ACCEPTED' WHERE request_id=?", (row['request_id'],))
                     self.store.event(row['request_id'], 'SERVICE_REQUEST_RECOVERED', {'status': 'REPORT_REQUEUED'})
                     continue
-                workflow = self.store.db.execute('SELECT status,result FROM requests WHERE request_key=?',
-                    ('workflow:' + row['request_id'],)).fetchone()
-                result = json.loads(workflow['result']) if workflow and workflow['result'] else {
+                workflow_result = self._workflow_result(row['request_id'])
+                result = workflow_result if workflow_result is not None else {
                     'status': 'INTERRUPTED_RECONCILE_REQUIRED', 'reexecute_trade': False}
                 self.store.db.execute('UPDATE requests SET status=?,result=? WHERE request_id=?',
-                    ('RECOVERED_RESULT' if workflow and workflow['result'] else 'INTERRUPTED', canonical(result), row['request_id']))
-                self.store.event(row['request_id'], 'SERVICE_REQUEST_RECOVERED', result, notify=True)
+                    ('RECOVERED_RESULT' if workflow_result is not None else 'INTERRUPTED', canonical(result), row['request_id']))
+                self.store.event(row['request_id'], 'SERVICE_REQUEST_RECOVERED', result, notify=workflow_result is None)
             self.store.db.execute("UPDATE outbox SET state='PENDING' WHERE state='SENDING'")
             if self.telegram is not None:
                 # No receipt timestamp means the previous HTTP acknowledgement was not durable.
@@ -251,6 +254,11 @@ class Service:
             result = {'status': getattr(error, 'state', 'FAILED'), 'error_type': type(error).__name__}
             if isinstance(error, HumanRequired):
                 result['reason'] = str(error)
+        # Review completion persists its result, notification and HTML atomically.
+        # Reuse that outcome even when review raised; never send a second summary.
+        workflow_result = self._workflow_result(row['request_id'])
+        if workflow_result is not None:
+            result = workflow_result
         document = result.pop('_document', None)
         markup = result.pop('_reply_markup', None)
         with self.store.transaction():
@@ -259,6 +267,7 @@ class Service:
             self.store.event(row['request_id'], 'SERVICE_RESULT', result)
             if payload.get('source') == 'telegram':
                 self.store.db.execute("UPDATE telegram_requests SET status='COMPLETE' WHERE request_id=?", (payload['telegram_request_id'],))
+            if payload.get('source') == 'telegram' and workflow_result is None:
                 notification = {'route': payload['route'], 'chat_id': payload['chat_id'],
                                 'text': render_notification(result, symbols=self._symbols())}
                 if markup:
@@ -354,7 +363,7 @@ class Service:
                 count = self._cancel_chat(payload)
                 return {'status': 'CANCEL_REQUESTED' if count else 'NO_ACTIVE_CHAT', 'protection': 'CONTINUES'}
             if command == 'pause':
-                return self.app.pause()
+                return self.app.pause(notify=False)
             if command in {'schedule_on', 'schedule_off'}:
                 if command == 'schedule_on' and (self.app.bundle.synthetic or not self.scheduler['enabled']):
                     raise HumanRequired('Enable an approved fresh-data scheduler configuration first')
@@ -494,7 +503,8 @@ class Service:
             if self.app.bundle.synthetic and payload['source'] == 'scheduler':
                 raise HumanRequired('Synthetic input cannot drive a recurring market strategy')
             return self.app.review(kind=kind, event_id=payload.get('event_id'), request_key='workflow:' + request_id,
-                                   on_progress=on_progress if payload.get('source') == 'telegram' else None)
+                on_progress=on_progress if payload.get('source') == 'telegram' else None,
+                notification_target={key: payload[key] for key in ('route', 'chat_id')} if payload.get('source') == 'telegram' else None)
         if kind in PROTECTION:
             self.app.reconcile()
             return {'status': 'PROTECTION_CHECKED', 'result': self.app.protect()}

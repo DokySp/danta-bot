@@ -19,8 +19,10 @@ import yaml
 
 from danta.adapters import AdapterError, HttpResponse
 from danta.adapters.telegram import COMMANDS, TelegramAdapter
+from danta.application import Application, MarketBundle, fixture_decision
 from danta.cli import main
 from danta.config import HumanRequired, ROOT, canonical, load_config, utcnow
+from danta.execution import FixtureBroker
 from danta.market import SessionCalendar
 from danta.models import Session
 from danta.safety import CredentialError
@@ -70,10 +72,8 @@ class FakeApp:
     def finalize_nav(self):
         return {'status': 'NAV_NOT_FINALIZED', 'issues': ['SYNTHETIC_SERVICE_TEST']}
 
-    def pause(self):
-        with self.store.transaction():
-            self.store.set('paused', True)
-        return {'status': 'PAUSED', 'protection': 'CONTINUES'}
+    def pause(self, *, notify=True):
+        return Application.pause(self, notify=notify)
 
     def status(self):
         return {'status': 'FAKE_STATUS', 'paused': self.store.get('paused'),
@@ -157,6 +157,110 @@ class ServiceIntegrationTests(unittest.TestCase):
     def last_result(self):
         row = self.app.store.db.execute("SELECT result FROM requests WHERE request_key LIKE 'service:%' ORDER BY rowid DESC LIMIT 1").fetchone()
         return json.loads(row[0])
+
+    def use_real_review(self):
+        self.service.close()
+        approval, released = self.app.approval, self.app.review_release
+        broker = FixtureBroker()
+        broker.environment, broker.store = 'paper', self.app.store
+        approval['capabilities'] += ['account_read', 'paper_simulation']
+        data = json.loads((ROOT / 'tests/fixtures/offline-e2e.json').read_text())
+        data['account_identity'] = 'synthetic-service-account'
+        bundle = MarketBundle(data, self.config.research, mode='offline')
+        self.now = bundle.now
+        def watch(frozen, **kwargs):
+            result = fixture_decision(frozen)
+            for review in result['candidate_reviews']:
+                review['verdict'] = 'WATCH'
+            return result
+        self.app = Application(self.config, bundle, broker=broker, decide=watch,
+                               refresh=lambda: bundle, approval=approval)
+        self.app.review_release = released
+        self.adapter = TelegramAdapter(self.app.store.db, enabled=True,
+            allowed_senders=['user-1'], allowed_chats=['chat-1'], transport=self.transport,
+            authorize=lambda *args: None)
+        self.service = Service(self.app, telegram=self.adapter, clock=lambda: self.now)
+        self.adapter.authorize = self.service._authorize_control
+
+    def test_real_review_sends_one_result_and_html_for_success_block_and_failure(self):
+        self.use_real_review()
+        original = self.now
+        for index, outcome in enumerate(('COMPLETE', 'BLOCKED', 'FAILED'), 1):
+            with self.subTest(outcome=outcome):
+                self.app.bundle.now = self.now = (self.app.bundle.calendar.active(original).closes_at
+                    if outcome == 'BLOCKED' else original)
+                self.receive('/review', update=index)
+                if outcome == 'FAILED':
+                    with patch.object(self.app, 'reconcile', side_effect=RuntimeError('synthetic review failure')):
+                        self.assertTrue(self.service.run_once(review=True))
+                else:
+                    self.assertTrue(self.service.run_once(review=True))
+                result = self.last_result()
+                self.assertEqual(result['run_status'], outcome)
+                pending = self.app.store.read("SELECT payload FROM outbox WHERE state='PENDING'")
+                self.assertEqual(len(pending), 2)
+                for row in pending:
+                    payload = json.loads(row['payload'])
+                    self.assertEqual((payload['route'], payload['chat_id']), ('trading-engine', 'chat-1'))
+                self.sent.clear()
+                self.sent_urls.clear()
+                while self.service.outbox_once():
+                    pass
+                self.assertEqual(sum(url.endswith('/sendMessage') for url in self.sent_urls), 1)
+                self.assertEqual(sum(url.endswith('/sendDocument') for url in self.sent_urls), 1)
+                self.receive('/review', update=index)
+                self.assertFalse(self.service.run_once(review=True))
+                self.assertFalse(self.service.outbox_once())
+        self.assertEqual(self.app.store.read('SELECT COUNT(*) FROM intents')[0][0], 0)
+
+    def test_completed_review_recovery_never_queues_another_result(self):
+        self.use_real_review()
+        for update, delivered in enumerate((False, True), 1):
+            with self.subTest(delivered=delivered):
+                self.receive('/review', update=update)
+                request = self.app.store.read("SELECT * FROM requests WHERE request_key LIKE 'service:%' ORDER BY rowid DESC LIMIT 1")[0]
+                self.app.store.db.execute("UPDATE requests SET status='RUNNING' WHERE request_id=?", (request['request_id'],))
+                self.app.review(request_key='workflow:' + request['request_id'],
+                                notification_target={'route':'trading-engine', 'chat_id':'chat-1'})
+                if delivered:
+                    while self.service.outbox_once():
+                        pass
+                before = self.app.store.read('SELECT COUNT(*) FROM outbox')[0][0]
+                self.service._recover()
+                self.service._recover()
+                self.assertEqual(self.app.store.read('SELECT COUNT(*) FROM outbox')[0][0], before)
+                self.assertFalse(self.service.run_once(review=True))
+                self.assertEqual(self.last_result()['run_status'], 'COMPLETE')
+                while self.service.outbox_once():
+                    pass
+        self.assertEqual(sum(url.endswith('/sendMessage') for url in self.sent_urls), 2)
+        self.assertEqual(sum(url.endswith('/sendDocument') for url in self.sent_urls), 2)
+
+    def test_scheduled_review_keeps_one_result_and_report(self):
+        self.use_real_review()
+        self.app.bundle.synthetic = False
+        self.app.bundle.candidates = []
+        self.app.store.set('discretionary_schedule', True)
+        self.app.store.accept_request('service:schedule:review-notification',
+            {'source':'scheduler', 'kind':'full_review'}, deadline=(self.now + timedelta(minutes=1)).isoformat())
+        self.assertTrue(self.service.run_once(review=True))
+        self.assertEqual(self.last_result()['run_status'], 'COMPLETE')
+        self.assertEqual(self.app.store.read('SELECT COUNT(*) FROM outbox')[0][0], 2)
+        while self.service.outbox_once():
+            pass
+        self.assertEqual(sum(url.endswith('/sendMessage') for url in self.sent_urls), 1)
+        self.assertEqual(sum(url.endswith('/sendDocument') for url in self.sent_urls), 1)
+
+    def test_pause_has_one_reply_but_direct_operator_pause_still_notifies(self):
+        self.receive('/pause')
+        self.assertTrue(self.service.run_once())
+        self.assertTrue(self.service.outbox_once())
+        self.assertFalse(self.service.outbox_once())
+        self.assertEqual(self.app.store.read("SELECT COUNT(*) FROM journal WHERE kind='DISCRETIONARY_PAUSED'")[0][0], 1)
+        self.app.pause()
+        self.assertTrue(self.service.outbox_once())
+        self.assertFalse(self.service.outbox_once())
+        self.assertEqual(sum(url.endswith('/sendMessage') for url in self.sent_urls), 2)
 
     def test_image_version_overrides_retained_environment_on_both_status_paths(self):
         version_file = Path(self.tmp.name) / 'VERSION'
