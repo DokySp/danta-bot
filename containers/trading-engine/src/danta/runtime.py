@@ -691,6 +691,16 @@ class ExternalRuntime:
                       "bid": "asking.bidp1", "ask": "asking.askp1",
                       "bid_quantity": "asking.bidp_rsqn1", "ask_quantity": "asking.askp_rsqn1",
                       "source": result.metadata["source"]}
+            # A fresh tick may arrive while REST is in flight; do not discard it
+            # merely because that REST book still carries an older provider time.
+            try:
+                current = read(ticker)
+            except AdapterError as error:
+                if error.code != 'STREAM_QUOTE_STALE':
+                    raise
+            else:
+                result, polled, streaming = current, False, True
+                fields = self.manifest['normalization']['quote']
         if result.quality != "COMPLETE" or len(result.records) != 1:
             raise ValueError("QUOTE_FETCH_INCOMPLETE")
         raw = result.records[0]

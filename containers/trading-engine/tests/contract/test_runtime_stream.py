@@ -106,6 +106,18 @@ class RuntimeStreamContracts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "QUOTE_OBSERVATION_OUTSIDE_SESSION"):
             self.runtime._quote(self.instrument)
 
+    def test_fresh_stream_tick_wins_over_old_rest_book_returned_later(self):
+        stale_book = FetchResult(({'session_date':self.now.date().isoformat(), 'asking':{
+            'aspr_acpt_hour':(self.now-timedelta(seconds=20)).strftime('%H%M%S'),
+            'bidp1':'1','askp1':'2','bidp_rsqn1':'1','askp_rsqn1':'1'}},),
+            'COMPLETE', self.now, metadata={'source':'SYNTHETIC_REST_BOOK'})
+        fresh = FetchResult((dict(self.kis.raw),), 'COMPLETE', self.now)
+        with patch.object(self.kis, 'stream_quote', side_effect=[AdapterError('STREAM_QUOTE_STALE'),fresh]), \
+                patch.object(self.kis, 'poll_quote', return_value=stale_book, create=True):
+            quote = self.runtime._quote(self.instrument)
+        self.assertEqual(quote.observed_at, self.now)
+        self.assertEqual(str(quote.bid), '9999')
+
     def test_subscription_limit_preserves_protection_and_reports_all_excess_candidates(self):
         protected = {"KRX:000001": 3}
         account = {"strategy_quantities": protected, "orders": []}

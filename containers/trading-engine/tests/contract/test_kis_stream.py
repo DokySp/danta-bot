@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from danta.adapters import AdapterError, HttpResponse
 from danta.adapters.kis import KisAdapter, KisCredentials
-from danta.adapters.kis_stream import COLUMNS, connect, parse_records
+from danta.adapters.kis_stream import COLUMNS, KisQuoteStream, connect, parse_records
 
 
 NOW = datetime(2026, 9, 18, 1, 0, 0, tzinfo=timezone.utc)
@@ -96,6 +96,33 @@ class Transport:
 
 
 class KisStreamTests(unittest.TestCase):
+    def test_first_tick_before_subscribe_ack_is_kept_but_not_used_until_ack(self):
+        stream = KisQuoteStream(environment='demo', approval=lambda: 'fixture', permit=lambda: None, clock=lambda: NOW)
+        stream.targets, stream.connected = {'005930'}, True
+        ws = Socket()
+        ws.incoming.put(frame(record()))
+        stream._receive(ws, ('1','005930','H0STCNT0'))
+        with self.assertRaisesRegex(AdapterError, 'STREAM_NOT_READY'):
+            stream.quote('005930')
+        ws.incoming.put(ack('1','005930'))
+        stream._receive(ws, ('1','005930','H0STCNT0'))
+        self.assertEqual(stream.quote('005930').quality, 'COMPLETE')
+
+    def test_old_first_trade_verifies_date_but_never_becomes_a_fresh_quote(self):
+        stream = KisQuoteStream(environment='demo', approval=lambda: 'fixture', permit=lambda: None, clock=lambda: NOW)
+        stream.targets = stream.active = {'005930'}
+        stream.connected = True
+        ws = Socket()
+        ws.incoming.put(frame(record(STCK_CNTG_HOUR='095900')))
+        stream._receive(ws)
+        self.assertEqual(stream.session_date('005930'), '2026-09-18')
+        with self.assertRaisesRegex(AdapterError, 'STREAM_QUOTE_STALE'):
+            stream.quote('005930')
+        ws.incoming.put(frame(record(STCK_CNTG_HOUR='095900', TRHT_YN='Y')))
+        stream._receive(ws)
+        with self.assertRaisesRegex(AdapterError, 'STREAM_SESSION_UNVERIFIED'):
+            stream.session_date('005930')
+
     def test_portal_book_schema_maps_multiple_records_and_rejects_wrong_lengths(self):
         self.assertEqual(len(BOOK_PAYLOAD.split('^')), 63)
         rows = parse_records('0|H0STASP0|002|' + BOOK_PAYLOAD + '^' + BOOK_PAYLOAD.replace('005930', '000660'))
@@ -267,6 +294,20 @@ class KisStreamTests(unittest.TestCase):
         with patch.object(self.adapter, '_request', side_effect=disconnect):
             with self.assertRaisesRegex(AdapterError, 'STREAM_SESSION_UNVERIFIED'):
                 self.adapter.poll_quote('005930')
+
+    def test_new_trade_during_rest_lookup_does_not_invalidate_verified_session(self):
+        ws = self.start()
+        ws.incoming.put(frame(record()))
+        self.until(self.quote_ready)
+        self.now += timedelta(seconds=6)
+        with self.assertRaisesRegex(AdapterError, 'STREAM_QUOTE_STALE'):
+            self.adapter.stream_quote('005930')
+        def fresh_tick(*args, **kwargs):
+            ws.incoming.put(frame(record(STCK_CNTG_HOUR='100006')))
+            self.until(self.quote_ready)
+            return {'output1':{'aspr_acpt_hour':'100006','bidp1':'70000'}}, {}
+        with patch.object(self.adapter, '_request', side_effect=fresh_tick):
+            self.assertEqual(self.adapter.poll_quote('005930').records[0]['session_date'], '2026-09-18')
 
     def test_delta_keeps_other_cache_and_waits_for_unsubscribe_ack(self):
         ws = self.start(("005930", "000660"))

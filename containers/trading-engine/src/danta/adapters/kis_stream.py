@@ -63,7 +63,7 @@ def parse_records(raw):
     return tuple(dict(zip(columns, values[index:index + len(columns)])) for index in range(0, len(values), len(columns)))
 
 
-def provider_time(record, now):
+def provider_time(record, now, *, maximum_age_seconds=5):
     # A delayed halt/non-regular packet must never authorize REST fallback.
     if record["MARKET_CLS_CODE"] != "2" or record["HOUR_CLS_CODE"] != "0" or record["TRHT_YN"] != "N":
         raise AdapterError("STREAM_SESSION_INVALID")
@@ -74,7 +74,10 @@ def provider_time(record, now):
         stamp = datetime.strptime(day + hour, "%Y%m%d%H%M%S").replace(tzinfo=SEOUL)
     except ValueError:
         raise AdapterError("STREAM_TIMESTAMP_INVALID") from None
-    if stamp.date() != now.astimezone(SEOUL).date() or not 0 <= (now - stamp).total_seconds() <= 5:
+    age = (now - stamp).total_seconds()
+    if age < 0:
+        raise AdapterError('STREAM_TIMESTAMP_INVALID')
+    if stamp.date() != now.astimezone(SEOUL).date() or (maximum_age_seconds is not None and age > maximum_age_seconds):
         raise AdapterError("STREAM_QUOTE_STALE")
     return stamp
 
@@ -164,7 +167,7 @@ class KisQuoteStream:
         with self.lock:
             stamp = self.latest.get(ticker)
             if (self.closed or not self.connected or ticker not in self.active or ticker not in self.targets
-                    or self.errors.get(ticker) != "STREAM_QUOTE_STALE" or stamp is None
+                    or self.errors.get(ticker) not in {None, 'STREAM_QUOTE_STALE'} or stamp is None
                     or stamp.date() != self.clock().astimezone(SEOUL).date()):
                 raise AdapterError("STREAM_SESSION_UNVERIFIED")
             return stamp.date().isoformat()
@@ -215,9 +218,8 @@ class KisQuoteStream:
                 # Removed subscriptions can still deliver until their unsubscribe ACK.
                 active = self.active if tr_id == 'H0STCNT0' else self.book_active
                 if ticker not in active:
-                    if pending == ("1", ticker, tr_id):
-                        continue
-                    raise AdapterError("STREAM_SYMBOL_UNEXPECTED")
+                    if pending != ('1', ticker, tr_id):
+                        raise AdapterError('STREAM_SYMBOL_UNEXPECTED')
                 if ticker not in self.targets:
                     continue
                 if tr_id == 'H0STASP0':
@@ -234,6 +236,12 @@ class KisQuoteStream:
                         raise AdapterError("STREAM_QUOTE_OUT_OF_ORDER")
                 except AdapterError as error:
                     self.cache.pop(ticker, None)
+                    if error.code == 'STREAM_QUOTE_STALE':
+                        try:
+                            stamp = provider_time(record, received, maximum_age_seconds=None)
+                            self.latest[ticker] = max(stamp, self.latest.get(ticker, stamp))
+                        except AdapterError:
+                            pass
                     self.errors[ticker] = error.code
                     continue
                 self.latest[ticker] = stamp
