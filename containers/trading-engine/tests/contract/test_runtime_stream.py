@@ -112,6 +112,11 @@ class RuntimeStreamContracts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "QUOTE_OBSERVATION_OUTSIDE_SESSION"):
             self.runtime._quote(self.instrument)
 
+    def test_stale_stream_moves_directly_to_book_refresh_without_initial_tick_wait(self):
+        with patch.object(self.kis, 'stream_quote', side_effect=AdapterError('STREAM_QUOTE_STALE')), \
+                patch('danta.runtime.time.sleep', side_effect=AssertionError('unnecessary wait')):
+            self.runtime._wait_for_stream_quotes([self.instrument])
+
     def test_fresh_stream_tick_wins_over_old_rest_book_returned_later(self):
         stale_book = FetchResult(({'session_date':self.now.date().isoformat(), 'asking':{
             'aspr_acpt_hour':(self.now-timedelta(seconds=20)).strftime('%H%M%S'),

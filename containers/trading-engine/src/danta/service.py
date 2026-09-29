@@ -192,7 +192,7 @@ class Service:
                     queued += 1
         events = [{'event_id': event.event_id, 'verified_at': event.available_at, 'verified': True}
                   for event in self.app.bundle.events if event.official and event.primary_source_complete
-                  and event.timing_quality in {'EXACT', 'FIRST_COLLECTED'}
+                  and event.timing_quality in {'EXACT', 'FIRST_COLLECTED', 'DATE_ONLY'}
                   and session.opens_at <= event.available_at <= now]
         intents = self.planner.due(now, session_id=session.session_id,
             continuous_open=session.opens_at, continuous_close=session.closes_at,

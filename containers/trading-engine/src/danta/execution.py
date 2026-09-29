@@ -219,9 +219,10 @@ class Executor:
 
     def invalidate_unsubmitted_entries(self, run_id: str, reason: str) -> None:
         with self.store.transaction():
-            self.store.db.execute("UPDATE intents SET state='INVALIDATED',reserve_cash='0',reserve_risk='0' WHERE side='BUY' AND state IN ('PLANNED','VALIDATED')")
-            self.store.bump_version()
-            self.store.event(run_id, "UNSUBMITTED_ENTRIES_INVALIDATED", {"reason": reason})
+            changed = self.store.db.execute("UPDATE intents SET state='INVALIDATED',reserve_cash='0',reserve_risk='0' WHERE side='BUY' AND state IN ('PLANNED','VALIDATED')").rowcount
+            if changed:
+                self.store.bump_version()
+                self.store.event(run_id, "UNSUBMITTED_ENTRIES_INVALIDATED", {"reason": reason})
 
     def reconcile(self, snapshot: dict | None = None) -> dict:
         """Snapshot has complete broker observations; never infer fills from prose."""

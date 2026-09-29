@@ -106,6 +106,32 @@ class EngineCase(unittest.TestCase):
         finally:
             app.close()
 
+    def test_review_removes_exclusion_recovered_during_candidate_quote_refresh(self):
+        app = Application(self.config, self.bundle)
+        try:
+            symbol = "TEST:AAA"
+            quote = app.bundle.quotes[symbol]
+            app.bundle.quotes[symbol] = quote.model_copy(update={"observed_at": app.bundle.now - timedelta(seconds=6)})
+            app.bundle.exclusions = [{"instrument_id": symbol, "reason": "STREAM_NOT_READY"}]
+            app.bundle.data['runtime_diagnostics'] = [{'scope':'ENTRY', 'instrument_id':symbol, 'reason':'STREAM_NOT_READY'}]
+            calls = []
+            def refresh_quotes(symbols):
+                calls.append(symbols)
+                if len(calls) > 1:
+                    app.bundle.quotes[symbol] = quote
+                    app.bundle.exclusions = []
+                    app.bundle.data['runtime_diagnostics'] = []
+                return app.bundle
+            app.quote_refresh = refresh_quotes
+            result = app.review()
+            self.assertEqual(result["feature_exclusions"], [])
+            candidates = json.loads(next(self.config.state_dir.glob("runs/*/*/candidates.json")).read_text())["data"]
+            self.assertEqual(candidates["feature_exclusions"], [])
+            self.assertEqual(result["order_status"], "FIXTURE_FILLED")
+            self.assertEqual(result['review_details'][0]['filter_reasons'], [])
+        finally:
+            app.close()
+
     def test_failed_review_reports_an_already_persisted_order(self):
         app = Application(self.config,self.bundle)
         submit = app.executor.submit
@@ -431,6 +457,153 @@ class EngineCase(unittest.TestCase):
                 finally:
                     app.close()
                     shutil.rmtree(self.config.state_dir)
+
+    def test_new_review_can_enter_after_unfilled_failure_without_replaying_same_request(self):
+        for failure in ("REJECTED", "NOT_SENT", "CANCELED", "PREFLIGHT_FAILURE"):
+            with self.subTest(failure=failure):
+                app = Application(self.config, self.bundle)
+                try:
+                    if failure == "PREFLIGHT_FAILURE":
+                        with patch.object(app.executor, "preflight", side_effect=ValueError("TEMPORARY_PREFLIGHT")):
+                            with self.assertRaisesRegex(ValueError, "TEMPORARY_PREFLIGHT"):
+                                app.review(request_key="first-review")
+                    elif failure == "CANCELED":
+                        with patch.object(app.broker, "fill"):
+                            app.review(request_key="first-review")
+                        app.executor.cancel(app.store.working()[0]["id"], app.bundle.now)
+                        app.reconcile()
+                    else:
+                        with patch.object(app.broker, "submit", return_value={"status": failure}):
+                            app.review(request_key="first-review")
+                    self.assertEqual(app.store.quantity("TEST:AAA"), 0)
+                    self.assertEqual(len(app.theses()), 1)
+                    self.assertIsNone(app.theses()[0].protection_started_at)
+                    before = app.broker.submissions
+                    app.review(request_key="first-review")
+                    self.assertEqual(app.broker.submissions, before)
+                    result = app.review(request_key="new-review")
+                    self.assertEqual(result["order_status"], "FIXTURE_FILLED")
+                    self.assertEqual(app.broker.submissions, before + 1)
+                    self.assertGreater(app.store.quantity("TEST:AAA"), 0)
+                    # The abandoned thesis stays auditable, but must not duplicate
+                    # the actual holding's review or enable an additional buy.
+                    held = app.review(request_key="held-review")
+                    self.assertEqual(held["decision_status"], "VALID")
+                    self.assertEqual(app.broker.submissions, before + 1)
+                    frozen = json.loads((self.config.state_dir / "runs" / app.bundle.now.date().isoformat() /
+                                         held["run_id"] / "input.snapshot.json").read_text())["data"]
+                    self.assertEqual(len(frozen["theses"]), 1)
+                    self.assertIsNotNone(frozen["theses"][0]["first_fill_at"])
+                finally:
+                    app.close()
+                    shutil.rmtree(self.config.state_dir)
+
+    def test_new_review_keeps_working_unknown_and_filled_entry_restrictions(self):
+        for state in ("ACKNOWLEDGED", "UNKNOWN", "PARTIAL_CANCELED", "EXIT_PROTECTION"):
+            with self.subTest(state=state):
+                app = Application(self.config, self.bundle)
+                try:
+                    if state == "UNKNOWN":
+                        with patch.object(app.broker, "submit", return_value={"status": "UNKNOWN"}):
+                            app.review()
+                        with patch.object(app.broker, "submit") as submit, self.assertRaises(HumanRequired):
+                            app.review()
+                        submit.assert_not_called()
+                        continue
+                    with patch.object(app.broker, "fill"):
+                        app.review()
+                    order = app.store.working()[0]
+                    if state != "ACKNOWLEDGED":
+                        app.broker.fill(order["broker_id"], 1, D(order["limit_price"]), D(0), app.bundle.now)
+                        app.reconcile()
+                        app.executor.cancel(order["id"], app.bundle.now)
+                        app.reconcile()
+                    if state == "EXIT_PROTECTION":
+                        quote = app.bundle.quotes["TEST:AAA"]
+                        app.bundle.quotes["TEST:AAA"] = quote.model_copy(update={"bid": app.theses()[0].current_stop - 1})
+                        app.protect()
+                        exit_order = app.store.working()[0]
+                        app.broker.fill(exit_order["broker_id"], 1, app.bundle.quotes["TEST:AAA"].bid, D(0), app.bundle.now)
+                        app.reconcile()
+                        app.bundle.quotes["TEST:AAA"] = quote
+                    before = app.broker.submissions
+                    result = app.review()
+                    self.assertEqual(app.broker.submissions, before)
+                    if state == "EXIT_PROTECTION":
+                        self.assertEqual(result["reason"], "REENTRY_COMPLETED_SESSION_REQUIRED")
+                finally:
+                    app.close()
+                    shutil.rmtree(self.config.state_dir)
+
+    def test_unsubmitted_invalidation_changes_version_only_when_it_changes_orders(self):
+        ex = self.executor()
+        ex.reconcile()
+        version = ex.store.get("account_version")
+        ex.invalidate_unsubmitted_entries("protection", "EXIT_OVERDUE")
+        self.assertEqual(ex.store.get("account_version"), version)
+        order = ex.submit(self.intent(ex), self.bundle.now)
+        version = ex.store.get("account_version")
+        ex.invalidate_unsubmitted_entries("protection", "EXIT_OVERDUE")
+        self.assertEqual(ex.store.get("account_version"), version)
+        self.assertEqual(ex.store.order(order["id"])["state"], "ACKNOWLEDGED")
+        ex.store.db.execute("UPDATE intents SET state='VALIDATED' WHERE id=?", (order["id"],))
+        ex.invalidate_unsubmitted_entries("protection", "EXIT_OVERDUE")
+        self.assertEqual(ex.store.get("account_version"), version + 1)
+        self.assertEqual(ex.store.order(order["id"])["state"], "INVALIDATED")
+        self.assertEqual(ex.store.reservation(), 0)
+        ex.invalidate_unsubmitted_entries("protection", "EXIT_OVERDUE")
+        self.assertEqual(ex.store.get("account_version"), version + 1)
+        self.assertEqual(ex.store.read("SELECT COUNT(*) FROM journal WHERE kind='UNSUBMITTED_ENTRIES_INVALIDATED'")[0][0], 1)
+
+    def test_portfolio_matches_only_reservations_in_the_same_complete_broker_snapshot(self):
+        app = Application(self.config, self.bundle)
+        try:
+            with patch.object(app.broker, "fill"):
+                app.review()
+            order = app.store.working()[0]
+            account = json.loads(canonical(app.broker.snapshot()))
+            app.bundle.data["account_snapshot"] = account
+            self.assertEqual(app.portfolio().broker_reflected_reserve_cash, 0)
+            account["broker_cash_reserves_orders"] = True
+            reserved = D(order["reserve_cash"])
+            principal = order["quantity"] * D(order["limit_price"])
+            self.assertEqual(app.portfolio().broker_reflected_reserve_cash, principal)
+            self.assertEqual(app.portfolio(exclude_intent_id=order["id"]).broker_reflected_reserve_cash, 0)
+            app.store.db.execute("UPDATE intents SET reserve_cash=? WHERE id=?", (str(reserved + D(100)), order["id"]))
+            self.assertEqual(app.portfolio().broker_reflected_reserve_cash, principal)
+            self.assertEqual(app.portfolio().pending_entries[0].reserved_cash, reserved + D(100))
+            app.store.db.execute("UPDATE intents SET reserve_cash=? WHERE id=?", (str(reserved), order["id"]))
+            for update in ({"complete": False}, {"ownership_complete": False}, {"orders": []},
+                           {"orders": account["orders"] * 2},
+                           {"orders": [{**account["orders"][0], "namespace": "different-account"}]},
+                           {"orders": [{**account["orders"][0], "state": "REJECTED"}]}):
+                app.bundle.data["account_snapshot"] = {**account, **update}
+                self.assertEqual(app.portfolio().broker_reflected_reserve_cash, 0)
+            app.bundle.data["account_snapshot"] = account
+            for state in ("PLANNED", "VALIDATED", "SUBMITTING", "UNKNOWN"):
+                app.store.db.execute("UPDATE intents SET state=? WHERE id=?", (state, order["id"]))
+                self.assertEqual(app.portfolio().broker_reflected_reserve_cash, 0)
+            app.store.db.execute("UPDATE intents SET state='ACKNOWLEDGED' WHERE id=?", (order["id"],))
+            app.store.set("reconciled", False)
+            self.assertEqual(app.portfolio().broker_reflected_reserve_cash, 0)
+            app.reconcile()
+            # A subsequent partial fill cannot be matched to the earlier quantity.
+            app.broker.fill(order["broker_id"], 1, D(order["limit_price"]), D(0), app.bundle.now)
+            app.reconcile()
+            self.assertEqual(app.portfolio().broker_reflected_reserve_cash, 0)
+            account = {**json.loads(canonical(app.broker.snapshot())), "broker_cash_reserves_orders": True}
+            app.bundle.data["account_snapshot"] = account
+            remaining = D(app.store.order(order["id"])["reserve_cash"])
+            self.assertLess(remaining, reserved)
+            remaining_principal = (order["quantity"] - 1) * D(order["limit_price"])
+            self.assertEqual(app.portfolio().broker_reflected_reserve_cash, remaining_principal)
+            app.executor.cancel(order["id"], app.bundle.now)
+            self.assertEqual(app.portfolio().broker_reflected_reserve_cash, remaining_principal)
+            app.reconcile()
+            self.assertEqual(app.portfolio().broker_reflected_reserve_cash, 0)
+            self.assertEqual(app.portfolio().pending_entries, [])
+        finally:
+            app.close()
 
     def test_concurrent_preflights_reserve_and_submit_same_intent_once(self):
         ex = self.executor()

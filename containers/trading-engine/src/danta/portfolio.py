@@ -54,6 +54,7 @@ def roundtrip_friction(costs: CostSchedule, quantity: int, ask: Decimal, bid: De
 def snapshot_valid(snapshot: PortfolioSnapshot, now: datetime) -> bool:
     return (snapshot.complete and snapshot.ownership_verified and snapshot.sector_classification_verified and
             snapshot.as_of <= now and
+            snapshot.broker_reflected_reserve_cash <= sum((p.reserved_cash for p in snapshot.pending_entries), ZERO) and
             all(h.source_verified and h.valuation_quality == "EXACT" and h.valuation_at == snapshot.as_of and h.sector for h in snapshot.holdings))
 
 
@@ -131,7 +132,8 @@ def size_entry(candidate: Candidate, quote: Quote, stop: Decimal,
     empty.update(unit_risk=unit, q_risk=q_risk)
     residual_risk = snapshot.nav*Decimal(p["aggregate_planned_risk_fraction"]) - current_planned_risk(snapshot, costs, research_profile)
     reserved_cash = sum((e.reserved_cash for e in snapshot.pending_entries), ZERO)
-    cash = min(snapshot.allocated_cash, snapshot.broker_available_cash) - reserved_cash
+    cash = min(snapshot.allocated_cash - reserved_cash,
+               snapshot.broker_available_cash - (reserved_cash - snapshot.broker_reflected_reserve_cash))
     cap = min(q_risk,
               floor_quantity((snapshot.nav*Decimal(p["entry_position_weight"])-issuer_values.get(instrument.issuer_id, ZERO))/entry),
               floor_quantity((snapshot.nav*Decimal(p["entry_sector_weight"])-sector_values.get(instrument.sector, ZERO))/entry),

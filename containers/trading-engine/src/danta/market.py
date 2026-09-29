@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_FLOOR
 from statistics import median
+from zoneinfo import ZoneInfo
 
 from .models import DailyBar, EventRecord, FeatureSnapshot, Session, aware_datetime, finite_decimal
 
@@ -51,7 +52,14 @@ class SessionCalendar:
         return next((s for s in self.sessions if s.opens_at <= now < s.closes_at), None)
 
     def event_age(self, event: EventRecord, current_session_id: str) -> int:
-        return self.session(current_session_id).ordinal - self.available_session(event.available_at).ordinal + 1
+        available = event.available_at
+        if event.timing_quality == "DATE_ONLY":
+            seoul = ZoneInfo("Asia/Seoul")
+            if event.published_date is None or event.published_date > available.astimezone(seoul).date():
+                raise DataQualityError("INVALID_EVENT_PUBLICATION_DATE")
+            # Count from the earliest possible session; collecting late never rejuvenates an event.
+            available = datetime.combine(event.published_date, datetime.min.time(), tzinfo=seoul)
+        return self.session(current_session_id).ordinal - self.available_session(available).ordinal + 1
 
     def completed_after(self, after: datetime, as_of: datetime) -> list[Session]:
         return [s for s in self.sessions if after < s.closes_at <= as_of]

@@ -2,7 +2,7 @@ import hashlib
 import unittest
 from datetime import datetime, timezone
 
-from danta.disclosure_parser import parse_official_event
+from danta.disclosure_parser import correction_reference, parse_official_event, resolve_correction_parent
 
 
 class DisclosureParserTest(unittest.TestCase):
@@ -37,6 +37,13 @@ class DisclosureParserTest(unittest.TestCase):
         event, _, _ = self.parse(text, title="연결 영업실적 전망")
         self.assertEqual(event.family, "official_guidance")
         self.assertIn("not realized", event.comparison_basis)
+
+    def test_nonfinancial_plans_and_treasury_contracts_are_observations(self):
+        for title in ("투자판단관련주요경영사항(임상시험계획승인신청등결정)",
+                      "주요사항보고서(자기주식취득신탁계약체결결정)",
+                      "[기재정정]장래사업ㆍ경영계획"):
+            with self.subTest(title=title):
+                self.assertEqual(self.parse(self.earnings(), title=title)[2], "OBSERVATION_ONLY_EVENT_FAMILY")
 
     def test_confirmed_contract_has_scale_and_terms(self):
         rows = [("계약금액(원)", "2000000000"), ("최근매출액(원)", "8000000000"), ("계약상대", "합성회사"), ("계약조건", "검수 후 대금 지급"), ("계약기간 시작일", "2026-09-14"), ("계약기간 종료일", "2027-09-13")]
@@ -77,16 +84,52 @@ class DisclosureParserTest(unittest.TestCase):
         for bad in (
             text.replace("계약금액(원)", "계약금액(USD)"),
             text.replace("2. 계약내역", "2. 기타내역"),
-            text.replace("진행에 따라 청구 및 지급", "-"),
-            text.replace("진행에 따라 청구 및 지급", "미정"),
-            text.replace("진행에 따라 청구 및 지급", "미공개"),
-            text.replace("진행에 따라 청구 및 지급", "공시유보"),
+            text.replace("대금지급 조건 등", "확인되지 않은 항목"),
+            text.replace("<td>유</td>", "<td>-</td>"),
             text.replace("합성회사", "공시유보"),
             text.replace("본사 계약분이며 금액과 기간은 변동될 수 있습니다.", ""),
             text.replace("</table>", '<tr><td colspan="2">계약상대</td><td>다른회사</td></tr></table>'),
         ):
             with self.subTest(bad=bad):
                 self.assertIsNone(self.parse(bad, title="단일판매ㆍ공급계약체결")[0])
+
+    def test_undisclosed_payment_terms_preserve_contract_and_explicit_uncertainty(self):
+        for value in ("-", "미정", "미공개", "공시유보", ""):
+            with self.subTest(value=value):
+                text = self.contract_with_spans().replace("진행에 따라 청구 및 지급", value)
+                event, facts, reason = self.parse(text, title="단일판매ㆍ공급계약체결")
+                self.assertEqual(reason, "SUPPORTED_OFFICIAL_TABLE_PARSED")
+                self.assertEqual(event.facts["contract_amount"], "2000000000")
+                self.assertIn("구체적인 지급조건이 공개되지 않음", event.facts["undisclosed_terms"])
+                self.assertTrue(any(fact.fact_id.endswith(":undisclosed_terms") for fact in facts))
+
+    def test_correction_requires_unique_issuer_title_date_match_from_hashed_cover_table(self):
+        content = ('<table><tr><td>1. 정정관련 공시서류</td><td>단일판매ㆍ공급계약 체결</td></tr>'
+                   '<tr><td>2. 정정관련 공시서류제출일</td><td>2026-09-11</td></tr></table>').encode()
+        documents = [{"content": content, "sha256": hashlib.sha256(content).hexdigest()}]
+        correction = {"rcept_no": "20260914000001", "corp_code": "00000001", "report_nm": "[기재정정]단일판매ㆍ공급계약체결"}
+        original = {"rcept_no": "20260911000001", "corp_code": "00000001", "report_nm": "단일판매·공급계약체결", "rcept_dt": "20260911"}
+        self.assertEqual(correction_reference(documents)[1].isoformat(), "2026-09-11")
+        self.assertEqual(resolve_correction_parent(correction, documents, [original]), original["rcept_no"])
+        for rows in ([], [dict(original, corp_code="00000002")], [dict(original, rcept_dt="20260910")],
+                     [dict(original, report_nm="연결 영업실적 공시")],
+                     [original, dict(original, rcept_no="20260911000002")], [correction]):
+            with self.subTest(rows=rows):
+                self.assertIsNone(resolve_correction_parent(correction, documents, rows))
+        self.assertIsNone(resolve_correction_parent(correction, [dict(documents[0], sha256="wrong")], [original]))
+        misleading = b'<p>20260911000001</p><a href="https://kind.krx.co.kr/?rcpno=20260911000001">related</a>'
+        self.assertIsNone(resolve_correction_parent(correction,
+            [{"content": misleading, "sha256": hashlib.sha256(misleading).hexdigest()}], [original]))
+
+    def test_correction_cover_accepts_explicit_original_filing_date_without_inventing_period(self):
+        content = ('<table><tr><td>1. 정정대상 공시서류 :</td><td>분기보고서</td></tr>'
+                   '<tr><td>2. 정정대상 공시서류의 최초제출일 :</td><td>2026년 08월 14일</td></tr></table>').encode()
+        documents = [{"content": content, "sha256": hashlib.sha256(content).hexdigest()}]
+        receipt = {"rcept_no": "20260914000001", "corp_code": "00000001", "report_nm": "[기재정정]분기보고서 (2026.06)"}
+        original = {"rcept_no": "20260814000001", "corp_code": "00000001", "report_nm": "분기보고서 (2026.06)", "rcept_dt": "20260814"}
+        self.assertEqual(resolve_correction_parent(receipt, documents, [original]), original["rcept_no"])
+        self.assertIsNone(resolve_correction_parent(receipt, documents,
+            [original, dict(original, rcept_no="20260814000002", report_nm="분기보고서 (2026.03)")]))
 
 
 if __name__ == "__main__":

@@ -482,7 +482,7 @@ class KisBrokerPort:
         return {"complete": not errors, "ownership_complete": not errors, "errors": errors,
                 "diagnostics": diagnostics + [reason for reason in errors if reason != 'NO_MARGIN_BUYING_POWER_UNVERIFIED'],
                 "orders": normalized, "strategy_quantities": census["quantities"], "strategy_sellable_quantities": census["sellable_quantities"],
-                "broker_available_cash": str(available), "whole_account": True,
+                "broker_available_cash": str(available), "broker_cash_reserves_orders": not errors, "whole_account": True,
                 "account_cash": {"cash_krw": census["economic_cash"], "observed_at": census["account_observed_at"],
                                  "source": "KIS:inquire-balance:prvs_rcdl_excc_amt", "daily_costs": census["daily_costs"],
                                  "cost_quality": census["cost_quality"]}}
@@ -517,9 +517,10 @@ class KisBrokerPort:
             return self._whole_snapshot()
         now = self.clock()
         mapping = self.manifest["normalization"]
+        # The buying-power query must follow the orders it is claimed to cover.
+        orders = self.adapter.read_orders(date.fromisoformat(self.manifest["bootstrap"]["orders_since"]), now.astimezone(SEOUL).date())
         account = self.adapter.read_account(resource_symbol=mapping["account"]["resource_symbol"],
                                             resource_price=mapping["account"]["resource_price"])
-        orders = self.adapter.read_orders(date.fromisoformat(self.manifest["bootstrap"]["orders_since"]), now.astimezone(SEOUL).date())
         errors, normalized = [], []
         if account.quality != "COMPLETE" or orders.quality != "COMPLETE":
             failures = [{'endpoint': name, 'quality': result.quality,
@@ -602,7 +603,8 @@ class KisBrokerPort:
                 normalized.append(item)
             return {"complete": not errors,"ownership_complete": not errors and ownership_complete,"strategy_quantities":strategy,
                     "strategy_sellable_quantities": {key:min(quantity,sellable.get(key,0)) for key,quantity in strategy.items()},
-                    "orders":normalized,"errors":errors,"broker_available_cash":str(resources)}
+                    "orders":normalized,"errors":errors,"broker_available_cash":str(resources),
+                    "broker_cash_reserves_orders": not errors and ownership_complete and mapping["account"]["available_cash"] == "nrcvb_buy_amt"}
         except (ValueError,KeyError,TypeError,AdapterError) as error:
             return {"complete":False,"ownership_complete":False,"orders":normalized,
                     "diagnostics": [_failure_diagnostic(error, 'account_normalization')],
@@ -794,6 +796,9 @@ class ExternalRuntime:
                 except AdapterError as error:
                     if isinstance(error, HumanRequired) or error.code in AUTH_ERRORS:
                         raise
+                    if error.code == 'STREAM_QUOTE_STALE':
+                        # The live session date is known; _quote can refresh the REST book now.
+                        pending.remove(ticker)
             if not pending or time.monotonic() >= deadline:
                 return
             time.sleep(min(0.05, max(0, deadline - time.monotonic())))
@@ -803,6 +808,9 @@ class ExternalRuntime:
         self.state.close()
 
     def _events(self,instruments,now,*,since=None):
+        from .adapters import FetchResult
+        from .disclosure_parser import PARSER_VERSION, correction_reference, official_event_family, parse_official_event, resolve_correction_parent
+        from .market import DataQualityError
         self.disclosure_diagnostics = list(self.state.data.get("disclosure_diagnostics",[]))
         settings = self.manifest["disclosures"]
         cached = self.state.data.setdefault("disclosure_records",{})
@@ -810,15 +818,24 @@ class ExternalRuntime:
         last_poll = self.state.data.get("disclosure_last_poll")
         coverage = dict(self.state.data.get("disclosure_coverage",{}))
         scope = {item.instrument_id for item in instruments}
+        held = set()
+        with self.state.lock:
+            if self.state.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='holdings'").fetchone():
+                held = {row[0] for row in self.state.db.execute("SELECT instrument_id FROM holdings WHERE owner='strategy' AND quantity>0")}
+        current = self.calendar.available_session(now)
         scoped = since is not None
         poll_due = scoped or last_poll is None or (now-aware_time(last_poll)).total_seconds() >= 180
-        if poll_due:
+        reparse_due = any(record.get('parser_version') != PARSER_VERSION and record['event']['instrument_id'] in scope
+                          for record in cached.values())
+        if poll_due or reparse_due:
             self.disclosure_diagnostics = []
             with self.state.lock:
                 start = since or date.fromisoformat(self.state.data.get("disclosure_cursor_date",settings["start_date"]))
             # A resumed cursor is never silently truncated; DART range requests are split.
             result_rows, qualities = [],[]
             upper = now.astimezone(SEOUL).date()
+            if not poll_due:
+                start = upper + timedelta(days=1)
             corporations = sorted(code for code, symbol in settings['instrument_by_corp_code'].items() if symbol in scope) if scoped else [None]
             if scoped and {settings['instrument_by_corp_code'][code] for code in corporations} != scope:
                 raise HumanRequired('DISCLOSURE_CORPORATION_UNVERIFIED')
@@ -859,7 +876,8 @@ class ExternalRuntime:
                 start = end+timedelta(days=1)
             all_complete = all(quality in {"COMPLETE","COMPLETE_NO_EVENT"} for quality in qualities)
             quality = "COMPLETE" if result_rows and all_complete else "COMPLETE_NO_EVENT" if all_complete else "PARTIAL"
-            coverage = {instrument.instrument_id:(quality if not scoped or coverage.get(instrument.instrument_id) in {'COMPLETE','COMPLETE_NO_EVENT'} else 'PARTIAL') for instrument in instruments}
+            if poll_due:
+                coverage = {instrument.instrument_id:(quality if not scoped or coverage.get(instrument.instrument_id) in {'COMPLETE','COMPLETE_NO_EVENT'} else 'PARTIAL') for instrument in instruments}
             verified_events = []
             if settings.get("verified_events_path"):
                 extraction_path = Path(settings["verified_events_path"])
@@ -868,30 +886,76 @@ class ExternalRuntime:
                 verified_events = _json(extraction_path)["events"]
             by_receipt = {event["official_id"]:event for event in verified_events}
             corporation_map = settings["instrument_by_corp_code"]
-            rows = {row['rcept_no']: row for row in [*pending.values(), *result_rows]}
+            corp_by_instrument = {symbol: code for code, symbol in corporation_map.items()}
+            rows = {}
+            for receipt, record in cached.items():
+                event = record['event']
+                if record.get('parser_version') == PARSER_VERSION or event['instrument_id'] not in scope:
+                    continue
+                # Old caches kept the official title and receipt ID, but not the list row.
+                title = next((fact['value'] for fact in record['facts'] if fact.get('unit') == 'official_report_title'), event.get('facts', {}).get('report_title', ''))
+                rows[receipt] = record.get('receipt') or {
+                    'rcept_no': receipt, 'rcept_dt': receipt[:8], 'report_nm': title,
+                    'corp_code': corp_by_instrument.get(event['instrument_id']),
+                    'correction_parent_id': (event.get('correction_of') or '').removeprefix('dart:') or None}
+            rows.update({row['rcept_no']: row for row in [*pending.values(), *result_rows]})
+            correction_lists = {}
             documents_changed = False
             for row in rows.values():
                 instrument_id = corporation_map.get(row["corp_code"])
-                if instrument_id not in coverage:
+                if instrument_id not in scope:
                     continue
                 receipt = row["rcept_no"]
+                previous = cached.get(receipt)
+                title_text = row.get("report_nm", "")
                 if self.manifest.get("automatic"):
-                    title_text = row.get("report_nm", "")
                     if not any(word in title_text for word in ("계약", "전망", "계획", "영업실적", "실적공시", "사업보고서", "분기보고서", "반기보고서")):
                         continue
-                    if receipt in cached:
-                        continue  # Corrections have their own receipt; never reset original availability.
+                if previous and previous.get('parser_version') == PARSER_VERSION and receipt not in pending:
+                    continue  # Corrections have their own receipt; never reset original availability.
+                published_date = None
                 try:
-                    document = self.dart.read_disclosure(receipt)
+                    published_date = date.fromisoformat(str(row.get('rcept_dt', '')))
+                except ValueError:
+                    pass
+                recent = True
+                if published_date is not None and published_date <= upper:
+                    try:
+                        published_session = self.calendar.available_session(datetime.combine(published_date, datetime.min.time(), tzinfo=SEOUL))
+                        recent = 1 <= current.ordinal - published_session.ordinal + 1 <= self.profile['signal']['max_event_age_sessions']
+                    except DataQualityError:
+                        recent = False
+                try:
+                    if previous:
+                        originals = tuple({'content': item['content'].encode('utf-8'), 'sha256': item['sha256']}
+                                          for item in previous['documents'].values())
+                        document = FetchResult(originals, 'COMPLETE', aware_time(previous['event']['observed_at']))
+                    else:
+                        document = self.dart.read_disclosure(receipt)
                     if document.quality != "COMPLETE" or not document.records:
                         raise ValueError("PRIMARY_SOURCE_FETCH_FAILED")
                     document_hashes = sorted(item["sha256"] for item in document.records)
-                    if receipt in cached and cached[receipt]["document_hashes"] == document_hashes:
-                        continue
-                    first_seen = self.state.data["events"].setdefault(receipt,document.retrieved_at.isoformat())
+                    first_seen = self.state.data["events"].setdefault(receipt,previous['event']['available_at'] if previous else document.retrieved_at.isoformat())
                     available = aware_time(first_seen)
-                    old_date = row.get("rcept_dt") and date.fromisoformat(str(row["rcept_dt"])) < available.astimezone(SEOUL).date()
-                    timing = "UNCERTAIN" if old_date else "FIRST_COLLECTED"
+                    timing = 'DATE_ONLY' if published_date is not None and published_date <= min(upper, available.astimezone(SEOUL).date()) else 'UNCERTAIN'
+                    if '정정' in title_text and official_event_family(title_text) and (recent or instrument_id in held):
+                        reference = correction_reference(list(document.records))
+                        if reference and reference[1] <= upper:
+                            key = (row['corp_code'], reference[1])
+                            if key not in correction_lists:
+                                try:
+                                    originals = self.dart.list_disclosures(reference[1], reference[1], corp_code=row['corp_code'])
+                                    if originals.quality not in {'COMPLETE', 'COMPLETE_NO_EVENT'}:
+                                        raise AdapterError(originals.metadata.get('error', 'CORRECTION_LIST_INCOMPLETE'))
+                                    correction_lists[key] = list(originals.records)
+                                except AdapterError as error:
+                                    if isinstance(error, HumanRequired) or error.code in AUTH_ERRORS:
+                                        raise
+                                    correction_lists[key] = []
+                                    self.disclosure_diagnostics.append({'source':'DART','instrument_id':instrument_id,
+                                                                       'receipt_id':receipt,'reason':error.code,
+                                                                       'affects_current_evidence':recent})
+                            row = {**row, 'correction_parent_id': resolve_correction_parent(row, list(document.records), correction_lists[key])}
                     uri = "https://dart.fss.or.kr/dsaf001/main.do?rcpNo="+receipt
                     title = MarketFact(fact_id="dart-title:"+receipt,instrument_id=instrument_id,value=row.get("report_nm",""),unit="official_report_title",
                         source=uri,content_hash=digest(row),published_at=None,observed_at=document.retrieved_at,available_at=available,quality="VERIFIED")
@@ -902,7 +966,7 @@ class ExternalRuntime:
                         "available_at":available.isoformat(),"interpretation_status":"RAW_OFFICIAL_DOCUMENT"} for item in document.records}
                     normalized = by_receipt.get(receipt)
                     if normalized and normalized["source_hash"] in document_hashes:
-                        event = EventRecord.model_validate_json(canonical({**normalized,"available_at":available,"observed_at":document.retrieved_at,"timing_quality":timing}))
+                        event = EventRecord.model_validate_json(canonical({**normalized,"available_at":available,"observed_at":document.retrieved_at,"timing_quality":timing,"published_date":published_date.isoformat() if published_date else None}))
                         if event.instrument_id != instrument_id or set(event.fact_ids) != set(event.facts):
                             raise ValueError("EXPLICIT_INSTRUMENT_FACT_LINKS_REQUIRED")
                         for fact_id,value in event.facts.items():
@@ -911,31 +975,36 @@ class ExternalRuntime:
                                 observed_at=document.retrieved_at,available_at=available,quality="VERIFIED"))
                         reason = "APPROVED_SOURCE_EXTRACTION"
                     else:
-                        from .disclosure_parser import parse_official_event
                         event,parsed_facts,reason = parse_official_event(row,list(document.records),instrument_id,available)
                         facts.extend(parsed_facts)
                         if event is not None:
-                            event = event.model_copy(update={"timing_quality":timing,"available_at":available})
+                            event = event.model_copy(update={"timing_quality":timing,"available_at":available,"published_date":published_date})
                         else:
                             event = EventRecord(event_id="dart:"+receipt,instrument_id=instrument_id,official_id=receipt,normalized_key="dart:"+receipt,
                                 family="unclassified",source_uri=uri,source_hash=document_hashes[0],fact_ids=[title.fact_id],facts={"report_title":title.value},
                                 comparison_basis="raw original; unsupported primary template",available_at=available,observed_at=document.retrieved_at,
-                                official=True,primary_source_complete=False,timing_quality=timing,polarity="UNKNOWN")
+                                official=True,primary_source_complete=False,timing_quality=timing,published_date=published_date,polarity="UNKNOWN")
                     cached[receipt] = {"event":event.model_dump(mode="json"),"facts":[fact.model_dump(mode="json") for fact in facts],
-                                       "documents":documents,"document_hashes":document_hashes,"parse_reason":reason}
-                    pending.pop(receipt, None)
+                                       "documents":documents,"document_hashes":document_hashes,"parse_reason":reason,
+                                       "receipt":row,"parser_version":PARSER_VERSION}
+                    if reason == 'CORRECTION_RELATION_UNRESOLVED' and (recent or instrument_id in held):
+                        pending[receipt] = row
+                    else:
+                        pending.pop(receipt, None)
                     documents_changed = True
                 except (ValueError,KeyError,AdapterError) as error:
                     if isinstance(error,HumanRequired) or isinstance(error,AdapterError) and error.code in AUTH_ERRORS:
                         raise
-                    coverage[instrument_id] = "PARTIAL"
+                    if recent:
+                        coverage[instrument_id] = "PARTIAL"
                     pending[receipt] = row
                     self.disclosure_diagnostics.append({"source":"DART","instrument_id":instrument_id,
-                                                       "receipt_id":receipt,"reason":getattr(error,"code","PRIMARY_SOURCE_FETCH_FAILED")})
+                                                       "receipt_id":receipt,"reason":getattr(error,"code","PRIMARY_SOURCE_FETCH_FAILED"),
+                                                       "affects_current_evidence":recent})
             with self.state.lock:
-                if all_complete and not scoped:
+                if poll_due and all_complete and not scoped:
                     self.state.data["disclosure_cursor_date"] = upper.isoformat()
-                if not scoped:
+                if poll_due and not scoped:
                     self.state.data['disclosure_last_poll'] = self.clock().isoformat()
                 self.state.data.setdefault('disclosure_coverage', {}).update(coverage)
                 previous = [row for row in self.state.data.get('disclosure_diagnostics', [])
@@ -946,25 +1015,25 @@ class ExternalRuntime:
                 if documents_changed:
                     keys += ['events','disclosure_records']
                 self.state.save(keys)
-        held = set()
-        with self.state.lock:
-            if self.state.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='holdings'").fetchone():
-                held = {row[0] for row in self.state.db.execute("SELECT instrument_id FROM holdings WHERE owner='strategy' AND quantity>0")}
-        current = self.calendar.available_session(now)
         events,facts,documents = [],[],{}
         for record in cached.values():
             event = EventRecord.model_validate_json(canonical(record["event"]))
             if event.instrument_id not in scope:
                 continue
-            age = self.calendar.event_age(event,current.session_id)
-            if event.instrument_id not in held and not 1 <= age <= self.profile["signal"]["max_event_age_sessions"]:
+            try:
+                age = self.calendar.event_age(event,current.session_id)
+                recent = 1 <= age <= self.profile["signal"]["max_event_age_sessions"]
+            except DataQualityError:
+                recent = False
+            if event.instrument_id not in held and not recent:
                 continue
             events.append(event)
             facts.extend(MarketFact.model_validate_json(canonical(fact)) for fact in record["facts"])
             documents.update(record["documents"])
             if coverage.get(event.instrument_id) == "COMPLETE_NO_EVENT":
                 coverage[event.instrument_id] = "COMPLETE"
-            if not event.primary_source_complete or event.timing_quality == "UNCERTAIN":
+            if recent and record.get('parse_reason') != 'OBSERVATION_ONLY_EVENT_FAMILY' and (
+                    event.timing_quality == "UNCERTAIN" or not event.primary_source_complete):
                 coverage[event.instrument_id] = "PARTIAL"
         return events,facts,coverage,documents
 
@@ -979,7 +1048,7 @@ class ExternalRuntime:
             instruments = [current.instruments[symbol] for symbol in sorted(scope)]
             events, facts, coverage, documents = self._events(instruments, self.clock(),
                 since=aware_time(frozen['created_at']).astimezone(SEOUL).date())
-            if self.disclosure_diagnostics:
+            if any(row.get('affects_current_evidence', True) for row in self.disclosure_diagnostics):
                 raise AdapterError('DECISION_EVIDENCE_REFRESH_INCOMPLETE')
             bundle = copy(current)
             bundle.events = list(EventRegistry([row for row in current.events if row.instrument_id not in scope] + events).records.values())
@@ -1029,6 +1098,9 @@ class ExternalRuntime:
                 bundle.data["runtime_diagnostics"] = [row for row in latest.data["runtime_diagnostics"]
                     if row.get('scope') not in {'PROTECTION','ENTRY'} or
                     row.get('instrument_id') not in incoming.data.get('quote_refresh_order',{})]+incoming.data["runtime_diagnostics"]
+                bundle.exclusions = [row for row in latest.exclusions
+                    if row.get('scope') not in {'PROTECTION','ENTRY'} or
+                    row.get('instrument_id') not in incoming.data.get('quote_refresh_order',{})]+incoming.data['runtime_diagnostics']
             observations = [item for item in (latest,incoming) if item is not None]
             account = max(observations,key=lambda item:item.data.get("account_refresh_order",0))
             for key in ("account_snapshot","broker_available_cash","strategy_sellable_quantities","account_refresh_order"):
@@ -1050,8 +1122,6 @@ class ExternalRuntime:
             bundle.now = max(item.now for item in observations)
             bundle.data.update(as_of=bundle.now.isoformat(),quotes=[item.model_dump(mode="json") for item in quotes.values()],
                                quote_depth=depth,quote_refresh_order=orders)
-            if not protection:
-                bundle.candidates = [item for item in bundle.candidates if item.instrument.instrument_id in quotes]
             if isinstance(self.broker,PaperBrokerPort):
                 paper = self.broker.snapshot(bundle=bundle)
                 bundle.data.update(account_snapshot=paper,broker_available_cash=paper["broker_available_cash"],
@@ -1133,6 +1203,7 @@ class ExternalRuntime:
             else:
                 _,instruments,bars,index_bars,diagnostics = self.daily_cache
             diagnostics = list(diagnostics)
+            universe_diagnostics = list(diagnostics)
             if self.manifest.get("automatic") and self.latest_bundle is None:
                 # Start existing-position protection before collecting a month
                 # of disclosure originals. The review worker fills coverage;
@@ -1141,15 +1212,18 @@ class ExternalRuntime:
                 coverage = {item.instrument_id: "FETCH_FAILED" for item in instruments}
             else:
                 events,facts,coverage,documents = self._events(instruments,self.clock())
-            diagnostics.extend(self.disclosure_diagnostics)
             expected = [session.session_id for session in completed[-self.profile["universe"]["minimum_completed_bars"]:]]
             start = completed[-self.profile["universe"]["minimum_completed_bars"]].opens_at.date()
             end = completed[-1].closes_at.date()
             needed = self._protection_symbols(account)
             current_session = self.calendar.available_session(now)
             for event in events:
-                if (event.official and event.primary_source_complete and
-                        1 <= self.calendar.event_age(event,current_session.session_id) <= self.profile["signal"]["max_event_age_sessions"]):
+                try:
+                    age = self.calendar.event_age(event,current_session.session_id)
+                except ValueError:
+                    continue
+                if (event.official and event.primary_source_complete and event.available_at <= now and
+                        event.timing_quality != 'UNCERTAIN' and 1 <= age <= self.profile["signal"]["max_event_age_sessions"]):
                     needed.add(event.instrument_id)
             for board in self.profile["universe"]["boards"]:
                 if board not in index_bars:
@@ -1172,15 +1246,21 @@ class ExternalRuntime:
                     if isinstance(error,HumanRequired) or isinstance(error,AdapterError) and error.code in AUTH_ERRORS:
                         raise
                     diagnostics.append({"instrument_id":instrument.instrument_id,"reason":getattr(error,"code",str(error))})
-            self.daily_cache = (day,instruments,bars,index_bars,diagnostics)
+            self.daily_cache = (day,instruments,bars,index_bars,universe_diagnostics)
+            diagnostics.extend(self.disclosure_diagnostics)
             protected = self._protection_symbols(account)
             current = self.calendar.active(self.clock())
             recent = set()
             if current:
                 for event in events:
+                    try:
+                        age = self.calendar.event_age(event,current.session_id)
+                    except ValueError:
+                        continue
                     if (event.official and event.primary_source_complete and not event.withdrawn and
+                            event.available_at <= self.clock() and event.timing_quality != 'UNCERTAIN' and
                             event.family in self.profile["signal"]["event_families"] and
-                            1 <= self.calendar.event_age(event,current.session_id) <= self.profile["signal"]["max_event_age_sessions"]):
+                            1 <= age <= self.profile["signal"]["max_event_age_sessions"]):
                         recent.add(event.instrument_id)
             quotes,depth,quote_orders = [],{},{}
             quote_instruments = []
@@ -1241,8 +1321,8 @@ class ExternalRuntime:
                 "quote_depth":depth,"quote_refresh_order":quote_orders,"account_refresh_order":account_order,
                 "strategy_sellable_quantities":account.get("strategy_sellable_quantities",{})}
             bundle = MarketBundle(data,self.profile,mode=self.config.mode)
-            quoted = set(bundle.quotes)
-            bundle.candidates = [candidate for candidate in bundle.candidates if candidate.instrument.instrument_id in quoted]
+            requested = {item.instrument_id for item in quote_instruments}
+            bundle.candidates = [candidate for candidate in bundle.candidates if candidate.instrument.instrument_id in requested]
             bundle.exclusions = list({(row.get('source'),row.get('instrument_id'),row['reason']):row
                                       for row in [*bundle.exclusions,*diagnostics]}.values())
             return self._publish(bundle)

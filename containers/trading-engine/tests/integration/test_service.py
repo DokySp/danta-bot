@@ -652,6 +652,7 @@ class ServiceIntegrationTests(unittest.TestCase):
             for identity, timing, official, complete, available in (
                 ('exact', 'EXACT', True, True, self.now - timedelta(minutes=1)),
                 ('first', 'FIRST_COLLECTED', True, True, self.now - timedelta(minutes=1)),
+                ('date', 'DATE_ONLY', True, True, self.now - timedelta(minutes=1)),
                 ('uncertain', 'UNCERTAIN', True, True, self.now - timedelta(minutes=1)),
                 ('unofficial', 'FIRST_COLLECTED', False, True, self.now - timedelta(minutes=1)),
                 ('incomplete', 'FIRST_COLLECTED', True, False, self.now - timedelta(minutes=1)),
@@ -661,7 +662,7 @@ class ServiceIntegrationTests(unittest.TestCase):
         self.service.queue_tick()
         events = [json.loads(row[0]) for row in self.app.store.db.execute(
             "SELECT payload FROM requests WHERE request_key LIKE 'service:schedule:%'")]
-        self.assertEqual({event['event_id'] for event in events if event['kind'] == 'event_review'}, {'exact', 'first'})
+        self.assertEqual({event['event_id'] for event in events if event['kind'] == 'event_review'}, {'exact', 'first', 'date'})
         self.assertEqual(self.service.queue_tick(), 0)
 
     def test_candidate_commands_delegate_one_argument_without_calling_trade_workflow(self):

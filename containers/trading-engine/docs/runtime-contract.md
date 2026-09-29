@@ -277,15 +277,23 @@ The cursor advances only after complete list/document collection. Long resumed
 ranges are split into DART-supported date ranges. Canonical event/fact/document
 records remain in SQLite when the daily list cursor advances; recent five-session
 events and evidence for held instruments are selected for the current bundle.
-The first available timestamp is immutable. Older date-only material first
-collected after an outage is marked `UNCERTAIN`, preventing a fresh intraday
-entry merely because the system rediscovered it today.
+The first available timestamp is immutable. A verified publication date without
+an exact timestamp is `DATE_ONLY`: age starts at the earliest session on or after
+that Seoul date, while actual collection time still bounds evidence availability.
+Late collection never rejuvenates old events. Missing or contradictory publication
+dates remain `UNCERTAIN`; date-only records are not precise intraday PIT evidence.
 
 `disclosure_parser.parse_official_event` is called for newly fetched official
 originals. Supported, explicitly labeled tables can produce earnings, guidance
 or material-contract event facts automatically. Unrecognized templates,
 unresolved corrections, absent units or comparison periods remain `PARTIAL` /
-`WATCH`. Parser tests cover synthetic labeled originals and the merged-cell
+`WATCH` for relevant recent events. Observation-only families and expired events
+do not taint a separate current event. Undisclosed contract payment terms remain
+explicitly unknown for model review; amount, counterparty and period are required.
+Corrections link only to a unique same-issuer filing matching the official cover
+table's document title and filing date. Parser-version changes reparse cached
+originals without downloading them again or changing their collection timestamp.
+Parser tests cover synthetic labeled originals and the merged-cell
 contract layout observed in receipt `20260911800002`. A read-only probe on
 2026-09-14 verified that original's amounts, dates, payment terms and qualifiers;
 other production layouts remain unverified. See [DART evidence](dart-read-verification.json).
@@ -295,6 +303,9 @@ An optional
 hash and instrument. It is not required for the automatic parser path.
 
 The runtime passes the application-created frozen input through CodexAdapter.
+The model sees a compact original-document index. `get_fact` pages long originals
+with character offsets; `search_official_evidence` searches these frozen documents,
+not the Internet. Raw document identifiers do not replace validated output fact IDs.
 The limited tool scope includes candidates, reviewed positions, current theses
 and portfolio holdings/pending entries. Raw documents keep their instrument and
 source provenance; external instructions inside them remain untrusted text.

@@ -139,6 +139,22 @@ class KisAccountContracts(unittest.TestCase):
         request["remaining_quantity"] = 1
         self.assertEqual(port.cancel(request)["status"], "ACKNOWLEDGED")
 
+    def test_broker_net_buying_power_is_read_after_its_order_snapshot(self):
+        port = self.port()
+        calls = []
+        def orders(*_):
+            calls.append("orders")
+            return port.adapter.result([])
+        def power(*_):
+            calls.append("power")
+            return port.adapter.power
+        with patch.object(port.adapter, "read_orders", side_effect=orders), \
+                patch.object(port.adapter, "read_buying_power", side_effect=power):
+            account = port.snapshot()
+        self.assertTrue(account["complete"] and account["broker_cash_reserves_orders"])
+        self.assertLess(calls.index("orders"), calls.index("power"))
+        self.assertEqual(account["broker_available_cash"], port.adapter.power["nrcvb_buy_amt"])
+
     def test_census_does_not_sum_repeated_summaries_or_replay_closed_baselines(self):
         port = self.port()
         port.adapter.orders = [order()]

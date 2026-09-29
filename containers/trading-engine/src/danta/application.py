@@ -305,7 +305,11 @@ class Application:
                 stop=thesis.current_stop, atr=features.atr14 if features else Decimal(0), average_entry=thesis.average_entry, valuation_at=bundle.now,
                 price_observed_at=quote.observed_at if quote else None, valuation_quality="EXACT" if fresh else "STALE" if quote and quote.bid else "MISSING",
                 first_fill_session=thesis.first_fill_session, reduced=thesis.reduced_quantity > 0))
-        pending = []
+        pending, broker_reflected_reserve = [], Decimal(0)
+        account = bundle.data.get("account_snapshot", {})
+        broker_orders = account.get("orders", []) if (account.get("broker_cash_reserves_orders") is True and
+            account.get("complete") is True and account.get("ownership_complete") is True and
+            self.store.get("reconciled") and self.store.get("ownership_complete")) else []
         for row in self.store.working():
             if row["side"] == "BUY" and row["id"] != exclude_intent_id:
                 instrument = bundle.instruments[row["instrument_id"]]
@@ -314,10 +318,18 @@ class Application:
                     thesis_id=row["thesis_id"], plan_id=row["plan_id"], remaining_quantity=remaining,
                     entry_price=row["limit_price"], unit_risk=Decimal(row["reserve_risk"]) / remaining if remaining else Decimal(1),
                     reserved_cash=row["reserve_cash"], reserved_risk=row["reserve_risk"]))
+                reflected = [order for order in broker_orders if row["broker_id"] and
+                    order.get("broker_id") == row["broker_id"] and order.get("namespace") == row["broker_namespace"]]
+                if (row["state"] in {"ACKNOWLEDGED", "PARTIALLY_FILLED", "CANCEL_REQUESTED"} and len(reflected) == 1 and
+                        reflected[0].get("state") in {"ACKNOWLEDGED", "PARTIALLY_FILLED", "CANCEL_REQUESTED"} and
+                        all(reflected[0].get(key) == row[key] for key in ("instrument_id", "side", "quantity", "cumulative_quantity"))):
+                    # The order principal is reflected; keep local fee cushions reserved.
+                    broker_reflected_reserve += min(Decimal(row["reserve_cash"]), remaining * Decimal(row["limit_price"]))
         cash = Decimal(self.store.get("cash_krw"))
         nav = strategy_nav(cash, {row.instrument_id: row.quantity for row in holdings}, {row.instrument_id: row.mark for row in holdings})
         return PortfolioSnapshot(account_alias=bundle.costs.account_alias, strategy_id="catalyst_trend_swing", as_of=bundle.now,
             nav=nav, allocated_cash=cash, broker_available_cash=Decimal(bundle.data["broker_available_cash"]), holdings=holdings,
+            broker_reflected_reserve_cash=broker_reflected_reserve,
             pending_entries=pending, complete=self.store.get("reconciled") and
                 (self.store.get("costs_complete", True) or self.store.get("account_cash_reconciled", False)) and market_complete,
             ownership_verified=self.store.get("ownership_complete"),
@@ -635,7 +647,8 @@ class Application:
             if self.protection_refresh and self.refresh:
                 self.bundle = self.refresh()
             protection = self.protect()
-            theses = [thesis for thesis in self.theses() if thesis.exited_at is None and (self.store.quantity(thesis.instrument_id) or self.store.working(thesis.instrument_id))]
+            active_thesis_ids = {row["thesis_id"] for row in self.store.holdings() + self.store.working()}
+            theses = [thesis for thesis in self.theses() if thesis.exited_at is None and thesis.thesis_id in active_thesis_ids]
             held_ids = {thesis.instrument_id for thesis in theses}
             if self.quote_refresh:
                 self.bundle = self.quote_refresh([candidate.instrument.instrument_id for candidate in self.bundle.candidates
@@ -695,7 +708,7 @@ class Application:
                     synthetic=bundle.synthetic, require_ai=False) if quote else None
                 if symbol not in held_ids and gate and gate.allowed:
                     eligible.append(candidate)
-                    details[symbol]['stage'] = 'AWAITING_AI'
+                    details[symbol].update(stage='AWAITING_AI', filter_reasons=[])
                 else:
                     reasons = ['EXISTING_THESIS'] if symbol in held_ids else gate.reasons if gate else ['MISSING_QUOTE']
                     details[symbol].update(stage='AWAITING_AI' if symbol in held_ids else 'PREFILTERED', filter_reasons=reasons)
@@ -710,6 +723,8 @@ class Application:
                 now=bundle.now, session_id=session.session_id, profile=self.profile, portfolio=self.portfolio(), candidates=candidates, events=bundle.events,
                 facts=bundle.facts, theses=theses, scope="FULL" if kind == "full_review" else "PARTIAL", reviewed_positions=affected)
             save("input.snapshot.json", frozen)
+            result['feature_exclusions'] = [{**row, 'reason':'DAILY_HISTORY_NOT_COLLECTED' if row.get('reason') == repr(row.get('instrument_id')) else row.get('reason')}
+                for row in bundle.exclusions if kind == 'full_review' or row.get('instrument_id') == event.instrument_id]
             save("candidates.json", {"total_universe": bundle.total_universe, "feature_exclusions": bundle.exclusions,
                 "candidate_controls": controls, "candidate_controls_hash": digest(controls), "prefilters": prefilters, "candidates": candidates})
             if not candidates and not frozen["reviewed_positions"]:
@@ -779,7 +794,7 @@ class Application:
                     continue
                 gate = assess_entry(candidate, quote, self.bundle.events, self.bundle.calendar, self.bundle.ticks, self.bundle.now,
                     self.profile, verdicts[instrument_id].verdict, synthetic=bundle.synthetic)
-                previous = [thesis for thesis in self.theses() if thesis.instrument_id == instrument_id]
+                previous = [thesis for thesis in self.theses() if thesis.instrument_id == instrument_id and thesis.protection_started_at is not None]
                 if previous:
                     reentry = reentry_eligibility(previous[-1], self.bundle.events, self.bundle.bars[instrument_id], self.bundle.calendar, self.bundle.now, self.profile)
                     if not reentry.allowed:
@@ -803,7 +818,7 @@ class Application:
                     strategy_hash=self.config.strategy_hash, policy_hash=self.config.config_hash, created_at=self.bundle.now)
                 with self.store.transaction():
                     self._save_thesis(thesis)
-                intent = OrderIntent(run_id=run_id, plan_id=digest([frozen["material_hash"], instrument_id]), thesis_id=thesis_id, instrument_id=instrument_id,
+                intent = OrderIntent(run_id=run_id, plan_id=digest([run_id, frozen["material_hash"], instrument_id]), thesis_id=thesis_id, instrument_id=instrument_id,
                     side="BUY", quantity=plan.quantity, limit_price=plan.entry_price,
                     expires_at=min(plan.expires_at, decision_deadline), reason="ENTRY_ACCEPTED",
                     account_version=self.store.get("account_version"), policy_hash=self.config.config_hash, reserve_cash=plan.reserved_cash, reserve_risk=plan.total_risk)

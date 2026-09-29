@@ -146,9 +146,10 @@ class EventRecord(StrictModel):
     available_at: AwareTime
     observed_at: AwareTime
     published_at: AwareTime | None = None
+    published_date: date | None = None
     official: bool
     primary_source_complete: bool
-    timing_quality: Literal["EXACT", "FIRST_COLLECTED", "UNCERTAIN"]
+    timing_quality: Literal["EXACT", "FIRST_COLLECTED", "DATE_ONLY", "UNCERTAIN"]
     polarity: Literal["POSITIVE", "NEGATIVE", "UNKNOWN"]
     correction_of: str | None = None
     resolves_event_ids: list[str] = Field(default_factory=list)
@@ -266,6 +267,8 @@ class PortfolioSnapshot(StrictModel):
     nav: Positive
     allocated_cash: Nonnegative
     broker_available_cash: Nonnegative
+    # Local reservations matched to the broker's buying-power observation.
+    broker_reflected_reserve_cash: Nonnegative = Decimal(0)
     holdings: list[Holding]
     pending_entries: list[PendingEntry]
     complete: bool

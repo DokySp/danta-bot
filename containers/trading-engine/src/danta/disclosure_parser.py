@@ -14,6 +14,8 @@ from html.parser import HTMLParser
 
 from .models import EventRecord, MarketFact
 
+PARSER_VERSION = 2
+
 
 class Tables(HTMLParser):
     def __init__(self):
@@ -117,6 +119,87 @@ def _matrix(table, left_labels, right_labels):
     raise ValueError("COMPARISON_COLUMNS_UNRECOGNIZED")
 
 
+def official_event_family(title):
+    title = _label(title)
+    if any(word in title for word in ("단일판매", "공급계약")) and any(word in title for word in ("체결", "해지", "취소")):
+        return "material_contract"
+    if "영업실적" in title and any(word in title for word in ("전망", "계획")):
+        return "official_guidance"
+    if any(word in title for word in ("영업실적", "실적공시", "사업보고서", "분기보고서", "반기보고서")):
+        return "earnings_quality"
+    return None
+
+
+def _report_name(title):
+    return re.sub(r"[\sㆍ·]", "", re.sub(r"^(?:\[[^\]]*정정[^\]]*\]\s*)+", "", title))
+
+
+def correction_reference(documents):
+    """Read the explicitly labelled original report/date, never a number in prose."""
+    references = set()
+    for document in documents:
+        content = document.get("content")
+        if (not isinstance(content, bytes) or not content or len(content) > 10_000_000 or
+                document.get("sha256") != hashlib.sha256(content).hexdigest()):
+            return None
+        try:
+            text = content.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            return None
+        if "<!ENTITY" in text.upper():
+            return None
+        parser = Tables()
+        try:
+            parser.feed(text)
+        except ValueError:
+            # A later unsupported table does not invalidate a completed correction cover table.
+            pass
+        titles, dates = set(), set()
+        for table in parser.tables:
+            for row in table:
+                if len(row) < 2:
+                    continue
+                label = _label(row[0])
+                values = list(dict.fromkeys(cell.strip() for cell in row[1:] if cell.strip() and _label(cell) != label))
+                if label in {"정정대상공시서류", "정정관련공시서류"}:
+                    titles.update(_report_name(value) for value in values)
+                elif label in {"정정대상공시서류의최초제출일", "정정관련공시서류제출일"}:
+                    for value in values:
+                        try:
+                            dates.add(date.fromisoformat(re.sub(r"[년월./]", "-", re.sub(r"\s|일", "", value)).rstrip("-")))
+                        except ValueError:
+                            return None
+        if titles or dates:
+            if len(titles) != 1 or len(dates) != 1:
+                return None
+            references.add((titles.pop(), dates.pop()))
+    return references.pop() if len(references) == 1 else None
+
+
+def resolve_correction_parent(receipt, documents, receipts):
+    if "정정" not in receipt.get("report_nm", "") or not receipt.get("corp_code"):
+        return None
+    reference = correction_reference(documents)
+    if reference is None:
+        return None
+    title, published_on = reference
+    matches = set()
+    for original in receipts:
+        identifier = original.get("rcept_no", "")
+        if (original.get("corp_code") != receipt["corp_code"] or
+                not re.fullmatch(r"\d{14}", identifier) or identifier >= receipt.get("rcept_no", "")):
+            continue
+        try:
+            original_date = date.fromisoformat(str(original.get("rcept_dt", "")))
+        except ValueError:
+            continue
+        name = _report_name(original.get("report_nm", ""))
+        if (identifier[:8] == original_date.strftime('%Y%m%d') and original_date == published_on and
+                (name == title or name.startswith(title + "("))):
+            matches.add(identifier)
+    return matches.pop() if len(matches) == 1 else None
+
+
 def _contract_pairs(table):
     pairs, notes_next = {}, False
     paths = {
@@ -151,7 +234,8 @@ def _contract_pairs(table):
         raise ValueError("CONTRACT_NOTES_INCOMPLETE")
     terms = ("계약금선급금유무", "대금지급조건등")
     if any(label in pairs for label in terms):
-        if "계약조건" in pairs or not all(pairs.get(label, "").strip() not in {"", "-", "미정", "미공개", "공시유보"} for label in terms):
+        if ("계약조건" in pairs or not all(label in pairs for label in terms) or
+                pairs[terms[0]].strip() in {"", "-", "미정", "미공개", "공시유보"}):
             raise ValueError("CONTRACT_TERMS_INCOMPLETE")
         pairs["계약조건"] = "; ".join(label + ": " + pairs[label] for label in terms)
     return pairs
@@ -162,14 +246,12 @@ def parse_official_event(receipt: dict, documents: list[dict], instrument_id: st
     title, receipt_id = receipt.get("report_nm", ""), receipt.get("rcept_no", "")
     if not re.fullmatch(r"\d{14}", receipt_id):
         return None, [], "INVALID_OFFICIAL_RECEIPT"
+    family = official_event_family(title)
+    if family is None:
+        return None, [], "OBSERVATION_ONLY_EVENT_FAMILY"
     correction = receipt.get("correction_parent_id")
     if "정정" in title and not correction:
         return None, [], "CORRECTION_RELATION_UNRESOLVED"
-    family = "material_contract" if "계약" in title and any(word in title for word in ("체결", "해지", "취소")) else (
-        "official_guidance" if any(word in title for word in ("전망", "계획")) else
-        "earnings_quality" if any(word in title for word in ("영업실적", "실적공시", "사업보고서", "분기보고서", "반기보고서")) else None)
-    if family is None:
-        return None, [], "OBSERVATION_ONLY_EVENT_FAMILY"
     successes, reasons = [], []
     for document in documents:
         content = document.get("content")
@@ -226,6 +308,8 @@ def parse_official_event(receipt: dict, documents: list[dict], instrument_id: st
                         if not all(label in pairs for label in fields.values()):
                             raise ValueError("COMPLETE_CONTRACT_FIELDS_REQUIRED")
                         values = {key: pairs[label] for key, label in fields.items()}
+                        if "대금지급조건등" in pairs and pairs["대금지급조건등"].strip() in {"", "-", "미정", "미공개", "공시유보"}:
+                            values["undisclosed_terms"] = "대금지급 조건 등: " + (pairs["대금지급조건등"] or "(빈 칸)") + "; 원문에 구체적인 지급조건이 공개되지 않음"
                         if "기타투자판단과관련한중요사항" in pairs:
                             values["additional_terms"] = pairs["기타투자판단과관련한중요사항"]
                         for key in ("contract_amount", "previous_revenue"):

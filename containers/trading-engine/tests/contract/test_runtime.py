@@ -283,6 +283,32 @@ class ExternalRuntimeContracts(unittest.TestCase):
         self.assertEqual([call.args[0].instrument_id for call in quote.call_args_list],['KRX:000001'])
         self.assertIn('KRX:000001',refreshed.quotes)
 
+    def test_quote_recovery_clears_cached_exclusions_and_keeps_retryable_candidates(self):
+        bundle, _broker, decide, refresh = self._factory()
+        runtime = decide.__self__
+        self.addCleanup(runtime.close)
+        account = bundle.data['account_snapshot']
+        quote = self.case[7].model_copy(update={'instrument_id':'KRX:000001'})
+        with patch.object(runtime, '_account', return_value=(account, 1)), \
+                patch.object(runtime, '_protection_symbols', return_value={'KRX:000001'}), \
+                patch.object(runtime, '_quote', side_effect=AdapterError('STREAM_NOT_READY')):
+            missing = refresh()
+        self.assertNotIn('KRX:000001', missing.quotes)
+        self.assertEqual([row.instrument.instrument_id for row in missing.candidates], ['KRX:000001'])
+        self.assertTrue(any(row['reason']=='STREAM_NOT_READY' for row in missing.exclusions))
+        with patch.object(runtime, '_account', return_value=(account, 2)), \
+                patch.object(runtime, '_protection_symbols', return_value={'KRX:000001'}), \
+                patch.object(runtime, '_quote', return_value=quote):
+            recovered = refresh()
+        self.assertIn('KRX:000001', recovered.quotes)
+        self.assertFalse(any(row['reason']=='STREAM_NOT_READY' for row in recovered.exclusions))
+        with patch.object(runtime, '_quote', side_effect=AdapterError('STREAM_NOT_READY')):
+            runtime.refresh_quotes(['KRX:000001'])
+        with patch.object(runtime, '_quote', return_value=quote):
+            recovered = runtime.refresh_quotes(['KRX:000001'])
+        for rows in (recovered.exclusions, recovered.data['runtime_diagnostics']):
+            self.assertFalse(any(row.get('scope') in {'PROTECTION','ENTRY'} for row in rows))
+
     def test_monitor_quote_limit_is_separate_from_targeted_order_refresh(self):
         bundle, _broker, decide, _refresh = self._factory()
         runtime = decide.__self__
@@ -613,6 +639,137 @@ class ExternalRuntimeContracts(unittest.TestCase):
         self.assertEqual(preserved[0].available_at,first_available)
         self.assertEqual(coverage["KRX:000001"],"PARTIAL")
         self.assertIn({"source":"DART","reason":"TRANSPORT_FAILED"},runtime.disclosure_diagnostics)
+
+    def test_cached_disclosures_reparse_without_redownload_or_rejuvenating_old_evidence(self):
+        bundle, _, decide, _ = self._factory()
+        runtime = decide.__self__
+        self.addCleanup(runtime.close)
+        runtime.manifest['automatic'] = True
+        runtime.manifest['disclosures']['instrument_by_corp_code'] = {'00000001':'KRX:000001'}
+        runtime.state.data['disclosure_last_poll'] = None
+        content = ('<p>연결 기준 (단위: 백만원)</p><table><tr><th>구분</th><th>당기실적 2026.01.01~2026.03.31</th>'
+                   '<th>전년동기실적 2025.01.01~2025.03.31</th></tr><tr><td>매출액</td><td>1,200</td><td>1,000</td></tr>'
+                   '<tr><td>영업이익</td><td>150</td><td>100</td></tr></table>').encode()
+        recent_day = self.case[1].sessions[118].opens_at.date()
+        old_day = self.case[1].sessions[114].opens_at.date()
+        rows = [
+            {'rcept_no':recent_day.strftime('%Y%m%d')+'000001','rcept_dt':recent_day.isoformat(),'corp_code':'00000001','report_nm':'연결 영업실적 공시'},
+            {'rcept_no':self.now.strftime('%Y%m%d')+'000002','rcept_dt':self.now.date().isoformat(),'corp_code':'00000001','report_nm':'임상시험계획승인'},
+            {'rcept_no':old_day.strftime('%Y%m%d')+'000003','rcept_dt':old_day.isoformat(),'corp_code':'00000001','report_nm':'분기보고서'},
+            {'rcept_no':'20200101000004','rcept_dt':'20200101','corp_code':'00000001','report_nm':'분기보고서'},
+        ]
+        def document(receipt):
+            body = content if receipt == rows[0]['rcept_no'] else b'<p>unsupported official table</p>'
+            return FetchResult(({'content':body,'sha256':hashlib.sha256(body).hexdigest()},), 'COMPLETE', self.now)
+        with patch.object(runtime.dart, 'list_disclosures', return_value=FetchResult(tuple(rows), 'COMPLETE', self.now)), \
+                patch.object(runtime.dart, 'read_disclosure', side_effect=document):
+            events, _, coverage, _ = runtime._events(list(bundle.instruments.values()), self.now)
+        self.assertEqual({event.official_id for event in events}, {row['rcept_no'] for row in rows[:2]})
+        self.assertEqual(coverage['KRX:000001'], 'COMPLETE')
+        record = runtime.state.data['disclosure_records'][rows[0]['rcept_no']]
+        record.pop('parser_version')
+        record.pop('receipt')
+        record['event'].update(timing_quality='UNCERTAIN', published_date=None, primary_source_complete=False)
+        first_seen = runtime.state.data['events'][rows[0]['rcept_no']]
+        with patch.object(runtime.dart, 'list_disclosures', side_effect=AssertionError('unexpected listing')), \
+                patch.object(runtime.dart, 'read_disclosure', side_effect=AssertionError('unexpected redownload')):
+            events, _, coverage, _ = runtime._events(list(bundle.instruments.values()), self.now+timedelta(seconds=1))
+        repaired = next(event for event in events if event.official_id == rows[0]['rcept_no'])
+        self.assertTrue(repaired.primary_source_complete)
+        self.assertEqual(repaired.timing_quality, 'DATE_ONLY')
+        self.assertIsNone(repaired.published_at)
+        self.assertEqual(repaired.published_date, recent_day)
+        self.assertEqual(repaired.available_at, aware_time(first_seen))
+        self.assertEqual(runtime.calendar.event_age(repaired, runtime.calendar.active(self.now).session_id), 3)
+        self.assertEqual(coverage['KRX:000001'], 'COMPLETE')
+        runtime.state.db.execute('CREATE TABLE holdings(instrument_id TEXT, owner TEXT, quantity INTEGER)')
+        runtime.state.db.execute("INSERT INTO holdings VALUES ('KRX:000001','strategy',1)")
+        retained, _, coverage, documents = runtime._events(list(bundle.instruments.values()), self.now+timedelta(seconds=2))
+        self.assertEqual({event.official_id for event in retained}, {row['rcept_no'] for row in rows})
+        self.assertEqual(coverage['KRX:000001'], 'COMPLETE')
+        self.assertTrue(any(doc['receipt_id'] == rows[-1]['rcept_no'] for doc in documents.values()))
+
+    def test_future_or_unknown_publication_date_remains_uncertain(self):
+        bundle, _, decide, _ = self._factory()
+        runtime = decide.__self__
+        self.addCleanup(runtime.close)
+        runtime.manifest['disclosures']['instrument_by_corp_code'] = {'00000001':'KRX:000001'}
+        content = b'<p>unsupported financial table</p>'
+        document = FetchResult(({'content':content,'sha256':hashlib.sha256(content).hexdigest()},), 'COMPLETE', self.now)
+        for index, day in enumerate(((self.now.date()+timedelta(days=1)).isoformat(), '', 'bad-date')):
+            row = {'rcept_no':self.now.strftime('%Y%m%d')+f'{index:06}','rcept_dt':day,
+                   'corp_code':'00000001','report_nm':'영업실적 공시'}
+            runtime.state.data['disclosure_last_poll'] = None
+            with patch.object(runtime.dart, 'list_disclosures', return_value=FetchResult((row,), 'COMPLETE', self.now)), \
+                    patch.object(runtime.dart, 'read_disclosure', return_value=document):
+                events, _, coverage, _ = runtime._events(list(bundle.instruments.values()), self.now)
+            self.assertEqual(next(event for event in events if event.official_id == row['rcept_no']).timing_quality, 'UNCERTAIN')
+            self.assertEqual(coverage['KRX:000001'], 'PARTIAL')
+
+    def test_old_pending_source_failure_is_visible_but_does_not_block_current_decision(self):
+        bundle, _, decide, _ = self._factory()
+        runtime = decide.__self__
+        self.addCleanup(runtime.close)
+        runtime.manifest['disclosures']['instrument_by_corp_code'] = {'00000001':'KRX:000001'}
+        old_day = self.case[1].sessions[110].opens_at.date()
+        row = {'rcept_no':old_day.strftime('%Y%m%d')+'000001','rcept_dt':old_day.isoformat(),
+               'corp_code':'00000001','report_nm':'분기보고서'}
+        runtime.state.data['disclosure_pending_documents'] = {row['rcept_no']:row}
+        frozen = {'created_at':self.now.isoformat(), 'events':[], 'facts':[], 'candidates':[], 'reviewed_positions':['KRX:000001']}
+        with patch.object(runtime.dart, 'list_disclosures', return_value=FetchResult((), 'COMPLETE_NO_EVENT', self.now)), \
+                patch.object(runtime.dart, 'read_disclosure', side_effect=AdapterError('DOCUMENT_NOT_AVAILABLE')):
+            runtime.refresh_decision(frozen)
+            self.assertEqual(len(runtime.disclosure_diagnostics), 1)
+            self.assertFalse(runtime.disclosure_diagnostics[0]['affects_current_evidence'])
+            row['rcept_dt'] = ''
+            with self.assertRaisesRegex(AdapterError, 'DECISION_EVIDENCE_REFRESH_INCOMPLETE'):
+                runtime.refresh_decision(frozen)
+
+    def test_refresh_preserves_held_evidence_older_than_calendar_without_selecting_it_as_recent(self):
+        bundle, _, decide, _ = self._factory()
+        runtime = decide.__self__
+        self.addCleanup(runtime.close)
+        ancient = self.case[8].model_copy(update={'instrument_id':'KRX:000001','timing_quality':'DATE_ONLY',
+                                                'published_date':datetime(2020,1,1).date()})
+        with patch.object(runtime, '_events', return_value=([ancient], [], {'KRX:000001':'COMPLETE'}, {})):
+            refreshed = runtime.refresh()
+        self.assertEqual(refreshed.events, [ancient])
+        self.assertTrue(any(row.get('reason') == 'NO_VALID_RECENT_OFFICIAL_EVENT' for row in refreshed.data['runtime_diagnostics']))
+
+    def test_correction_parent_lookup_is_issuer_scoped_and_retries_from_cached_original(self):
+        bundle, _, decide, _ = self._factory()
+        runtime = decide.__self__
+        self.addCleanup(runtime.close)
+        runtime.manifest['disclosures']['instrument_by_corp_code'] = {'00000001':'KRX:000001'}
+        runtime.state.data['disclosure_last_poll'] = None
+        parent_day = self.now.date()-timedelta(days=30)
+        parent = {'rcept_no':parent_day.strftime('%Y%m%d')+'000001','rcept_dt':parent_day.isoformat(),
+                  'corp_code':'00000001','report_nm':'단일판매ㆍ공급계약체결'}
+        receipt = {'rcept_no':self.now.strftime('%Y%m%d')+'000002','rcept_dt':self.now.date().isoformat(),
+                   'corp_code':'00000001','report_nm':'[기재정정]단일판매ㆍ공급계약체결'}
+        pairs = [('정정관련 공시서류','단일판매ㆍ공급계약체결'),('정정관련 공시서류제출일',parent_day.isoformat())]
+        contract = [('계약금액(원)','2000000000'),('최근매출액(원)','8000000000'),('계약상대','합성회사'),
+                    ('계약조건','검수 후 지급'),('계약기간 시작일','2026-01-01'),('계약기간 종료일','2026-12-31')]
+        content = ''.join('<table>'+''.join(f'<tr><td>{key}</td><td>{value}</td></tr>' for key,value in rows)+'</table>'
+                          for rows in (pairs, contract)).encode()
+        document = FetchResult(({'content':content,'sha256':hashlib.sha256(content).hexdigest()},), 'COMPLETE', self.now)
+        parent_result = FetchResult((), 'FETCH_FAILED', self.now, metadata={'error':'TRANSPORT_FAILED'})
+        def listing(start, end, **kwargs):
+            if kwargs:
+                self.assertEqual((start,end,kwargs), (parent_day,parent_day,{'corp_code':'00000001'}))
+                return parent_result
+            return FetchResult((receipt,), 'COMPLETE', self.now)
+        with patch.object(runtime.dart, 'list_disclosures', side_effect=listing), \
+                patch.object(runtime.dart, 'read_disclosure', return_value=document) as read:
+            _, _, coverage, _ = runtime._events(list(bundle.instruments.values()), self.now)
+            self.assertEqual(coverage['KRX:000001'], 'PARTIAL')
+            parent_result = FetchResult((parent,), 'COMPLETE', self.now)
+            events, _, coverage, _ = runtime._events(list(bundle.instruments.values()), self.now+timedelta(seconds=181))
+        read.assert_called_once_with(receipt['rcept_no'])
+        self.assertEqual(events[0].correction_of, 'dart:'+parent['rcept_no'])
+        self.assertTrue(events[0].primary_source_complete)
+        self.assertEqual(coverage['KRX:000001'], 'COMPLETE')
+        self.assertFalse(runtime.state.data['disclosure_pending_documents'])
 
     def test_quote_actual_observation_time_is_not_http_reception_time(self):
         bundle,_broker,decide,_refresh = self._factory()

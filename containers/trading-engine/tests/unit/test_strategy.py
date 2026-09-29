@@ -162,6 +162,20 @@ class StrategyContractTests(unittest.TestCase):
         self.assertFalse(registry.ingest(correction)[1])
         self.assertFalse(self.assess(events=list(registry.records.values())).allowed)
 
+    def test_date_only_disclosure_age_uses_publication_day_not_late_collection(self):
+        event = self.event.model_copy(update={"timing_quality":"DATE_ONLY", "published_at":None,
+            "published_date":self.calendar.sessions[118].opens_at.date(), "available_at":self.now})
+        self.assertEqual(self.calendar.event_age(event, self.calendar.active(self.now).session_id), 3)
+        self.assertTrue(self.assess(events=[event]).allowed)
+        old = event.model_copy(update={"published_date":self.calendar.sessions[114].opens_at.date()})
+        self.assertIn("NO_VALID_RECENT_OFFICIAL_EVENT", self.assess(events=[old]).reasons)
+        for published_date in (None, self.now.date()+timedelta(days=1)):
+            with self.assertRaisesRegex(DataQualityError, "INVALID_EVENT_PUBLICATION_DATE"):
+                self.calendar.event_age(event.model_copy(update={"published_date":published_date}), self.calendar.active(self.now).session_id)
+        with self.assertRaisesRegex(DataQualityError, "EVENT_PRECEDES_CALENDAR_COVERAGE"):
+            self.calendar.event_age(event.model_copy(update={"published_date":self.calendar.sessions[0].opens_at.date()-timedelta(days=1)}),
+                                   self.calendar.active(self.now).session_id)
+
     def test_quote_received_after_decision_cannot_authorize_entry_or_protection(self):
         quote = self.quote.model_copy(update={"received_at": self.now + timedelta(hours=1)})
         self.assertIn("STALE_OR_INVALID_QUOTE", self.assess(quote=quote).reasons)
@@ -232,6 +246,32 @@ class StrategyContractTests(unittest.TestCase):
         self.assertEqual(plan.quantity,31)
         self.assertEqual(plan.reserved_cash,D(310100))
         self.assertLessEqual(plan.total_risk,plan.risk_budget)
+
+    def test_cash_reservations_are_deducted_once_only_when_broker_reflection_is_known(self):
+        candidate = self.candidate.model_copy(update={"features": self.candidate.features.model_copy(update={"atr14": D(500)})})
+        quote = self.quote.model_copy(update={"ask": D(10000), "bid": D(10000)})
+        pending = PendingEntry(instrument_id="TEST:BBB", issuer_id="issuer-BBB", sector="other-sector",
+            thesis_id="pending", plan_id="pending", remaining_quantity=12, entry_price=D(10000),
+            unit_risk=D(500), reserved_cash=D(120000), reserved_risk=D(6000))
+        base = self.snapshot.model_copy(update={"allocated_cash": D(320000), "pending_entries": [pending]})
+        local = pending.model_copy(update={"instrument_id": "TEST:CCC", "issuer_id": "issuer-CCC",
+            "plan_id": "local-only", "remaining_quantity": 9, "reserved_cash": D(90000), "reserved_risk": D(4500)})
+        for cash, reflected, entries, quantity in (
+                (320000, 0, [pending], 20),  # Paper/fixture gross cash keeps the full reservation.
+                (200000, 120000, [pending], 20),  # Broker has already reserved this buy.
+                (200000, 120000, [pending.model_copy(update={"reserved_cash": D(120100)})], 19),  # Local fee cushion remains.
+                (200000, 0, [pending], 8),  # Unconfirmed/local-only remains conservative.
+                (200000, 120000, [pending, local], 11),  # New local plan after the broker query.
+                (9999, 120000, [pending], 0)):
+            with self.subTest(cash=cash, reflected=reflected, entries=len(entries)):
+                snapshot = base.model_copy(update={"broker_available_cash": D(cash),
+                    "broker_reflected_reserve_cash": D(reflected), "pending_entries": entries})
+                plan = size_entry(candidate, quote, D(9750), snapshot, self.costs, self.now, self.profile)
+                self.assertEqual(plan.quantity, quantity)
+                self.assertLessEqual(plan.reserved_cash, D(cash))
+        invalid = base.model_copy(update={"broker_reflected_reserve_cash": D(120001)})
+        self.assertEqual(size_entry(candidate, quote, D(9750), invalid, self.costs, self.now, self.profile).reason,
+                         "PORTFOLIO_QUALITY_INSUFFICIENT")
 
     def test_s11_unknown_or_excessive_costs_block_only_entry(self):
         stop = self.assess().stop_price
