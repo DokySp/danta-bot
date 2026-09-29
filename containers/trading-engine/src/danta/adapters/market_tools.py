@@ -20,6 +20,15 @@ SNAPSHOT_FIELDS = frozenset({"schema_version", "run_id", "created_at", "config_h
 RECORD_FIELDS = {"events": set(EventRecord.model_fields), "facts": set(MarketFact.model_fields),
                  "candidates": set(Candidate.model_fields), "theses": set(InvestmentThesis.model_fields)}
 DOCUMENT_FIELDS = {"fact_id", "instrument_id", "source", "sha256", "content", "receipt_id", "available_at", "interpretation_status"}
+DOCUMENT_PAGE_CHARS = 16000
+
+
+def document_index(snapshot):
+    """Expose identifiers, never the full body, of already validated frozen documents."""
+    return [dict({key: value for key, value in record.items() if key != "content"},
+                 content_chars=len(record["content"]))
+            for record in snapshot.get("tool_records", {}).get("facts", {}).values()
+            if "content" in record]
 
 
 def validate_attachments(attachments):
@@ -113,12 +122,25 @@ class MarketTools:
         records = self.snapshot.get("tool_records", {})
         if name in ID_TOOLS:
             collection, id_key = ID_TOOLS[name]
-            if set(arguments) != {id_key} or not isinstance(arguments[id_key], str):
+            optional = {"offset"} if name == "get_fact" else set()
+            if (id_key not in arguments or set(arguments) - {id_key} - optional or
+                    not isinstance(arguments[id_key], str)):
                 raise AdapterError("INVALID_TOOL_ARGUMENTS")
             if arguments[id_key] not in records.get(collection, {}):
                 raise AdapterError("EVIDENCE_NOT_FOUND")
             result = records[collection][arguments[id_key]]
             _record_in_scope(collection, result, scope.get("instrument_ids", []), arguments[id_key])
+            if name == "get_fact":
+                offset = arguments.get("offset", 0)
+                if type(offset) is not int or offset < 0 or (offset and "content" not in result):
+                    raise AdapterError("INVALID_TOOL_ARGUMENTS")
+                if "content" in result and ("offset" in arguments or len(result["content"]) > DOCUMENT_PAGE_CHARS):
+                    total = len(result["content"])
+                    if offset > total:
+                        raise AdapterError("INVALID_TOOL_ARGUMENTS")
+                    end = min(offset + DOCUMENT_PAGE_CHARS, total)
+                    result = dict(result, content=result["content"][offset:end], offset=offset,
+                                  next_offset=end if end < total else None, total_chars=total)
         else:
             required = {"instrument_id", "start", "end", "page"} | ({"query"} if name == "search_official_evidence" else set())
             if set(arguments) != required or type(arguments["page"]) is not int or not 1 <= arguments["page"] <= 100:
@@ -132,20 +154,34 @@ class MarketTools:
             except (TypeError, ValueError, KeyError):
                 raise AdapterError("INVALID_TOOL_PERIOD") from None
             collection = "bars" if name == "get_bars" else "official_evidence"
-            values = records.get(collection, {}).get(arguments["instrument_id"], [])
+            values = list(records.get(collection, {}).get(arguments["instrument_id"], []))
+            if name == "search_official_evidence":
+                query = arguments["query"]
+                if not isinstance(query, str) or len(query) > 200:
+                    raise AdapterError("INVALID_TOOL_QUERY")
+                for item in document_index(self.snapshot):
+                    if item["instrument_id"] != arguments["instrument_id"]:
+                        continue
+                    # Search frozen originals only; this is not an Internet search.
+                    available = item.get("available_at")
+                    if available:
+                        values.append(dict(item, date=available[:10], url=item["source"]))
             selected = []
             for item in values:
                 if not start <= date.fromisoformat(item["date"]) <= end:
                     continue
                 if name == "search_official_evidence":
-                    query = arguments["query"]
-                    if not isinstance(query, str) or len(query) > 200:
-                        raise AdapterError("INVALID_TOOL_QUERY")
                     url = urlsplit(item.get("url", ""))
                     if url.scheme != "https" or url.hostname not in scope.get("official_domains", []) or url.username or url.password:
                         continue
-                    if query.casefold() not in json.dumps(item, ensure_ascii=False).casefold():
+                    document = records.get("facts", {}).get(item.get("fact_id"), {})
+                    content = document.get("content", "") if document.get("instrument_id") == arguments["instrument_id"] else ""
+                    if query.casefold() not in (json.dumps(item, ensure_ascii=False) + content).casefold():
                         continue
+                    if query and content:
+                        at = content.casefold().find(query.casefold())
+                        if at >= 0:
+                            item = dict(item, excerpt=content[max(0, at-100):at+300])
                 selected.append(item)
             offset = (arguments["page"] - 1) * 100
             result = {"records": selected[offset:offset + 100], "total_count": len(selected),
@@ -205,12 +241,17 @@ def main():
 def tool_schema(name):
     if name in ID_TOOLS:
         properties = {ID_TOOLS[name][1]: {"type": "string"}}
+        required = list(properties)
+        if name == "get_fact":
+            properties["offset"] = {"type": "integer", "minimum": 0,
+                "description": "Optional character offset for raw documents. Follow next_offset until the needed evidence is read."}
     else:
         properties = {"instrument_id": {"type": "string"}, "start": {"type": "string"}, "end": {"type": "string"},
                       "page": {"type": "integer", "minimum": 1, "maximum": 100}}
         if name == "search_official_evidence":
             properties["query"] = {"type": "string", "maxLength": 200}
-    return {"type": "object", "properties": properties, "required": list(properties), "additionalProperties": False}
+        required = list(properties)
+    return {"type": "object", "properties": properties, "required": required, "additionalProperties": False}
 
 
 if __name__ == "__main__":

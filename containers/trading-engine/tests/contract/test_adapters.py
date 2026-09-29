@@ -250,6 +250,42 @@ class AdapterContracts(unittest.TestCase):
                "source": "https://issuer.invalid/report", "sha256": "0" * 64}
         self.assertEqual(MarketTools({"tool_scope": scope, "tool_records": {"facts": {"document1": raw}}}).call("get_fact", {"fact_id": "document1"})["data"], raw)
 
+    def test_original_documents_are_discoverable_searchable_and_paged(self):
+        scope = {"instrument_ids": ["TEST:AAA"], "start": "2026-09-01", "end": "2026-09-10", "official_domains": ["issuer.invalid"]}
+        body = '가' * 100000 + '계약금액 확인' + '나' * 100000
+        raw = {"fact_id": "document1", "instrument_id": "TEST:AAA", "content": body,
+               "source": "https://issuer.invalid/report", "sha256": "0" * 64, "available_at": "2026-09-02T00:00:00+00:00"}
+        snapshot = {"tool_scope": scope, "tool_records": {"facts": {"document1": raw}, "official_evidence": {}}}
+        market = MarketTools(snapshot)
+        search = market.call('search_official_evidence', dict(instrument_id='TEST:AAA', start=scope['start'],
+                            end=scope['end'], query='계약금액', page=1))['data']
+        self.assertEqual(search['total_count'], 1)
+        self.assertEqual(search['records'][0]['fact_id'], 'document1')
+        self.assertIn('계약금액', search['records'][0]['excerpt'])
+        pages, offset = [], 0
+        while offset is not None:
+            page = market.call('get_fact', {'fact_id': 'document1', 'offset': offset})['data']
+            self.assertLess(len(json.dumps(page, ensure_ascii=False).encode()), 262144)
+            pages.append(page['content'])
+            offset = page['next_offset']
+        self.assertEqual(''.join(pages), body)
+        for bad in (-1, True, len(body)+1):
+            with self.subTest(offset=bad), self.assertRaises(AdapterError):
+                market.call('get_fact', {'fact_id': 'document1', 'offset': bad})
+        with tempfile.TemporaryDirectory() as directory:
+            prompts = []
+            def runner(command, **kwargs):
+                prompts.append(kwargs['input'])
+                Path(command[command.index('--output-last-message')+1]).write_text('{"ok":true}')
+                return 0, '{"type":"turn.completed"}', ''
+            runner.fixture_only = True
+            result = CodexAdapter(runner=runner).run(snapshot, {}, attempt_root=directory, prompt='fixture',
+                validate_schema=lambda value:value, validate_semantic=lambda value:True,
+                expires_at=datetime.now(timezone.utc)+timedelta(seconds=20))
+            self.assertEqual(result.status, 'SUCCESS')
+            self.assertIn('document1', prompts[0])
+            self.assertNotIn(body, prompts[0])
+
     def test_snapshot_credential_aliases_text_and_field_boundary(self):
         for key in ("apiKey", "API_KEY", "Api-Key", "appSecret", "accessToken", "accountNumber", "crtfc_key", "authJson"):
             with self.subTest(key=key), self.assertRaisesRegex(AdapterError, "SENSITIVE_SNAPSHOT_FIELD"):
