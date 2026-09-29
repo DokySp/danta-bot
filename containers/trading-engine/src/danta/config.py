@@ -9,6 +9,7 @@ import stat
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -246,11 +247,22 @@ class Config:
 
 def load_config(directory: str | Path | None = None) -> Config:
     directory = Path(directory or ROOT / "config").resolve()
-    contract = json.loads((ROOT / "schemas/config-contract.json").read_text())
+    try:
+        contract = (ROOT / "schemas/config-contract.json").read_text()
+        sources = tuple((directory / f"{name}.yaml").read_text() for name in ("app", "strategy", "schedules"))
+    except OSError as error:
+        raise ConfigurationError(f"Configuration could not be loaded: {type(error).__name__}") from error
+    return _parse_config(directory, contract, sources)
+
+
+@lru_cache(maxsize=8)
+def _parse_config(directory: Path, contract_text: str, sources: tuple[str, ...]) -> Config:
+    # Read the actual bytes on every authority check; reuse only identical validated content.
+    contract = json.loads(contract_text)
     data = {}
     try:
-        for name in ("app", "strategy", "schedules"):
-            data[name] = yaml.load((directory / f"{name}.yaml").read_text(), Loader=StrictLoader)
+        for name, source in zip(("app", "strategy", "schedules"), sources):
+            data[name] = yaml.load(source, Loader=StrictLoader)
             if name == 'strategy':
                 try:
                     orders = data[name]['strategy']['research_profile']['orders']

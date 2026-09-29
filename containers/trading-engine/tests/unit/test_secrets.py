@@ -3,11 +3,37 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from danta.config import HumanRequired, ROOT, load_config, load_secrets
+from danta.config import ConfigurationError, HumanRequired, ROOT, load_config, load_secrets
 
 
 class SecretsTests(unittest.TestCase):
+    def test_config_cache_uses_contents_not_mtime_and_returns_immutable_snapshots(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ('app', 'strategy', 'schedules'):
+                (root / (name + '.yaml')).write_bytes((ROOT / 'tests/fixtures/config' / (name + '.yaml')).read_bytes())
+            before = load_config(root)
+            with patch('danta.config.yaml.load', side_effect=AssertionError('unchanged YAML parsed again')):
+                self.assertIs(load_config(root), before)
+            modified = before.data
+            modified['app']['model']['model_id'] = 'cannot mutate the cached snapshot'
+            self.assertNotEqual(before.data, modified)
+            path = root / 'app.yaml'
+            stat = path.stat()
+            source = path.read_text()
+            self.assertIn('mode: offline', source)
+            path.write_text(source.replace('mode: offline', 'mode: shadow '))
+            os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+            self.assertNotEqual(load_config(root).config_hash, before.config_hash)
+            with self.assertRaisesRegex(HumanRequired, 'POLICY_CHANGED'):
+                before.assert_current()
+            path.write_text('app: [private-canary')
+            with self.assertRaises(ConfigurationError) as caught:
+                load_config(root)
+            self.assertNotIn('private-canary', str(caught.exception))
+
     def test_private_file_and_policy_snapshot_are_separate(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
