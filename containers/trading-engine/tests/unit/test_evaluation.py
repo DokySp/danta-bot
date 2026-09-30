@@ -11,7 +11,7 @@ import unittest
 
 from danta.accounting import ExternalFlow, NavPoint, completed_session_returns, performance, strategy_nav, usage_totals
 from danta.evaluation import (ARMS, EvaluationManifest, PaperLedger, PaperOrder, TimelineEvent,
-                              _protect, _run, content_hash, evaluate_manifest, evaluate_metrics,
+                              _protect, _review, _run, content_hash, evaluate_manifest, evaluate_metrics,
                               paired_bootstrap, validate_candidate_pool)
 from danta.market import SessionCalendar, TickTable
 from danta.models import EventRecord, InvestmentThesis, Quote
@@ -144,6 +144,38 @@ class AccountingEvaluationTests(unittest.TestCase):
         self.assertIn('UNRESOLVED_CORPORATE_ACTION_DELIST', ledger.quality_issues)
         self.assertEqual(ledger.holdings['TEST:AAA'].quantity, 4)
 
+    def test_split_preserves_excursion_and_reduction_and_never_truncates_quantities(self):
+        _, ledger, order = ledger_order(4)
+        ledger.submit(order)
+        ledger.process_quote(quote(order.eligible_at), ask_quantity=4, bid_quantity=0, event_id='entry')
+        thesis = ledger.theses[order.thesis.thesis_id]
+        thesis.mfe_price = D(11000)
+        at = order.eligible_at + timedelta(seconds=1)
+        reduction = PaperOrder('reduction', order.instrument_id, 'SELL', 1, None, at, at, None,
+            thesis, order.issuer_id, order.sector, order.atr, D(0), reasons=['REDUCE_TO_LIMIT'])
+        ledger.submit(reduction)
+        ledger.process_quote(quote(at), ask_quantity=0, bid_quantity=1, event_id='reduction')
+        before, original = ledger.nav, copy.deepcopy(thesis)
+        ledger.corporate_action(order.instrument_id, 'SPLIT', at, ratio='2', confirmed=True)
+        adjusted = ledger.theses[thesis.thesis_id]
+        self.assertEqual(ledger.nav, before)
+        self.assertEqual(adjusted.mfe_price, D(5500))
+        self.assertEqual(adjusted.reduced_quantity, 2)
+        self.assertEqual(adjusted.planned_quantity, 8)
+        self.assertEqual(adjusted.mfe_price / adjusted.average_entry,
+                         original.mfe_price / original.average_entry)
+        for fractional in ('sellable_quantity', 'planned_quantity', 'reduced_quantity'):
+            with self.subTest(fractional=fractional):
+                unsupported = copy.deepcopy(ledger)
+                holding = unsupported.holdings[order.instrument_id]
+                record = unsupported.theses[thesis.thesis_id]
+                setattr(holding if fractional == 'sellable_quantity' else record, fractional, 1)
+                before_holding, before_thesis = holding.model_dump(), record.model_dump()
+                unsupported.corporate_action(order.instrument_id, 'SPLIT', at, ratio='.5', confirmed=True)
+                self.assertIn('CORPORATE_ACTION_REQUIRES_CASH_IN_LIEU', unsupported.quality_issues)
+                self.assertEqual(unsupported.holdings[order.instrument_id].model_dump(), before_holding)
+                self.assertEqual(unsupported.theses[thesis.thesis_id].model_dump(), before_thesis)
+
     def test_e08_comparison_pool_must_precede_ai_acceptance(self):
         manifest = fixture()
         data = copy.deepcopy(manifest.timeline[0].data)
@@ -209,6 +241,45 @@ class AccountingEvaluationTests(unittest.TestCase):
         failed = evaluate_metrics(manifest, loss, loss)
         self.assertEqual(failed['verdict'], 'FAIL')
 
+    def test_confirmation_requires_known_cost_and_net_primary_baseline_excess(self):
+        manifest = fixture()
+        manifest.operating_cost_krw = D(0)
+        replay = _run(manifest)
+        replay['sessions'] = [str(index) for index in range(80)]
+        for name, arm in replay['arms'].items():
+            arm['daily_returns'] = {session: '.002' if name == 'full_strategy' else '.001'
+                                    for session in replay['sessions']}
+            arm['issues'], arm['max_drawdown'] = [], '0'
+        replay['arms']['full_strategy']['closed_trades'] = [
+            {'thesis_id': str(index), 'exit_session': str(index)} for index in range(30)]
+        unknown = evaluate_metrics(manifest, replay, replay)
+        self.assertEqual(unknown['criteria_verdict'], 'INCONCLUSIVE')
+        self.assertIn('CONFIRMATION_OPERATING_COST_ALLOCATION_UNCONFIRMED', unknown['hold_reasons'])
+        manifest.confirmation_operating_cost_krw = D(0)
+        no_cost = evaluate_metrics(manifest, replay, replay)
+        self.assertEqual(no_cost['criteria_verdict'], 'PASS_REVIEW_ELIGIBLE')
+        self.assertEqual(no_cost['verdict'], 'INCONCLUSIVE')
+        capital = manifest.initial_capital_krw * (1 + D(no_cost['discovery_return']))
+        self.assertEqual(D(no_cost['confirmation_starting_capital_krw']), capital)
+        gain = D(no_cost['confirmation_return']) * capital
+        for cost in (gain * D('.75'), gain * 2):
+            with self.subTest(cost=cost):
+                manifest.confirmation_operating_cost_krw = cost
+                result = evaluate_metrics(manifest, replay, replay)
+                self.assertEqual(result['criteria_verdict'], 'FAIL')
+                self.assertEqual(D(result['confirmation_pnl_after_operating_cost_krw']), gain - cost)
+                self.assertIn('CONFIRMATION_PNL_OR_BASELINE_EXCESS_AFTER_OPERATING_COST_NOT_POSITIVE',
+                              result['failures'])
+
+    def test_manifest_rejects_unsupported_preregistered_protocol(self):
+        for field, value in (('primary_baseline', 'cash'), ('discovery_completed_sessions', 30),
+                             ('block_bootstrap_resamples', 100), ('slippage_stress_multiplier', '1.0')):
+            with self.subTest(field=field):
+                data = fixture().model_dump(mode='json')
+                data['research_profile']['evaluation'][field] = value
+                with self.assertRaises(ValueError):
+                    EvaluationManifest.model_validate_json(json.dumps(data))
+
     def test_paper_after_latency_partial_expiry_and_cancel_race(self):
         _, ledger, order = ledger_order()
         ledger.submit(order)
@@ -228,6 +299,56 @@ class AccountingEvaluationTests(unittest.TestCase):
         self.assertEqual(expires.status, 'EXPIRED')
         self.assertEqual(expires.filled, 0)
 
+    def test_expired_unfilled_entry_does_not_become_a_previous_holding(self):
+        manifest, ledger, _ = ledger_order()
+        event = manifest.timeline[0]
+        quotes = {item['instrument_id']: Quote.model_validate_json(json.dumps(item))
+                  for item in event.data['quotes']}
+        _review(ledger, manifest, event.data, event.at, event.at, quotes)
+        self.assertEqual(len(ledger.orders), 1)
+        first = next(iter(ledger.orders.values()))
+        now = first.expires_at + timedelta(seconds=1)
+        ledger.advance(now)
+        self.assertEqual(first.status, 'EXPIRED')
+        self.assertIsNone(ledger.theses[first.thesis.thesis_id].protection_started_at)
+        quotes = {symbol: item.model_copy(update={'observed_at': now, 'received_at': now})
+                  for symbol, item in quotes.items()}
+        _review(ledger, manifest, event.data, event.at, now, quotes)
+        self.assertEqual(len(ledger.orders), 2)
+        self.assertEqual(ledger.gates['EXISTING_THESIS_NO_ADDITIONAL_BUY'], 0)
+
+    def test_reentry_uses_only_events_selected_for_the_new_thesis(self):
+        manifest, original, order = ledger_order()
+        review = manifest.timeline[0]
+        previous_session = [session for session in manifest.sessions if session.closes_at <= review.at][-1]
+        old_at = previous_session.opens_at + timedelta(minutes=10)
+        previous = order.thesis.model_copy(update={
+            'created_at': old_at, 'first_fill_at': old_at + timedelta(minutes=20),
+            'first_fill_session': previous_session.session_id,
+            'exit_reason': 'EXIT_THESIS_INVALID', 'exited_at': previous_session.closes_at - timedelta(minutes=10),
+            'invalidating_event_ids': ['invalidating-official']})
+        original.theses[previous.thesis_id] = previous
+        data = copy.deepcopy(review.data)
+        for key in ('available_at', 'observed_at', 'published_at'):
+            data['events'][0][key] = old_at.isoformat()
+        new_event = {**data['events'][0], 'event_id': 'new-positive-official',
+            'resolves_event_ids': ['invalidating-official'],
+            **{key: (review.at - timedelta(minutes=10)).isoformat()
+               for key in ('available_at', 'observed_at', 'published_at')}}
+        data['events'].append(new_event)
+        data['candidates'][0]['event_ids'].append(new_event['event_id'])
+        quotes = {item['instrument_id']: Quote.model_validate_json(json.dumps(item)) for item in data['quotes']}
+        for event_id, count in (('event-AAA', 0), ('new-positive-official', 1)):
+            with self.subTest(event_id=event_id):
+                ledger = copy.deepcopy(original)
+                data['decisions']['TEST:AAA']['event_ids'] = [event_id]
+                _review(ledger, manifest, data, review.at, review.at, quotes)
+                self.assertEqual(len(ledger.orders), count)
+                if count:
+                    self.assertEqual(list(ledger.theses.values())[-1].event_ids, [event_id])
+                else:
+                    self.assertEqual(ledger.gates['REENTRY_OFFICIAL_RESOLUTION_REQUIRED'], 1)
+
     def test_semantic_invalidation_belongs_only_to_full_strategy(self):
         manifest, full, order = ledger_order()
         full.submit(order)
@@ -242,6 +363,21 @@ class AccountingEvaluationTests(unittest.TestCase):
         self.assertEqual(len(full.orders), 2)
         self.assertEqual(len(baseline.orders), 1)
         self.assertEqual(list(full.orders.values())[-1].reasons, ['EXIT_THESIS_INVALID'])
+
+    def test_invalidation_survives_a_stale_quote_until_protection_can_execute(self):
+        manifest, ledger, order = ledger_order()
+        ledger.submit(order)
+        ledger.process_quote(quote(order.eligible_at), ask_quantity=3, bid_quantity=0, event_id='entry')
+        event = EventRecord.model_validate_json(json.dumps(manifest.timeline[0].data['events'][0]))
+        event.event_id, event.polarity = 'negative-official', 'NEGATIVE'
+        now = order.eligible_at + timedelta(seconds=120)
+        _protect(ledger, manifest, quote(order.eligible_at), now, invalidating_events=[event])
+        self.assertEqual(len(ledger.orders), 1)
+        self.assertEqual(ledger.journal[-1]['action'], 'MONITOR_DEGRADED')
+        self.assertIn('EXIT_THESIS_INVALID', ledger.journal[-1]['reasons'])
+        _protect(ledger, manifest, quote(now), now)
+        self.assertEqual(len(ledger.orders), 2)
+        self.assertEqual(list(ledger.orders.values())[-1].reasons, ['EXIT_THESIS_INVALID'])
 
     def test_session_deadline_runs_without_quotes_and_waits_for_actual_liquidity(self):
         manifest = fixture()

@@ -91,6 +91,8 @@ class EvaluationManifest(StrictModel):
 
     @model_validator(mode="after")
     def frozen_contract(self):
+        from .config import validate_evaluation_profile
+        validate_evaluation_profile(self.research_profile)
         if self.frozen_at > self.starts_at:
             raise ValueError("experiment must be frozen before observation starts")
         if any(not getattr(self, key) for key in (
@@ -152,6 +154,7 @@ class PaperLedger:
         self.slippage_multiplier = money(slippage_multiplier)
         self.holdings: dict[str, Holding] = {}
         self.theses: dict[str, InvestmentThesis] = {}
+        self.invalidating_events: dict[str, EventRecord] = {}
         self.orders: dict[str, PaperOrder] = {}
         self.journal: list[dict] = []
         self.closed_trades: list[dict] = []
@@ -379,7 +382,10 @@ class PaperLedger:
             self.trade_stats[held.thesis_id]['income'] += amount
         elif kind == 'SPLIT' and data.get('confirmed') is True:
             ratio = money(data['ratio'])
-            if ratio <= 0 or held.quantity * ratio != (held.quantity * ratio).to_integral_value():
+            thesis = self.theses[held.thesis_id]
+            if ratio <= 0 or any(quantity * ratio != (quantity * ratio).to_integral_value()
+                                 for quantity in (held.quantity, held.sellable_quantity,
+                                                  thesis.planned_quantity, thesis.reduced_quantity)):
                 self.quality_issues.add('CORPORATE_ACTION_REQUIRES_CASH_IN_LIEU')
                 return
             if any(o.instrument_id == symbol and o.status in {'PENDING', 'PARTIAL', 'CANCEL_REQUESTED'} for o in self.orders.values()):
@@ -390,12 +396,13 @@ class PaperLedger:
                 'sellable_quantity': int(held.sellable_quantity * ratio),
                 **{key: getattr(held, key) / ratio for key in ('mark', 'stop', 'atr', 'average_entry')}})
             self.holdings[symbol] = held
-            thesis = self.theses[held.thesis_id]
             # Apply the action atomically; assignment validation must not see half-adjusted stops.
             self.theses[held.thesis_id] = thesis.model_copy(update={
                 'initial_stop': thesis.initial_stop / ratio, 'current_stop': thesis.current_stop / ratio,
                 'initial_r_price': thesis.initial_r_price / ratio, 'average_entry': thesis.average_entry / ratio,
-                'planned_quantity': int(thesis.planned_quantity * ratio)})
+                'planned_quantity': int(thesis.planned_quantity * ratio),
+                'reduced_quantity': int(thesis.reduced_quantity * ratio),
+                'mfe_price': thesis.mfe_price / ratio if thesis.mfe_price is not None else None})
             stats = self.trade_stats[held.thesis_id]
             stats['max_price'] /= ratio
             stats['min_price'] /= ratio
@@ -495,6 +502,13 @@ def _review(ledger, manifest, data, input_at, now, latest_quotes):
         candidates.sort(key=lambda c: (-c.features.rs20, -c.features.adtv20, c.instrument.instrument_id))
     for candidate in candidates:
         symbol = candidate.instrument.instrument_id
+        if ledger.arm == 'full_strategy':
+            event_ids = decisions.get(symbol, {}).get('event_ids', candidate.event_ids)
+            if (not isinstance(event_ids, list) or any(not isinstance(value, str) for value in event_ids)
+                    or len(event_ids) != len(set(event_ids)) or not set(event_ids).issubset(candidate.event_ids)):
+                raise ValueError('AI event selection must reference candidate evidence')
+            candidate = candidate.model_copy(update={'event_ids': event_ids})
+        selected_events = [event for event in events if event.event_id in candidate.event_ids]
         quote = latest_quotes.get(symbol)
         if quote is None:
             ledger.gates['MISSING_EXECUTABLE_QUOTE'] += 1
@@ -514,11 +528,12 @@ def _review(ledger, manifest, data, input_at, now, latest_quotes):
         if not gate.allowed:
             ledger.gates.update(gate.reasons or [gate.reason])
             continue
-        previous = [thesis for thesis in ledger.theses.values() if thesis.instrument_id == symbol]
+        previous = [thesis for thesis in ledger.theses.values() if thesis.instrument_id == symbol
+                    and thesis.protection_started_at is not None]
         if previous:
             bars = [_typed(DailyBar, item) for item in data.get('reentry_bars', {}).get(symbol, [])]
             previous_thesis = max(previous, key=lambda thesis: thesis.created_at)
-            reentry = reentry_eligibility(previous_thesis, events, bars, ledger.calendar, now,
+            reentry = reentry_eligibility(previous_thesis, selected_events, bars, ledger.calendar, now,
                                           manifest.research_profile,
                                           require_event=ledger.arm != 'technical_only',
                                           require_ai=ledger.arm == 'full_strategy')
@@ -564,13 +579,17 @@ def _protect(ledger, manifest, quote, now, features=None, invalidating_events=()
     if ledger.arm == 'full_strategy' and invalidating_events:
         thesis.invalidating_event_ids = sorted(set(thesis.invalidating_event_ids)
                                                | {event.event_id for event in invalidating_events})
+        for event in invalidating_events:
+            ledger.invalidating_events.setdefault(event.event_id, event.model_copy(deep=True))
     pending_sells = any(o.instrument_id == symbol and o.side == 'SELL'
                         and o.status in {'PENDING', 'PARTIAL', 'CANCEL_REQUESTED'} for o in ledger.orders.values())
     plan = evaluate_exit(thesis, holding, quote, ledger.calendar, now,
                           manifest.research_profile, features=features,
                           account_complete=not ledger.quality_issues, orders_known=True,
                           tradable=symbol not in ledger.halted,
-                          invalidating_events=list(invalidating_events) if ledger.arm == 'full_strategy' else [],
+                          invalidating_events=[ledger.invalidating_events[event_id]
+                              for event_id in thesis.invalidating_event_ids
+                              if event_id in ledger.invalidating_events] if ledger.arm == 'full_strategy' else [],
                           reduction_quantity=reduction_quantity)
     ledger.gates[plan.action] += 1
     ledger.journal.append({'type': 'PROTECTION_OBSERVATION', 'instrument_id': symbol,
@@ -854,12 +873,23 @@ def evaluate_metrics(manifest: EvaluationManifest, replay: dict, stress: dict) -
         reasons.append('BEST_OF_MULTIPLE_EXPERIMENTS_SELECTION_BIAS')
     confirm_gain = compounded(full_returns, confirmation)
     confirm_baseline = compounded(baseline_returns, confirmation)
+    confirmation_capital = None if gain is None else manifest.initial_capital_krw * (1 + gain)
+    confirm_pnl = (confirmation_capital * confirm_gain
+                   if confirmation_capital is not None and confirmation_capital > 0 and confirm_gain is not None
+                   else None)
+    confirm_net_pnl = (None if confirm_pnl is None or manifest.confirmation_operating_cost_krw is None
+                       else confirm_pnl - manifest.confirmation_operating_cost_krw)
+    confirm_net_return = None if confirm_net_pnl is None else confirm_net_pnl / confirmation_capital
+    if manifest.confirmation_operating_cost_krw is None:
+        reasons.append('CONFIRMATION_OPERATING_COST_ALLOCATION_UNCONFIRMED')
     if len(confirmation) < 20:
         reasons.append('SEPARATE_20_SESSION_CONFIRMATION_PENDING')
-    elif confirm_gain is None or confirm_baseline is None:
+    elif confirm_pnl is None or confirm_baseline is None:
         reasons.append('CONFIRMATION_COVERAGE_INCOMPLETE')
     elif confirm_gain <= 0 or confirm_gain <= confirm_baseline:
         failures.append('CONFIRMATION_NET_PNL_OR_BASELINE_EXCESS_NOT_POSITIVE')
+    elif confirm_net_return is not None and (confirm_net_return <= 0 or confirm_net_return <= confirm_baseline):
+        failures.append('CONFIRMATION_PNL_OR_BASELINE_EXCESS_AFTER_OPERATING_COST_NOT_POSITIVE')
     sample_sufficient = len(discovery) == 60 and len(closed) >= 30 and bootstrap['status'] == 'COMPUTED'
     criteria_verdict = ('INCONCLUSIVE' if not sample_sufficient else
                         'FAIL' if failures else 'INCONCLUSIVE' if reasons else 'PASS_REVIEW_ELIGIBLE')
@@ -878,6 +908,9 @@ def evaluate_metrics(manifest: EvaluationManifest, replay: dict, stress: dict) -
         'primary_baseline_return': None if baseline is None else str(baseline),
         'confirmation_return': None if confirm_gain is None else str(confirm_gain),
         'confirmation_primary_baseline_return': None if confirm_baseline is None else str(confirm_baseline),
+        'confirmation_starting_capital_krw': None if confirmation_capital is None else str(confirmation_capital),
+        'confirmation_pnl_after_operating_cost_krw': None if confirm_net_pnl is None else str(confirm_net_pnl),
+        'confirmation_return_after_operating_cost': None if confirm_net_return is None else str(confirm_net_return),
         'bootstrap': bootstrap, 'failures': failures, 'hold_reasons': reasons,
         'experiment_attempt_count': manifest.experiment_attempt_count,
         'selected_best_experiment': manifest.selected_best_experiment,
