@@ -96,6 +96,69 @@ class Transport:
 
 
 class KisStreamTests(unittest.TestCase):
+    def test_first_book_needs_ack_but_not_a_first_trade_and_never_rebases_its_date(self):
+        self.now += timedelta(seconds=6)
+        stream = KisQuoteStream(environment='demo', approval=lambda: 'fixture', permit=lambda: None, clock=lambda: self.now)
+        stream.targets, stream.active, stream.connected = {'005930'}, {'005930'}, True
+        ws = Socket()
+        ws.incoming.put('0|H0STASP0|001|' + BOOK_PAYLOAD)
+        stream._receive(ws, ('1', '005930', 'H0STASP0'))
+        with self.assertRaisesRegex(AdapterError, 'STREAM_NOT_READY'):
+            stream.quote('005930')
+        ws.incoming.put(ack('1', '005930', tr_id='H0STASP0'))
+        stream._receive(ws, ('1', '005930', 'H0STASP0'))
+        result = stream.quote('005930')
+        self.assertEqual((result.quality, result.metadata['tr_id']), ('COMPLETE', 'H0STASP0'))
+        self.assertEqual(result.records[0]['BSOP_DATE'], '20260918')
+        self.assertEqual(result.retrieved_at, self.now)
+        self.assertEqual(stream.latest, {})
+        for elapsed in (timedelta(seconds=6), timedelta(days=1)):
+            self.now = NOW + timedelta(seconds=6) + elapsed
+            with self.subTest(elapsed=elapsed), self.assertRaises(AdapterError):
+                stream.quote('005930')
+        stream._reset('STREAM_CONNECTION_FAILED')
+        self.assertFalse(stream.books)
+        stream.connected, stream.active, stream.book_active = True, {'005930'}, {'005930'}
+        with self.assertRaisesRegex(AdapterError, 'STREAM_NOT_READY'):
+            stream.quote('005930')
+
+    def test_first_book_rejects_stale_future_and_nonregular_packets(self):
+        self.now += timedelta(seconds=6)
+        for hour, hour_class, market in (('095959', '0', '2'), ('100007', '0', '2'),
+                                       ('100006', 'C', '2'), ('100006', '0', '3')):
+            with self.subTest(hour=hour, hour_class=hour_class, market=market):
+                stream = KisQuoteStream(environment='demo', approval=lambda: 'fixture', permit=lambda: None, clock=lambda: self.now)
+                stream.targets, stream.active, stream.book_active = {'005930'}, {'005930'}, {'005930'}
+                stream.connected = True
+                ws = Socket()
+                values = BOOK_PAYLOAD.split('^')
+                values[1], values[2], values[-1] = hour, hour_class, market
+                ws.incoming.put('0|H0STASP0|001|' + '^'.join(values))
+                stream._receive(ws)
+                with self.assertRaises(AdapterError):
+                    stream.quote('005930')
+                if hour == '100007':
+                    self.now += timedelta(seconds=1)
+                    with self.assertRaises(AdapterError):
+                        stream.quote('005930')
+                    self.now -= timedelta(seconds=1)
+
+    def test_next_session_book_can_replace_prior_session_with_later_hhmmss(self):
+        self.now += timedelta(seconds=6)
+        stream = KisQuoteStream(environment='demo', approval=lambda: 'fixture', permit=lambda: None, clock=lambda: self.now)
+        stream.targets, stream.active, stream.book_active = {'005930'}, {'005930'}, {'005930'}
+        stream.connected = True
+        ws = Socket()
+        ws.incoming.put('0|H0STASP0|001|' + BOOK_PAYLOAD)
+        stream._receive(ws)
+        self.assertEqual(stream.quote('005930').records[0]['BSOP_DATE'], '20260918')
+        self.now = NOW + timedelta(days=1) - timedelta(hours=1)
+        ws.incoming.put('0|H0STASP0|001|' + BOOK_PAYLOAD.replace('100006', '090000'))
+        stream._receive(ws)
+        result = stream.quote('005930')
+        self.assertEqual((result.records[0]['BSOP_DATE'], result.records[0]['BSOP_HOUR']), ('20260919', '090000'))
+        self.assertEqual(result.retrieved_at, self.now)
+
     def test_first_tick_before_subscribe_ack_is_kept_but_not_used_until_ack(self):
         stream = KisQuoteStream(environment='demo', approval=lambda: 'fixture', permit=lambda: None, clock=lambda: NOW)
         stream.targets, stream.connected = {'005930'}, True

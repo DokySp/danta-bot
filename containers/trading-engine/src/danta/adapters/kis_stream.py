@@ -121,15 +121,17 @@ class KisQuoteStream:
             if ticker not in self.active:
                 raise AdapterError(self.errors.get(ticker, "STREAM_NOT_READY"))
             now = self.clock()
-            if (ticker in self.book_active and ticker in self.books and ticker in self.latest and
-                    self.latest[ticker].date() == now.astimezone(SEOUL).date() and
+            if (ticker in self.book_active and ticker in self.books and
                     self.errors.get(ticker) in {None,'STREAM_QUOTE_STALE'}):
                 book, received = self.books[ticker]
                 try:
-                    stamp = datetime.strptime(self.latest[ticker].strftime('%Y%m%d')+book['BSOP_HOUR'],'%Y%m%d%H%M%S').replace(tzinfo=SEOUL)
+                    # H0STASP0 has HHMMSS only. Pin its date to this live receipt,
+                    # never to a later read or an unrelated first trade.
+                    stamp = datetime.strptime(received.astimezone(SEOUL).strftime('%Y%m%d')+book['BSOP_HOUR'],'%Y%m%d%H%M%S').replace(tzinfo=SEOUL)
                     if book['HOUR_CLS_CODE'] != '0' or book['MARKET_CLS_CODE'] != '2':
                         raise AdapterError('STREAM_SESSION_INVALID')
-                    if 0 <= (now-stamp).total_seconds() <= 5 and 0 <= (now-received).total_seconds() <= 5:
+                    if (0 <= (received-stamp).total_seconds() <= 5 and
+                            0 <= (now-stamp).total_seconds() <= 5 and 0 <= (now-received).total_seconds() <= 5):
                         return FetchResult(({**book,'BSOP_DATE':stamp.strftime('%Y%m%d')},),
                                            'COMPLETE',received,metadata={'tr_id':'H0STASP0','source':'KIS:H0STASP0'})
                 except ValueError:
@@ -226,7 +228,8 @@ class KisQuoteStream:
                     if not re.fullmatch(r'\d{6}',record['BSOP_HOUR']):
                         raise AdapterError('STREAM_TIMESTAMP_INVALID')
                     previous = self.books.get(ticker)
-                    if previous and record['BSOP_HOUR'] < previous[0]['BSOP_HOUR']:
+                    if (previous and received.astimezone(SEOUL).date() == previous[1].astimezone(SEOUL).date()
+                            and record['BSOP_HOUR'] < previous[0]['BSOP_HOUR']):
                         continue
                     self.books[ticker] = (record,received)
                     continue
