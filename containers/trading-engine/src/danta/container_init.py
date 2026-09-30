@@ -42,7 +42,7 @@ def initialize(app: Path = Path("/app"), locks: Path = Path("/tmp/danta-writers-
     for name in ("app.yaml", "strategy.yaml", "schedules.yaml"):
         set_permissions(config / name, uid=0, mode=0o644)
     for name, uid, mode in (("secrets.yaml", 10001, 0o400), ("runtime.json", 0, 0o444),
-                            ("runtime-manifest.json", 0, 0o444)):
+                            ("runtime-manifest.json", 0, 0o444), ("cash-reconciliation.json", 0, 0o444)):
         path = config / name
         if path.exists() or path.is_symlink():
             set_permissions(path, uid=uid, mode=mode)

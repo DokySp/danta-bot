@@ -4,6 +4,8 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import os
+import stat
 import sys
 import threading
 from datetime import datetime, timedelta
@@ -376,6 +378,12 @@ class Application:
     def reconcile(self) -> dict:
         result = self.executor.reconcile()
         self._sync_theses()
+        try:
+            self._resolve_cash_evidence()
+            self.store.set('cash_reconciliation_error', None)
+        except HumanRequired as error:
+            # Invalid recovery evidence must not interrupt account/protection work.
+            self.store.set('cash_reconciliation_error', str(error))
         if self.concentration.active_plan and not any(row["side"] == "SELL" for row in self.store.working()):
             targets = self.store.get("concentration_targets", {})
             if targets and all(self.store.quantity(symbol) <= quantity for symbol, quantity in targets.items()):
@@ -384,6 +392,29 @@ class Application:
                     self.store.set("concentration_state", self.concentration.state())
                     self.store.set("concentration_targets", {})
         return result
+
+    def _resolve_cash_evidence(self) -> None:
+        path = self.config.directory / 'cash-reconciliation.json'
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            return
+        except OSError:
+            raise HumanRequired('CASH_RECONCILIATION_FILE_INVALID') from None
+        try:
+            with os.fdopen(fd, 'r', encoding='utf-8') as source:
+                info = os.fstat(source.fileno())
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                        or self.config.mode != 'offline' and (info.st_uid != 0 or info.st_mode & 0o022)):
+                    raise ValueError('CASH_RECONCILIATION_FILE_NOT_OPERATOR_OWNED')
+                text = source.read(1024 * 1024 + 1)
+                if len(text) > 1024 * 1024:
+                    raise ValueError('CASH_RECONCILIATION_FILE_TOO_LARGE')
+                evidence = json.loads(text)
+            self.store.resolve_cash_adjustments(evidence, now=self.clock())
+        except (OSError, UnicodeError, ValueError, TypeError, KeyError, ArithmeticError):
+            # Evidence may contain bank statement text; keep it out of error messages.
+            raise HumanRequired('CASH_RECONCILIATION_EVIDENCE_INVALID') from None
 
     def protect(self, *, allow_idle_account=False, run_id="protection") -> list[dict]:
         """Called independently of the review thread and model quota circuit."""
@@ -502,6 +533,9 @@ class Application:
                      for item in self.store.get("external_flows", [])]
             result = performance([NavPoint(at=aware_time(item["at"]), nav=Decimal(item["nav"]), session_id=item["session_id"], completed=item["completed"], quality=item["quality"])
                                   for item in existing], flows, unallocated=not ownership_verified or self.store.get("performance_uncertain", False))
+            if ownership_verified and self.store.get("performance_uncertain", False):
+                result['issues'] = sorted({'CASH_FLOW_UNCLASSIFIED' if issue == 'UNALLOCATED' else issue
+                                           for issue in result['issues']})
             self.store.set("nav_points", existing)
             self.store.set("performance", result)
             # Missing intermediate marks do not erase the loss between verified observations.
@@ -663,7 +697,9 @@ class Application:
             (directory / name).write_text(canonical({**metadata, "data": data}) + "\n")
         save("config.snapshot.json", self.config.data)
         result = {**metadata, "run_status": "RUNNING", "model_status": "NOT_CALLED", "decision_status": "NOT_REACHED",
-                  "order_status": "NONE", "performance_status": "STRATEGY_UNPROVEN", "live_status": "LIVE_NOT_AUTHORIZED" if self.config.mode != "live" else "OPERATOR_AUTHORIZED"}
+                  "order_status": "NONE", "performance_status": "STRATEGY_UNPROVEN", "live_status": "LIVE_NOT_AUTHORIZED" if self.config.mode != "live" else "OPERATOR_AUTHORIZED",
+                  "kind": kind, "review_scope": "FULL" if kind == "full_review" else "PARTIAL",
+                  "trigger": {"event_id": event_id} if event_id else None, "review_targets": None}
         details, plans, orders, protection = {}, [], [], []
         try:
             if on_progress:
@@ -693,6 +729,8 @@ class Application:
                 event = next((item for item in bundle.events if item.event_id == event_id), None)
                 if event is None:
                     raise ValueError("UNKNOWN_EVENT")
+                result['trigger'] = {key: event.model_dump(mode='json')[key] for key in
+                                     ('event_id', 'instrument_id', 'family', 'available_at')}
                 candidates = [candidate for candidate in candidates if candidate.instrument.instrument_id == event.instrument_id]
                 excluded_candidates = [candidate for candidate in excluded_candidates if candidate.instrument.instrument_id == event.instrument_id]
                 affected = [thesis.instrument_id for thesis in theses if thesis.instrument_id == event.instrument_id]
@@ -709,7 +747,8 @@ class Application:
             for symbol in sorted({c.instrument.instrument_id for c in candidates+excluded_candidates} | held_ids | set(failed_quotes)):
                 quote, features = bundle.quotes.get(symbol), bundle.features.get(symbol)
                 row = {'instrument_id': symbol, 'name': bundle.data.get('instrument_names', {}).get(symbol),
-                       'scope': 'HOLDING' if symbol in held_ids else 'NEW', 'stage': 'NOT_REVIEWED',
+                       'scope': 'HOLDING' if symbol in held_ids else 'NEW',
+                       'stage': 'OUTSIDE_REVIEW_SCOPE' if affected is not None and symbol in held_ids and symbol not in affected else 'NOT_REVIEWED',
                        'evaluated_at': bundle.now.isoformat(),
                        'quote': quote.model_dump(mode='json') if quote else None,
                        'quote_age_seconds': (bundle.now-quote.observed_at).total_seconds() if quote else None,
@@ -748,6 +787,7 @@ class Application:
                 now=bundle.now, session_id=session.session_id, profile=self.profile, portfolio=self.portfolio(), candidates=candidates, events=bundle.events,
                 facts=bundle.facts, theses=theses, scope="FULL" if kind == "full_review" else "PARTIAL", reviewed_positions=affected,
                 previous_theses=self.theses())
+            result['review_targets'] = frozen['review_targets']
             save("input.snapshot.json", frozen)
             result['feature_exclusions'] = [{**row, 'reason':'DAILY_HISTORY_NOT_COLLECTED' if row.get('reason') == repr(row.get('instrument_id')) else row.get('reason')}
                 for row in bundle.exclusions if kind == 'full_review' or row.get('instrument_id') == event.instrument_id]
@@ -755,7 +795,9 @@ class Application:
                 "candidate_controls": controls, "candidate_controls_hash": digest(controls), "prefilters": prefilters, "candidates": candidates})
             if not candidates and not frozen["reviewed_positions"]:
                 result.update(run_status="COMPLETE", decision_status="NO_CANDIDATES",
-                              reason="NO_ELIGIBLE_CANDIDATES" if details else "NO_CANDIDATES", performance=self.record_nav())
+                              reason="NO_ELIGIBLE_CANDIDATES" if prefilters or result['feature_exclusions'] or
+                                  any(row['scope'] == 'NEW' for row in details.values()) else "NO_REVIEW_TARGETS",
+                              performance=self.record_nav())
                 return result
             if self.store.get("material_hash") == frozen["material_hash"] and self.store.working():
                 result.update(run_status="COMPLETE", decision_status="KEEP_EXISTING_PLAN")
@@ -904,6 +946,41 @@ class Application:
             # A later failure must not hide earlier persisted submissions.
             orders = [dict(row) for row in self.store.read(
                 "SELECT * FROM intents WHERE json_extract(payload,'$.run_id')=?", (run_id,))]
+            journal = [dict(row) for row in self.store.read('SELECT * FROM journal WHERE run_id=? ORDER BY sequence', (run_id,))]
+            try:
+                result['portfolio'] = self.portfolio().model_dump(mode='json')
+            except Exception as error:
+                # Reporting still has ledger quantities and cash when valuation cannot be built.
+                result['portfolio'] = {'allocated_cash': self.store.get('cash_krw'),
+                    'holdings': self.store.holdings(), 'complete': False}
+                result['portfolio_diagnostic'] = {'reason': 'PORTFOLIO_VALUATION_UNAVAILABLE', 'error_type': type(error).__name__}
+            result['portfolio'].update(reconciled=self.store.get('reconciled'),
+                account_checked_at=self.store.get('account_checked_at'), account_succeeded_at=self.store.get('account_succeeded_at'))
+            status = self.status()
+            result['portfolio'].update({key: status[key] for key in
+                ('blocked_reasons', 'nav_risk_unverified', 'performance_uncertain', 'cash_reconciliation')})
+            result['instruments'] = self.bundle.data.get('instrument_names', {})
+            result['theses'] = [thesis.model_dump(mode='json') for thesis in self.theses()]
+            result.setdefault('performance', self.store.get('performance'))
+            result['trade_scope'] = 'RUN'
+            result['orders'] = []
+            by_id = {}
+            for order in orders:
+                record = {key: order[key] for key in ('instrument_id', 'side', 'quantity', 'state', 'cumulative_quantity', 'cumulative_notional')}
+                record.update(reason=json.loads(order['payload']).get('reason'),
+                    created_at=next((row['created_at'] for row in journal if json.loads(row['payload']).get('intent_id') == order['id']), None))
+                result['orders'].append(record)
+                by_id[order['id']] = record
+            from .reporting import reported_fee
+            result['fills'] = []
+            for row in journal:
+                if row['kind'] in {'CUMULATIVE_FILL', 'FILL_CORRECTION'}:
+                    fill = json.loads(row['payload'])
+                    order = by_id.get(fill.get('intent_id'), {})
+                    result['fills'].append({**{key: order.get(key) for key in ('instrument_id', 'side', 'reason')},
+                        'at': fill.get('observed_at', row['created_at']), 'quantity': fill.get('quantity_delta'),
+                        'amount_krw': fill.get('notional_delta_krw'), 'fee_krw': reported_fee(fill),
+                        'correction': row['kind'] == 'FILL_CORRECTION'})
             for plan in plans:
                 if plan['instrument_id'] in details:
                     details[plan['instrument_id']]['plan'] = plan
@@ -917,7 +994,7 @@ class Application:
             if plans or protection or result['decision_status'] == 'VALID':
                 save('plan.json', {'plans':plans, 'protection':protection})
             if orders or result['decision_status'] == 'VALID':
-                save('execution.json', {'orders':orders, 'journal':[dict(row) for row in self.store.read('SELECT * FROM journal WHERE run_id=?',(run_id,))]})
+                save('execution.json', {'orders':orders, 'journal':journal})
             if orders:
                 states = {order['state'] for order in orders}
                 status = next(iter(states)) if len(states) == 1 else 'MIXED'
@@ -925,8 +1002,9 @@ class Application:
                     status = 'FIXTURE_FILLED'
                 result.update(order_status=status,
                               order_states={state:sum(order['state'] == state for order in orders) for state in sorted(states)})
+            result['unreached_stages'] = [name for name in ("input.snapshot.json", "candidates.json", "proposal.json", "decision.json", "plan.json", "execution.json") if not (directory / name).exists()]
             save("manifest.json", {"kind": kind, "input_source_hash": digest(bundle.data), "generated_artifacts": sorted(path.name for path in directory.iterdir()),
-                "unreached_stages": [name for name in ("input.snapshot.json", "candidates.json", "decision.json", "plan.json", "execution.json") if not (directory / name).exists()],
+                "unreached_stages": result['unreached_stages'],
                 "result": result})
             (directory / "result.json").write_text(canonical(result) + "\n")
             write_report(result, directory / "summary.json", directory / "summary.html", "거래 판단·실행 결과")
@@ -947,9 +1025,16 @@ class Application:
     def resume(self) -> dict:
         self.config.assert_current()
         self.config.require_external("resume", self.approval)
+        refresh = self.protection_refresh or self.refresh
+        if refresh:
+            self.bundle = refresh()
         self.reconcile()
         if not self.store.get("reconciled") or not self.store.get("ownership_complete"):
             raise HumanRequired("Current account/ownership reconciliation required")
+        self.record_nav()
+        if self.store.get('nav_risk_unverified', False):
+            raise HumanRequired('CASH_FLOW_UNCLASSIFIED' if self.store.get('performance_uncertain', False)
+                                else 'NAV_RISK_UNVERIFIED')
         if self.store.get("drawdown_paused", False) and "resume_drawdown" not in self.approval["capabilities"]:
             raise HumanRequired("Drawdown requires explicit new operator decision")
         with self.store.transaction():
@@ -987,6 +1072,13 @@ class Application:
     def status(self) -> dict:
         health = self.store.get("model_health", {})
         paused = self.store.get('paused') or self.store.get('drawdown_paused', False)
+        pending_cash = self.store.get('unclassified_cash_adjustments', [])
+        blocked_reasons = [reason for condition, reason in (
+            (paused, 'NEW_RISK_PAUSED'),
+            (not self.store.get('reconciled') or not self.store.get('ownership_complete'), 'ACCOUNT_RECONCILIATION_REQUIRED'),
+            (self.store.get('monitor_degraded', False), 'MONITOR_DEGRADED'),
+            (self.store.get('performance_uncertain', False), 'CASH_FLOW_UNCLASSIFIED'),
+            (self.store.get('nav_risk_unverified', False), 'NAV_RISK_UNVERIFIED')) if condition]
         review_status = ('PAUSED' if paused else 'ACCOUNT_INCOMPLETE' if not self.store.get('reconciled') else
                          'MONITOR_DEGRADED' if self.store.get('monitor_degraded', False) else
                          'OUTSIDE_SESSION' if self.bundle.calendar.active(self.clock()) is None else 'ENABLED')
@@ -1009,6 +1101,12 @@ class Application:
                 "monitor_status": "MONITOR_DEGRADED" if self.store.get("monitor_degraded", False) else
                     "RUNNING" if self.monitor_thread and self.monitor_thread.is_alive() else "NOT_RUNNING",
                 "review_status": review_status,
+                "blocked_reasons": blocked_reasons,
+                "nav_risk_unverified": self.store.get('nav_risk_unverified', False),
+                "performance_uncertain": self.store.get('performance_uncertain', False),
+                "cash_reconciliation": {"pending_count": len(pending_cash), "account_scope": self.store.get('scope'),
+                    "reason": self.store.get('cash_reconciliation_error'),
+                    "adjustments": [{"adjustment_id": digest(item), **item} for item in pending_cash]},
                 "paused": self.store.get("paused"), "reconciled": self.store.get("reconciled"),
                 "cash_krw": self.store.get("cash_krw"), "holdings": self.store.holdings(), "working_orders": self.store.working(),
                 "costs_complete": self.store.get("costs_complete", True), "performance": self.store.get("performance"),

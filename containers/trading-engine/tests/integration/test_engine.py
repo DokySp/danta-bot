@@ -27,6 +27,107 @@ from danta.store import Store
 
 
 class EngineCase(unittest.TestCase):
+    def test_early_and_partial_reports_keep_known_account_and_distinguish_review_scope(self):
+        app = Application(self.config, self.bundle)
+        try:
+            executed = app.review()
+            self.assertTrue(executed['orders'])
+            self.assertTrue(executed['fills'])
+            event = self.bundle.events[0].model_copy(update={'event_id': 'unrelated', 'instrument_id': 'TEST:BBB'})
+            self.bundle.events.append(event)
+            result = app.review(kind='event_review', event_id=event.event_id)
+            self.assertEqual(result['model_status'], 'NOT_CALLED')
+            self.assertEqual(result['reason'], 'NO_REVIEW_TARGETS')
+            self.assertEqual(result['review_targets']['position_ids'], [])
+            self.assertEqual(result['portfolio']['holdings'][0]['quantity'], app.store.quantity('TEST:AAA'))
+            self.assertEqual(result['portfolio']['allocated_cash'], app.store.get('cash_krw'))
+            self.assertEqual(result['orders'], [])
+            self.assertEqual(result['fills'], [])
+            self.assertEqual(result['review_details'][0]['stage'], 'OUTSIDE_REVIEW_SCOPE')
+            self.assertEqual(result['review_details'][0]['protection']['action'], 'KEEP_QUANTITY')
+            self.assertIn('proposal.json', result['unreached_stages'])
+            report = next(self.config.state_dir.glob('runs/*/' + result['run_id'] + '/summary.html')).read_text()
+            for text in ('AI 판단을 요청하지 않았습니다', '해당 공시의 영향 종목만', '이번 검토 주문 기록', '0건'):
+                self.assertIn(text, report)
+            self.assertNotIn('보유 종목 자료가 제공되지 않았습니다', report)
+            self.assertNotIn('종목별 투자 근거·보호 조건이 제공되지 않았습니다', report)
+            app.pause()
+            paused = app.review()
+            self.assertTrue(paused['portfolio']['holdings'])
+            self.assertIn('NEW_RISK_PAUSED', paused['portfolio']['blocked_reasons'])
+        finally:
+            app.close()
+
+    def test_cash_evidence_recovers_risk_without_erasing_internal_losses_or_missing_history(self):
+        app = Application(self.config, self.bundle)
+        try:
+            app.reconcile()
+            app.record_nav()
+            now = self.bundle.now
+            pending = [{'observed_at': (now + timedelta(milliseconds=500)).isoformat(),
+                        'amount': '-2000000', 'classification': 'UNCLASSIFIED_CASH_FLOW'}]
+            app.store.set('cash_krw', '8000000')
+            app.store.set('unclassified_cash_adjustments', pending)
+            app.store.set('performance_uncertain', True)
+            self.bundle.now += timedelta(seconds=1)
+            self.assertIn('CASH_FLOW_UNCLASSIFIED', app.record_nav()['issues'])
+            self.assertTrue(app.store.get('nav_risk_unverified'))
+            resolution = {'schema_version': 1, 'account_scope': app.store.get('scope'), 'resolutions': [{
+                'id': 'test-statement', 'adjustment_ids': [digest(pending[0])], 'classification': 'CASH_TRANSFER',
+                'source': 'SYNTHETIC_ONLY', 'internal_pnl': '0', 'external_flows': [{
+                    'at': (now + timedelta(microseconds=1)).isoformat(), 'amount': '-2000000',
+                    'before_nav': '10000000', 'after_nav': '8000000'}]}]}
+            path = self.config_dir / 'cash-reconciliation.json'
+            path.write_text(json.dumps(resolution))
+            app.reconcile()
+            self.bundle.now += timedelta(seconds=1)
+            self.assertEqual(app.record_nav()['coverage'], 'INSUFFICIENT_COVERAGE')
+            self.assertFalse(app.store.get('nav_risk_unverified'))
+            self.assertFalse(app.store.get('drawdown_paused'))
+            self.assertEqual(app.store.get('cash_krw'), '8000000')
+            # A subsequently confirmed internal loss must still trip the drawdown circuit.
+            pending = [{'observed_at': self.bundle.now.isoformat(), 'amount': '-2000000', 'classification': 'UNCLASSIFIED_CASH_FLOW'}]
+            app.store.set('cash_krw', '6000000')
+            app.store.set('unclassified_cash_adjustments', pending)
+            app.store.set('performance_uncertain', True)
+            resolution['resolutions'].append({'id': 'loss', 'adjustment_ids': [digest(pending[0])],
+                'classification': 'INTERNAL_PNL', 'source': 'SYNTHETIC_ONLY', 'internal_pnl': '-2000000', 'external_flows': []})
+            path.write_text(json.dumps(resolution))
+            app.reconcile()
+            self.bundle.now += timedelta(seconds=1)
+            app.record_nav()
+            self.assertTrue(app.store.get('drawdown_paused'))
+        finally:
+            app.close()
+
+    def test_invalid_cash_file_preserves_account_protection_and_resume_reports_blocker(self):
+        app = self.external_app('shadow')
+        try:
+            app.store.set('unclassified_cash_adjustments', [{'observed_at': self.bundle.now.isoformat(),
+                'amount': '-1', 'classification': 'UNCLASSIFIED_CASH_FLOW'}])
+            app.store.set('performance_uncertain', True)
+            path = self.config_dir / 'cash-reconciliation.json'
+            path.write_text('{invalid PRIVATE_STATEMENT')
+            app.reconcile()
+            self.assertTrue(app.store.get('reconciled'))
+            app.protect()
+            status = app.status()
+            self.assertEqual(status['cash_reconciliation']['reason'], 'CASH_RECONCILIATION_EVIDENCE_INVALID')
+            self.assertEqual(status['cash_reconciliation']['pending_count'], 1)
+            self.assertIn('CASH_FLOW_UNCLASSIFIED', status['blocked_reasons'])
+            self.assertIn('현금 차이의 입출금·비용 구분 미완료', render_notification(status))
+            self.assertNotIn('PRIVATE_STATEMENT', json.dumps(status))
+            app.pause()
+            with self.assertRaisesRegex(HumanRequired, 'CASH_FLOW_UNCLASSIFIED'):
+                app.resume()
+            self.assertTrue(app.store.get('paused'))
+            path.unlink()
+            path.symlink_to(self.config_dir / 'app.yaml')
+            app.reconcile()
+            self.assertEqual(app.status()['cash_reconciliation']['reason'], 'CASH_RECONCILIATION_FILE_INVALID')
+        finally:
+            app.close()
+
     def test_partial_review_contract_excludes_context_positions(self):
         app = Application(self.config, self.bundle)
         try:

@@ -111,6 +111,11 @@ LABELS = {
     'monitor_checked_at': '감시 확인 시각', 'model_checked_at': '모델 최근 실행', 'model_id': '사용 모델',
     'model_purpose': '최근 모델 용도', 'chat_model': '일반 대화 AI', 'review_model': '투자 판단 AI',
     'status_checked_at': '상태 확인 시각', 'monitor_diagnostic': '현재 감시 문제', 'account_diagnostics': '현재 계좌 문제',
+    'review_scope': 'AI 검토 범위', 'trigger': '검토 계기', 'review_targets': 'AI 검토 대상',
+    'nav_risk_unverified': '현재 자산·위험 미검증', 'performance_uncertain': '성과 대조 미완료',
+    'cash_reconciliation': '현금 차이 대조', 'pending_count': '미분류 현금 차이 건수',
+    'adjustments': '현금 차이 기록', 'adjustment_id': '현금 차이 참조', 'blocked_reasons': '신규 투자 차단 이유',
+    'complete': '자료 확인 완료',
 }
 STATES = {
     'NO_RECENT_EVENT_TO_REVIEW': '검토할 최근 공시가 없어 일봉 수집 대상에서 제외',
@@ -126,6 +131,8 @@ STATES = {
     'DECISION_EVIDENCE_REFRESH_INCOMPLETE': '판단 대상 공시의 최신 상태를 확인하지 못함',
     'DAILY_HISTORY_NOT_COLLECTED': '일봉 미수집으로 지표 검토 미진행',
     'NO_ELIGIBLE_CANDIDATES': '신규 후보가 사전 검사에서 모두 제외됨',
+    'NO_REVIEW_TARGETS': '이번 범위에 AI가 검토할 후보·보유 종목 없음',
+    'OUTSIDE_REVIEW_SCOPE': '이번 AI 검토 대상 밖 · 보유 현황 참고',
     'OPERATOR_EXCLUDED': '사용자 설정으로 신규 매수 제외',
     'PREFILTERED': 'AI 검토 전 제외', 'AWAITING_AI': 'AI 판단 미완료', 'NOT_REVIEWED': '검토 미완료',
     'ACCEPT': '매수 검토 승인', 'VETO': '매수 거부', 'WATCH': '관찰', 'INSUFFICIENT_DATA': '자료 부족',
@@ -198,6 +205,12 @@ STATES = {
     'INTERRUPTED_RECONCILE_REQUIRED': '재시작으로 중단된 이전 작업 · 계좌 자동 대조 중',
     'OWNERSHIP_RECONCILIATION_REQUIRED': '보유 자산의 전략 귀속 확인 필요',
     'ACCOUNT_CASH_RECONCILIATION_REQUIRED': '계좌 현금 대조 필요',
+    'CASH_FLOW_UNCLASSIFIED': '현금 차이의 입출금·비용 구분 미완료',
+    'NAV_RISK_UNVERIFIED': '현재 자산·손실 위험의 검증 미완료',
+    'CASH_RECONCILIATION_FILE_INVALID': '현금 대조 근거 파일을 안전하게 읽을 수 없음',
+    'CASH_RECONCILIATION_EVIDENCE_INVALID': '현금 대조 근거 파일의 형식·계좌·금액 확인 필요',
+    'PORTFOLIO_VALUATION_UNAVAILABLE': '보유 수량·현금은 저장 기록이며 현재 평가를 구성하지 못함',
+    'full_review': '전체 투자 검토', 'event_review': '새 공시 영향 검토',
 }
 INTERNAL = {'id', 'run_id', 'session_id', 'intent_id', 'broker_id', 'request_id', 'thesis_id', 'approval_id',
             'event_ids', 'fact_ids', 'source_uris', 'route', 'chat_id', 'user_id', 'requested_by', 'code_id',
@@ -239,6 +252,8 @@ def _time(value):
 def _value(value, key=''):
     if value is None or value == '':
         return MISSING
+    if key == 'review_scope':
+        return {'FULL': '전체 후보·보유 종목', 'PARTIAL': '해당 공시의 영향 종목만'}.get(value, str(value))
     if isinstance(value, bool):
         return '예' if value else '아니요'
     if key in {'at', 'as_of', 'resets_at', 'observed_at'} or key.endswith('_at'):
@@ -407,6 +422,13 @@ def render_notification(payload, *, symbols=None) -> str:
             lines.append('현재 계좌 문제: ' + diagnostic_text({'diagnostics': data['account_diagnostics']}))
         if data.get('monitor_status') == 'MONITOR_DEGRADED':
             lines.append('현재 감시 문제: ' + diagnostic_text(data.get('monitor_diagnostic') or {}, symbols=symbols))
+        if data.get('blocked_reasons'):
+            lines.append('신규 투자 차단 이유: ' + ', '.join(_value(reason) for reason in data['blocked_reasons']))
+        if data.get('cash_reconciliation'):
+            cash = data['cash_reconciliation']
+            lines.append('미분류 현금 차이: ' + str(cash['pending_count']) + '건')
+            if cash.get('reason'):
+                lines.append('현금 대조 문제: ' + _value(cash['reason']))
         diagnostic = data.get('model_diagnostic') or {}
         if data.get('model_status') not in {'SUCCESS', 'NOT_CALLED', None} and diagnostic:
             lines.append('모델 진단: ' + _value(diagnostic.get('category')) + ' / 종료 코드 ' + str(diagnostic.get('exit_code', '미확인')))
@@ -440,9 +462,11 @@ def render_notification(payload, *, symbols=None) -> str:
         return _usage_text(data)
     if 'run_status' in data:
         lines = ['투자 검토 결과']
-        for key in ('run_status', 'reason', 'model_status', 'decision_status', 'order_status'):
+        for key in ('kind', 'review_scope', 'run_status', 'reason', 'model_status', 'decision_status', 'order_status'):
             if key in data:
                 lines.append(LABELS[key] + ': ' + _value(data[key], key))
+        if (data.get('trigger') or {}).get('instrument_id'):
+            lines.append('계기 공시 종목: ' + _name(data['trigger'], symbols))
         for row in data.get('review_details', []):
             lines.append('• ' + _name(row, symbols) + ' — ' + _review_outcome(row))
         if data.get('feature_exclusions'):
@@ -561,7 +585,13 @@ def _review_outcome(row):
         if row.get('stage') == 'AI_PROPOSED':
             text = 'AI 응답 (실행 검증 미완료) · ' + text
     else:
-        text = _value(row.get('stage')) + ': ' + ', '.join(_value(reason) for reason in row.get('filter_reasons', []))
+        text = _value(row.get('stage'))
+        if row.get('filter_reasons'):
+            text += ': ' + ', '.join(_value(reason) for reason in row['filter_reasons'])
+    if row.get('protection'):
+        text += ' / 보호 판단: ' + _value(row['protection'].get('action'))
+        if row['protection'].get('reasons'):
+            text += ' · ' + ', '.join(_value(reason) for reason in row['protection']['reasons'])
     if plan:
         text += ' / 주문 계획: ' + _value(plan.get('reason')) + ' · ' + _amount(plan.get('quantity'), '주')
     elif not row.get('orders'):
@@ -589,6 +619,9 @@ def _review_html(run, symbols):
         body += '<article class="thesis"><h3>' + html.escape(_name(row, symbols)) + '</h3>'
         body += '<p>' + html.escape(('기존 보유' if row.get('scope') == 'HOLDING' else '신규 후보') + ' · ' + _review_outcome(row)) + '</p>'
         body += '<p class="metadata">검사 시각: ' + html.escape(_time(row.get('evaluated_at'))) + '</p>'
+        if row.get('stage') == 'OUTSIDE_REVIEW_SCOPE':
+            body += '<p>이 종목은 공시 영향 검토 대상이 아니므로 AI 판단을 요청하지 않았습니다. 보호 감시 결과와 보유 현황을 참고로 표시합니다.</p></article>'
+            continue
         features, quote = row.get('features') or {}, row.get('quote') or {}
         criteria = run.get('entry_criteria', {})
         universe, signal, order_policy = (criteria.get(key, {}) for key in ('universe', 'signal', 'orders'))
@@ -633,9 +666,6 @@ def _review_html(run, symbols):
             ('priced_in_case', '가격 반영 여부'), ('counterevidence_fact_ids', '반대 근거 참조'),
             ('invalidation_case', '판단 무효 조건'), ('uncertainties', '불확실성'), ('reason', '보유 판단 이유')) if key in ai],
             empty='AI 판단이 수행되지 않았거나 완료되지 않았습니다.')
-        protection = row.get('protection') or {}
-        if protection:
-            body += '<p>보호 판단: ' + html.escape(_value(protection.get('action')) + ' · ' + ', '.join(_value(x) for x in protection.get('reasons', []))) + '</p>'
         body += '</article>'
     return body
 
@@ -646,18 +676,33 @@ def _operational_report(data):
     symbols = data.get('instruments', {})
     runs = data.get('runs', []) if daily else [data]
     orders, fills, nav = data.get('orders', []), data.get('fills', []), data.get('nav', [])
+    run_trades = not daily and data.get('trade_scope') == 'RUN'
     holdings = status.get('holdings', [])
     body = f'<p class="metadata">대상일: {html.escape(str(data.get("date", "실행 결과")))} · 생성: {html.escape(_time(data.get("created_at")))}</p>'
     sections = [('overview', '요약'), ('holdings', '보유 종목'), ('decisions', '판단·근거'), ('trades', '주문·체결'), ('ledger', '자산 기록'), ('diagnostics', '운영 진단')]
     body += '<nav class="report-nav" aria-label="리포트 바로가기">' + ''.join(f'<a href="#{key}">{name}</a>' for key, name in sections) + '</nav>'
     body += '<section id="overview"><h2>핵심 요약</h2><div class="cards">'
     cards = [('운영 모드', _value(status.get('mode', data.get('mode')))), ('보유 종목', f'{len(holdings)}개' if 'holdings' in status else MISSING),
-             ('주문 기록', f'{len(orders)}건' if 'orders' in data else MISSING), ('체결·정정 기록', f'{len(fills)}건' if 'fills' in data else MISSING),
+             ('이번 검토 주문 기록' if run_trades else '주문 기록', f'{len(orders)}건' if 'orders' in data else MISSING),
+             ('이번 검토 체결·정정 기록' if run_trades else '체결·정정 기록', f'{len(fills)}건' if 'fills' in data else MISSING),
              ('전략 현금', _amount(status.get('cash_krw', status.get('allocated_cash'))))]
     body += ''.join(f'<div class="card">{html.escape(label)}<strong>{html.escape(value)}</strong></div>' for label, value in cards) + '</div>'
     body += '<p class="notice">이 보고서는 저장된 관측·판단·체결 기록입니다. 주문 접수와 체결을 구분하며, 누락된 자료를 0원이나 거래 없음으로 간주하지 않습니다. 실제 투자 성과는 별도 검증이 필요합니다.</p>'
     if not daily:
-        body += _table(['항목', '결과'], [[LABELS[key], _value(data[key])] for key in ('run_status', 'reason', 'model_status', 'decision_status', 'order_status') if key in data])
+        body += _table(['항목', '결과'], [[LABELS[key], _value(data[key], key)] for key in ('kind', 'review_scope', 'run_status', 'reason', 'model_status', 'decision_status', 'order_status') if key in data])
+        if data.get('trigger'):
+            body += _details('계기 공시', data['trigger'], symbols)
+        if data.get('review_targets') is not None:
+            targets = data['review_targets']
+            body += '<p>확정된 AI 검토 대상: 신규 후보 ' + str(len(targets['candidate_ids'])) + '개 · 보유 종목 ' + str(len(targets['position_ids'])) + '개.</p>'
+        stages = {'input.snapshot.json': '판단 입력 확정', 'candidates.json': '후보 사전 검사', 'proposal.json': 'AI 응답',
+                  'decision.json': 'AI 응답 검증', 'plan.json': '주문·보호 계획', 'execution.json': '주문 실행'}
+        if data.get('unreached_stages'):
+            body += '<p>생성되지 않은 단계 기록: ' + html.escape(', '.join(stages.get(name, name) for name in data['unreached_stages'])) + '.</p>'
+        body += _details('저장된 계좌·평가 확인 상태', {key: status[key] for key in
+            ('as_of', 'reconciled', 'complete', 'account_checked_at', 'account_succeeded_at') if key in status})
+        if data.get('portfolio_diagnostic'):
+            body += _details('보유 평가 문제', data['portfolio_diagnostic'])
     else:
         health_keys = ('model_id', 'authentication', 'review_status', 'account_status', 'account_checked_at', 'account_succeeded_at', 'monitor_status', 'monitor_checked_at')
         body += _table(['현재 상태', '확인 결과'], [[LABELS[key], _value(status[key], key)] for key in health_keys if key in status])
@@ -670,17 +715,28 @@ def _operational_report(data):
         if status.get('monitor_status') == 'MONITOR_DEGRADED':
             body += '<p class="notice">현재 보호 감시 문제: ' + html.escape(diagnostic_text(status.get('monitor_diagnostic') or {}, symbols=symbols)) + '</p>'
         body += '<p class="muted">일반 대화 성공은 투자 판단 완료를 뜻하지 않습니다. 상태별 확인 시각과 아래 과거 사건을 구분해 보세요.</p>'
+    if any(key in status for key in ('nav_risk_unverified', 'cash_reconciliation', 'new_risk_allowed')):
+        body += _details('신규 투자 가능 여부와 현금 대조', {key: status[key] for key in
+            ('new_risk_allowed', 'blocked_reasons', 'nav_risk_unverified', 'performance_uncertain', 'cash_reconciliation') if key in status})
     body += '</section><section id="holdings"><h2>보유 종목</h2>'
-    body += _table(['종목', '보유 수량', '평가 단가', '평가 금액', '가격 기준 시각'],
-        [[_name(row, symbols), _amount(row.get('quantity'), '주'), _amount(row.get('price', row.get('mark'))),
-          _amount(row.get('value', row.get('value_krw'))), _time(row.get('price_observed_at', row.get('valuation_at')))] for row in holdings],
+    holding_rows = []
+    for row in holdings:
+        value = row.get('value', row.get('value_krw'))
+        price, quantity = _number(row.get('price', row.get('mark'))), _number(row.get('quantity'))
+        if value is None and row.get('valuation_quality') == 'EXACT' and price is not None and quantity is not None:
+            value = price * quantity
+        holding_rows.append([_name(row, symbols), _amount(row.get('quantity'), '주'), _amount(price),
+            _amount(value), _value(row.get('valuation_quality')), _time(row.get('price_observed_at', row.get('valuation_at')))])
+    body += _table(['종목', '보유 수량', '평가 단가', '평가 금액', '평가 품질', '가격 기준 시각'], holding_rows,
         empty='보유 종목이 없습니다.' if 'holdings' in status else '보유 종목 자료가 제공되지 않았습니다.')
     body += '</section><section id="decisions"><h2>판단·근거</h2>'
     body += _table(['시각', '실행', '모델', '판단', '이번 검토의 주문', '이유'],
         [[_time(run.get('created_at')), _value(run.get('run_status')), _value(run.get('model_status')),
           _value(run.get('decision_status')), _value(run.get('order_status')), _value(run.get('reason'))] for run in runs],
         empty='기록된 투자 검토가 없습니다. 보호 매도 여부는 아래 주문·체결 장부에서 별도로 확인합니다.')
-    body += '<p class="muted">위 주문 결과는 해당 투자 검토의 범위입니다. 보호 규칙으로 발생한 매도를 포함한 전체 거래는 주문·체결 장부에 표시합니다.</p>'
+    body += '<p class="muted">위 주문 결과는 해당 투자 검토의 범위입니다. ' + (
+        '아래 장부도 이번 검토에 연결된 주문·체결만 표시합니다. 보호 감시를 포함한 당일 전체 거래는 /report 에서 확인합니다.' if run_trades else
+        '보호 규칙으로 발생한 매도를 포함한 전체 거래는 주문·체결 장부에 표시합니다.') + '</p>'
     for run in runs:
         if run.get('feature_exclusions'):
             for group,rows in _screening_groups(run['feature_exclusions']).items():
@@ -697,7 +753,7 @@ def _operational_report(data):
         body += '</dl></article>'
     if not data.get('theses'):
         body += '<p class="muted">종목별 투자 근거·보호 조건이 제공되지 않았습니다.</p>'
-    body += '</section><section id="trades"><h2>주문·체결 장부</h2><h3>주문</h3>'
+    body += '</section><section id="trades"><h2>' + ('이번 검토 주문·체결 기록' if run_trades else '주문·체결 장부') + '</h2><h3>주문</h3>'
     body += _table(['시각', '종목', '방향', '주문 수량', '상태', '누적 체결', '누적 체결 금액', '이유'],
         [[_time(row.get('created_at')), _name(row, symbols), _value(row.get('side')), _amount(row.get('quantity'), '주'),
           _value(row.get('state')), _amount(row.get('cumulative_quantity'), '주'), _amount(row.get('cumulative_notional')), _value(row.get('reason'))] for row in orders],

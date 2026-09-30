@@ -22,7 +22,7 @@ class ContainerSetupTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         for name in ("config", "var", "auth", "locks"):
             (self.root / name).mkdir()
-        for name in ("app.yaml", "strategy.yaml", "schedules.yaml", "secrets.yaml", "runtime.json"):
+        for name in ("app.yaml", "strategy.yaml", "schedules.yaml", "secrets.yaml", "runtime.json", "cash-reconciliation.json"):
             (self.root / "config" / name).write_text('{"id": "SYNTHETIC_ONLY"}')
 
     def test_permissions_are_repeatable_without_rewriting_configuration_or_data(self):
@@ -38,7 +38,8 @@ class ContainerSetupTests(unittest.TestCase):
         for path, content in before.items():
             self.assertEqual(path.read_bytes(), content)
         for name, mode in (("locks", 0o700), ("var", 0o700), ("auth", 0o700),
-                           ("config", 0o755), ("config/secrets.yaml", 0o400), ("config/runtime.json", 0o444)):
+                           ("config", 0o755), ("config/secrets.yaml", 0o400), ("config/runtime.json", 0o444),
+                           ("config/cash-reconciliation.json", 0o444)):
             self.assertEqual((self.root / name).stat().st_mode & 0o777, mode)
         self.assertEqual(state.stat().st_mode & 0o777, 0o640)
 

@@ -348,6 +348,89 @@ class Store:
                            "unclassified_delta_krw": str(residual), "observed_at": observed_at.isoformat(),
                            "performance_uncertain": bool(pending)})
 
+    def resolve_cash_adjustments(self, evidence: dict, *, now) -> dict:
+        """Apply explicit operator evidence; matching amounts alone never classify a flow."""
+        from .accounting import ExternalFlow
+        if (not isinstance(evidence, dict) or set(evidence) != {"schema_version", "account_scope", "resolutions"}
+                or type(evidence["schema_version"]) is not int or evidence["schema_version"] != 1
+                or evidence["account_scope"] != self.get("scope")
+                or not isinstance(evidence["resolutions"], list)):
+            raise ValueError("CASH_RECONCILIATION_SCOPE_INVALID")
+        with self.transaction():
+            pending = self.get("unclassified_cash_adjustments", [])
+            records = {digest(item): item for item in pending}
+            if len(records) != len(pending):
+                raise ValueError("CASH_ADJUSTMENT_IDENTITY_AMBIGUOUS")
+            applied = self.get("cash_adjustment_resolutions", {})
+            flows = self.get("external_flows", [])
+            resolved = 0
+            for resolution in evidence["resolutions"]:
+                if (not isinstance(resolution, dict) or set(resolution) !=
+                        {"id", "adjustment_ids", "classification", "source", "internal_pnl", "external_flows"}
+                        or any(not isinstance(resolution[key], str) or not resolution[key].strip()
+                               for key in ("id", "source"))):
+                    raise ValueError("CASH_RECONCILIATION_EVIDENCE_INVALID")
+                fingerprint = digest(resolution)
+                previous = applied.get(resolution["id"])
+                if previous:
+                    if previous["evidence_hash"] != fingerprint:
+                        raise ValueError("CASH_RECONCILIATION_ID_REUSED")
+                    continue
+                ids = resolution["adjustment_ids"]
+                if (not isinstance(ids, list) or not ids or any(not isinstance(item, str) for item in ids)
+                        or len(ids) != len(set(ids)) or not set(ids) <= records.keys()):
+                    raise ValueError("CASH_ADJUSTMENT_NOT_PENDING")
+                selected = [records[item] for item in ids]
+                observed_through = max(aware_time(item["observed_at"]) for item in selected)
+                if observed_through > now:
+                    raise ValueError("CASH_RECONCILIATION_FUTURE_OBSERVATION")
+                total = sum((finite_decimal(item["amount"]) for item in selected), Decimal(0))
+                internal = finite_decimal(resolution["internal_pnl"])
+                classification = resolution["classification"]
+                new_flows = resolution["external_flows"]
+                if not isinstance(new_flows, list):
+                    raise ValueError("CASH_RECONCILIATION_FLOWS_INVALID")
+                if classification == "BROKER_CORRECTION":
+                    if total or internal or new_flows:
+                        raise ValueError("CASH_CORRECTION_MUST_BALANCE")
+                elif classification == "INTERNAL_PNL":
+                    if total != internal or new_flows:
+                        raise ValueError("CASH_INTERNAL_PNL_MISMATCH")
+                elif classification == "CASH_TRANSFER":
+                    if not new_flows:
+                        raise ValueError("CASH_TRANSFER_VALUATIONS_REQUIRED")
+                    net_flow = Decimal(0)
+                    for flow in new_flows:
+                        if not isinstance(flow, dict) or set(flow) != {"at", "amount", "before_nav", "after_nav"}:
+                            raise ValueError("CASH_TRANSFER_VALUATIONS_REQUIRED")
+                        point = ExternalFlow(at=aware_time(flow["at"]), **{key: flow[key] for key in ("amount", "before_nav", "after_nav")})
+                        if (point.at > observed_through or point.before_nav is None or point.after_nav is None
+                                or min(point.before_nav, point.after_nav) < 0 or not point.amount
+                                or point.before_nav + point.amount != point.after_nav
+                                or any(aware_time(item["at"]) == point.at for item in flows)):
+                            raise ValueError("CASH_TRANSFER_VALUATIONS_INVALID")
+                        flows.append({**flow, "kind": "CASH_TRANSFER", "source": resolution["source"],
+                                      "resolution_id": resolution["id"]})
+                        net_flow += point.amount
+                    if net_flow + internal != total:
+                        raise ValueError("CASH_TRANSFER_AMOUNT_MISMATCH")
+                else:
+                    raise ValueError("CASH_RECONCILIATION_CLASSIFICATION_INVALID")
+                applied[resolution["id"]] = {"evidence_hash": fingerprint, "evidence": resolution,
+                    "adjustments": selected, "resolved_at": now.isoformat()}
+                for item in ids:
+                    del records[item]
+                resolved += len(selected)
+                self.event("reconcile", "CASH_ADJUSTMENTS_CLASSIFIED", applied[resolution["id"]])
+            if resolved:
+                self.set("cash_adjustment_resolutions", applied)
+                self.set("external_flows", sorted(flows, key=lambda item: aware_time(item["at"])))
+                self.set("unclassified_cash_adjustments", list(records.values()))
+                self.set("performance_uncertain", bool(records))
+                self.bump_version()
+            return {"status": "CASH_RECONCILED" if not records else "CASH_RECONCILIATION_REQUIRED",
+                    "resolved_count": resolved, "pending_count": len(records)}
+
     def apply_cumulative_fill(self, intent_id: str, *, quantity: int, notional: Decimal,
                               fees: Decimal | None, revision: int, observed_at: str,
                               correction: bool = False, fill_session_id: str | None = None,

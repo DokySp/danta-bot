@@ -2,6 +2,7 @@
 /config/secrets.yaml
 /config/runtime.json
 /config/runtime-manifest.json
+/config/cash-reconciliation.json
 /locks/
 /auth/
 /secrets/
