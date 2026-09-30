@@ -1356,13 +1356,13 @@ class ExternalRuntime:
             completed_at = self.clock()
             return validate_proposal(value,frozen,current_account_version=frozen["portfolio"]["account_state_version"],
                 current_facts_hash=digest([frozen["events"],frozen["facts"]]),completed_at=completed_at,now=completed_at)
-        result = codex.run(enriched,DecisionProposal.model_json_schema(),attempt_root=attempt_root,
+        result = codex.run(enriched,frozen["output_contract"],attempt_root=attempt_root,
             prompt=(ROOT/"prompts/portfolio_decision.md").read_text(),validate_schema=lambda value:DecisionProposal.model_validate(value),
             validate_semantic=validate_at_completion,on_progress=on_progress,
             expires_at=started_at+timedelta(seconds=self.config.app["model"]["timeout_seconds"]+self.profile["orders"]["decision_max_age_seconds"]))
         self._record_model_result(store, frozen, call_id, attempt_root, started_at, result, purpose="review", codex=codex)
         if result.status != "SUCCESS":
-            raise AdapterError("MODEL_"+result.status)
+            raise AdapterError("MODEL_"+result.status, diagnostic=result.diagnostic)
         return result.decision.model_dump(mode="json") if hasattr(result.decision,"model_dump") else result.decision
 
     def chat(self, *, request_id, session_id, messages, account_context=None, attachments=None,

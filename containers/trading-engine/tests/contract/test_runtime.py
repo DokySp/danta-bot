@@ -24,6 +24,7 @@ from danta.adapters import AdapterError, FetchResult, HttpResponse
 from danta.adapters.kis import KisAdapter, KisCredentials
 from danta.application import Application
 from danta.config import HumanRequired, load_config, canonical, aware_time
+from danta.decision import DecisionProposal
 from danta.runtime import KisBrokerPort, RuntimeState, build_external_runtime
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -830,7 +831,8 @@ class ExternalRuntimeContracts(unittest.TestCase):
             return 0,json.dumps({"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}),""
         runtime.codex.runner = fake_runner
         frozen = {"run_id":"FAKE_RUN","input_snapshot_id":"FAKE_INPUT","portfolio":{"account_state_version":1},
-                  "review_scope":"FULL","reviewed_positions":[],"events":[],"facts":[],"candidates":[],"theses":[]}
+                  "review_scope":"FULL","reviewed_positions":[],"events":[],"facts":[],"candidates":[],"theses":[],
+                  "output_contract": DecisionProposal.model_json_schema()}
         result = decide(frozen)
         self.assertEqual(result["run_id"],"FAKE_RUN")
         self.assertEqual(len(calls),1)
@@ -855,7 +857,8 @@ class ExternalRuntimeContracts(unittest.TestCase):
         runtime.clock = lambda:datetime.now(timezone.utc)
         runtime.codex.sleep = lambda _seconds:None
         frozen = {"run_id":"RETRY_RUN","input_snapshot_id":"RETRY_INPUT","portfolio":{"account_state_version":1},
-                  "review_scope":"FULL","reviewed_positions":[],"events":[],"facts":[],"candidates":[],"theses":[]}
+                  "review_scope":"FULL","reviewed_positions":[],"events":[],"facts":[],"candidates":[],"theses":[],
+                  "output_contract": DecisionProposal.model_json_schema()}
         calls = []
         def runner(command,*,env,cwd,input,timeout):
             calls.append(command)
@@ -891,7 +894,8 @@ class ExternalRuntimeContracts(unittest.TestCase):
         now = [datetime.now(timezone.utc)]
         runtime.clock = lambda:now[0]
         frozen = {"run_id":"LONG_RUN","input_snapshot_id":"LONG_INPUT","portfolio":{"account_state_version":1},
-                  "review_scope":"FULL","reviewed_positions":[],"events":[],"facts":[],"candidates":[],"theses":[]}
+                  "review_scope":"FULL","reviewed_positions":[],"events":[],"facts":[],"candidates":[],"theses":[],
+                  "output_contract": DecisionProposal.model_json_schema()}
         def runner(command,*,env,cwd,input,timeout):
             now[0] += timedelta(seconds=150)
             value = {"schema_version":1,"run_id":"LONG_RUN","input_snapshot_id":"LONG_INPUT","account_state_version":1,
@@ -920,7 +924,8 @@ class ExternalRuntimeContracts(unittest.TestCase):
             raise OSError(canary)
         runtime.codex.runner = runner
         frozen = {"run_id":"START_FAILURE","input_snapshot_id":"START_FAILURE_INPUT","portfolio":{"account_state_version":1},
-                  "review_scope":"FULL","reviewed_positions":[],"events":[],"facts":[],"candidates":[],"theses":[]}
+                  "review_scope":"FULL","reviewed_positions":[],"events":[],"facts":[],"candidates":[],"theses":[],
+                  "output_contract": DecisionProposal.model_json_schema()}
         with self.assertRaisesRegex(AdapterError,"MODEL_PROCESS_FAILED") as caught:
             decide(frozen)
         self.assertNotIn(canary,str(caught.exception))

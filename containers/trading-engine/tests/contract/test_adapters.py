@@ -370,6 +370,24 @@ class AdapterContracts(unittest.TestCase):
             final.unlink()
             self.assertEqual(parse_attempt(**base).status, "FINAL_MISSING")
 
+    def test_rejected_model_output_preserves_usage_and_safe_semantic_reason(self):
+        with tempfile.TemporaryDirectory() as directory:
+            final = Path(directory) / 'final.json'
+            final.write_text('{"ok":true}')
+            usage = {'input_tokens': 120, 'output_tokens': 15}
+            base = dict(returncode=0, events_text=json.dumps({'type': 'turn.completed', 'usage': usage}),
+                stderr='', final_path=final, validate_schema=lambda value: value)
+            for reason, expected in (('POSITION_RESULT_OMITTED_OR_DUPLICATED', 'POSITION_RESULT_OMITTED_OR_DUPLICATED'),
+                                     ('private user text', 'INVALID_PROPOSAL')):
+                def reject(_value):
+                    raise ValueError(reason)
+                result = parse_attempt(**base, validate_semantic=reject)
+                self.assertEqual(result.usage, usage)
+                self.assertEqual(result.diagnostic['reason'], expected)
+            final.write_text('invalid')
+            result = parse_attempt(**base, validate_semantic=lambda value: True)
+            self.assertEqual((result.status, result.usage), ('SCHEMA_INVALID', usage))
+
     def test_codex_quota_circuit_and_fresh_format_repair(self):
         with tempfile.TemporaryDirectory() as directory:
             calls, circuit = [], {}

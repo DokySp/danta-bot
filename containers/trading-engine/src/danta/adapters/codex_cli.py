@@ -34,6 +34,7 @@ class ModelResult:
     attempts: int = 0
     reset_at: datetime | None = None
     usage: dict | None = None
+    diagnostic: dict | None = None
 
 
 def failure_diagnostic(text="", *, returncode=None, error=None):
@@ -144,25 +145,27 @@ def parse_attempt(*, returncode, events_text, stderr, final_path, validate_schem
                 usage = event.get("usage")
             completed |= event.get("type") == "turn.completed"
     except ValueError:
-        return ModelResult("EVENT_STREAM_INVALID")
+        return ModelResult("EVENT_STREAM_INVALID", usage=usage)
     if returncode or failures:
         return ModelResult(classify_failure("\n".join(failures) + "\n" + stderr), reset_at=reset_at, usage=usage)
     if not completed:
-        return ModelResult("TURN_INCOMPLETE")
+        return ModelResult("TURN_INCOMPLETE", usage=usage)
     path = Path(final_path)
     if not path.is_file() or path.is_symlink():
-        return ModelResult("FINAL_MISSING")
+        return ModelResult("FINAL_MISSING", usage=usage)
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
         parsed = validate_schema(value)
     except (ValueError, TypeError, KeyError):
-        return ModelResult("SCHEMA_INVALID")
+        return ModelResult("SCHEMA_INVALID", usage=usage)
     try:
         validated = validate_semantic(parsed)
         if validated is False:
-            return ModelResult("SEMANTIC_REJECTED")
-    except (ValueError, TypeError, KeyError, AdapterError):
-        return ModelResult("SEMANTIC_REJECTED")
+            return ModelResult("SEMANTIC_REJECTED", usage=usage)
+    except (ValueError, TypeError, KeyError, AdapterError) as error:
+        reason = str(error)
+        diagnostic = {"stage": "SEMANTIC_VALIDATION", "reason": reason if re.fullmatch(r"[A-Z][A-Z_]{0,95}", reason) else "INVALID_PROPOSAL"}
+        return ModelResult("SEMANTIC_REJECTED", usage=usage, diagnostic=diagnostic)
     return ModelResult("SUCCESS", parsed, usage=usage)
 
 
@@ -431,9 +434,9 @@ class CodexAdapter:
                 diagnostic = failure_diagnostic(error=error)
                 result = ModelResult("PROCESS_FAILED")
             if datetime.now(timezone.utc) >= expires_at:
-                result = ModelResult("EXPIRED")
+                result = ModelResult("EXPIRED", usage=result.usage, diagnostic=result.diagnostic)
             (attempt / "result.json").write_text(json.dumps({"status": result.status, "input_sha256": hashlib.sha256(frozen_text.encode()).hexdigest(),
-                "usage": result.usage, "diagnostic": diagnostic, "provenance": "FIXTURE_ONLY" if fixture_only else "CODEX_CLI"}))
+                "usage": result.usage, "diagnostic": result.diagnostic or diagnostic, "provenance": "FIXTURE_ONLY" if fixture_only else "CODEX_CLI"}))
             if result.status == "QUOTA_EXHAUSTED":
                 self.circuit[key] = {"reset_at": result.reset_at.isoformat() if result.reset_at else None, "requires_operator": result.reset_at is None}
                 if self.persist_circuit:
@@ -445,4 +448,4 @@ class CodexAdapter:
             if result.status == "SCHEMA_INVALID" and repairs < 1:
                 repairs += 1
                 continue
-            return ModelResult(result.status, result.decision, str(attempt), attempts, result.reset_at, result.usage)
+            return ModelResult(result.status, result.decision, str(attempt), attempts, result.reset_at, result.usage, result.diagnostic or diagnostic)
