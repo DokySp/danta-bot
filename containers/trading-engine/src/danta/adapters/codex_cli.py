@@ -229,11 +229,19 @@ def probe_cli(executable="codex"):
 
 class CodexAdapter:
     def __init__(self, *, executable="codex", model_id=None, reasoning_effort=None, auth_mode=None, auth_home=None,
-                 mode="offline", authorize=None, timeout_seconds=180, runner=None, sleep=time.sleep, circuit_state=None, persist_circuit=None,
-                 isolation_probe=None):
+                 mode="offline", authorize=None, timeout_seconds=600, runner=None, sleep=time.sleep, circuit_state=None, persist_circuit=None,
+                 isolation_probe=None, transient_retries=1, retry_delay_seconds=5, schema_repair_attempts=1):
         self.executable, self.model_id, self.reasoning_effort = executable, model_id, reasoning_effort
         self.auth_mode, self.auth_home, self.mode, self.authorize = auth_mode, auth_home, mode, authorize
+        if (type(timeout_seconds) is not int or timeout_seconds <= 0 or any(
+                type(value) is not int or value < 0 for value in (transient_retries, retry_delay_seconds, schema_repair_attempts))):
+            raise AdapterError("MODEL_TIMING_INVALID")
         self.timeout = timeout_seconds
+        self.transient_retries, self.retry_delay = transient_retries, retry_delay_seconds
+        self.schema_repair_attempts = schema_repair_attempts
+        # Startup/authentication has its own bounded work; each allowed attempt
+        # still receives the configured model time, independent of decision age.
+        self.run_budget_seconds = timeout_seconds * (1 + transient_retries + schema_repair_attempts) + retry_delay_seconds * transient_retries + 30
         self.runner, self.sleep = runner or self._run_process, sleep
         self.circuit = circuit_state if circuit_state is not None else {}
         self.persist_circuit = persist_circuit
@@ -441,11 +449,11 @@ class CodexAdapter:
                 self.circuit[key] = {"reset_at": result.reset_at.isoformat() if result.reset_at else None, "requires_operator": result.reset_at is None}
                 if self.persist_circuit:
                     self.persist_circuit(self.circuit)
-            if result.status == "TRANSIENT_FAILURE" and retries < 1 and (expires_at - datetime.now(timezone.utc)).total_seconds() > 5:
+            if result.status == "TRANSIENT_FAILURE" and retries < self.transient_retries and (expires_at - datetime.now(timezone.utc)).total_seconds() > self.retry_delay:
                 retries += 1
-                self.sleep(5)
+                self.sleep(self.retry_delay)
                 continue
-            if result.status == "SCHEMA_INVALID" and repairs < 1:
+            if result.status == "SCHEMA_INVALID" and repairs < self.schema_repair_attempts:
                 repairs += 1
                 continue
             return ModelResult(result.status, result.decision, str(attempt), attempts, result.reset_at, result.usage, result.diagnostic or diagnostic)

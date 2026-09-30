@@ -37,10 +37,10 @@ def connect(url):
     if url not in URLS.values():
         raise AdapterError("STREAM_ORIGIN_NOT_ALLOWED")
     parsed = urlsplit(url)
-    raw = socket.create_connection((parsed.hostname, parsed.port), timeout=2)
+    raw = socket.create_connection((parsed.hostname, parsed.port), timeout=10)
     ws = websocket.WebSocket(enable_multithread=True)
     try:
-        ws.connect(url, socket=raw, timeout=2, redirect_limit=0)
+        ws.connect(url, socket=raw, timeout=10, redirect_limit=0)
         if ws.getstatus() != 101:
             raise AdapterError("STREAM_HANDSHAKE_FAILED")
         ws.settimeout(0.5)
@@ -256,7 +256,7 @@ class KisQuoteStream:
         self.permit()
         ws.send(json.dumps({"header": {"approval_key": key, "custtype": "P", "tr_type": operation, "content-type": "utf-8"},
                             "body": {"input": {"tr_id": tr_id, "tr_key": ticker}}}))
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 15
         while not self.stop.is_set() and time.monotonic() < deadline:
             if self._receive(ws, (operation, ticker, tr_id)):
                 self.stop.wait(0.1)
@@ -333,6 +333,6 @@ class KisQuoteStream:
             except Exception:
                 pass
         if thread is not None:
-            thread.join(timeout=5)
+            thread.join(timeout=25)
             if thread.is_alive():
                 raise AdapterError("STREAM_CLOSE_TIMEOUT")

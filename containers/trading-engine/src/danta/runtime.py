@@ -785,7 +785,8 @@ class ExternalRuntime:
                 self.manifest["normalization"]["quote"].get("transport", "rest") != "websocket"):
             return
         pending = {item.instrument_id.removeprefix("KRX:") for item in instruments}
-        deadline = time.monotonic() + self.profile["orders"]["quote_max_age_seconds"]
+        deadline = time.monotonic() + 30
+        # Connection/ACK waiting is independent of the 5-second quote age limit.
         # Only full collection waits for initial ticks. Protection reads the
         # background cache immediately and never waits for a connection.
         while pending:
@@ -1359,7 +1360,7 @@ class ExternalRuntime:
         result = codex.run(enriched,frozen["output_contract"],attempt_root=attempt_root,
             prompt=(ROOT/"prompts/portfolio_decision.md").read_text(),validate_schema=lambda value:DecisionProposal.model_validate(value),
             validate_semantic=validate_at_completion,on_progress=on_progress,
-            expires_at=started_at+timedelta(seconds=self.config.app["model"]["timeout_seconds"]+self.profile["orders"]["decision_max_age_seconds"]))
+            expires_at=started_at+timedelta(seconds=codex.run_budget_seconds))
         self._record_model_result(store, frozen, call_id, attempt_root, started_at, result, purpose="review", codex=codex)
         if result.status != "SUCCESS":
             raise AdapterError("MODEL_"+result.status, diagnostic=result.diagnostic)
@@ -1396,7 +1397,7 @@ class ExternalRuntime:
         result = codex.run(frozen, schema, attempt_root=attempt_root,
             prompt=(ROOT / "prompts/general_chat.md").read_text(), validate_schema=validate_reply,
             validate_semantic=lambda _value: True,
-            expires_at=started_at + timedelta(seconds=self.config.app["model"]["timeout_seconds"]),
+            expires_at=started_at + timedelta(seconds=codex.run_budget_seconds),
             on_progress=on_progress, cancel=cancel)
         self._record_model_result(store, frozen, call_id, attempt_root, started_at, result, purpose="chat", codex=codex)
         if result.status != "SUCCESS":
@@ -1662,7 +1663,9 @@ def build_external_runtime(config,trusted_approval,*,kis_transport=None,dart_tra
             raise HumanRequired("Runtime model identity changed")
     codex = CodexAdapter(executable=executable,model_id=model_settings["model_id"],reasoning_effort=model_settings["reasoning_effort"],
         auth_mode=model_settings["auth_mode"],auth_home=secret(isolation["auth_home_env"]),mode=config.mode,authorize=model_authorize,
-        timeout_seconds=model_settings["timeout_seconds"],runner=model_runner,circuit_state=state.data["circuit"],persist_circuit=persist_circuit,
+        timeout_seconds=model_settings["timeout_seconds"],transient_retries=model_settings["transient_retries"],
+        retry_delay_seconds=model_settings["retry_delay_seconds"],schema_repair_attempts=model_settings["schema_repair_attempts"],
+        runner=model_runner,circuit_state=state.data["circuit"],persist_circuit=persist_circuit,
         isolation_probe=lambda current: str(Path(current).resolve()) == str(Path(executable).resolve()) and hashlib.sha256(Path(current).read_bytes()).hexdigest() == executable_hash)
     runtime = ExternalRuntime(config,trusted_approval,manifest,kis,dart,codex,state,clock=clock)
     if config.mode == "paper":

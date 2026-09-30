@@ -449,6 +449,23 @@ class KisStreamTests(unittest.TestCase):
         self.assertEqual(self.transport.calls, [])
         self.assertEqual(self.connector.sockets, [])
 
+    def test_subscription_ack_can_arrive_after_the_former_five_second_budget(self):
+        stream = KisQuoteStream(environment='demo', approval=lambda: 'fixture', permit=lambda: None, clock=lambda: self.now)
+        ws = Socket()
+        stream.targets = {'005930'}
+        elapsed = [0.0]
+        receive = stream._receive
+        def delayed_ack(socket, pending):
+            if elapsed[0] < 6:
+                elapsed[0] += 1
+                return False
+            return receive(socket, pending)
+        with patch('danta.adapters.kis_stream.time.monotonic', side_effect=lambda: elapsed[0]), \
+                patch.object(stream, '_receive', side_effect=delayed_ack), patch.object(stream.stop, 'wait'):
+            stream._change(ws, 'fixture', '1', '005930')
+        self.assertEqual(stream.active, {'005930'})
+        self.assertEqual(elapsed[0], 6)
+
     def test_direct_socket_and_redirect_limit_without_network(self):
         class Raw:
             def close(self):
@@ -456,9 +473,10 @@ class KisStreamTests(unittest.TestCase):
         with patch("danta.adapters.kis_stream.socket.create_connection", return_value=Raw()) as direct, patch("websocket.WebSocket") as ws:
             ws.return_value.getstatus.return_value = 101
             result = connect("ws://ops.koreainvestment.com:31000")
-            direct.assert_called_once_with(("ops.koreainvestment.com", 31000), timeout=2)
+            direct.assert_called_once_with(("ops.koreainvestment.com", 31000), timeout=10)
             self.assertIs(result, ws.return_value)
             self.assertEqual(ws.return_value.connect.call_args.kwargs["redirect_limit"], 0)
+            self.assertEqual(ws.return_value.connect.call_args.kwargs["timeout"], 10)
             self.assertIsInstance(ws.return_value.connect.call_args.kwargs["socket"], Raw)
             ws.return_value.getstatus.return_value = 302
             with self.assertRaisesRegex(AdapterError, "STREAM_CONNECT_FAILED"):

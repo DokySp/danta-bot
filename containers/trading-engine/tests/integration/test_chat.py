@@ -45,7 +45,7 @@ class ChatTests(unittest.TestCase):
         runtime.config, runtime.approval, runtime.clock = config, case.app.approval, utcnow
         runtime.broker = SimpleNamespace(store=case.app.store)
         runtime.codex = type('FixtureCodex', (), {'model_id': 'gpt-5.6-sol', 'reasoning_effort': 'medium',
-            'auth_mode': 'chatgpt', 'run': run})()
+            'auth_mode': 'chatgpt', 'run_budget_seconds': 575, 'run': run})()
         runtime.verified_models = {'gpt-5.6-sol'}
         runtime.model_probe_lock = threading.Lock()
         return source, runtime
@@ -183,7 +183,7 @@ class ChatTests(unittest.TestCase):
                 kwargs['validate_schema']({'reply_text': 'ok', 'orders': ['BUY']})
             kwargs['validate_schema']({'reply_text': '안녕하세요'})
             return ModelResult('SUCCESS', {'reply_text': '안녕하세요'}, attempts=1, usage={'input_tokens': 7})
-        runtime.codex = SimpleNamespace(run=run, model_id='FIXTURE_MODEL', reasoning_effort='medium')
+        runtime.codex = SimpleNamespace(run=run, model_id='FIXTURE_MODEL', reasoning_effort='medium', run_budget_seconds=575)
         result = runtime.chat(request_id='chat-test', session_id='session-test', messages=[{'role': 'user', 'content': '안녕'}])
         self.assertEqual(result['status'], 'CHAT_COMPLETE')
         recorded = json.loads(case.app.store.db.execute("SELECT payload FROM journal WHERE kind='MODEL_OUTCOME'").fetchone()[0])

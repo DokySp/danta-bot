@@ -886,6 +886,35 @@ class ExternalRuntimeContracts(unittest.TestCase):
         self.assertEqual(len(usage["attempts"]),4)
         self.assertTrue(all(record["record_type"] in {"MODEL_ATTEMPT","MODEL_OUTCOME"} for record in usage["attempts"]))
 
+    def test_model_deadlines_cover_configured_retry_budget_for_review_and_chat(self):
+        from danta.adapters.codex_cli import ModelResult
+        app_path = self.config.directory / 'app.yaml'
+        data = yaml.safe_load(app_path.read_text())
+        data['model'].update(timeout_seconds=600, transient_retries=1, retry_delay_seconds=7, schema_repair_attempts=1)
+        app_path.write_text(yaml.safe_dump(data))
+        self.config = load_config(self.config.directory)
+        self.approval['config_hash'] = self.config.config_hash
+        bundle, broker, decide, refresh = self._factory()
+        app = Application(self.config, bundle, broker=broker, decide=decide, refresh=refresh, approval=self.approval)
+        self.addCleanup(app.close)
+        runtime = decide.__self__
+        now = datetime.now(timezone.utc)
+        runtime.clock = lambda: now
+        frozen = {'run_id':'BUDGET_RUN', 'input_snapshot_id':'BUDGET_INPUT', 'portfolio':{'account_state_version':1},
+                  'review_scope':'FULL', 'reviewed_positions':[], 'events':[], 'facts':[], 'candidates':[], 'theses':[],
+                  'output_contract':DecisionProposal.model_json_schema()}
+        captured = []
+        def run(value, _schema, **kwargs):
+            captured.append(kwargs['expires_at'])
+            return ModelResult('SUCCESS', {'reply_text':'fixture'} if 'conversation' in value else {}, attempts=1)
+        with patch.object(runtime.codex, 'run', side_effect=run):
+            decide(frozen)
+            runtime.chat(request_id='BUDGET_CHAT', session_id='fixture', messages=[{'role':'user', 'content':'fixture'}])
+        self.assertEqual(runtime.codex.timeout, 600)
+        self.assertEqual(runtime.codex.retry_delay, 7)
+        self.assertEqual(captured, [now + timedelta(seconds=1837)] * 2)
+        self.assertEqual(runtime.profile['orders']['decision_max_age_seconds'], 120)
+
     def test_semantic_callback_uses_actual_completion_after_long_model_call(self):
         bundle,broker,decide,refresh = self._factory()
         app = Application(self.config,bundle,broker=broker,decide=decide,refresh=refresh,approval=self.approval)

@@ -16,7 +16,7 @@
       "model_id": null,
       "reasoning_effort": null,
       "auth_mode": null,
-      "timeout_seconds": 180,
+      "timeout_seconds": 600,
       "transient_retries": 1,
       "retry_delay_seconds": 5,
       "schema_repair_attempts": 1,

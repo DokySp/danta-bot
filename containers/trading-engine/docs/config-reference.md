@@ -48,7 +48,7 @@ simulation slippage 값은 거부한다. 평가 비교군·60/30/20 표본·boot
 | 영역 | 기본값 / 의미 | 외부 실행에서 필요한 확인 |
 |---|---|---|
 | app | `offline`, `Asia/Seoul`, 계좌 별칭 null, `127.0.0.1:8080` | 실제 모드/계좌와 bind/수신 경계 |
-| model | `codex_cli`, `gpt-6-astra`/`xhigh`/`chatgpt`, timeout 180초 | 다음 호출에서 모델·추론 설정 적용. 실제 로그인·모델 접근·격리 증거·모델 사용 승인 검증 |
+| model | `codex_cli`, `gpt-6-astra`/`xhigh`/`chatgpt`, attempt별 timeout 600초 | 다음 호출에서 모델·추론 설정 적용. 실제 로그인·모델 접근·격리 증거·모델 사용 승인 검증 |
 | model 재시도 | transient 1회/5초, schema 교정 1회, fallback false | quota reset 미확인은 운영자 확인, 다른 모델 자동 교체 없음 |
 | broker | `kis`, 환경/manifest/rate-limit null | 모의/실전 endpoint, 계좌 귀속, 제공자 필드·한도 검증 |
 | broker 비밀 참조 | `KIS_ACCOUNT_REF`, `KIS_APP_KEY`, `KIS_APP_SECRET` 이름 | 값은 private secrets.yaml에서만 읽으며 정책 YAML·image에는 넣지 않음 |
@@ -58,6 +58,13 @@ simulation slippage 값은 거부한다. 평가 비교군·60/30/20 표본·boot
 | telegram | enabled/ingress false, sender/chat 빈 목록, route `trading-engine`, `default_chat_id: null` | 같은 Docker 네트워크·송신/수신/제어 승인 및 허용 sender/chat. 송신이 활성화되고 허용 chat이 여러 개면 자동 알림·리포트 수신지를 `default_chat_id`로 지정 |
 | storage | SQLite, 로컬 filesystem 필수, raw 보존 기간 null | writable 로컬 상태 디렉터리·백업/복원, 보존 정책 |
 | observability | redaction/attempt usage/structured events true | 실제 운영 검증을 합성 성공으로 표시하지 않음 |
+
+모델 호출 전체 예산은 `timeout_seconds × (1 + transient_retries + schema_repair_attempts)`에
+재시도 대기와 인증·준비 여유 30초를 더한다. 기본값은 최대 1,835초이며 재시도는 해당
+일시 오류·형식 오류가 발생할 때만 수행한다. `TIMEOUT`은 자동 재시도하지 않는다.
+판단 유효 120초는 모델 완료부터 계산하고, 실행 전 계좌·근거·시장 시간·호가를 다시 검증한다.
+초기 시세 연결 대기는 최대 30초, WebSocket 연결과 handshake는 각각 10초, 구독 ACK는 15초다.
+이 대기시간과 주문에 사용할 수 있는 호가의 최대 나이 5초는 별도다.
 
 `null`은 0·무제한·자동 승인을 뜻하지 않는다. 기본 offline fixture에는 실제 모델·인증·계좌·
 수수료 공급 설정이 필요 없다. `CodexAdapter`의 명시된 fixture runner와 DART fixture

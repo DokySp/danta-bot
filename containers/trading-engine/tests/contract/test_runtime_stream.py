@@ -112,6 +112,23 @@ class RuntimeStreamContracts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "QUOTE_OBSERVATION_OUTSIDE_SESSION"):
             self.runtime._quote(self.instrument)
 
+    def test_initial_quote_wait_is_longer_than_accepted_quote_age_but_remains_bounded(self):
+        for ready_after, expected_elapsed in ((8, 8), (None, 30)):
+            with self.subTest(ready_after=ready_after):
+                elapsed = [0.0]
+                def quote(_ticker):
+                    if ready_after is None or elapsed[0] < ready_after:
+                        raise AdapterError('STREAM_NOT_READY')
+                    return FetchResult((dict(self.kis.raw),), 'COMPLETE', self.now)
+                def sleep(seconds):
+                    elapsed[0] += seconds
+                with patch.object(self.kis, 'stream_quote', side_effect=quote), \
+                        patch('danta.runtime.time.monotonic', side_effect=lambda: elapsed[0]), \
+                        patch('danta.runtime.time.sleep', side_effect=sleep):
+                    self.runtime._wait_for_stream_quotes([self.instrument])
+                self.assertAlmostEqual(elapsed[0], expected_elapsed, delta=0.06)
+                self.assertEqual(self.runtime.profile['orders']['quote_max_age_seconds'], 5)
+
     def test_stale_stream_moves_directly_to_book_refresh_without_initial_tick_wait(self):
         with patch.object(self.kis, 'stream_quote', side_effect=AdapterError('STREAM_QUOTE_STALE')), \
                 patch('danta.runtime.time.sleep', side_effect=AssertionError('unnecessary wait')):
