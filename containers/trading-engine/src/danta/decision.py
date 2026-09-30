@@ -6,7 +6,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
-from .config import HumanRequired, canonical, digest
+from .config import HumanRequired, aware_time, canonical, digest
 from .models import Candidate, EventRecord, InvestmentThesis, MarketFact, PortfolioSnapshot, StrictModel
 
 
@@ -22,6 +22,8 @@ class CandidateReview(StrictModel):
     priced_in_case: str
     invalidation_case: str
     uncertainties: list[str]
+    resolved_invalidation_event_ids: list[str]
+    resolution_case: str
 
 
 class PositionReview(StrictModel):
@@ -46,7 +48,8 @@ class DecisionProposal(StrictModel):
 def freeze_input(*, run_id: str, config_hash: str, strategy_hash: str, code_id: str,
                  now: datetime, session_id: str, profile: dict, portfolio: PortfolioSnapshot,
                  candidates: list[Candidate], events: list[EventRecord], facts: list[MarketFact],
-                 theses: list[InvestmentThesis], scope: str = "FULL", reviewed_positions: list[str] | None = None) -> dict:
+                 theses: list[InvestmentThesis], scope: str = "FULL", reviewed_positions: list[str] | None = None,
+                 previous_theses: list[InvestmentThesis] = ()) -> dict:
     if scope not in {"FULL", "PARTIAL"}:
         raise ValueError("Unknown review scope")
     reviewed_positions = reviewed_positions if reviewed_positions is not None else [holding.instrument_id for holding in portfolio.holdings]
@@ -58,18 +61,30 @@ def freeze_input(*, run_id: str, config_hash: str, strategy_hash: str, code_id: 
     for obj in [*events, *facts]:
         if obj.available_at > now:
             raise ValueError("FUTURE_EVIDENCE")
+    candidate_ids = [candidate.instrument.instrument_id for candidate in candidates]
+    previous = {}
+    for thesis in sorted((item for item in previous_theses if item.exited_at is not None), key=lambda item: item.exited_at):
+        if thesis.instrument_id in candidate_ids:
+            previous[thesis.instrument_id] = thesis
+    contract = DecisionProposal.model_json_schema()
+    for field, definition, ids in (("candidate_reviews", "CandidateReview", candidate_ids),
+                                   ("position_reviews", "PositionReview", reviewed_positions)):
+        contract["properties"][field].update(minItems=len(ids), maxItems=len(ids))
+        if ids:
+            contract["$defs"][definition]["properties"]["instrument_id"]["enum"] = ids
     data = {"schema_version": 1, "run_id": run_id, "created_at": now, "config_hash": config_hash,
             "strategy_hash": strategy_hash, "code_id": code_id, "session_id": session_id,
             "review_scope": scope, "reviewed_positions": reviewed_positions, "strategy_contract": profile,
             "portfolio": portfolio, "theses": theses, "events": events, "facts": facts,
             "candidates": candidates, "pending_orders": portfolio.pending_entries,
             "missing_data": [candidate.instrument.instrument_id for candidate in candidates if candidate.coverage not in {"COMPLETE", "COMPLETE_NO_EVENT"}],
-            "output_contract": DecisionProposal.model_json_schema()}
+            "review_targets": {"candidate_ids": candidate_ids, "position_ids": reviewed_positions},
+            "reentry_theses": list(previous.values()), "output_contract": contract}
     # Material fingerprint deliberately excludes tick prices, but includes session,
     # account state, event freshness and qualification, not just source text.
     material = {"session_id": session_id, "account_state_version": portfolio.account_state_version,
                 "strategy_hash": strategy_hash, "config_hash": config_hash,
-                "theses": theses, "events": events, "facts": facts, "candidate_qualification": [
+                "theses": theses, "reentry_theses": list(previous.values()), "events": events, "facts": facts, "candidate_qualification": [
                     [candidate.instrument.instrument_id, candidate.coverage, candidate.event_ids, candidate.features.last_session_id]
                     for candidate in candidates]}
     data["material_hash"] = digest(material)
@@ -105,6 +120,7 @@ def validate_proposal(value: dict, frozen: dict, *, current_account_version: int
     events = {item["event_id"]: item for item in frozen["events"]}
     facts = {item["fact_id"]: item for item in frozen["facts"]}
     theses = {item["thesis_id"]: item for item in frozen["theses"]}
+    previous = {item["instrument_id"]: item for item in frozen.get("reentry_theses", [])}
     for review in proposal.candidate_reviews:
         candidate = candidates[review.instrument_id]
         if not set(review.event_ids).issubset(set(candidate["event_ids"])):
@@ -131,6 +147,16 @@ def validate_proposal(value: dict, frozen: dict, *, current_account_version: int
             for text in (review.economic_path, review.horizon_case, review.priced_in_case, review.invalidation_case):
                 if len(text.strip()) < 20 or text in {"EXAMPLE_ONLY", "TODO"}:
                     raise ValueError("ACCEPT_REQUIRES_SUBSTANTIVE_CASE")
+        if review.resolved_invalidation_event_ids:
+            prior = previous.get(review.instrument_id)
+            if (review.verdict != "ACCEPT" or not prior or prior["exit_reason"] != "EXIT_THESIS_INVALID" or
+                    not set(review.resolved_invalidation_event_ids).issubset(prior["invalidating_event_ids"]) or
+                    not prior["invalidation_case"] or prior["invalidation_case"] not in review.resolution_case or
+                    len(review.resolution_case.strip()) < 20 or
+                    not any(events[key]["polarity"] == "POSITIVE" and
+                            aware_time(events[key]["available_at"]) > aware_time(prior["exited_at"]) and key not in prior["event_ids"]
+                            for key in review.event_ids)):
+                raise ValueError("REENTRY_RESOLUTION_UNVERIFIED")
     for review in proposal.position_reviews:
         thesis = theses.get(review.thesis_id)
         if not thesis or thesis["instrument_id"] != review.instrument_id:

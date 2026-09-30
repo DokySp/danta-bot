@@ -311,6 +311,7 @@ class InvestmentThesis(StrictModel):
     exit_reason: str | None = None
     exited_at: AwareTime | None = None
     invalidating_event_ids: list[str] = Field(default_factory=list)
+    resolved_invalidation_event_ids: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def fixed_protection(self) -> InvestmentThesis:

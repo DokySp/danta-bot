@@ -14,7 +14,7 @@ from html.parser import HTMLParser
 
 from .models import EventRecord, MarketFact
 
-PARSER_VERSION = 2
+PARSER_VERSION = 3
 
 
 class Tables(HTMLParser):
@@ -300,7 +300,8 @@ def parse_official_event(receipt: dict, documents: list[dict], instrument_id: st
                         if not all(key in values for key in ("revenue_current", "revenue_prior", "operating_profit_current", "operating_profit_prior")):
                             raise ValueError("REVENUE_AND_OPERATING_PROFIT_REQUIRED")
                         values.update(current_period="/".join(day.isoformat() for day in current_period), prior_period="/".join(day.isoformat() for day in prior_period), consolidation=basis, source_unit=unit)
-                        polarity = "POSITIVE" if all(Decimal(values[key + "_current"]) > Decimal(values[key + "_prior"]) for key in ("revenue", "operating_profit")) else "UNKNOWN"
+                        changes = [Decimal(values[key + "_current"]) - Decimal(values[key + "_prior"]) for key in ("revenue", "operating_profit")]
+                        polarity = "POSITIVE" if all(change > 0 for change in changes) else "NEGATIVE" if all(change < 0 for change in changes) else "UNKNOWN"
                         comparison = f"{basis}; KRW; {values['current_period']} vs {values['prior_period']}; {'reported' if family == 'earnings_quality' else 'company forecast, not realized results'}"
                     else:
                         pairs = _contract_pairs(table)

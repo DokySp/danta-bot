@@ -22,6 +22,11 @@ class DisclosureParserTest(unittest.TestCase):
         self.assertEqual(event.polarity, "POSITIVE")
         self.assertTrue(all(fact.content_hash == event.source_hash for fact in facts))
 
+    def test_confirmed_financial_decline_is_negative_and_mixed_results_stay_unknown(self):
+        decline = self.earnings().replace('1,200', '900').replace('>150<', '>90<')
+        self.assertEqual(self.parse(decline)[0].polarity, 'NEGATIVE')
+        self.assertEqual(self.parse(self.earnings().replace('>150<', '>90<'))[0].polarity, 'UNKNOWN')
+
     def test_missing_basis_period_unit_and_metric_never_inferred(self):
         text = self.earnings()
         for bad in (text.replace("연결", ""), text.replace("백만원", "USD"), text.replace("2025.04.01", "2025.01.01"), text.replace("영업이익", "순이익")):

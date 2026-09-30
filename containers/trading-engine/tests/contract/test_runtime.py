@@ -689,6 +689,35 @@ class ExternalRuntimeContracts(unittest.TestCase):
         self.assertEqual(coverage['KRX:000001'], 'COMPLETE')
         self.assertTrue(any(doc['receipt_id'] == rows[-1]['rcept_no'] for doc in documents.values()))
 
+    def test_version_two_decline_cache_is_reparsed_without_new_availability_or_download(self):
+        from danta.disclosure_parser import PARSER_VERSION
+        bundle, _, decide, _ = self._factory()
+        runtime = decide.__self__
+        self.addCleanup(runtime.close)
+        runtime.manifest['automatic'] = True
+        runtime.manifest['disclosures']['instrument_by_corp_code'] = {'00000001': 'KRX:000001'}
+        runtime.state.data['disclosure_last_poll'] = None
+        content = ('<p>연결 기준 (단위: 백만원)</p><table><tr><th>구분</th><th>당기실적 2026.01.01~2026.03.31</th>'
+                   '<th>전년동기실적 2025.01.01~2025.03.31</th></tr><tr><td>매출액</td><td>900</td><td>1,000</td></tr>'
+                   '<tr><td>영업이익</td><td>90</td><td>100</td></tr></table>').encode()
+        receipt = self.now.strftime('%Y%m%d') + '000001'
+        row = {'rcept_no': receipt, 'rcept_dt': self.now.date().isoformat(),
+               'corp_code': '00000001', 'report_nm': '연결 영업실적 공시'}
+        document = FetchResult(({'content': content, 'sha256': hashlib.sha256(content).hexdigest()},), 'COMPLETE', self.now)
+        with patch('danta.disclosure_parser.PARSER_VERSION', 2), \
+                patch.object(runtime.dart, 'list_disclosures', return_value=FetchResult((row,), 'COMPLETE', self.now)), \
+                patch.object(runtime.dart, 'read_disclosure', return_value=document):
+            runtime._events(list(bundle.instruments.values()), self.now)
+        record = runtime.state.data['disclosure_records'][receipt]
+        record['event']['polarity'] = 'UNKNOWN'  # Actual version-2 interpretation of this table.
+        first_seen = record['event']['available_at']
+        with patch.object(runtime.dart, 'list_disclosures', side_effect=AssertionError('unexpected listing')), \
+                patch.object(runtime.dart, 'read_disclosure', side_effect=AssertionError('unexpected download')):
+            events, _, _, _ = runtime._events(list(bundle.instruments.values()), self.now + timedelta(seconds=1))
+        self.assertEqual(events[0].polarity, 'NEGATIVE')
+        self.assertEqual(events[0].available_at, aware_time(first_seen))
+        self.assertEqual(runtime.state.data['disclosure_records'][receipt]['parser_version'], PARSER_VERSION)
+
     def test_future_or_unknown_publication_date_remains_uncertain(self):
         bundle, _, decide, _ = self._factory()
         runtime = decide.__self__

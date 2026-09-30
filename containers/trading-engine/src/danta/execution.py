@@ -28,6 +28,7 @@ class OrderIntent:
     reserve_cash: Decimal = Decimal(0)
     reserve_risk: Decimal = Decimal(0)
     plan_revision: int = 1
+    evidence_hash: str | None = None
 
     def __post_init__(self):
         if type(self.quantity) is not int or self.quantity <= 0 or type(self.account_version) is not int:
@@ -76,7 +77,7 @@ class Executor:
     def _validate_state(self, intent: OrderIntent, now: datetime) -> None:
         if not self.store.get("reconciled") or not self.store.get("ownership_complete"):
             raise HumanRequired("Account/order/ownership reconciliation required")
-        if intent.side == "BUY" and (self.store.get("paused") or self.store.get("drawdown_paused", False)):
+        if intent.side == "BUY" and (self.store.get("paused") or self.store.get("drawdown_paused", False) or self.store.get("nav_risk_unverified", False)):
             raise ValueError("NEW_RISK_PAUSED")
         if self.store.get("account_version") != intent.account_version:
             raise ValueError("STALE_ACCOUNT_VERSION")

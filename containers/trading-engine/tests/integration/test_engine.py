@@ -18,13 +18,217 @@ import yaml
 
 from danta.adapters import AdapterError
 from danta.application import Application, MarketBundle, fixture_decision
-from danta.config import ConfigurationError, HumanRequired, ROOT, canonical, load_config, utcnow
+from danta.config import ConfigurationError, HumanRequired, ROOT, canonical, digest, load_config, utcnow
+from danta.decision import freeze_input, validate_proposal
+from danta.market import SessionCalendar
 from danta.execution import Executor, FixtureBroker, OrderIntent, needed_quantity
 from danta.reporting import render_notification
 from danta.store import Store
 
 
 class EngineCase(unittest.TestCase):
+    def test_partial_review_contract_excludes_context_positions(self):
+        app = Application(self.config, self.bundle)
+        try:
+            app.review()
+            frozen = freeze_input(run_id='partial', config_hash=self.config.config_hash,
+                strategy_hash=self.config.strategy_hash, code_id=app.code_id, now=self.bundle.now,
+                session_id=self.bundle.calendar.active(self.bundle.now).session_id, profile=app.profile,
+                portfolio=app.portfolio(), candidates=[], events=self.bundle.events, facts=self.bundle.facts,
+                theses=app.theses(), scope='PARTIAL', reviewed_positions=[])
+            self.assertTrue(frozen['theses'])
+            self.assertEqual(frozen['review_targets']['position_ids'], [])
+            self.assertEqual(frozen['output_contract']['properties']['position_reviews']['maxItems'], 0)
+            proposal = fixture_decision(frozen)
+            args = dict(current_account_version=app.store.get('account_version'),
+                current_facts_hash=digest([frozen['events'], frozen['facts']]),
+                completed_at=self.bundle.now, now=self.bundle.now)
+            self.assertEqual(validate_proposal(proposal, frozen, **args).position_reviews, [])
+            proposal['position_reviews'] = [dict(instrument_id='TEST:AAA', thesis_id=app.theses()[0].thesis_id,
+                action='KEEP', changed_event_ids=[], reason='context only')]
+            with self.assertRaisesRegex(ValueError, 'POSITION_RESULT_OMITTED_OR_DUPLICATED'):
+                validate_proposal(proposal, frozen, **args)
+        finally:
+            app.close()
+
+    def test_new_evidence_at_buy_preflight_invalidates_the_approved_decision(self):
+        app = Application(self.config, self.bundle)
+        try:
+            preflight = app.executor.preflight
+            def correction_before_dispatch(intent, now):
+                event = self.bundle.events[0]
+                self.bundle.events.append(event.model_copy(update={
+                    'event_id': 'later-correction', 'correction_of': event.event_id}))
+                preflight(intent, now)
+            app.executor.preflight = correction_before_dispatch
+            with self.assertRaisesRegex(ValueError, 'STALE_DECISION_EVIDENCE'):
+                app.review()
+            self.assertEqual(app.broker.submissions, 0)
+        finally:
+            app.close()
+
+    def test_ai_invalidation_preserves_monitor_updates_and_survives_quote_retry(self):
+        app = Application(self.config, self.bundle)
+        try:
+            app.review()
+            symbol = 'TEST:AAA'
+            original = app.theses()[0]
+            correction = self.bundle.events[0].model_copy(update={
+                'event_id': 'official-neutral-correction', 'polarity': 'UNKNOWN',
+                'correction_of': original.event_ids[0]})
+            self.bundle.events.append(correction)
+            quote = self.bundle.quotes[symbol]
+            observed_high = quote.bid + 1000
+            def decide(frozen):
+                # A monitor observation arrives while the model is processing its older snapshot.
+                self.bundle.quotes[symbol] = quote.model_copy(update={'bid': observed_high, 'ask': observed_high + 1})
+                app.protect()
+                self.bundle.quotes[symbol] = quote.model_copy(update={
+                    'observed_at': self.bundle.now - timedelta(seconds=90)})
+                proposal = fixture_decision(frozen)
+                proposal['position_reviews'][0].update(action='EXIT_THESIS_INVALID',
+                    changed_event_ids=[correction.event_id], reason=original.invalidation_case)
+                return proposal
+            app.decide = decide
+            result = app.review()
+            self.assertEqual(result['decision_status'], 'VALID')
+            self.assertEqual(app.theses()[0].mfe_price, observed_high)
+            self.assertEqual(app.theses()[0].invalidating_event_ids, [correction.event_id])
+            self.assertFalse(any(row['side'] == 'SELL' for row in app.store.working()))
+            # Retry even if the rolling provider snapshot no longer contains the approved event.
+            self.bundle.events = []
+            self.bundle.quotes[symbol] = quote
+            result = app.protect()
+            self.assertIn('EXIT_THESIS_INVALID', result[0]['reasons'])
+            self.assertTrue(any(row['side'] == 'SELL' for row in app.store.working()))
+        finally:
+            app.close()
+
+    def test_protection_thesis_update_is_atomic_against_concurrent_invalidation(self):
+        app = Application(self.config, self.bundle)
+        entered, release = threading.Event(), threading.Event()
+        from danta.risk import update_trailing_stop
+        try:
+            app.review()
+            def slow_update(*args, **kwargs):
+                entered.set()
+                if not release.wait(3):
+                    raise AssertionError('trailing update was not released')
+                return update_trailing_stop(*args, **kwargs)
+            def save_invalidation():
+                with app.store.transaction():
+                    latest = app.theses()[0]
+                    app._save_thesis(latest.model_copy(update={'invalidating_event_ids': ['approved-event']}))
+            with patch('danta.application.update_trailing_stop', side_effect=slow_update), ThreadPoolExecutor(2) as pool:
+                monitor = pool.submit(app.protect)
+                self.assertTrue(entered.wait(3))
+                writer = pool.submit(save_invalidation)
+                self.assertFalse(writer.done())
+                release.set()
+                monitor.result(timeout=3)
+                writer.result(timeout=3)
+            self.assertEqual(app.theses()[0].invalidating_event_ids, ['approved-event'])
+        finally:
+            release.set()
+            app.close()
+
+    def test_missing_nav_mark_recovers_risk_checks_without_certifying_history(self):
+        app = Application(self.config, self.bundle)
+        try:
+            for offset, nav, quality in ((0, '10000000', 'EXACT'), (1, '9900000', 'INSUFFICIENT_COVERAGE'),
+                                         (2, '9900000', 'EXACT'), (3, '8000000', 'EXACT')):
+                result = app._record_nav_point(dict(at=(self.bundle.now + timedelta(seconds=offset)).isoformat(),
+                    nav=nav, session_id=None, completed=False, quality=quality), ownership_verified=True)
+                if offset == 1:
+                    self.assertTrue(app.portfolio().new_risk_paused)
+                if offset == 2:
+                    self.assertFalse(app.portfolio().new_risk_paused)
+            self.assertEqual(result['coverage'], 'INSUFFICIENT_COVERAGE')
+            self.assertIsNone(result['max_drawdown'])
+            self.assertTrue(app.store.get('drawdown_paused'))
+            self.assertTrue(app.portfolio().new_risk_paused)
+        finally:
+            app.close()
+
+    def test_closed_thesis_clock_survives_rolling_calendar_and_review_reports_protection_order(self):
+        app = Application(self.config, self.bundle)
+        try:
+            app.review()
+            symbol = 'TEST:AAA'
+            with app.store.transaction():
+                thesis = app.theses()[0]
+                app._save_thesis(thesis.model_copy(update={'current_stop': self.bundle.quotes[symbol].bid}))
+            result = app.review()
+            self.assertEqual(result['order_status'], 'ACKNOWLEDGED')
+            sells = [order for order in app.store.working() if order['side'] == 'SELL']
+            self.assertEqual(len(sells), 1)
+            self.assertEqual(json.loads(sells[0]['payload'])['run_id'], result['run_id'])
+            app.broker.fill(sells[0]['broker_id'], sells[0]['quantity'], self.bundle.quotes[symbol].bid, D(0), self.bundle.now)
+            app.reconcile()
+            self.assertIsNotNone(app.theses()[0].exited_at)
+            old_clock = app.theses()[0].first_fill_session
+            sessions = [session for session in self.bundle.calendar.sessions if session.opens_at > self.bundle.now]
+            self.bundle.calendar = SessionCalendar(sessions, provenance='FIXTURE_ONLY', verified=True, synthetic=True)
+            app.reconcile()
+            self.assertEqual(app.theses()[0].first_fill_session, old_clock)
+        finally:
+            app.close()
+
+    def test_new_thesis_uses_configured_holding_limit(self):
+        path = self.config_dir / 'strategy.yaml'
+        path.write_text(path.read_text().replace('max_holding_sessions: 20', 'max_holding_sessions: 10'))
+        app = Application(load_config(self.config_dir), self.bundle)
+        try:
+            app.review()
+            self.assertEqual(app.theses()[0].max_holding_sessions, 10)
+        finally:
+            app.close()
+
+    def test_reentry_resolution_requires_selected_new_official_evidence(self):
+        from danta.strategy import assess_entry, reentry_eligibility
+        app = Application(self.config, self.bundle)
+        try:
+            app.review()
+            now = self.bundle.now
+            previous = app.theses()[0].model_copy(update={'exit_reason': 'EXIT_THESIS_INVALID',
+                'exited_at': now - timedelta(minutes=1), 'invalidating_event_ids': ['negative-official']})
+            original = self.bundle.events[0]
+            positive = original.model_copy(update={'event_id': 'new-positive', 'available_at': now,
+                'observed_at': now, 'published_at': now})
+            negative = original.model_copy(update={'event_id': 'negative-official', 'polarity': 'NEGATIVE'})
+            candidate = self.bundle.candidates[0].model_copy(update={
+                'event_ids': [original.event_id, positive.event_id], 'counterevidence_event_ids': [negative.event_id]})
+            frozen = freeze_input(run_id='reentry', config_hash=self.config.config_hash,
+                strategy_hash=self.config.strategy_hash, code_id=app.code_id, now=now,
+                session_id=self.bundle.calendar.active(now).session_id, profile=app.profile,
+                portfolio=app.portfolio(), candidates=[candidate], events=[original, positive, negative],
+                facts=self.bundle.facts, theses=[], scope='PARTIAL', reviewed_positions=[], previous_theses=[previous])
+            proposal = fixture_decision(frozen)
+            review = proposal['candidate_reviews'][0]
+            review.update(event_ids=[positive.event_id], resolved_invalidation_event_ids=[negative.event_id],
+                resolution_case=previous.invalidation_case + ' 새 공식 원문이 해당 무효화 조건을 해소했음을 확인한 합성 검증입니다.')
+            args = dict(current_account_version=app.store.get('account_version'),
+                current_facts_hash=digest([frozen['events'], frozen['facts']]), completed_at=now, now=now)
+            decision = validate_proposal(proposal, frozen, **args).candidate_reviews[0]
+            selected = candidate.model_copy(update={'event_ids': decision.event_ids})
+            gate_args = (selected, self.bundle.quotes['TEST:AAA'], [original, positive, negative],
+                         self.bundle.calendar, self.bundle.ticks, now, app.profile)
+            self.assertIn('NEGATIVE_EVENT_REVIEW_REQUIRED', assess_entry(*gate_args, synthetic=True).reasons)
+            self.assertTrue(assess_entry(*gate_args, synthetic=True,
+                resolved_event_ids=decision.resolved_invalidation_event_ids).allowed)
+            self.assertTrue(reentry_eligibility(previous, [positive], self.bundle.bars['TEST:AAA'],
+                self.bundle.calendar, now, app.profile, resolved_event_ids=decision.resolved_invalidation_event_ids).allowed)
+            self.assertFalse(reentry_eligibility(previous, [original], self.bundle.bars['TEST:AAA'],
+                self.bundle.calendar, now, app.profile, resolved_event_ids=decision.resolved_invalidation_event_ids).allowed)
+            for changes in ({'event_ids': [original.event_id]}, {'resolved_invalidation_event_ids': ['foreign-event']},
+                            {'resolution_case': 'unsupported'}):
+                with self.subTest(changes=changes):
+                    bad = {**proposal, 'candidate_reviews': [{**review, **changes}]}
+                    with self.assertRaisesRegex(ValueError, 'REENTRY_RESOLUTION_UNVERIFIED'):
+                        validate_proposal(bad, frozen, **args)
+        finally:
+            app.close()
+
     def test_unsupported_policy_knobs_and_ambiguous_report_destination_fail_at_load(self):
         strategy_path, schedule_path, app_path = [self.config_dir / (name + '.yaml') for name in ('strategy', 'schedules', 'app')]
         original = strategy_path.read_text()
@@ -52,6 +256,7 @@ class EngineCase(unittest.TestCase):
         settings['telegram']['default_chat_id'] = 'two'
         app_path.write_text(yaml.safe_dump(settings))
         self.assertEqual(load_config(self.config_dir).app['telegram']['default_chat_id'], 'two')
+
 
     def test_review_failure_keeps_provider_details_in_result_and_notification(self):
         app = Application(self.config, self.bundle)

@@ -68,7 +68,8 @@ def evaluate_exit(thesis: InvestmentThesis, holding: Holding, quote: Quote | Non
     invalid = [e for e in invalidating_events if e.instrument_id == holding.instrument_id and
                e.official and e.primary_source_complete and e.source_hash and e.fact_ids and e.available_at <= now and
                (e.event_id in thesis.invalidating_event_ids or e.correction_of in thesis.event_ids) and
-               (e.polarity == "NEGATIVE" or e.withdrawn)]
+               (e.polarity == "NEGATIVE" or e.withdrawn or
+                e.event_id in thesis.invalidating_event_ids and e.correction_of in thesis.event_ids)]
     if invalid:
         reasons.append("EXIT_THESIS_INVALID")
     # An expired session remains overdue even after close, during a halt, or on restart.

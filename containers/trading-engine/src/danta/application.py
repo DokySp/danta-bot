@@ -102,7 +102,8 @@ def fixture_decision(frozen: dict, *, on_progress=None) -> dict:
             "horizon_case": "합성 사건의 영향이 3~20세션에 이어지는 상황을 테스트하며 실제 수익 증거는 아닙니다.",
             "priced_in_case": "현재 합성 호가가 추격 상한 이내인지는 프로그램이 확인하며 가격 반영 정도는 미확인입니다.",
             "invalidation_case": "공식 정정에서 합성 계약의 취소 또는 실적 개선의 철회가 확인되면 이 가설을 무효화합니다.",
-            "uncertainties": ["FIXTURE_ONLY: 합성 입력과 기록 응답, 실제 모델 실행 아님"]}
+            "uncertainties": ["FIXTURE_ONLY: 합성 입력과 기록 응답, 실제 모델 실행 아님"],
+            "resolved_invalidation_event_ids": [], "resolution_case": ""}
             for index, candidate in enumerate(frozen["candidates"])],
         "position_reviews": [{"instrument_id": thesis["instrument_id"], "thesis_id": thesis["thesis_id"], "action": "KEEP",
             "changed_event_ids": [], "reason": "합성 fixture에 새 근거 무효화가 없습니다. 보호 판단은 별도로 수행합니다."}
@@ -264,16 +265,22 @@ class Application:
         if not self.bundle.calendar.active(now):
             raise ValueError("INVALID_ORDER_SESSION")
         if intent.side == "BUY":
+            current_evidence = digest([[event for event in self.bundle.events if event.instrument_id == intent.instrument_id],
+                                       [fact for fact in self.bundle.facts if fact.instrument_id == intent.instrument_id]])
+            if not intent.evidence_hash or current_evidence != intent.evidence_hash:
+                raise ValueError("STALE_DECISION_EVIDENCE")
             controls = self.store.get("candidate_controls", {"removed": [], "excluded": []})
             if intent.instrument_id in controls["removed"] or intent.instrument_id in controls["excluded"]:
                 raise ValueError("CANDIDATE_SCOPE_CHANGED")
             candidate = next((item for item in self.bundle.candidates if item.instrument.instrument_id == intent.instrument_id), None)
             if candidate is None:
                 raise ValueError("CANDIDATE_NOT_CURRENT")
-            gate = assess_entry(candidate, quote, self.bundle.events, self.bundle.calendar, self.bundle.ticks, now, self.profile, synthetic=self.bundle.synthetic)
+            thesis = next(item for item in self.theses() if item.thesis_id == intent.thesis_id)
+            candidate = candidate.model_copy(update={"event_ids": thesis.event_ids})
+            gate = assess_entry(candidate, quote, self.bundle.events, self.bundle.calendar, self.bundle.ticks, now, self.profile,
+                synthetic=self.bundle.synthetic, resolved_event_ids=thesis.resolved_invalidation_event_ids)
             if not gate.allowed or quote.ask > intent.limit_price:
                 raise ValueError("STALE_DECISION:" + gate.reason)
-            thesis = next(item for item in self.theses() if item.thesis_id == intent.thesis_id)
             capped_quote = quote.model_copy(update={"ask": intent.limit_price})
             current_size = size_entry(candidate, capped_quote, thesis.initial_stop, self.portfolio(exclude_intent_id=intent.id), self.bundle.costs, now, self.profile)
             if current_size.quantity < intent.quantity:
@@ -334,7 +341,8 @@ class Application:
                 (self.store.get("costs_complete", True) or self.store.get("account_cash_reconciled", False)) and market_complete,
             ownership_verified=self.store.get("ownership_complete"),
             sector_classification_verified=bundle.data["sector_classification_verified"], account_state_version=self.store.get("account_version"),
-            new_risk_paused=self.store.get("paused") or self.store.get("drawdown_paused", False), monitor_degraded=self.store.get("monitor_degraded", False), synthetic=bundle.synthetic)
+            new_risk_paused=self.store.get("paused") or self.store.get("drawdown_paused", False) or self.store.get("nav_risk_unverified", False),
+            monitor_degraded=self.store.get("monitor_degraded", False), synthetic=bundle.synthetic)
 
     def _save_thesis(self, thesis: InvestmentThesis) -> None:
         self.store.db.execute("INSERT INTO theses VALUES (?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", (thesis.thesis_id, thesis.model_dump_json()))
@@ -349,10 +357,13 @@ class Application:
                     first = self.store.db.execute("SELECT available_at,payload FROM observations WHERE id=?", (f"first-fill:{thesis.thesis_id}",)).fetchone()
                     evidence = json.loads(first[1]) if first else {}
                     when = aware_time(evidence.get("first_fill_at") or evidence.get("observed_at") or first[0]) if first else self.bundle.now
-                    session = self.bundle.calendar.session(evidence["fill_session_id"]) if evidence.get("fill_session_id") else self.bundle.calendar.active(when)
-                    if session is None:
-                        raise HumanRequired("First fill does not belong to a verified session")
-                    thesis = thesis.model_copy(update={"average_entry": average, "first_fill_at": when, "first_fill_session": session.session_id,
+                    session_id = thesis.first_fill_session
+                    if when != thesis.first_fill_at or evidence.get("fill_session_id", session_id) not in (None, session_id):
+                        session = self.bundle.calendar.session(evidence["fill_session_id"]) if evidence.get("fill_session_id") else self.bundle.calendar.active(when)
+                        if session is None:
+                            raise HumanRequired("First fill does not belong to a verified session")
+                        session_id = session.session_id
+                    thesis = thesis.model_copy(update={"average_entry": average, "first_fill_at": when, "first_fill_session": session_id,
                         "first_fill_time_quality": evidence.get("time_quality", "UNKNOWN")})
                 reduced = self.store.db.execute("SELECT COALESCE(SUM(cumulative_quantity),0) FROM intents WHERE thesis_id=? AND side='SELL' AND json_extract(payload,'$.reason')='REDUCE_TO_LIMIT'", (thesis.thesis_id,)).fetchone()[0]
                 thesis = thesis.model_copy(update={"reduced_quantity": reduced})
@@ -374,7 +385,7 @@ class Application:
                     self.store.set("concentration_targets", {})
         return result
 
-    def protect(self, *, allow_idle_account=False) -> list[dict]:
+    def protect(self, *, allow_idle_account=False, run_id="protection") -> list[dict]:
         """Called independently of the review thread and model quota circuit."""
         refresh = self.protection_refresh or self.refresh
         if refresh:
@@ -391,22 +402,24 @@ class Application:
             if reductions:
                 self.store.set("concentration_targets", {symbol: self.store.quantity(symbol) - item.quantity for symbol, item in reductions.items()})
         targets = self.store.get("concentration_targets", {})
-        by_thesis = {item.thesis_id: item for item in self.theses()}
         for holding in snapshot.holdings:
-            thesis = by_thesis[holding.thesis_id]
             quote = bundle.quotes.get(holding.instrument_id)
             features = bundle.features.get(holding.instrument_id)
-            if features is not None:
-                thesis = update_trailing_stop(thesis, features, bundle.bars.get(holding.instrument_id, []), bundle.ticks,
-                    self.profile, observed_price=quote.bid if quote and quote_fresh(quote, bundle.now, monitor_quote_max_age(self.profile)) and
-                        (thesis.protection_started_at is None or quote.observed_at >= thesis.protection_started_at) else None)
             with self.store.transaction():
+                thesis = next(item for item in self.theses() if item.thesis_id == holding.thesis_id)
+                if features is not None:
+                    thesis = update_trailing_stop(thesis, features, bundle.bars.get(holding.instrument_id, []), bundle.ticks,
+                        self.profile, observed_price=quote.bid if quote and quote_fresh(quote, bundle.now, monitor_quote_max_age(self.profile)) and
+                            (thesis.protection_started_at is None or quote.observed_at >= thesis.protection_started_at) else None)
                 self._save_thesis(thesis)
+                invalidations = {event.event_id: event for event in bundle.events if event.event_id in thesis.invalidating_event_ids}
+                invalidations.update({item["event_id"]: EventRecord.model_validate_json(canonical(item))
+                    for item in self.store.get("invalidation_evidence:" + thesis.thesis_id, [])})
             plan = evaluate_exit(thesis, holding, quote, bundle.calendar, bundle.now, self.profile,
                 features=features, account_complete=self.store.get("reconciled") and self.store.get("ownership_complete"),
                 orders_known=all(row["state"] not in {"UNKNOWN", "CANCEL_REQUESTED"} for row in self.store.working()),
                 tradable=holding.instrument_id in bundle.instruments and bundle.instruments[holding.instrument_id].status == "NORMAL" and bundle.instruments[holding.instrument_id].status_verified,
-                invalidating_events=[event for event in bundle.events if event.event_id in thesis.invalidating_event_ids],
+                invalidating_events=list(invalidations.values()),
                 reduction_quantity=max(0, holding.quantity - targets[holding.instrument_id]) if holding.instrument_id in targets else 0)
             results.append(plan.model_dump(mode="json"))
             if self.config.mode == "shadow":
@@ -447,7 +460,7 @@ class Application:
                         revision = json.loads(previous["payload"])["plan_revision"] + 1
                     quantity = min(plan.quantity, self.store.quantity(holding.instrument_id))
                     if quantity:
-                        intent = OrderIntent(run_id="protection", plan_id=plan_id, plan_revision=revision,
+                        intent = OrderIntent(run_id=run_id, plan_id=plan_id, plan_revision=revision,
                             thesis_id=thesis.thesis_id, instrument_id=holding.instrument_id, side="SELL", quantity=quantity,
                             limit_price=None, expires_at=None, reason=plan.action, account_version=self.store.get("account_version"), policy_hash=self.config.config_hash)
                         self.executor.submit(intent, bundle.now)
@@ -491,10 +504,22 @@ class Application:
                                   for item in existing], flows, unallocated=not ownership_verified or self.store.get("performance_uncertain", False))
             self.store.set("nav_points", existing)
             self.store.set("performance", result)
-            if result.get("coverage") == "EXACT":
+            # Missing intermediate marks do not erase the loss between verified observations.
+            # Full-history performance keeps its incomplete coverage; only risk uses these anchors.
+            verified_points = [NavPoint(at=aware_time(item["at"]), nav=Decimal(item["nav"]))
+                               for item in existing if item["quality"] == "EXACT"]
+            unallocated = not ownership_verified or self.store.get("performance_uncertain", False)
+            risk = performance(verified_points, flows, unallocated=unallocated)
+            if len(verified_points) == 1 and not unallocated:
+                # The first verified allocation establishes the risk index, not a return history.
+                risk = {"coverage": "EXACT", "twr": "0", "performance_index": []}
+            self.store.set("nav_risk_unverified", point["quality"] != "EXACT" or risk["coverage"] != "EXACT")
+            if risk["coverage"] == "EXACT":
                 high = self.store.get("drawdown_high_watermark")
-                circuit = DrawdownCircuit(high_watermark=Decimal(high) if high is not None else Decimal(1), paused=self.store.get("drawdown_paused", False))
-                state = circuit.observe(Decimal(result["twr"]) + 1, self.profile)
+                high = max([Decimal(high) if high is not None else Decimal(1),
+                            *(Decimal(item["index"]) for item in risk["performance_index"])])
+                circuit = DrawdownCircuit(high_watermark=high, paused=self.store.get("drawdown_paused", False))
+                state = circuit.observe(Decimal(risk["twr"]) + 1, self.profile)
                 self.store.set("drawdown_high_watermark", str(circuit.high_watermark))
                 self.store.set("drawdown_paused", state["new_risk_paused"])
                 if state["newly_paused"]:
@@ -646,7 +671,7 @@ class Application:
             self.reconcile()
             if self.protection_refresh and self.refresh:
                 self.bundle = self.refresh()
-            protection = self.protect()
+            protection = self.protect(run_id=run_id)
             active_thesis_ids = {row["thesis_id"] for row in self.store.holdings() + self.store.working()}
             theses = [thesis for thesis in self.theses() if thesis.exited_at is None and thesis.thesis_id in active_thesis_ids]
             held_ids = {thesis.instrument_id for thesis in theses}
@@ -721,7 +746,8 @@ class Application:
                 return result
             frozen = freeze_input(run_id=run_id, config_hash=self.config.config_hash, strategy_hash=self.config.strategy_hash, code_id=self.code_id,
                 now=bundle.now, session_id=session.session_id, profile=self.profile, portfolio=self.portfolio(), candidates=candidates, events=bundle.events,
-                facts=bundle.facts, theses=theses, scope="FULL" if kind == "full_review" else "PARTIAL", reviewed_positions=affected)
+                facts=bundle.facts, theses=theses, scope="FULL" if kind == "full_review" else "PARTIAL", reviewed_positions=affected,
+                previous_theses=self.theses())
             save("input.snapshot.json", frozen)
             result['feature_exclusions'] = [{**row, 'reason':'DAILY_HISTORY_NOT_COLLECTED' if row.get('reason') == repr(row.get('instrument_id')) else row.get('reason')}
                 for row in bundle.exclusions if kind == 'full_review' or row.get('instrument_id') == event.instrument_id]
@@ -774,14 +800,18 @@ class Application:
             verdicts = {review.instrument_id: review for review in decision.candidate_reviews}
             for review in decision.position_reviews:
                 if review.action == "EXIT_THESIS_INVALID" and self.config.mode != "shadow":
-                    thesis = next(thesis for thesis in theses if thesis.thesis_id == review.thesis_id)
                     with self.store.transaction():
-                        self._save_thesis(thesis.model_copy(update={"invalidating_event_ids": review.changed_event_ids}))
-            protection = self.protect()
+                        thesis = next(item for item in self.theses() if item.thesis_id == review.thesis_id)
+                        self._save_thesis(thesis.model_copy(update={"invalidating_event_ids": sorted(set(thesis.invalidating_event_ids) | set(review.changed_event_ids))}))
+                        records = {item["event_id"]: item for item in self.store.get("invalidation_evidence:" + thesis.thesis_id, [])}
+                        records.update({event.event_id: event.model_dump(mode="json") for event in current_bundle.events if event.event_id in review.changed_event_ids})
+                        self.store.set("invalidation_evidence:" + thesis.thesis_id, list(records.values()))
+            protection += self.protect(run_id=run_id)
             if self.quote_refresh:
                 self.bundle = self.quote_refresh([candidate.instrument.instrument_id for candidate in candidates])
             for candidate in rank_candidates([candidate.model_copy(update={"priority": verdicts[candidate.instrument.instrument_id].priority}) for candidate in candidates]):
                 instrument_id = candidate.instrument.instrument_id
+                candidate = candidate.model_copy(update={"event_ids": verdicts[instrument_id].event_ids})
                 quote = self.bundle.quotes.get(instrument_id)
                 if self.quote_refresh and (quote is None or not quote_fresh(quote,self.clock(),self.profile['orders']['quote_max_age_seconds'])):
                     self.bundle = self.quote_refresh([instrument_id])
@@ -793,10 +823,13 @@ class Application:
                     plans.append({'instrument_id':instrument_id,'reason':'MISSING_QUOTE','quantity':0})
                     continue
                 gate = assess_entry(candidate, quote, self.bundle.events, self.bundle.calendar, self.bundle.ticks, self.bundle.now,
-                    self.profile, verdicts[instrument_id].verdict, synthetic=bundle.synthetic)
+                    self.profile, verdicts[instrument_id].verdict, synthetic=bundle.synthetic,
+                    resolved_event_ids=verdicts[instrument_id].resolved_invalidation_event_ids)
                 previous = [thesis for thesis in self.theses() if thesis.instrument_id == instrument_id and thesis.protection_started_at is not None]
                 if previous:
-                    reentry = reentry_eligibility(previous[-1], self.bundle.events, self.bundle.bars[instrument_id], self.bundle.calendar, self.bundle.now, self.profile)
+                    reentry = reentry_eligibility(max(previous, key=lambda item: item.created_at), [event for event in self.bundle.events if event.event_id in verdicts[instrument_id].event_ids],
+                        self.bundle.bars[instrument_id], self.bundle.calendar, self.bundle.now, self.profile,
+                        resolved_event_ids=verdicts[instrument_id].resolved_invalidation_event_ids)
                     if not reentry.allowed:
                         plans.append({"instrument_id": instrument_id, "reason": reentry.reason, "quantity": 0})
                         continue
@@ -815,13 +848,18 @@ class Application:
                     horizon_case=review.horizon_case, counterevidence=canonical(review.counterevidence_fact_ids), invalidation_case=review.invalidation_case,
                     initial_stop=plan.stop_price, current_stop=plan.stop_price, initial_r_price=plan.entry_price - plan.stop_price,
                     average_entry=plan.entry_price, planned_quantity=plan.quantity, risk_budget=plan.risk_budget,
-                    strategy_hash=self.config.strategy_hash, policy_hash=self.config.config_hash, created_at=self.bundle.now)
+                    strategy_hash=self.config.strategy_hash, policy_hash=self.config.config_hash, created_at=self.bundle.now,
+                    max_holding_sessions=self.profile["exits"]["max_holding_sessions"],
+                    trend_exit_consecutive_closes=self.profile["exits"]["trend_exit_consecutive_closes"],
+                    resolved_invalidation_event_ids=review.resolved_invalidation_event_ids)
                 with self.store.transaction():
                     self._save_thesis(thesis)
                 intent = OrderIntent(run_id=run_id, plan_id=digest([run_id, frozen["material_hash"], instrument_id]), thesis_id=thesis_id, instrument_id=instrument_id,
                     side="BUY", quantity=plan.quantity, limit_price=plan.entry_price,
                     expires_at=min(plan.expires_at, decision_deadline), reason="ENTRY_ACCEPTED",
-                    account_version=self.store.get("account_version"), policy_hash=self.config.config_hash, reserve_cash=plan.reserved_cash, reserve_risk=plan.total_risk)
+                    account_version=self.store.get("account_version"), policy_hash=self.config.config_hash, reserve_cash=plan.reserved_cash, reserve_risk=plan.total_risk,
+                    evidence_hash=digest([[event for event in frozen["events"] if event["instrument_id"] == instrument_id],
+                                          [fact for fact in frozen["facts"] if fact["instrument_id"] == instrument_id]]))
                 order = self.executor.submit(intent, self.bundle.now)
                 orders.append(order)
                 if self.broker.environment == "fixture" and order["state"] == "ACKNOWLEDGED":
@@ -880,9 +918,12 @@ class Application:
                 save('plan.json', {'plans':plans, 'protection':protection})
             if orders or result['decision_status'] == 'VALID':
                 save('execution.json', {'orders':orders, 'journal':[dict(row) for row in self.store.read('SELECT * FROM journal WHERE run_id=?',(run_id,))]})
-            if orders and result['run_status'] != 'COMPLETE':
+            if orders:
                 states = {order['state'] for order in orders}
-                result.update(order_status=next(iter(states)) if len(states) == 1 else 'MIXED',
+                status = next(iter(states)) if len(states) == 1 else 'MIXED'
+                if bundle.synthetic and states == {'FILLED'}:
+                    status = 'FIXTURE_FILLED'
+                result.update(order_status=status,
                               order_states={state:sum(order['state'] == state for order in orders) for state in sorted(states)})
             save("manifest.json", {"kind": kind, "input_source_hash": digest(bundle.data), "generated_artifacts": sorted(path.name for path in directory.iterdir()),
                 "unreached_stages": [name for name in ("input.snapshot.json", "candidates.json", "decision.json", "plan.json", "execution.json") if not (directory / name).exists()],

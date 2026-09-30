@@ -39,7 +39,7 @@ def assess_entry(candidate: Candidate, quote: Quote, events: list[EventRecord],
                  calendar: SessionCalendar, ticks: TickTable, now: datetime,
                  research_profile: dict, verdict: str = "ACCEPT", *,
                  synthetic: bool = False, require_event: bool = True,
-                 require_ai: bool = True) -> GateResult:
+                 require_ai: bool = True, resolved_event_ids: list[str] = ()) -> GateResult:
     """Baseline callers may omit event/AI gates explicitly, never money/risk gates."""
     reasons: list[str] = []
     instrument, f = candidate.instrument, candidate.features
@@ -96,7 +96,7 @@ def assess_entry(candidate: Candidate, quote: Quote, events: list[EventRecord],
                     pass
         if not valid_events:
             reasons.append("NO_VALID_RECENT_OFFICIAL_EVENT")
-        resolved = {event_id for e in valid_events for event_id in e.resolves_event_ids}
+        resolved = {event_id for e in valid_events for event_id in e.resolves_event_ids} | set(resolved_event_ids)
         for event in events if require_ai else ():
             if (event.instrument_id == instrument.instrument_id and event.available_at <= now and
                     event.official and event.primary_source_complete and event.event_id not in resolved and
@@ -133,7 +133,8 @@ def rank_candidates(candidates: list[Candidate]) -> list[Candidate]:
 def reentry_eligibility(previous: InvestmentThesis, events: list[EventRecord],
                         completed_bars: list[DailyBar], calendar: SessionCalendar,
                         now: datetime, research_profile: dict, *,
-                        require_event: bool = True, require_ai: bool = True) -> GateResult:
+                        require_event: bool = True, require_ai: bool = True,
+                        resolved_event_ids: list[str] = ()) -> GateResult:
     if previous.exited_at is None:
         return GateResult(allowed=False, reason="EXISTING_THESIS_NO_ADDITIONAL_BUY")
     current = calendar.active(now)
@@ -164,7 +165,7 @@ def reentry_eligibility(previous: InvestmentThesis, events: list[EventRecord],
             return GateResult(allowed=False, reason="REENTRY_PRICE_NOT_RECOVERED")
     elif reason == "EXIT_THESIS_INVALID":
         if not any(e.available_at > previous.exited_at and e.event_id not in previous.event_ids and
-                   set(previous.invalidating_event_ids).issubset(set(e.resolves_event_ids)) and
+                   set(previous.invalidating_event_ids).issubset(set(e.resolves_event_ids) | set(resolved_event_ids)) and
                    previous.invalidating_event_ids for e in valid_events):
             return GateResult(allowed=False, reason="REENTRY_OFFICIAL_RESOLUTION_REQUIRED")
     elif reason in {"EXIT_TIME_LIMIT", "EXIT_TREND_FAILURE", "REDUCE_TO_LIMIT"}:

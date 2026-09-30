@@ -65,6 +65,17 @@
           },
           "title": "Uncertainties",
           "type": "array"
+        },
+        "resolved_invalidation_event_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Resolved Invalidation Event Ids",
+          "type": "array"
+        },
+        "resolution_case": {
+          "title": "Resolution Case",
+          "type": "string"
         }
       },
       "required": [
@@ -78,7 +89,9 @@
         "horizon_case",
         "priced_in_case",
         "invalidation_case",
-        "uncertainties"
+        "uncertainties",
+        "resolved_invalidation_event_ids",
+        "resolution_case"
       ],
       "title": "CandidateReview",
       "type": "object"
