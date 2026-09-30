@@ -34,6 +34,15 @@ unsafe YAML tag, 잘못된 비율·참조를 거부한다. 비율·금액은 YAM
 다루며 bool에 `"false"` 같은 문자열을 쓰지 않는다. 실행마다 canonical JSON과 설정·전략
 hash를 고정한다. 파일이 바뀐 진행 실행은 기존 hash로 새 권한을 얻지 못한다.
 
+실행에서 지원하지 않는 정책값은 로딩 시 거부한다. 추세 청산은 연속 2회 종가,
+진입 시간은 연속장 시작 20분 후부터 종료 30분 전까지다. 야간·주말 보유 허용,
+공식 근거 필수, 지수 필터, 미체결 주문 반영, 낙폭 시 신규 위험 중단은 고정 계약이다.
+`watchlist`는 빈 목록을 유지하고 후보 변경 명령을 사용한다. 수수료·세금·운영비는
+검증된 비용 자료/평가 manifest로 지정하며, 미사용 profile 비용 참조와 기본값 이외의
+simulation slippage 값은 거부한다. 평가 비교군·60/30/20 표본·bootstrap·stress 조건도
+현재 사전 등록 프로토콜과 다른 값을 거부한다. `max_holding_sessions`는 새 진입 가설에
+그대로 저장하고, 기존 보유의 최초 체결 시각과 보호 조건은 재검토로 덮어쓰지 않는다.
+
 ## app.yaml
 
 | 영역 | 기본값 / 의미 | 외부 실행에서 필요한 확인 |
@@ -46,13 +55,15 @@ hash를 고정한다. 파일이 바뀐 진행 실행은 기존 hash로 새 권�
 | market | OpenDART, 공식 IR 목록 빈 값, calendar/corporate action null | DART 권한, 승인 도메인, 실제 세션·기업행위 출처 |
 | execution | enabled false, single writer true | 실행 활성화와 승인 capability가 함께 필요 |
 | monitoring | enabled false, 호가/활성주문 5초, idle계좌 60초 | 최신성/호출량/보호 실행 가능성 검증 |
-| telegram | enabled/ingress false, sender/chat 빈 목록, route `trading-engine` | 같은 Docker 네트워크·송신/수신/제어 승인 및 허용 sender/chat |
+| telegram | enabled/ingress false, sender/chat 빈 목록, route `trading-engine`, `default_chat_id: null` | 같은 Docker 네트워크·송신/수신/제어 승인 및 허용 sender/chat. 송신이 활성화되고 허용 chat이 여러 개면 자동 알림·리포트 수신지를 `default_chat_id`로 지정 |
 | storage | SQLite, 로컬 filesystem 필수, raw 보존 기간 null | writable 로컬 상태 디렉터리·백업/복원, 보존 정책 |
 | observability | redaction/attempt usage/structured events true | 실제 운영 검증을 합성 성공으로 표시하지 않음 |
 
 `null`은 0·무제한·자동 승인을 뜻하지 않는다. 기본 offline fixture에는 실제 모델·인증·계좌·
 수수료 공급 설정이 필요 없다. `CodexAdapter`의 명시된 fixture runner와 DART fixture
 transport도 이 경우에만 내부 `FIXTURE_ONLY` 표지를 사용한다. 외부 분기에는 적용하지 않는다.
+`telegram.default_chat_id`는 허용 chat 목록 안의 문자열이어야 한다. 생략한 기존 설정은
+`null`로 읽으며, 허용 chat이 하나면 그곳으로 자동 알림·리포트를 보낸다. 명령 응답은 요청한 chat으로 보낸다.
 
 실제 adapter 구성과 manifest 필드는 [runtime-contract.md](runtime-contract.md), gateway
 연결과 mount 절차는 [runbook.md](runbook.md)를 따른다. image에는 고정 Codex CLI가 포함되며, 실제 인증과 외부 egress는 별도 운영 설정이다.
@@ -108,7 +119,9 @@ prompt·설정 hash, 계좌·소유·단일writer·저장소·복원·격리·�
 
 신규 재량 진입은 개장20분 뒤부터 종료30분 전까지다. 보호/대사 polling 간격은
 app.yaml에만 둔다. 재시작 시 기한 지난 매수를 catch-up하지 않고 대사·보호를 우선한다.
-pause/schedule_off는 새 재량 작업을 멈추며 이미 승인된 보호/대사를 자동 해제하지 않는다.
+pause/schedule_off는 새 재량 심사를 멈추며, 공시 수집·일일 NAV 확정과 재시도·리포트 및
+이미 승인된 보호/대사는 계속한다. 전역 scheduler.enabled=false는 보호/대사 외 스케줄을 비활성화한다.
+자정 뒤 일일 리포트도 NAV를 확정한 거래 세션의 날짜와 거래 기록을 사용한다.
 
 ## 비밀값 검사
 

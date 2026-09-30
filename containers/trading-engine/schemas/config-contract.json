@@ -60,6 +60,7 @@
       "route": "trading-engine",
       "allowed_sender_ids": [],
       "allowed_chat_ids": [],
+      "default_chat_id": null,
       "ingress_enabled": false
     },
     "storage": {

@@ -131,6 +131,12 @@ def _validate_shape(value: Any, contract: Any, path: str) -> None:
             raise ConfigurationError(f"{path}: ratio outside [0,1]")
 
 
+def validate_evaluation_profile(profile: dict) -> None:
+    expected = json.loads((ROOT / "schemas/config-contract.json").read_text())["strategy"]["strategy"]["research_profile"]["evaluation"]
+    if profile.get("evaluation") != expected:
+        raise ConfigurationError("Unsupported preregistered evaluation protocol")
+
+
 def _validate_semantics(data: dict) -> None:
     app = data["app"]
     strategy = data["strategy"]["strategy"]
@@ -169,10 +175,24 @@ def _validate_semantics(data: dict) -> None:
         ("exits", "auto_resume_after_drawdown"): False, ("orders", "entry_auto_reprice"): False,
         ("orders", "entry_type"): "limit_at_verified_ask", ("orders", "exit_type"): "market_in_valid_session",
         ("costs", "unknown_cost_is_zero"): False, ("evaluation", "automatic_live_promotion"): False,
+        ("universe", "overnight"): True, ("universe", "weekend_holding"): True,
+        ("universe", "watchlist"): [], ("signal", "primary_source_required"): True,
+        ("signal", "index_entry_gate"): "close_at_or_above_sma60",
+        ("exits", "trend_exit_consecutive_closes"): 2,
+        ("exits", "reentry_requires_close_above_previous_entry"): True,
+        ("exits", "drawdown_action"): "cancel_entries_pause_new_risk_keep_protection",
+        ("orders", "respect_pending_orders"): True,
+        ("costs", "commission_schedule"): None, ("costs", "tax_schedule"): None,
+        ("costs", "operating_cost_allocation"): None,
+        ("costs", "simulation_slippage_bps_per_side"): "10",
     }
     for (section, key), expected in fixed.items():
         if profile[section][key] != expected:
             raise ConfigurationError(f"Unsupported strategy semantics: {section}.{key}")
+    validate_evaluation_profile(profile)
+    if schedules["discretionary_entry_window"] != {
+            "start_minutes_after_continuous_open": 20, "end_minutes_before_continuous_close": 30}:
+        raise ConfigurationError("Unsupported discretionary entry window: supported offsets are 20/30 minutes")
     if app["model"]["auto_fallback"] or not app["execution"]["single_writer"] or not app["execution"]["live_requires_trusted_approval"]:
         raise ConfigurationError("Required authority boundary disabled")
     if app["model"]["provider"] != "codex_cli" or app["broker"]["provider"] != "kis":
@@ -181,6 +201,12 @@ def _validate_semantics(data: dict) -> None:
         raise ConfigurationError("Unsupported model isolation profile")
     if app["telegram"]["route"] != "trading-engine":
         raise ConfigurationError("Telegram route must be trading-engine")
+    telegram = app["telegram"]
+    default_chat = telegram["default_chat_id"]
+    if default_chat is not None and default_chat not in telegram["allowed_chat_ids"]:
+        raise ConfigurationError("telegram.default_chat_id must be an allowed chat")
+    if telegram["enabled"] and len(telegram["allowed_chat_ids"]) > 1 and default_chat is None:
+        raise ConfigurationError("Multiple Telegram chats require telegram.default_chat_id for automatic reports")
 
 
 def model_reload_hash(data):
@@ -263,6 +289,8 @@ def _parse_config(directory: Path, contract_text: str, sources: tuple[str, ...])
     try:
         for name, source in zip(("app", "strategy", "schedules"), sources):
             data[name] = yaml.load(source, Loader=StrictLoader)
+            if name == 'app' and isinstance(data[name], dict) and isinstance(data[name].get('telegram'), dict):
+                data[name]['telegram'].setdefault('default_chat_id', None)
             if name == 'strategy':
                 try:
                     orders = data[name]['strategy']['research_profile']['orders']

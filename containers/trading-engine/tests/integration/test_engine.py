@@ -25,6 +25,34 @@ from danta.store import Store
 
 
 class EngineCase(unittest.TestCase):
+    def test_unsupported_policy_knobs_and_ambiguous_report_destination_fail_at_load(self):
+        strategy_path, schedule_path, app_path = [self.config_dir / (name + '.yaml') for name in ('strategy', 'schedules', 'app')]
+        original = strategy_path.read_text()
+        for before, after in (('trend_exit_consecutive_closes: 2', 'trend_exit_consecutive_closes: 3'),
+                              ('overnight: true', 'overnight: false'),
+                              ('watchlist: []', 'watchlist: [TEST:AAA]'),
+                              ('block_bootstrap_resamples: 2000', 'block_bootstrap_resamples: 100')):
+            with self.subTest(setting=before):
+                strategy_path.write_text(original.replace(before, after))
+                with self.assertRaises(ConfigurationError):
+                    load_config(self.config_dir)
+        strategy_path.write_text(original)
+        original = schedule_path.read_text()
+        schedule_path.write_text(original.replace('start_minutes_after_continuous_open: 20', 'start_minutes_after_continuous_open: 40'))
+        with self.assertRaisesRegex(ConfigurationError, 'entry window'):
+            load_config(self.config_dir)
+        schedule_path.write_text(original)
+        settings = yaml.safe_load(app_path.read_text())
+        settings['telegram'].update(enabled=True, allowed_chat_ids=['one', 'two'])
+        for default in (None, 'foreign', 1):
+            settings['telegram']['default_chat_id'] = default
+            app_path.write_text(yaml.safe_dump(settings))
+            with self.assertRaises(ConfigurationError):
+                load_config(self.config_dir)
+        settings['telegram']['default_chat_id'] = 'two'
+        app_path.write_text(yaml.safe_dump(settings))
+        self.assertEqual(load_config(self.config_dir).app['telegram']['default_chat_id'], 'two')
+
     def test_review_failure_keeps_provider_details_in_result_and_notification(self):
         app = Application(self.config, self.bundle)
         try:
