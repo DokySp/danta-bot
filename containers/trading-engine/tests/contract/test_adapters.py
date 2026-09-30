@@ -545,10 +545,16 @@ class AdapterContracts(unittest.TestCase):
         opening = datetime(2026, 9, 10, 0, tzinfo=timezone.utc)
         closing = opening + timedelta(hours=3)
         jobs = [{"id": "review", "kind": "full_review", "trigger": {"type": "session_offset", "anchor": "continuous_open", "minutes": 20}},
+                {"id": "disclosures", "kind": "collect_disclosures", "trigger": {"type": "interval_in_session", "seconds": 180}},
+                {"id": "daily", "kind": "finalize_and_report", "trigger": {"type": "session_offset", "anchor": "continuous_close", "minutes": 30}},
                 {"id": "risk", "kind": "risk_monitor", "trigger": {"type": "market_event_with_poll_fallback"}}]
         planner = SchedulePlanner(jobs)
         due = planner.due(opening + timedelta(minutes=20), session_id="short", continuous_open=opening, continuous_close=closing, enabled=True)
-        self.assertEqual({item.kind for item in due}, {"full_review", "risk_monitor"})
+        self.assertEqual({item.kind for item in due}, {"full_review", "collect_disclosures", "risk_monitor"})
+        review_paused = planner.due(opening + timedelta(minutes=20), session_id="short", continuous_open=opening, continuous_close=closing, enabled=True, discretionary_enabled=False)
+        self.assertEqual({item.kind for item in review_paused}, {"collect_disclosures", "risk_monitor"})
+        finalization = planner.due(closing + timedelta(minutes=30), session_id="short", continuous_open=opening, continuous_close=closing, enabled=True, discretionary_enabled=False)
+        self.assertEqual({item.kind for item in finalization}, {"finalize_and_report"})
         paused = planner.due(opening + timedelta(minutes=20), session_id="short", continuous_open=opening, continuous_close=closing, enabled=False, discretionary_enabled=False)
         self.assertEqual({item.kind for item in paused}, {"risk_monitor"})
         self.assertEqual(planner.due(closing + timedelta(days=2), session_id="short", continuous_open=opening, continuous_close=closing, enabled=True), ())

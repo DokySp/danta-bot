@@ -1,6 +1,6 @@
 """Service integration uses real SQLite/adapters and fake app/transport; no sockets."""
 from contextlib import redirect_stdout
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import base64
 import html
@@ -427,6 +427,7 @@ class ServiceIntegrationTests(unittest.TestCase):
         app_file = self.directory / 'app.yaml'
         settings = yaml.safe_load(app_file.read_text())
         settings['telegram']['allowed_chat_ids'].append('chat-2')
+        settings['telegram']['default_chat_id'] = 'chat-1'
         app_file.write_text(yaml.safe_dump(settings, allow_unicode=True))
         self.config = self.app.config = load_config(self.directory)
         self.app.approval['config_hash'] = self.config.config_hash
@@ -488,8 +489,58 @@ class ServiceIntegrationTests(unittest.TestCase):
         self.assertFalse(self.service.run_once(review=True))
         self.assertFalse(self.service.outbox_once())
 
+    def test_scheduled_report_uses_explicit_default_with_multiple_allowed_chats(self):
+        app_file = self.directory / 'app.yaml'
+        settings = yaml.safe_load(app_file.read_text())
+        settings['telegram'].update(allowed_chat_ids=['chat-1', 'chat-2'], default_chat_id='chat-2')
+        app_file.write_text(yaml.safe_dump(settings, allow_unicode=True))
+        self.config = self.app.config = load_config(self.directory)
+        self.app.approval['config_hash'] = self.config.config_hash
+        self.adapter.chats.add('chat-2')
+        self.service.close()
+        self.service = Service(self.app, telegram=self.adapter, clock=lambda: self.now)
+        self.app.finalize_nav = lambda: {'status': 'NAV_FINALIZED'}
+        self.app.store.accept_request('service:schedule:explicit-destination',
+            {'source': 'scheduler', 'kind': 'finalize_and_report'},
+            deadline=(self.now + timedelta(minutes=1)).isoformat())
+        self.assertTrue(self.service.run_once(review=True))
+        self.assertTrue(self.service.outbox_once())
+        self.assertEqual(self.sent[-1]['chat_id'], 'chat-2')
+        self.assertEqual(self.app.store.db.execute('SELECT state FROM outbox').fetchone()[0], 'DELIVERED')
+
+    def test_after_midnight_finalization_reports_the_completed_session_day(self):
+        opening = datetime(2026, 9, 28, 0, tzinfo=timezone.utc)
+        session = Session(session_id='2026-09-28', ordinal=0, opens_at=opening,
+                          closes_at=opening + timedelta(hours=6, minutes=20))
+        self.app.bundle.calendar = SessionCalendar([session], provenance='synthetic', verified=True, synthetic=True)
+        self.service.scheduler['enabled'] = True
+        next(job for job in self.service.planner.jobs if job['kind'] == 'finalize_and_report')['trigger']['minutes'] = 530
+        self.now = session.closes_at + timedelta(minutes=530)
+        with self.app.store.transaction():
+            self.app.store.event('completed-session-run', 'RUN_OUTCOME', {'run_id': 'completed-session-run'})
+            self.app.store.db.execute('UPDATE journal SET created_at=? WHERE run_id=?',
+                ((session.closes_at - timedelta(minutes=1)).isoformat(), 'completed-session-run'))
+            self.app.store.event('next-day-run', 'RUN_OUTCOME', {'run_id': 'next-day-run'})
+            self.app.store.db.execute('UPDATE journal SET created_at=? WHERE run_id=?',
+                (self.now.isoformat(), 'next-day-run'))
+        self.app.finalize_nav = lambda: {'status': 'NAV_FINALIZED', 'point': {'session_id': session.session_id}}
+        self.assertEqual(self.service.queue_tick(), 1)
+        self.assertTrue(self.service.run_once(review=True))
+        result = self.last_result()
+        self.assertEqual(result['report']['date'], '2026-09-28')
+        self.assertEqual(result['report']['runs'], [{'run_id': 'completed-session-run'}])
+        self.assertEqual(self.service._report_data()['date'], '2026-09-29')
+        self.assertTrue(self.service.outbox_once())
+        self.assertEqual(self.sent[-1]['filename'], 'daily-2026-09-28.html')
+        self.app.finalize_nav = lambda: {'status': 'NAV_FINALIZED', 'point': {'session_id': 'another-session'}}
+        with self.assertRaisesRegex(HumanRequired, 'different exchange session'):
+            self.service._dispatch({'source': 'scheduler', 'kind': 'finalize_and_report',
+                                    'session_id': session.session_id}, 'mismatched-session')
+
     def test_daily_finalization_retries_durably_then_queues_one_success_report(self):
         self.service.scheduler['enabled'] = True
+        self.app.store.set('paused', True)
+        self.app.store.set('discretionary_schedule', False)
         session = self.app.bundle.calendar.sessions[0]
         self.now = session.closes_at + timedelta(minutes=30)
         self.assertEqual(self.service.queue_tick(), 1)
@@ -627,6 +678,19 @@ class ServiceIntegrationTests(unittest.TestCase):
             "SELECT payload FROM requests WHERE request_key LIKE 'service:schedule:%'")]
         self.assertTrue(any(row['kind'] == 'full_review' for row in rows))
         self.assertTrue(all('expires_at' in row for row in rows))
+
+    def test_disclosure_collection_continues_when_reviews_are_paused_or_unscheduled(self):
+        self.service.scheduler['enabled'] = True
+        for paused, scheduled in ((True, True), (False, False)):
+            with self.subTest(paused=paused, scheduled=scheduled):
+                self.app.store.set('paused', paused)
+                self.app.store.set('discretionary_schedule', scheduled)
+                self.app.refresh = lambda: self.app.bundle
+                self.assertEqual(self.service.queue_tick(), 1)
+                self.assertTrue(self.service.run_once(review=True))
+                self.assertEqual(self.last_result()['status'], 'COLLECTED')
+                self.assertEqual(self.app.review_calls, 0)
+                self.now += timedelta(minutes=3)
 
     def test_scheduled_review_deadline_is_durable_before_worker_claim(self):
         self.service.scheduler['enabled'] = True

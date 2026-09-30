@@ -183,7 +183,7 @@ class Service:
             seen = {row['request_key'][len('service:schedule:'):] for row in scheduled}
             for row in scheduled:
                 result = json.loads(row['result']) if row['result'] else {}
-                if (self.scheduler['enabled'] and discretionary and row['status'] == 'COMPLETE'
+                if (self.scheduler['enabled'] and row['status'] == 'COMPLETE'
                         and row['request_key'].startswith('service:schedule:' + session.session_id + ':')
                         and result.get('status') == 'NAV_NOT_FINALIZED' and result.get('retry_at')
                         and aware_time(result['retry_at']) <= now
@@ -205,6 +205,7 @@ class Service:
             if intent.kind in PROTECTION and not self.config.app['monitoring']['enabled']:
                 continue
             payload = {'source': 'scheduler', 'kind': intent.kind, **intent.payload,
+                       'session_id': session.session_id,
                        'due_at': intent.due_at.isoformat(), 'expires_at': intent.expires_at.isoformat()}
             # A worker must not claim the request before its deadline is durable.
             with self.store.lock:
@@ -524,12 +525,16 @@ class Service:
             if finalization['status'] == 'NAV_NOT_FINALIZED':
                 return {'status': 'NAV_NOT_FINALIZED', 'finalization': finalization,
                         'retry_at': (self.clock() + timedelta(minutes=5)).isoformat()}
-            return {**self._report(), 'finalization': finalization}
+            session_id = finalization.get('point', {}).get('session_id') or finalization.get('session_id') or payload.get('session_id')
+            if payload.get('session_id') and session_id != payload['session_id']:
+                raise HumanRequired('Daily finalization returned a different exchange session')
+            return {**self._report(session_id=session_id), 'finalization': finalization}
         raise ValueError('Unknown typed service request')
 
-    def _report_data(self):
+    def _report_data(self, *, session_id=None):
         now = self.clock()
-        day = now.astimezone(ZoneInfo('Asia/Seoul')).date()
+        report_at = self.app.bundle.calendar.session(session_id).opens_at if session_id else now
+        day = report_at.astimezone(ZoneInfo('Asia/Seoul')).date()
         start = datetime.combine(day, time(), ZoneInfo('Asia/Seoul')).astimezone(timezone.utc)
         end = start + timedelta(days=1)
         with self.store.lock:
@@ -585,8 +590,8 @@ class Service:
                     'diagnostics': [{'at': row['created_at'], 'kind': row['kind'], **row['payload']} for row in journal
                         if row['kind'] in {'ACCOUNT_INCOMPLETE', 'ACCOUNT_RECOVERED', 'MONITOR_DEGRADED', 'MONITOR_RECOVERED', 'SERVICE_WORKER_FAILED', 'MODEL_OUTCOME'}]}
 
-    def _report(self):
-        data = self._report_data()
+    def _report(self, *, session_id=None):
+        data = self._report_data(session_id=session_id)
         directory = self.config.state_dir / 'reports' / data['date']
         paths = write_report(data, directory / 'daily.json', directory / 'daily.html', '일일 판단·성과')
         document = {'filename': f"daily-{data['date']}.html", 'content': Path(paths['html']).read_text(encoding='utf-8')}
@@ -617,6 +622,8 @@ class Service:
         tg = self.config.app['telegram']
         route = payload.get('route') or tg['route']
         chat = payload.get('chat_id')
+        if chat is None:
+            chat = tg.get('default_chat_id')
         if chat is None and len(tg['allowed_chat_ids']) == 1:
             chat = tg['allowed_chat_ids'][0]
         try:

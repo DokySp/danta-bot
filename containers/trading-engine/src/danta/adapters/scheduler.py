@@ -28,7 +28,9 @@ class SchedulePlanner:
         for job in self.jobs:
             kind, trigger = job["kind"], job["trigger"]
             protective = kind in {"risk_monitor", "reconcile", "time_limit_exit"}
-            if not protective and (not enabled or not discretionary_enabled):
+            if not protective and not enabled:
+                continue
+            if kind in {"full_review", "event_review"} and not discretionary_enabled:
                 continue
             trigger_type = trigger["type"]
             due_times = []
