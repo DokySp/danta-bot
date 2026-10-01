@@ -180,6 +180,8 @@ STATES = {
     'STREAM_NOT_READY': '실시간 시세 첫 수신 대기', 'STREAM_CONNECTION_FAILED': '실시간 시세 연결 끊김',
     'STREAM_SESSION_INVALID': '정규장 시세 조건 불일치',
     'PROCESS_FAILED': 'Codex 실행 실패', 'MODEL_FAILED': '모델 실행 실패', 'CODEX_LOGIN_REQUIRED': 'Codex 로그인 확인 필요',
+    'INPUT_INVALID': 'AI 입력 검증 실패 · 모델 호출 전 중단', 'MODEL_INPUT_INVALID': 'AI 입력 검증 실패 · 모델 호출 전 중단',
+    'SNAPSHOT_VALIDATION': '모델 호출 전 입력 검사', 'INVALID_SNAPSHOT_FIELDS': 'AI 입력 항목과 허용 규격 불일치',
     'AUTHENTICATED': '로그인 확인됨', 'QUOTA_EXHAUSTED': '모델 사용 한도 소진', 'TIMEOUT': '응답 시간 초과',
     'AUTHENTICATED_AT_STARTUP': '시작 시 로그인 확인됨', 'AUTH_FAILED': '인증 확인 실패',
     'AUTH_MODE_MISMATCH': '저장된 로그인 방식과 엔진 설정 불일치', 'AUTH_STORAGE_PERMISSION': '인증 저장소 접근 권한 확인 필요',
@@ -431,7 +433,10 @@ def render_notification(payload, *, symbols=None) -> str:
                 lines.append('현금 대조 문제: ' + _value(cash['reason']))
         diagnostic = data.get('model_diagnostic') or {}
         if data.get('model_status') not in {'SUCCESS', 'NOT_CALLED', None} and diagnostic:
-            lines.append('모델 진단: ' + _value(diagnostic.get('category')) + ' / 종료 코드 ' + str(diagnostic.get('exit_code', '미확인')))
+            if diagnostic.get('stage'):
+                lines.append('모델 진단: ' + _value(diagnostic['stage']) + ' / ' + _value(diagnostic.get('reason')))
+            else:
+                lines.append('모델 진단: ' + _value(diagnostic.get('category')) + ' / 종료 코드 ' + str(diagnostic.get('exit_code', '미확인')))
         lines += ['전략 현금: ' + _amount(data.get('cash_krw')), f"보유 {len(data['holdings'])}종목 · 진행 중 주문 {len(data.get('working_orders', []))}건"]
         for row in data['holdings']:
             lines.append('• ' + _name(row, symbols) + ' ' + _amount(row.get('quantity'), '주'))

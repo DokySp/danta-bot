@@ -393,7 +393,10 @@ class CodexAdapter:
         now = datetime.now(timezone.utc)
         if block and (block.get("reset_at") is None or datetime.fromisoformat(block["reset_at"]) > now):
             return ModelResult("QUOTA_CIRCUIT_OPEN")
-        validate_snapshot(frozen_input)
+        try:
+            validate_snapshot(frozen_input)
+        except AdapterError as error:
+            return ModelResult("INPUT_INVALID", diagnostic={"stage": "SNAPSHOT_VALIDATION", "reason": error.code})
         frozen_text = json.dumps(frozen_input, sort_keys=True, ensure_ascii=False)
         repairs = retries = attempts = 0
         while True:

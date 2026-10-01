@@ -16,7 +16,7 @@ ID_TOOLS = {"get_event": ("events", "event_id"), "get_fact": ("facts", "fact_id"
 SNAPSHOT_FIELDS = frozenset({"schema_version", "run_id", "created_at", "config_hash", "strategy_hash", "code_id", "session_id",
     "review_scope", "reviewed_positions", "strategy_contract", "portfolio", "theses", "events", "facts", "candidates",
     "pending_orders", "missing_data", "output_contract", "material_hash", "input_snapshot_id", "tool_scope", "tool_records", "conversation",
-    "account_context", "attachments"})
+    "account_context", "attachments", "review_targets", "reentry_theses"})
 RECORD_FIELDS = {"events": set(EventRecord.model_fields), "facts": set(MarketFact.model_fields),
                  "candidates": set(Candidate.model_fields), "theses": set(InvestmentThesis.model_fields)}
 DOCUMENT_FIELDS = {"fact_id", "instrument_id", "source", "sha256", "content", "receipt_id", "available_at", "interpretation_status"}
@@ -96,6 +96,18 @@ def validate_snapshot(snapshot):
             raise AdapterError("INVALID_SNAPSHOT_RECORDS")
         for record in values:
             _record_in_scope(collection, record, instrument_ids)
+    previous = snapshot.get("reentry_theses", [])
+    if not isinstance(previous, list):
+        raise AdapterError("INVALID_SNAPSHOT_RECORDS")
+    for record in previous:
+        _record_in_scope("theses", record, instrument_ids)
+    if "review_targets" in snapshot:
+        positions = snapshot.get("reviewed_positions", [])
+        expected = {"candidate_ids": [record["instrument"]["instrument_id"] for record in snapshot.get("candidates", [])],
+                    "position_ids": positions}
+        if (not isinstance(positions, list) or any(not isinstance(item, str) or item not in instrument_ids for item in positions)
+                or snapshot["review_targets"] != expected):
+            raise AdapterError("INVALID_REVIEW_TARGETS")
     records = snapshot.get("tool_records", {})
     if not isinstance(records, dict) or set(records) - {*RECORD_FIELDS, "bars", "official_evidence"}:
         raise AdapterError("INVALID_TOOL_RECORDS")

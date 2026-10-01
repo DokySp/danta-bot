@@ -1425,7 +1425,7 @@ class ExternalRuntime:
                     **{key: frozen[key] for key in ("created_at", "strategy_hash", "config_hash", "code_id") if key in frozen}}
         with store.transaction():
             health = {"status": result.status, "checked_at": self.clock().isoformat(),
-                "purpose": purpose, "diagnostic": attempts[-1].get("diagnostic") if attempts else None}
+                "purpose": purpose, "diagnostic": result.diagnostic or (attempts[-1].get("diagnostic") if attempts else None)}
             store.set("model_health", health)
             store.set('model_health:' + purpose, health)
             for index,attempt in enumerate(attempts,1):
@@ -1433,6 +1433,7 @@ class ExternalRuntime:
                     "attempt_number":index,"usage_scope":"attempt"})
             store.event(frozen["run_id"],"MODEL_OUTCOME",{**metadata,"record_type":"MODEL_OUTCOME","status":result.status,
                 "attempt_count":result.attempts,"usage":result.usage,"usage_scope":"last_attempt",
+                "diagnostic": health["diagnostic"],
                 "reset_at":result.reset_at.isoformat() if result.reset_at else None,
                 "started_at":started_at.isoformat(),"completed_at":self.clock().isoformat()})
 

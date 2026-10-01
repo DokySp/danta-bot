@@ -250,6 +250,19 @@ class AdapterContracts(unittest.TestCase):
                "source": "https://issuer.invalid/report", "sha256": "0" * 64}
         self.assertEqual(MarketTools({"tool_scope": scope, "tool_records": {"facts": {"document1": raw}}}).call("get_fact", {"fact_id": "document1"})["data"], raw)
 
+    def test_review_targets_and_reentry_theses_remain_within_frozen_scope(self):
+        snapshot = {'tool_scope': {'instrument_ids': ['TEST:AAA']},
+                    'candidates': [{'instrument': {'instrument_id': 'TEST:AAA'}}],
+                    'reviewed_positions': [], 'review_targets': {'candidate_ids': ['TEST:AAA'], 'position_ids': []},
+                    'reentry_theses': [{'thesis_id': 'previous', 'instrument_id': 'TEST:AAA'}]}
+        validate_snapshot(snapshot)
+        for change, reason in (
+            ({'review_targets': {'candidate_ids': [], 'position_ids': []}}, 'INVALID_REVIEW_TARGETS'),
+            ({'reentry_theses': [{'thesis_id': 'foreign', 'instrument_id': 'TEST:BBB'}]}, 'INSTRUMENT_NOT_ALLOWED'),
+            ({'reentry_theses': [{'thesis_id': 'previous', 'instrument_id': 'TEST:AAA', 'payload': 'unvalidated'}]}, 'UNKNOWN_SNAPSHOT_RECORD_FIELD')):
+            with self.subTest(reason=reason), self.assertRaisesRegex(AdapterError, reason):
+                validate_snapshot(dict(snapshot, **change))
+
     def test_original_documents_are_discoverable_searchable_and_paged(self):
         scope = {"instrument_ids": ["TEST:AAA"], "start": "2026-09-01", "end": "2026-09-10", "official_domains": ["issuer.invalid"]}
         body = '가' * 100000 + '계약금액 확인' + '나' * 100000
@@ -465,8 +478,10 @@ class AdapterContracts(unittest.TestCase):
             attempts_before = list(Path(directory).iterdir())
             for malicious in ({"facts": [{"apiKey": "synthetic-canary"}]},
                 {"tool_scope": {"instrument_ids": ["TEST:AAA"]}, "events": [{"event_id": "e1", "instrument_id": "TEST:BBB"}]}):
-                with self.assertRaises(AdapterError):
-                    adapter.run(malicious, {}, **args)
+                rejected = adapter.run(malicious, {}, **args)
+                self.assertEqual((rejected.status, rejected.attempts), ("INPUT_INVALID", 0))
+                self.assertEqual(rejected.diagnostic['stage'], 'SNAPSHOT_VALIDATION')
+                self.assertNotIn('synthetic-canary', json.dumps(rejected.diagnostic))
             self.assertEqual(len(calls), 1)
             self.assertEqual(list(Path(directory).iterdir()), attempts_before)
             with self.assertRaisesRegex(AdapterError, "MODEL_CONFIGURATION_UNSET"):

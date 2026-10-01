@@ -938,7 +938,7 @@ class Application:
             if getattr(error, 'diagnostic', None):
                 result['diagnostics'] = [{'reason': getattr(error, 'code', type(error).__name__), **error.diagnostic}]
             if result["model_status"] == "RUNNING":
-                result["model_status"] = "MODEL_FAILED"
+                result["model_status"] = "INPUT_INVALID" if getattr(error, 'code', None) == "MODEL_INPUT_INVALID" else "MODEL_FAILED"
             if result['decision_status'] == 'REVALIDATING':
                 result['decision_status'] = 'REVALIDATION_FAILED'
             raise
@@ -1081,7 +1081,8 @@ class Application:
             (self.store.get('nav_risk_unverified', False), 'NAV_RISK_UNVERIFIED')) if condition]
         review_status = ('PAUSED' if paused else 'ACCOUNT_INCOMPLETE' if not self.store.get('reconciled') else
                          'MONITOR_DEGRADED' if self.store.get('monitor_degraded', False) else
-                         'OUTSIDE_SESSION' if self.bundle.calendar.active(self.clock()) is None else 'ENABLED')
+                         'OUTSIDE_SESSION' if self.bundle.calendar.active(self.clock()) is None else
+                         'INPUT_INVALID' if self.store.get('model_health:review', {}).get('status') == 'INPUT_INVALID' else 'ENABLED')
         return {"mode": self.config.mode, "config_hash": self.config.config_hash, "code_id": self.code_id,
                 "as_of": self.bundle.now.isoformat(),
                 'status_checked_at': self.clock().isoformat(),

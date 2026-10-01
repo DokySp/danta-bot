@@ -22,9 +22,10 @@ import yaml
 
 from danta.adapters import AdapterError, FetchResult, HttpResponse
 from danta.adapters.kis import KisAdapter, KisCredentials
-from danta.application import Application
+from danta.application import Application, fixture_decision
 from danta.config import HumanRequired, load_config, canonical, aware_time
-from danta.decision import DecisionProposal
+from danta.decision import DecisionProposal, freeze_input
+from danta.reporting import render_notification
 from danta.runtime import KisBrokerPort, RuntimeState, build_external_runtime
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -825,14 +826,17 @@ class ExternalRuntimeContracts(unittest.TestCase):
             self.assertNotIn("KIS_APP_SECRET",env)
             self.assertNotIn("FAKE_SECRET_NOT_A_CREDENTIAL",input)
             frozen = json.loads((Path(cwd)/"input.json").read_text())
-            value = {"schema_version":1,"run_id":frozen["run_id"],"input_snapshot_id":frozen["input_snapshot_id"],
-                     "account_state_version":1,"review_scope":"FULL","candidate_reviews":[],"position_reviews":[],"human_question":None}
+            self.assertEqual(frozen['review_targets']['position_ids'], ['TEST:AAA'])
+            self.assertEqual(frozen['reentry_theses'], [])
+            value = fixture_decision(frozen)
             Path(command[command.index("--output-last-message")+1]).write_text(json.dumps(value))
             return 0,json.dumps({"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}),""
         runtime.codex.runner = fake_runner
-        frozen = {"run_id":"FAKE_RUN","input_snapshot_id":"FAKE_INPUT","portfolio":{"account_state_version":1},
-                  "review_scope":"FULL","reviewed_positions":[],"events":[],"facts":[],"candidates":[],"theses":[],
-                  "output_contract": DecisionProposal.model_json_schema()}
+        frozen = freeze_input(run_id='FAKE_RUN', config_hash=self.config.config_hash,
+            strategy_hash=self.config.strategy_hash, code_id=app.code_id, now=self.now,
+            session_id=self.now.date().isoformat(), profile=app.profile,
+            portfolio=self.case[-1].model_copy(update={'holdings': [helpers.synthetic_holding(self.case)]}),
+            candidates=[], events=[], facts=[], theses=[helpers.synthetic_thesis(self.case)])
         result = decide(frozen)
         self.assertEqual(result["run_id"],"FAKE_RUN")
         self.assertEqual(len(calls),1)
@@ -840,6 +844,46 @@ class ExternalRuntimeContracts(unittest.TestCase):
         self.assertEqual([kind for kind,_ in rows],["MODEL_ATTEMPT","MODEL_OUTCOME"])
         self.assertEqual(rows[0][1]["usage"],{"input_tokens":1,"output_tokens":1})
         self.assertEqual(rows[1][1]["status"],"SUCCESS")
+
+    def test_invalid_snapshot_records_zero_attempts_and_replaces_stale_model_health(self):
+        bundle, broker, decide, refresh = self._factory()
+        app = Application(self.config, bundle, broker=broker, decide=decide, refresh=refresh, approval=self.approval)
+        self.addCleanup(app.close)
+        app.reconcile()
+        runtime = decide.__self__
+        runtime.clock = lambda: datetime.now(timezone.utc)
+        frozen = freeze_input(run_id='INPUT_FAILURE', config_hash=self.config.config_hash,
+            strategy_hash=self.config.strategy_hash, code_id=app.code_id, now=self.now,
+            session_id=self.now.date().isoformat(), profile=app.profile, portfolio=app.portfolio(),
+            candidates=[], events=[], facts=[], theses=[])
+        stale = {'status': 'TIMEOUT', 'checked_at': '2000-01-01T00:00:00+00:00', 'purpose': 'review'}
+        app.store.set('model_health', stale)
+        app.store.set('model_health:review', stale)
+        with patch.object(runtime.codex, 'runner', side_effect=AssertionError('invalid input must not reach CLI')):
+            with self.assertRaisesRegex(AdapterError, 'MODEL_INPUT_INVALID'):
+                decide(dict(frozen, unexpected_field='synthetic-canary'))
+        status = app.status()
+        self.assertEqual(status['model_status'], 'INPUT_INVALID')
+        self.assertEqual(status['review_status'], 'INPUT_INVALID')
+        self.assertNotEqual(status['model_checked_at'], stale['checked_at'])
+        self.assertEqual(status['review_model']['diagnostic'],
+                         {'stage': 'SNAPSHOT_VALIDATION', 'reason': 'INVALID_SNAPSHOT_FIELDS'})
+        self.assertIn('AI 입력 검증 실패', render_notification(status))
+        self.assertNotIn('응답 시간 초과', render_notification(status))
+        rows = list(app.store.db.execute("SELECT kind,payload FROM journal WHERE kind LIKE 'MODEL_%' ORDER BY sequence"))
+        self.assertEqual([row['kind'] for row in rows], ['MODEL_OUTCOME'])
+        outcome = json.loads(rows[0]['payload'])
+        self.assertEqual((outcome['status'], outcome['attempt_count']), ('INPUT_INVALID', 0))
+        self.assertEqual(outcome['diagnostic']['reason'], 'INVALID_SNAPSHOT_FIELDS')
+        self.assertNotIn('synthetic-canary', rows[0]['payload'])
+        self.assertFalse(list((self.config.state_dir / 'model-attempts').glob('*/*/result.json')))
+        def runner(command, **kwargs):
+            Path(kwargs['cwd'], 'final.json').write_text(json.dumps(fixture_decision(frozen)))
+            return 0, '{"type":"turn.completed"}', ''
+        runtime.codex.runner = runner
+        decide(frozen)
+        self.assertEqual(app.status()['review_model']['status'], 'SUCCESS')
+        self.assertEqual(app.status()['review_status'], 'ENABLED')
 
     def test_decide_requires_bound_journal_before_model_call(self):
         _bundle,_broker,decide,_refresh = self._factory()
