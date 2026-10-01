@@ -14,7 +14,7 @@ model:
   model_id: gpt-6-astra
   reasoning_effort: xhigh
   auth_mode: chatgpt
-  timeout_seconds: 600
+  timeout_seconds: 1200
   transient_retries: 1
   retry_delay_seconds: 5
   schema_repair_attempts: 1

@@ -48,7 +48,7 @@ simulation slippage 값은 거부한다. 평가 비교군·60/30/20 표본·boot
 | 영역 | 기본값 / 의미 | 외부 실행에서 필요한 확인 |
 |---|---|---|
 | app | `offline`, `Asia/Seoul`, 계좌 별칭 null, `127.0.0.1:8080` | 실제 모드/계좌와 bind/수신 경계 |
-| model | `codex_cli`, `gpt-6-astra`/`xhigh`/`chatgpt`, attempt별 timeout 600초 | 다음 호출에서 모델·추론 설정 적용. 실제 로그인·모델 접근·격리 증거·모델 사용 승인 검증 |
+| model | `codex_cli`, `gpt-6-astra`/`xhigh`/`chatgpt`, attempt별 timeout 1200초(20분) | 다음 호출에서 모델·추론 설정 적용. 실제 로그인·모델 접근·격리 증거·모델 사용 승인 검증 |
 | model 재시도 | transient 1회/5초, schema 교정 1회, fallback false | quota reset 미확인은 운영자 확인, 다른 모델 자동 교체 없음 |
 | broker | `kis`, 환경/manifest/rate-limit null | 모의/실전 endpoint, 계좌 귀속, 제공자 필드·한도 검증 |
 | broker 비밀 참조 | `KIS_ACCOUNT_REF`, `KIS_APP_KEY`, `KIS_APP_SECRET` 이름 | 값은 private secrets.yaml에서만 읽으며 정책 YAML·image에는 넣지 않음 |

@@ -229,7 +229,7 @@ def probe_cli(executable="codex"):
 
 class CodexAdapter:
     def __init__(self, *, executable="codex", model_id=None, reasoning_effort=None, auth_mode=None, auth_home=None,
-                 mode="offline", authorize=None, timeout_seconds=600, runner=None, sleep=time.sleep, circuit_state=None, persist_circuit=None,
+                 mode="offline", authorize=None, timeout_seconds=1200, runner=None, sleep=time.sleep, circuit_state=None, persist_circuit=None,
                  isolation_probe=None, transient_retries=1, retry_delay_seconds=5, schema_repair_attempts=1):
         self.executable, self.model_id, self.reasoning_effort = executable, model_id, reasoning_effort
         self.auth_mode, self.auth_home, self.mode, self.authorize = auth_mode, auth_home, mode, authorize

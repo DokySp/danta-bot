@@ -561,13 +561,13 @@ class AdapterContracts(unittest.TestCase):
                     instant[0] += timedelta(seconds=seconds)
                 def runner(command, **kwargs):
                     calls.append(kwargs['timeout'])
-                    instant[0] += timedelta(seconds=590)
+                    instant[0] += timedelta(seconds=1190)
                     if len(calls) == 1:
                         return 1, '{"type":"turn.failed","error":{"message":"503 server_error"}}', ''
                     Path(command[command.index('--output-last-message') + 1]).write_text('invalid' if len(calls) == 2 else '{"ok":true}')
                     return 0, '{"type":"turn.completed"}', ''
                 runner.fixture_only = True
-                adapter = CodexAdapter(timeout_seconds=600, transient_retries=retries, retry_delay_seconds=7,
+                adapter = CodexAdapter(timeout_seconds=1200, transient_retries=retries, retry_delay_seconds=7,
                                        schema_repair_attempts=repairs, runner=runner, sleep=sleep)
                 with patch('danta.adapters.codex_cli.datetime', Clock):
                     result = adapter.run({}, {}, attempt_root=directory, prompt='fixture',
@@ -575,11 +575,11 @@ class AdapterContracts(unittest.TestCase):
                         expires_at=started + timedelta(seconds=adapter.run_budget_seconds))
                 self.assertEqual(result.status, expected)
                 self.assertEqual(result.attempts, 1 + retries + (repairs if retries else 0))
-                self.assertEqual(calls, [600] * result.attempts)
+                self.assertEqual(calls, [1200] * result.attempts)
                 self.assertEqual(delays, [7] if retries else [])
                 if expected == 'SUCCESS':
                     self.assertEqual(result.decision, {'ok': True})
-                    self.assertGreater((instant[0] - started).total_seconds(), 1700)
+                    self.assertGreater((instant[0] - started).total_seconds(), 3500)
 
     def test_O21_transient_retries_once_with_attempt_results_and_usage(self):
         with tempfile.TemporaryDirectory() as directory:

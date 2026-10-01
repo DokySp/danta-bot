@@ -934,7 +934,7 @@ class ExternalRuntimeContracts(unittest.TestCase):
         from danta.adapters.codex_cli import ModelResult
         app_path = self.config.directory / 'app.yaml'
         data = yaml.safe_load(app_path.read_text())
-        data['model'].update(timeout_seconds=600, transient_retries=1, retry_delay_seconds=7, schema_repair_attempts=1)
+        data['model'].update(timeout_seconds=1200, transient_retries=1, retry_delay_seconds=7, schema_repair_attempts=1)
         app_path.write_text(yaml.safe_dump(data))
         self.config = load_config(self.config.directory)
         self.approval['config_hash'] = self.config.config_hash
@@ -954,9 +954,9 @@ class ExternalRuntimeContracts(unittest.TestCase):
         with patch.object(runtime.codex, 'run', side_effect=run):
             decide(frozen)
             runtime.chat(request_id='BUDGET_CHAT', session_id='fixture', messages=[{'role':'user', 'content':'fixture'}])
-        self.assertEqual(runtime.codex.timeout, 600)
+        self.assertEqual(runtime.codex.timeout, 1200)
         self.assertEqual(runtime.codex.retry_delay, 7)
-        self.assertEqual(captured, [now + timedelta(seconds=1837)] * 2)
+        self.assertEqual(captured, [now + timedelta(seconds=3637)] * 2)
         self.assertEqual(runtime.profile['orders']['decision_max_age_seconds'], 120)
 
     def test_semantic_callback_uses_actual_completion_after_long_model_call(self):
