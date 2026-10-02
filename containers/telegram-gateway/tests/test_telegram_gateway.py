@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 import os
+import socket
 import sys
 import tempfile
 import unittest
@@ -189,6 +190,34 @@ class GatewayEngineClientTest(unittest.TestCase):
         self.assertEqual(request.full_url, "http://receiver:8080/version")
         self.assertIsNone(request.data)
 
+    def test_connection_failures_preserve_safe_cause_and_timing_without_retry(self) -> None:
+        for cause, expected in ((ConnectionRefusedError(111, 'private-value'), 'CONNECTION_REFUSED'),
+                                (socket.gaierror(-2, 'private-host'), 'DNS_FAILURE'),
+                                (TimeoutError('private-url'), 'TIMEOUT')):
+            client = telegram_gateway.TradingEngineClient(2)
+            client._opener = Mock()
+            client._opener.open.side_effect = URLError(cause)
+            with self.assertLogs(level='WARNING') as logs, self.assertRaises(telegram_gateway.EngineRequestError) as raised:
+                client.post_message('http://receiver/telegram', {})
+            detail = raised.exception.diagnostic
+            self.assertEqual((detail['reason'], detail['method'], detail['endpoint']), (expected, 'POST', '/telegram'))
+            self.assertIn('occurred_at', detail)
+            self.assertGreaterEqual(detail['elapsed_seconds'], 0)
+            self.assertEqual(client._opener.open.call_count, 1)
+            rendered = telegram_gateway.engine_failure_text(raised.exception)
+            self.assertIn(expected, rendered)
+            self.assertNotIn('private', rendered + str(detail) + str(logs.output))
+
+    def test_invalid_success_response_is_not_echoed_as_private_text(self) -> None:
+        client = telegram_gateway.TradingEngineClient(2)
+        client._opener = Mock()
+        for raw in (b'private-provider-body', b'"private-provider-body"', b''):
+            client._opener.open.return_value = io.BytesIO(raw)
+            with self.assertRaises(telegram_gateway.EngineRequestError) as raised:
+                client.post_message('http://receiver/telegram', {})
+            self.assertEqual(raised.exception.diagnostic['reason'], 'INVALID_RESPONSE')
+            self.assertNotIn('private', str(raised.exception.diagnostic))
+
     def test_failures_do_not_expose_response_body_or_connection_details(self) -> None:
         client = telegram_gateway.TradingEngineClient(2)
         client._opener = Mock()
@@ -241,10 +270,10 @@ class GatewayEngineClientTest(unittest.TestCase):
         self.assertEqual(raised.exception.reply_text, reply)
         self.assertNotIn('private', str(raised.exception))
 
-    def test_preserves_plain_text_reply(self) -> None:
+    def test_preserves_structured_text_reply(self) -> None:
         client = telegram_gateway.TradingEngineClient(2)
         client._opener = Mock()
-        client._opener.open.return_value = io.BytesIO(b"plain text reply")
+        client._opener.open.return_value = io.BytesIO(b'{"reply_text":"plain text reply"}')
         self.assertEqual(client.post_message("http://receiver/telegram", {}), {"reply_text": "plain text reply"})
 
     def test_http_does_not_follow_redirect_or_environment_proxy(self) -> None:
@@ -811,7 +840,7 @@ class GatewayAttachmentFlowTest(unittest.TestCase):
                 if isinstance(readiness, Exception):
                     reply = client.return_value.send_message.call_args.args[1]
                     self.assertNotIn('private', reply)
-                    self.assertIn("로그를 확인", reply)
+                    self.assertIn("UNCLASSIFIED_FAILURE", reply)
                 elif not readiness["ready"]:
                     reply = client.return_value.send_message.call_args.args[1]
                     self.assertIn("WAITING_FOR_CONFIGURATION", reply)

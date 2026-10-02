@@ -8,6 +8,8 @@ import os
 import re
 import secrets
 import signal
+import socket
+import ssl
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1483,6 +1485,31 @@ class EngineRequestRejected(RuntimeError):
                            else '엔진이 요청을 실행하지 못했습니다. /status로 상태를 확인해 주세요.')
 
 
+class EngineRequestError(RuntimeError):
+    def __init__(self, message, diagnostic):
+        super().__init__(message)
+        self.diagnostic = diagnostic
+
+
+def engine_failure_text(error):
+    diagnostic = getattr(error, 'diagnostic', {})
+    labels = {'CONNECTION_REFUSED': '엔진 연결 거부', 'DNS_FAILURE': '엔진 주소 조회 실패',
+              'TIMEOUT': '엔진 응답 시간 초과', 'TLS_FAILURE': '엔진 보안 연결 실패',
+              'CONNECTION_FAILURE': '엔진 연결 중단', 'NETWORK_FAILURE': '엔진 네트워크 오류',
+              'HTTP_FAILURE': '엔진 HTTP 오류', 'INVALID_RESPONSE': '엔진 응답 형식 오류'}
+    code = diagnostic.get('reason', 'UNCLASSIFIED_FAILURE')
+    parts = [labels.get(code, '엔진 요청 처리 오류') + ' (' + code + ')']
+    if 'http_status' in diagnostic:
+        parts.append('HTTP ' + str(diagnostic['http_status']))
+    if 'endpoint' in diagnostic:
+        parts.append(diagnostic.get('method', 'GET') + ' ' + diagnostic['endpoint'])
+    if 'elapsed_seconds' in diagnostic:
+        parts.append(str(diagnostic['elapsed_seconds']) + '초')
+    if 'occurred_at' in diagnostic:
+        parts.append('발생 시각: ' + diagnostic['occurred_at'])
+    return ' · '.join(parts)
+
+
 class TradingEngineClient:
     def __init__(self, timeout: int) -> None:
         self.timeout = timeout
@@ -1506,12 +1533,17 @@ class TradingEngineClient:
     def get_readiness(self, url: str) -> dict[str, Any]:
         target = self.route_target(url)
         result = self._request(Request(target._replace(path="/readyz").geturl(), method="GET"), allow_unready=True)
-        if (not result or type(result.get("ready")) is not bool
-                or not isinstance(result.get("status"), str) or not re.fullmatch(r"[A-Z_]{1,64}", result["status"])
-                or result["ready"] != (result["status"] == "READY")
-                or not isinstance(result.get("issues"), list) or len(result["issues"]) > 20
-                or any(not isinstance(issue, str) or len(issue) > 500 for issue in result["issues"])):
-            raise RuntimeError("Invalid engine readiness response")
+        detail = result.get('diagnostic')
+        if isinstance(detail, dict):
+            selected = {key: value for key, value in detail.items() if key in ('reason', 'error_type', 'stage')
+                        and isinstance(value, str) and re.fullmatch(r'[A-Za-z][A-Za-z0-9_:]{0,100}', value)}
+            try:
+                selected['occurred_at'] = datetime.fromisoformat(detail['occurred_at']).astimezone(KST).isoformat()
+            except (KeyError, TypeError, ValueError):
+                pass
+            if selected:
+                logging.warning('engine runtime failure %s', json.dumps(selected, ensure_ascii=False))
+                result['issues'] = [*result['issues'], '원인 진단: ' + ' · '.join(selected.values())]
         return {key: result[key] for key in ("ready", "status", "issues")}
 
     def post_message(self, url: str, payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -1527,34 +1559,57 @@ class TradingEngineClient:
             raise EngineRequestRejected(result.get('reply_text'))
         return result
 
-    def _request(self, request: Request, *, allow_unready=False, allow_rejection=False) -> dict[str, Any] | None:
-        try:
-            with self._opener.open(request, timeout=self.timeout) as response:
-                raw = response.read().decode("utf-8")
-        except HTTPError as exc:
-            with exc:
-                if allow_unready and exc.code == 503:
-                    raw = exc.read().decode("utf-8")
-                elif allow_rejection and 400 <= exc.code < 600:
-                    try:
-                        rejected = json.loads(exc.read(65537).decode('utf-8'))
-                    except (ValueError, UnicodeDecodeError):
-                        rejected = None
-                    if isinstance(rejected, dict) and rejected.get('accepted') is False:
-                        return {'accepted': False, 'reply_text': rejected.get('reply_text')}
-                    raise RuntimeError(f"trading-engine route failed: HTTP {exc.code}") from None
-                else:
-                    raise RuntimeError(f"trading-engine route failed: HTTP {exc.code}") from None
-        except URLError:
-            raise RuntimeError("trading-engine route unavailable") from None
+    def _request(self, request: Request, *, allow_unready=False, allow_rejection=False) -> dict[str, Any]:
+        started = time.monotonic()
+        endpoint = urlsplit(request.full_url).path
+        diagnostic = {'endpoint': endpoint, 'method': request.get_method(),
+                      'occurred_at': datetime.now(KST).isoformat()}
 
-        if not raw.strip():
-            return None
+        def failure(reason, message):
+            detail = {**diagnostic, 'reason': reason, 'elapsed_seconds': round(time.monotonic()-started, 3)}
+            logging.warning('engine request failure %s', json.dumps(detail, ensure_ascii=False))
+            return EngineRequestError(message, detail)
+
         try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            return {"reply_text": raw}
-        return parsed if isinstance(parsed, dict) else {"reply_text": raw}
+            try:
+                response = self._opener.open(request, timeout=self.timeout)
+            except HTTPError as error:
+                response = error
+            with response:
+                status = getattr(response, 'status', None) or getattr(response, 'code', None) or 200
+                diagnostic['http_status'] = status
+                raw = response.read(65537)
+            if len(raw) > 65536:
+                raise failure('INVALID_RESPONSE', 'Invalid engine response size')
+            try:
+                parsed = json.loads(raw.decode('utf-8'))
+            except (ValueError, UnicodeError):
+                parsed = None
+            if not 200 <= status < 300 and not (allow_unready and status == 503):
+                if allow_rejection and 400 <= status < 600 and isinstance(parsed, dict) and parsed.get('accepted') is False:
+                    return {'accepted': False, 'reply_text': parsed.get('reply_text')}
+                raise failure('HTTP_FAILURE', f'trading-engine route failed: HTTP {status}')
+            if endpoint == '/readyz':
+                if (not isinstance(parsed, dict) or type(parsed.get('ready')) is not bool
+                        or not isinstance(parsed.get('status'), str) or not re.fullmatch(r'[A-Z_]{1,64}', parsed['status'])
+                        or parsed['ready'] != (parsed['status'] == 'READY')
+                        or not isinstance(parsed.get('issues'), list) or len(parsed['issues']) > 20
+                        or any(not isinstance(issue, str) or len(issue) > 500 for issue in parsed['issues'])):
+                    raise failure('INVALID_RESPONSE', 'Invalid engine readiness response')
+            elif not isinstance(parsed, dict) or endpoint == '/version' and (not isinstance(parsed.get('version'), str) or not parsed['version']):
+                raise failure('INVALID_RESPONSE', 'Invalid engine response')
+            return parsed
+        except EngineRequestError:
+            raise
+        except OSError as error:
+            reason = getattr(error, 'reason', error)
+            code = ('TIMEOUT' if isinstance(reason, TimeoutError) else
+                    'CONNECTION_REFUSED' if isinstance(reason, ConnectionRefusedError) else
+                    'DNS_FAILURE' if isinstance(reason, socket.gaierror) else
+                    'TLS_FAILURE' if isinstance(reason, ssl.SSLError) else
+                    'CONNECTION_FAILURE' if isinstance(reason, ConnectionError) else 'NETWORK_FAILURE')
+            diagnostic['error_type'] = type(reason).__name__ if isinstance(reason, BaseException) else type(error).__name__
+            raise failure(code, 'trading-engine route unavailable') from None
 
 
 @dataclass(frozen=True)
@@ -2016,17 +2071,12 @@ class GatewayApp:
             except ValueError as error:
                 client.send_message(chat_id, f'첨부파일을 전달하지 못했습니다: {error}', parse_mode='')
                 return
-            except (OSError, RuntimeError):
-                logging.warning(
-                    "failed to submit cached Telegram attachment caption route=%s chat_id=%s",
-                    route.route_id,
-                    chat_id,
-                )
-                client.send_message(
-                    chat_id,
-                    "파일은 저장했지만 엔진 요청 결과를 확인하지 못했습니다. "
-                    "자동 재시도하지 않습니다. /status로 상태를 확인해 주세요.",
-                )
+            except (OSError, RuntimeError) as error:
+                logging.warning('engine attachment request failed error_type=%s', type(error).__name__)
+                reply_text = ('파일은 저장했지만 엔진 요청에 실패했습니다.\n' + engine_failure_text(error)
+                              + '\n요청 접수 여부가 불확실하므로 자동 재시도하지 않습니다.')
+                client.send_message(chat_id, reply_text, parse_mode='')
+                self.append_outbound_conversation_event(route, chat_id, 'sendMessage', reply_text, source_path='engine_error')
                 return
 
             if pending_attachments and response and response.get('accepted') is True:
@@ -2083,9 +2133,9 @@ class GatewayApp:
                 reply_text += f"\ntrading-engine: {version['version']}"
                 if isinstance(version.get("runtime_status"), str):
                     reply_text += f"\n엔진 상태: {version['runtime_status']}"
-            except (OSError, RuntimeError, ValueError):
-                logging.warning("engine version unavailable route=%s", route.route_id)
-                reply_text += "\ntrading-engine: 연결 또는 버전 확인 실패"
+            except (OSError, RuntimeError, ValueError) as error:
+                logging.warning("engine version unavailable route=%s error_type=%s", route.route_id, type(error).__name__)
+                reply_text += "\ntrading-engine: " + engine_failure_text(error)
             client.send_message(chat_id, reply_text, parse_mode="")
             self.append_outbound_conversation_event(route, chat_id, "sendMessage", reply_text, source_path="version")
             return
@@ -2099,9 +2149,9 @@ class GatewayApp:
                     reply_text = f"엔진 상태: {readiness['status']}"
                     if readiness["issues"]:
                         reply_text += "\n" + "\n".join(readiness["issues"])
-            except (OSError, RuntimeError, ValueError):
-                logging.warning("engine readiness unavailable route=%s", route.route_id)
-                reply_text = "엔진 준비 상태를 확인할 수 없습니다. 엔진·게이트웨이 로그를 확인해 주세요."
+            except (OSError, RuntimeError, ValueError) as error:
+                logging.warning("engine readiness unavailable route=%s error_type=%s", route.route_id, type(error).__name__)
+                reply_text = "엔진 준비 상태 조회 실패\n" + engine_failure_text(error)
             if reply_text:
                 client.send_message(chat_id, reply_text, parse_mode="")
                 self.append_outbound_conversation_event(route, chat_id, "sendMessage", reply_text, source_path="readiness")
@@ -2143,9 +2193,9 @@ class GatewayApp:
         except ValueError as error:
             client.send_message(chat_id, f'요청을 전달하지 못했습니다: {error}', parse_mode='')
             return
-        except (OSError, RuntimeError):
-            logging.warning("engine request failed route=%s", route.route_id)
-            reply_text = "엔진 요청 결과를 확인하지 못했습니다. 자동 재시도하지 않습니다. /status로 상태를 확인해 주세요."
+        except (OSError, RuntimeError) as error:
+            logging.warning("engine request failed route=%s error_type=%s", route.route_id, type(error).__name__)
+            reply_text = "엔진 요청 실패\n" + engine_failure_text(error) + "\n요청 접수 여부가 불확실하므로 자동 재시도하지 않습니다."
             client.send_message(chat_id, reply_text)
             self.append_outbound_conversation_event(route, chat_id, "sendMessage", reply_text, source_path="engine_error")
             return
