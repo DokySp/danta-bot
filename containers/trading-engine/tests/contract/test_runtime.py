@@ -524,14 +524,24 @@ class ExternalRuntimeContracts(unittest.TestCase):
                 if not release.wait(3):
                     raise AssertionError("Fixture account gate timed out")
             return {}
-        with patch.object(broker,"_supplements",side_effect=supplements),ThreadPoolExecutor(max_workers=1) as pool:
+        waiting = threading.Event()
+        original_wait = broker.snapshot_condition.wait
+        def wait(*args):
+            waiting.set()
+            return original_wait(*args)
+        with patch.object(broker, "_supplements", side_effect=supplements), \
+                patch.object(broker.snapshot_condition, 'wait', side_effect=wait), ThreadPoolExecutor(max_workers=2) as pool:
             pending = pool.submit(broker.snapshot)
             try:
                 self.assertTrue(entered.wait(2))
-                second = broker.snapshot()
+                shared = pool.submit(broker.snapshot)
+                self.assertTrue(waiting.wait(2))
             finally:
                 release.set()
             first = pending.result(timeout=2)
+            self.assertIs(shared.result(timeout=2), first)
+            second = broker.snapshot()  # A later fresh read observes the changed balance.
+
         for snapshot,quantity in ((first,3),(second,4)):
             self.assertTrue(snapshot["complete"] and snapshot["ownership_complete"])
             self.assertEqual(snapshot["broker_available_cash"],str(quantity*1000))
@@ -641,6 +651,15 @@ class ExternalRuntimeContracts(unittest.TestCase):
         self.assertEqual(preserved[0].available_at,first_available)
         self.assertEqual(coverage["KRX:000001"],"PARTIAL")
         self.assertIn({"source":"DART","reason":"TRANSPORT_FAILED"},runtime.disclosure_diagnostics)
+
+    def test_scheduled_disclosure_collection_does_not_refresh_broker_account_or_quotes(self):
+        bundle, _, decide, _ = self._factory()
+        runtime = decide.__self__
+        self.addCleanup(runtime.close)
+        with patch.object(runtime, '_account', side_effect=AssertionError('account census duplicated')), \
+                patch.object(runtime, '_quote', side_effect=AssertionError('quote duplicated')):
+            refreshed = runtime.collect_disclosures()
+        self.assertEqual(refreshed.data['account_snapshot'], bundle.data['account_snapshot'])
 
     def test_cached_disclosures_reparse_without_redownload_or_rejuvenating_old_evidence(self):
         bundle, _, decide, _ = self._factory()

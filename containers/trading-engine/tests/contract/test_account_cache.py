@@ -1,5 +1,7 @@
 """Idle account reuse never replaces fresh order/review reads."""
 import unittest
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -40,3 +42,30 @@ class AccountCacheContracts(unittest.TestCase):
         broker._snapshot = snapshot
         self.assertTrue(broker.snapshot()['complete'])
         self.assertIsNone(broker.snapshot_cache)
+
+    def test_concurrent_fresh_reads_share_one_flight_but_an_order_invalidates_it(self):
+        for invalidate in (False, True):
+            broker = KisBrokerPort(SimpleNamespace(environment='real'), {}, None)
+            entered, waiting, release = threading.Event(), threading.Event(), threading.Event()
+            def snapshot():
+                entered.set()
+                self.assertTrue(release.wait(3))
+                return {'complete': True, 'ownership_complete': True, 'orders': []}
+            broker._snapshot = Mock(side_effect=snapshot)
+            original_wait = broker.snapshot_condition.wait
+            def wait(*args):
+                waiting.set()
+                return original_wait(*args)
+            broker.snapshot_condition.wait = wait
+            with ThreadPoolExecutor(2) as pool:
+                first = pool.submit(broker.snapshot)
+                self.assertTrue(entered.wait(2))
+                second = pool.submit(broker.snapshot)
+                self.assertTrue(waiting.wait(2))
+                if invalidate:
+                    broker._invalidate_snapshot()
+                release.set()
+                a, b = first.result(3), second.result(3)
+            self.assertEqual(broker._snapshot.call_count, 2 if invalidate else 1)
+            if not invalidate:
+                self.assertIs(a, b)

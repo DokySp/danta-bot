@@ -780,12 +780,15 @@ class EngineCase(unittest.TestCase):
             with self.subTest(response=response):
                 app = Application(self.config, self.bundle)
                 try:
-                    with patch.object(app.broker, "submit", return_value={"status": response}):
+                    diagnostic = {'provider_code': 'EGW00215', 'endpoint': 'order-cash', 'http_status': 500}
+                    with patch.object(app.broker, "submit", return_value={"status": response, 'reason': 'RATE_LIMITED', 'diagnostics': [diagnostic]}):
                         result = app.review()
                     self.assertEqual(result["order_status"], state)
                     self.assertEqual(result["order_states"], {state: 1})
                     self.assertEqual(app.store.quantity("TEST:AAA"), 0)
                     self.assertEqual(app.store.db.execute("SELECT state FROM intents").fetchone()[0], state)
+                    journal = json.loads(app.store.db.execute('SELECT payload FROM journal WHERE kind=?', ('ORDER_' + response,)).fetchone()[0])
+                    self.assertEqual((journal['reason'], journal['diagnostics']), ('RATE_LIMITED', [diagnostic]))
                     report = next(self.config.state_dir.glob("runs/*/*/summary.json"))
                     self.assertEqual(json.loads(report.read_text())["order_status"], state)
                 finally:

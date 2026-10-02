@@ -152,7 +152,8 @@ class Executor:
                         **({'diagnostics': response['diagnostics']} if response.get('diagnostics') else {})}, notify=True)
                 elif response.get("status") == "REJECTED":
                     self.store.db.execute("UPDATE intents SET state='REJECTED',reserve_cash='0',reserve_risk='0' WHERE id=?", (intent.id,))
-                    self.store.event(intent.run_id, "ORDER_REJECTED", {"intent_id": intent.id, "reason": response.get("reason", "BROKER_REJECTED")}, notify=True)
+                    self.store.event(intent.run_id, "ORDER_REJECTED", {"intent_id": intent.id, "reason": response.get("reason", "BROKER_REJECTED"),
+                        **({'diagnostics': response['diagnostics']} if response.get('diagnostics') else {})}, notify=True)
                 elif response.get("status") == "ACKNOWLEDGED" and response.get("broker_id") and response.get("namespace"):
                     self.store.db.execute("UPDATE intents SET state='ACKNOWLEDGED',broker_id=?,broker_namespace=?,broker_metadata=? WHERE id=?", (response["broker_id"], response["namespace"], canonical(response.get("metadata", {})), intent.id))
                     self.store.bump_version()
@@ -160,7 +161,8 @@ class Executor:
                 else:
                     self.store.db.execute("UPDATE intents SET state='UNKNOWN' WHERE id=?", (intent.id,))
                     self.store.set("reconciled", False)
-                    self.store.event(intent.run_id, "ORDER_UNKNOWN", {"intent_id": intent.id}, notify=True)
+                    self.store.event(intent.run_id, "ORDER_UNKNOWN", {"intent_id": intent.id, 'reason': response.get('reason', 'BROKER_RESPONSE_UNCONFIRMED'),
+                        **({'diagnostics': response['diagnostics']} if response.get('diagnostics') else {})}, notify=True)
             return self.store.order(intent.id)
 
     def _unknown(self, intent_id: str, reason: str) -> None:

@@ -102,7 +102,7 @@ def require_http_ok(response: HttpResponse):
         diagnostic['retry_after_seconds'] = min(int(retry_after), 86400)
     if response.status in {401, 403}:
         raise AdapterError("AUTH_FAILED", diagnostic=diagnostic)
-    if response.status == 429:
+    if response.status == 429 or diagnostic.get('provider_code') in {'EGW00201', 'EGW00215'}:
         raise AdapterError("RATE_LIMITED", diagnostic=diagnostic)
     if response.status >= 500:
         raise AdapterError("TRANSIENT_FAILURE", diagnostic=diagnostic)

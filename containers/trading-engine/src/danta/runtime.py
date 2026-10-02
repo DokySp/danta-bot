@@ -35,7 +35,8 @@ from .safety import reject_credentials
 SEOUL = ZoneInfo("Asia/Seoul")
 AUTH_ERRORS = {"AUTH_FAILED", "AUTHORIZATION_REQUIRED", "AUTH_CREDENTIALS_REQUIRED", "DART_AUTH_REQUIRED", "OFFLINE_NETWORK_BLOCKED"}
 DIAGNOSTIC_FIELDS = ('endpoint', 'http_status', 'provider_code', 'provider_message', 'requested_at',
-                     'elapsed_seconds', 'attempt_count', 'transport_error', 'failed_page', 'method', 'tr_id', 'request_stage', 'field')
+                     'elapsed_seconds', 'attempt_count', 'transport_error', 'failed_page', 'method', 'tr_id', 'request_stage', 'field',
+                     'retry_after_seconds', 'request_sent')
 
 
 def _failure_diagnostic(error, endpoint, *, reason=None, field=None):
@@ -109,32 +110,53 @@ class RuntimeState:
                                        isolation_level=None,check_same_thread=False)
         cache_path.chmod(0o600)
         self.cache_db.execute("CREATE TABLE IF NOT EXISTS runtime_cache(namespace TEXT PRIMARY KEY,payload TEXT NOT NULL)")
-        if (not self.cache_db.execute('SELECT 1 FROM runtime_cache LIMIT 1').fetchone() and
+        migrate_legacy = not self.cache_db.execute('SELECT 1 FROM runtime_cache LIMIT 1').fetchone()
+        if (migrate_legacy and
                 self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='runtime_cache'").fetchone()):
             self.cache_db.execute('BEGIN IMMEDIATE')
             try:
                 self.cache_db.executemany('INSERT INTO runtime_cache VALUES (?,?)',
-                                         self.db.execute('SELECT namespace,payload FROM runtime_cache').fetchall())
+                                         self.db.execute("SELECT namespace,payload FROM runtime_cache WHERE namespace<>'disclosure_records'").fetchall())
                 self.cache_db.execute('COMMIT')
             except BaseException:
                 self.cache_db.execute('ROLLBACK')
                 raise
-        self.data = {row[0]:json.loads(row[1]) for row in self.cache_db.execute("SELECT namespace,payload FROM runtime_cache")}
+        from .disclosure_cache import load_records
+        # ponytail: keep receipt metadata in memory; query by issuer if this index outgrows RAM.
+        records = load_records(self.cache_db, self.db)
+        self.data = {row[0]:json.loads(row[1]) for row in self.cache_db.execute(
+            "SELECT namespace,payload FROM runtime_cache WHERE namespace<>'disclosure_records'")}
+        self.data['disclosure_records'] = records
         for namespace in ("observations","events","circuit"):
             self.data.setdefault(namespace,{})
 
     def save(self, namespaces=None):
+        from .disclosure_cache import write_record
         with self.lock:
-            # Serialize only changed namespaces, before taking SQLite's writer lock.
-            values = [(key, canonical(self.data[key])) for key in (namespaces if namespaces is not None else self.data)]
+            keys = tuple(namespaces if namespaces is not None else self.data)
+            values = [(key, canonical(self.data[key])) for key in keys if key != 'disclosure_records']
+            records = {}
             self.cache_db.execute("BEGIN IMMEDIATE")
             try:
-                self.cache_db.executemany("INSERT INTO runtime_cache VALUES (?,?) ON CONFLICT(namespace) DO UPDATE SET payload=excluded.payload",
-                                    values)
+                if 'disclosure_records' in keys:
+                    for receipt, record in self.data['disclosure_records'].items():
+                        records[receipt] = write_record(self.cache_db, receipt, record)
+                self.cache_db.executemany("INSERT INTO runtime_cache VALUES (?,?) ON CONFLICT(namespace) DO UPDATE SET payload=excluded.payload", values)
                 self.cache_db.execute("COMMIT")
+                self.data['disclosure_records'].update(records)
             except BaseException:
                 self.cache_db.execute("ROLLBACK")
                 raise
+
+    def save_disclosure(self, receipt, record):
+        from .disclosure_cache import write_record
+        with self.lock:
+            return write_record(self.cache_db, receipt, record)
+
+    def disclosure_documents(self, receipt):
+        with self.lock:
+            row = self.cache_db.execute('SELECT documents FROM disclosure_records WHERE receipt=?', (receipt,)).fetchone()
+        return json.loads(row[0]) if row else {}
 
     def close(self):
         self.cache_db.close()
@@ -158,16 +180,29 @@ class PriorityTransport:
             raise HumanRequired("Approved rate/monitor budget is required")
         self.condition = threading.Condition()
         self.queue, self.sequence, self.next_at = [], 0, 0.0
+        self.cooldown_until = 0.0
+        self.rate_limit_failures = 0
+        self.rate_limit_diagnostic = {}
         self.fixture_only = getattr(transport, "fixture_only", False)
 
     def __call__(self, method, url, headers=None, body=None, timeout=15, *, before_send=None):
         priority = 0 if "/trading/" in url or "inquire-asking-price" in url or "inquire-price?" in url else 1
         with self.condition:
+            if time.monotonic() < self.cooldown_until:
+                raise AdapterError('RATE_LIMITED', diagnostic={**self.rate_limit_diagnostic,
+                    'retry_after_seconds': round(self.cooldown_until-time.monotonic(), 3),
+                    'request_stage': 'RATE_COOLDOWN', 'request_sent': False})
             self.sequence += 1
             ticket = (priority, self.sequence)
             self.queue.append(ticket)
             deadline = time.monotonic()+self.maximum_wait
             while min(self.queue) != ticket or time.monotonic() < self.next_at:
+                if time.monotonic() < self.cooldown_until:
+                    self.queue.remove(ticket)
+                    self.condition.notify_all()
+                    raise AdapterError('RATE_LIMITED', diagnostic={**self.rate_limit_diagnostic,
+                        'retry_after_seconds': round(self.cooldown_until-time.monotonic(), 3),
+                        'request_stage': 'RATE_COOLDOWN', 'request_sent': False})
                 remaining = deadline-time.monotonic()
                 if remaining <= 0:
                     self.queue.remove(ticket)
@@ -179,7 +214,28 @@ class PriorityTransport:
             self.condition.notify_all()
         if before_send is not None:
             before_send()
-        return self.transport(method, url, headers, body, timeout)
+        response = self.transport(method, url, headers, body, timeout)
+        try:
+            code = response.json().get('msg_cd')
+        except (AdapterError, AttributeError):
+            code = None
+        limited = isinstance(code, str) and code in {'EGW00201', 'EGW00215'}
+        if response.status == 429 or limited:
+            with self.condition:
+                if time.monotonic() - self.cooldown_until >= 60:
+                    self.rate_limit_failures = 0
+                self.rate_limit_failures = min(self.rate_limit_failures + 1, 5)
+                headers_lower = {key.lower(): value for key, value in response.headers.items()}
+                retry = headers_lower.get('retry-after', '')
+                delay = max(min(5 * 2 ** (self.rate_limit_failures-1), 60),
+                            min(int(retry), 86400) if retry.isdigit() else 0)
+                self.cooldown_until = max(self.cooldown_until, time.monotonic()+delay)
+                self.next_at = max(self.next_at, self.cooldown_until)
+                self.rate_limit_diagnostic = {}
+                if limited:
+                    self.rate_limit_diagnostic['provider_code'] = code
+                self.condition.notify_all()
+        return response
 
     request_checked = __call__
 
@@ -191,6 +247,8 @@ class KisBrokerPort:
         self.store = None
         self.latest_bundle = None
         self.snapshot_lock = threading.RLock()
+        self.snapshot_condition = threading.Condition(self.snapshot_lock)
+        self.snapshot_inflight = None
         self.snapshot_cache = None
         self.snapshot_generation = 0
 
@@ -232,7 +290,8 @@ class KisBrokerPort:
                             reason='NO_MARGIN_BUYING_POWER_UNVERIFIED', field=field)]}
         result = self.adapter.submit(ticker, intent["side"], intent["quantity"], limit_price=intent["limit_price"], valid_until=deadline)
         if result.status != "ACKNOWLEDGED":
-            return {"status": result.status, "reason": result.code}
+            return {"status": result.status, "reason": result.code,
+                    'diagnostics': [{'reason': result.code, **result.diagnostic}] if result.diagnostic else []}
         namespace = self._namespace(self.clock().astimezone(SEOUL).date().isoformat())
         if not result.organization:
             return {"status": "UNKNOWN", "reason": "ORDER_ORGANIZATION_UNVERIFIED"}
@@ -488,29 +547,51 @@ class KisBrokerPort:
                                  "cost_quality": census["cost_quality"]}}
 
     def snapshot(self, *, maximum_age_seconds=0):
-        # Do not hold a cache lock across provider I/O or ledger locks. Fresh
-        # protection and review reads must be able to finish independently.
-        ledger_version = self.store.get('account_version') if self.store else None
-        working = bool(self.store and self.store.working())
-        observed_at, refresh_order = self.clock(), time.monotonic_ns()
-        with self.snapshot_lock:
-            cached = self.snapshot_cache
-            if (maximum_age_seconds > 0 and cached and not working and
-                    0 <= (observed_at-aware_time(cached['observed_at'])).total_seconds() < maximum_age_seconds and
-                    cached.get('ledger_version') == ledger_version and
-                    not any(row['state'] not in {'FILLED','CANCELED','REJECTED','EXPIRED','PARTIAL_CANCELED'} for row in cached.get('orders', []))):
-                return cached
-            self.snapshot_generation += 1
-            generation = self.snapshot_generation
-            self.snapshot_cache = None
-        value = self._snapshot()
-        value.update(observed_at=observed_at.isoformat(), refresh_order=refresh_order, ledger_version=ledger_version)
-        current_version = self.store.get('account_version') if self.store else None
-        with self.snapshot_lock:
-            if (generation == self.snapshot_generation and current_version == ledger_version and
-                    value.get('complete') and value.get('ownership_complete')):
-                self.snapshot_cache = value
-        return value
+        # Coalesce concurrent readers without holding a cache or ledger lock
+        # during provider I/O. Order invalidation prevents reusing that flight.
+        while True:
+            ledger_version = self.store.get('account_version') if self.store else None
+            working = bool(self.store and self.store.working())
+            observed_at, refresh_order = self.clock(), time.monotonic_ns()
+            with self.snapshot_condition:
+                cached = self.snapshot_cache
+                if (maximum_age_seconds > 0 and cached and not working and
+                        0 <= (observed_at-aware_time(cached['observed_at'])).total_seconds() < maximum_age_seconds and
+                        cached.get('ledger_version') == ledger_version and
+                        not any(row['state'] not in {'FILLED','CANCELED','REJECTED','EXPIRED','PARTIAL_CANCELED'} for row in cached.get('orders', []))):
+                    return cached
+                flight = self.snapshot_inflight
+                if flight is None:
+                    generation = self.snapshot_generation
+                    flight = self.snapshot_inflight = {'generation': generation, 'ledger_version': ledger_version, 'done': False}
+                    break
+                while not flight['done']:
+                    self.snapshot_condition.wait()
+                shared = (flight if flight['generation'] == self.snapshot_generation
+                          and flight['ledger_version'] == ledger_version else None)
+            current_version = self.store.get('account_version') if self.store else None
+            if shared is not None and current_version == ledger_version:
+                if 'error' in shared:
+                    raise shared['error']
+                return shared['value']
+        try:
+            value = self._snapshot()
+            value.update(observed_at=observed_at.isoformat(), refresh_order=refresh_order, ledger_version=ledger_version)
+            current_version = self.store.get('account_version') if self.store else None
+            with self.snapshot_condition:
+                flight['value'] = value
+                self.snapshot_cache = (value if generation == self.snapshot_generation and current_version == ledger_version
+                    and value.get('complete') and value.get('ownership_complete') else None)
+            return value
+        except BaseException as error:
+            with self.snapshot_condition:
+                flight['error'] = error
+            raise
+        finally:
+            with self.snapshot_condition:
+                flight['done'] = True
+                self.snapshot_inflight = None
+                self.snapshot_condition.notify_all()
 
     def _snapshot(self):
         if self.manifest["bootstrap"].get("whole_account") is True:
@@ -929,7 +1010,7 @@ class ExternalRuntime:
                 try:
                     if previous:
                         originals = tuple({'content': item['content'].encode('utf-8'), 'sha256': item['sha256']}
-                                          for item in previous['documents'].values())
+                                          for item in self.state.disclosure_documents(receipt).values())
                         document = FetchResult(originals, 'COMPLETE', aware_time(previous['event']['observed_at']))
                     else:
                         document = self.dart.read_disclosure(receipt)
@@ -985,9 +1066,9 @@ class ExternalRuntime:
                                 family="unclassified",source_uri=uri,source_hash=document_hashes[0],fact_ids=[title.fact_id],facts={"report_title":title.value},
                                 comparison_basis="raw original; unsupported primary template",available_at=available,observed_at=document.retrieved_at,
                                 official=True,primary_source_complete=False,timing_quality=timing,published_date=published_date,polarity="UNKNOWN")
-                    cached[receipt] = {"event":event.model_dump(mode="json"),"facts":[fact.model_dump(mode="json") for fact in facts],
+                    cached[receipt] = self.state.save_disclosure(receipt, {"event":event.model_dump(mode="json"),"facts":[fact.model_dump(mode="json") for fact in facts],
                                        "documents":documents,"document_hashes":document_hashes,"parse_reason":reason,
-                                       "receipt":row,"parser_version":PARSER_VERSION}
+                                       "receipt":row,"parser_version":PARSER_VERSION})
                     if reason == 'CORRECTION_RELATION_UNRESOLVED' and (recent or instrument_id in held):
                         pending[receipt] = row
                     else:
@@ -1176,6 +1257,23 @@ class ExternalRuntime:
                        "runtime_diagnostics":diagnostics}
         return self._publish(bundle,protection=True)
 
+    def collect_disclosures(self):
+        """Refresh official evidence without repeating the account/quote census."""
+        with self.collect_lock:
+            self.config.assert_current()
+            self.config.require_external('disclosure_read', self.approval)
+            previous = self.latest_bundle
+            if previous is None:
+                return self.refresh()
+            events, facts, coverage, documents = self._events(list(previous.instruments.values()), self.clock())
+            data = {**previous.data, 'as_of': self.clock().isoformat(),
+                'events': [row.model_dump(mode='json') for row in events],
+                'facts': [row.model_dump(mode='json') for row in facts],
+                'coverage': coverage, 'raw_documents': documents,
+                'runtime_diagnostics': [row for row in previous.data['runtime_diagnostics'] if row.get('source') != 'DART']
+                    + self.disclosure_diagnostics}
+            return self._publish(MarketBundle(data, self.profile, mode=self.config.mode))
+
     def refresh(self):
         with self.collect_lock:
             self.config.assert_current()
@@ -1339,7 +1437,8 @@ class ExternalRuntime:
                      set(frozen["reviewed_positions"]) | {item["instrument_id"] for item in frozen["theses"]} |
                      {item["instrument_id"] for name in ("holdings","pending_entries") for item in frozen["portfolio"].get(name,[])})
         documents = self.latest_bundle.data.get("raw_documents",{}) if self.latest_bundle else {}
-        documents = {key:value for key,value in documents.items() if value["instrument_id"] in ids}
+        receipts = {value["receipt_id"] for value in documents.values() if value["instrument_id"] in ids}
+        documents = {key: value for receipt in receipts for key, value in self.state.disclosure_documents(receipt).items()}
         enriched["tool_records"] = {
             "events":{event["event_id"]:event for event in frozen["events"]},
             "facts":{**{fact["fact_id"]:fact for fact in frozen["facts"]},**documents},

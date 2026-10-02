@@ -47,6 +47,7 @@ class BrokerResult:
     order_id: str | None = None
     organization: str | None = None
     code: str | None = None
+    diagnostic: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -279,10 +280,10 @@ class KisAdapter:
                 code = data.get('msg_cd')
                 code = code if isinstance(code, str) and re.fullmatch(r'[A-Z][A-Z0-9_]{1,31}', code) else 'UNKNOWN'
                 # A broker rejection is different from a lost POST response.
-                raise AdapterError("BROKER_REJECTED:" + code)
+                raise AdapterError('RATE_LIMITED' if code in {'EGW00201', 'EGW00215'} else "BROKER_REJECTED:" + code)
         except AdapterError as error:
             error.diagnostic.update(endpoint=path.rsplit('/',1)[-1], requested_at=requested_at,
-                                    method='POST' if post else 'GET', tr_id=tr_id, request_stage=stage,
+                                    method='POST' if post else 'GET', tr_id=tr_id, request_stage=error.diagnostic.get('request_stage', stage),
                                     elapsed_seconds=round(time.monotonic()-started,3))
             if response is not None:
                 error.diagnostic['http_status'] = response.status
@@ -309,6 +310,8 @@ class KisAdapter:
             print(json.dumps({'event':'KIS_REQUEST_FAILED', 'reason':error.code,
                               'error_type':type(error).__name__, **error.diagnostic}, ensure_ascii=False),
                   file=sys.stderr, flush=True)
+            if post and error.diagnostic.get('request_sent') is False:
+                raise OrderNotSent(error.code, diagnostic=error.diagnostic) from None
             raise
         return data, {k.lower(): v for k, v in response.headers.items()}
 
@@ -338,7 +341,7 @@ class KisAdapter:
                         # Replay only the failed read page; submissions are never retried here.
                         if isinstance(error,AdapterError):
                             error.diagnostic['attempt_count'] = attempt + 1
-                        if attempt == 2 or code not in {'TRANSIENT_FAILURE', 'TRANSPORT_FAILED', 'RATE_LIMITED', 'BROKER_REJECTED:EGW00201'} or delay > 2:
+                        if attempt == 2 or code not in {'TRANSIENT_FAILURE', 'TRANSPORT_FAILED'} or delay > 2:
                             raise
                         time.sleep(delay)
                 if not isinstance(data.get(rows_key), list) or any(not isinstance(row, dict) for row in data[rows_key]):
@@ -508,12 +511,14 @@ class KisAdapter:
                 return BrokerResult("UNKNOWN", code="ACK_WITHOUT_ORDER_ID")
             return BrokerResult("ACKNOWLEDGED", str(order_id), output.get("KRX_FWDG_ORD_ORGNO") or output.get("krx_fwdg_ord_orgno"))
         except OrderNotSent as exc:
-            return BrokerResult("NOT_SENT", code=exc.code)
+            return BrokerResult("NOT_SENT", code=exc.code, diagnostic=exc.diagnostic)
         except AdapterError as exc:
             if exc.code.startswith("BROKER_REJECTED:"):
-                return BrokerResult("REJECTED", code=exc.code.split(":", 1)[1])
-            if exc.code in {"TRANSPORT_FAILED", "TRANSIENT_FAILURE", "MALFORMED_RESPONSE", "HTTP_FAILURE"}:
-                return BrokerResult("UNKNOWN", code=exc.code)
+                return BrokerResult("REJECTED", code=exc.code.split(":", 1)[1], diagnostic=exc.diagnostic)
+            if exc.code == 'RATE_LIMITED' and exc.diagnostic.get('http_status') == 200:
+                return BrokerResult('REJECTED', code=exc.code, diagnostic=exc.diagnostic)
+            if exc.code in {"TRANSPORT_FAILED", "TRANSIENT_FAILURE", "MALFORMED_RESPONSE", "HTTP_FAILURE", 'RATE_LIMITED'}:
+                return BrokerResult("UNKNOWN", code=exc.code, diagnostic=exc.diagnostic)
             raise
         except (TimeoutError, OSError):
             return BrokerResult("UNKNOWN", code="TRANSPORT_FAILED")

@@ -149,7 +149,7 @@ def prepare_application(source, *, kis_transport=None, dart_transport=None, mode
         isolation = model_evidence(source, secrets)
         transport = PriorityTransport(kis_transport or http_transport(
             allowed_origins={BASE_URLS["real"], MASTER_ORIGIN}, network_enabled=True),
-            minimum_interval_seconds="0.1", maximum_queue_seconds="2")
+            minimum_interval_seconds="0.25", maximum_queue_seconds="2")
         token = KisTokenCache(environment="real", app_key=credentials.app_key, app_secret=credentials.app_secret,
             path=source.state_dir / "kis-token.json", transport=transport, mode="live", authorize=authorize, clock=clock)
         kis = KisAdapter(environment="real", credentials=credentials, transport=transport, mode="live",
@@ -202,8 +202,8 @@ def prepare_application(source, *, kis_transport=None, dart_transport=None, mode
             expires_at=(now + timedelta(days=2)).isoformat(), credentials={"managed_token": True},
             calendar=sources["calendar"], ticks=sources["ticks"], costs=estimated_costs(grant["account_alias"], now),
             bootstrap=bootstrap, model=isolation, disclosures=sources["disclosures"],
-            rate_limit={"source": "conservative 10 requests/sec; reserved broker priority", "verified": True,
-                "minimum_interval_seconds": "0.1", "maximum_queue_seconds": "2"})
+            rate_limit={"source": "local 4 requests/sec budget with shared provider cooldown; reserved broker priority", "verified": True,
+                "minimum_interval_seconds": "0.25", "maximum_queue_seconds": "2"})
         bundle, broker, decide, refresh = build_external_runtime(current, grant, manifest=manifest,
             kis=kis, dart=dart, state=state, store=store, env=secrets, clock=clock, model_runner=model_runner)
         runtime = refresh.__self__

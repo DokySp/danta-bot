@@ -39,7 +39,7 @@ class KisPaginationContracts(unittest.TestCase):
     def test_request_failures_keep_safe_context_for_http_business_and_parse_errors(self):
         private = 'private-' + 'z' * 32
         for status, body, expected in (
-            (500, {'msg_cd':'EGW00215', 'msg1':'처리 오류 계좌 12345678 ' + private}, 'TRANSIENT_FAILURE'),
+            (500, {'msg_cd':'EGW00215', 'msg1':'처리 오류 계좌 12345678 ' + private}, 'RATE_LIMITED'),
             (200, {'rt_cd':'1', 'msg_cd':'APBK0918', 'msg1':'조회 불가 계좌 1234-5678 12/345/678 12.345.678 '
                 'https://user:pass@example.com/private?CANO=12345678 ' + private}, 'BROKER_REJECTED:APBK0918'),
             (200, b'not-json', 'MALFORMED_RESPONSE'),
@@ -70,7 +70,7 @@ class KisPaginationContracts(unittest.TestCase):
                     self.assertNotIn(secret, output.getvalue() + str(detail))
 
     @patch('danta.adapters.kis.time.sleep')
-    def test_server_error_preserves_redacted_message_timing_and_bounded_retries(self, sleep):
+    def test_rate_limit_preserves_cause_without_immediate_read_retries(self, sleep):
         calls = []
         private = 'private-' + 'z'*32
         def transport(*args):
@@ -79,10 +79,11 @@ class KisPaginationContracts(unittest.TestCase):
         transport.fixture_only = True
         adapter = KisAdapter(environment='real',credentials=KisCredentials('12345678','00',private,private,private),transport=transport)
         result = adapter.read_account()
-        self.assertEqual(calls,['GET']*3)
-        self.assertEqual([call.args[0] for call in sleep.call_args_list],[0.5,1.0])
+        self.assertEqual(calls,['GET'])
+        sleep.assert_not_called()
         self.assertEqual(result.metadata['provider_code'],'EGW00215')
-        self.assertEqual(result.metadata['attempt_count'],3)
+        self.assertEqual(result.metadata['attempt_count'],1)
+        self.assertEqual(result.metadata['error'],'RATE_LIMITED')
         self.assertIn('처리 오류',result.metadata['provider_message'])
         self.assertNotIn(private,str(result.metadata))
         self.assertNotIn('12345678',str(result.metadata))
@@ -136,7 +137,7 @@ class KisPaginationContracts(unittest.TestCase):
             ([(dict(page, output1=[None]), "D")], {}, "FETCH_FAILED", "MALFORMED_RESPONSE"),
             ([(page, "M"), TimeoutError()], {}, "PARTIAL", "TRANSPORT_FAILED"),
             ([TimeoutError()], {}, "FETCH_FAILED", "TRANSPORT_FAILED"),
-            ([(page, "M"), ({"rt_cd": "1", "msg_cd": "EGW00201"}, "")], {}, "PARTIAL", "BROKER_REJECTED:EGW00201"),
+            ([(page, "M"), ({"rt_cd": "1", "msg_cd": "EGW00201"}, "")], {}, "PARTIAL", "RATE_LIMITED"),
         ]
         for pages, options, quality, error in cases:
             with self.subTest(error=error, quality=quality):
