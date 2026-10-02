@@ -248,7 +248,10 @@ class KisTokenCacheTests(unittest.TestCase):
                         patch.object(queued.condition, 'wait', side_effect=advance):
                     result = broker.submit({'instrument_id':'KRX:000001', 'side':'BUY', 'quantity':1, 'limit_price':'1000',
                         'expires_at':(NOW + timedelta(seconds=1 if boundary == 'decision' else 60)).isoformat()})
-                self.assertEqual(result, {'status':'NOT_SENT', 'reason':'ORDER_VALIDITY_EXPIRED'})
+                self.assertEqual((result['status'], result['reason']), ('NOT_SENT', 'ORDER_VALIDITY_EXPIRED'))
+                diagnostic = result['diagnostics'][0]
+                self.assertEqual((diagnostic['reason'], diagnostic['endpoint'], diagnostic['method']),
+                                 ('ORDER_VALIDITY_EXPIRED', 'order-cash', 'POST'))
                 self.assertEqual(transport.calls, [])
 
     def test_unsent_submit_releases_reservation_and_unsent_cancel_restores_state(self):
