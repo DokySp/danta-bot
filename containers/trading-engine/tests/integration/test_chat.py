@@ -12,7 +12,7 @@ from danta.adapters import AdapterError
 from danta.adapters.codex_cli import ModelResult
 from danta.adapters.market_tools import validate_snapshot
 from danta.application import code_identity
-from danta.config import HumanRequired, load_config, model_reload_hash, utcnow
+from danta.config import ConfigurationError, HumanRequired, load_config, model_reload_hash, utcnow
 from danta.runtime import ExternalRuntime
 from danta.service import Service
 from tests.integration import test_service as service_fixtures
@@ -35,7 +35,7 @@ class ChatTests(unittest.TestCase):
     def reload_runtime(self, run):
         case = self.case
         data = case.config.data
-        data['app']['model'].update(model_id='gpt-5.6-sol', reasoning_effort='medium', auth_mode='chatgpt')
+        data['app']['model'].update(model_id='gpt-5.6-sol', reasoning_effort='medium', auth_mode='chatgpt', timeout_seconds=600)
         (case.directory / 'app.yaml').write_text(yaml.safe_dump(data['app']))
         source = load_config(case.directory)
         config = replace(source, model_reload_baseline=model_reload_hash(source.data))
@@ -45,10 +45,32 @@ class ChatTests(unittest.TestCase):
         runtime.config, runtime.approval, runtime.clock = config, case.app.approval, utcnow
         runtime.broker = SimpleNamespace(store=case.app.store)
         runtime.codex = type('FixtureCodex', (), {'model_id': 'gpt-5.6-sol', 'reasoning_effort': 'medium',
-            'auth_mode': 'chatgpt', 'run_budget_seconds': 575, 'run': run})()
+            'auth_mode': 'chatgpt', 'timeout': 600, 'run_budget_seconds': 575, 'run': run})()
         runtime.verified_models = {'gpt-5.6-sol'}
         runtime.model_probe_lock = threading.Lock()
         return source, runtime
+
+    def test_timeout_reload_applies_only_to_next_call_and_keeps_hash_bound_authority_frozen(self):
+        source, runtime = self.reload_runtime(lambda *_args, **_kwargs: None)
+        inflight = runtime._model_for_call()
+        data = source.data['app']
+        data['model']['timeout_seconds'] = 1200
+        (self.case.directory / 'app.yaml').write_text(yaml.safe_dump(data))
+        runtime.config.assert_current()
+        next_call = runtime._model_for_call()
+        self.assertEqual((inflight.timeout, next_call.timeout, runtime.codex.timeout), (600, 1200, 600))
+        settings = data['model']
+        self.assertEqual(next_call.run_budget_seconds,
+            1200 * (1 + settings['transient_retries'] + settings['schema_repair_attempts'])
+            + settings['retry_delay_seconds'] * settings['transient_retries'] + 30)
+        inflight.authorize('model_call', inflight.model_id, inflight.reasoning_effort, inflight.auth_mode)
+        with self.assertRaisesRegex(HumanRequired, 'POLICY_CHANGED'):
+            source.assert_current()
+        for timeout in (0, -1, True, '1200'):
+            data['model']['timeout_seconds'] = timeout
+            (self.case.directory / 'app.yaml').write_text(yaml.safe_dump(data))
+            with self.subTest(timeout=timeout), self.assertRaises(ConfigurationError):
+                runtime._model_for_call()
 
     def test_model_edits_apply_to_next_calls_without_changing_inflight_provenance(self):
         entered, release = threading.Event(), threading.Event()
@@ -97,7 +119,8 @@ class ChatTests(unittest.TestCase):
     def test_model_reload_keeps_other_policy_changes_blocked_and_probe_failure_local(self):
         source, runtime = self.reload_runtime(lambda *_args, **_kwargs: None)
         for section, key, value in (('execution', 'enabled', not source.app['execution']['enabled']), ('app', 'account_alias', 'other'),
-                                    ('model', 'auth_mode', 'api'), ('model', 'executable', '/bin/false')):
+                                    ('model', 'auth_mode', 'api'), ('model', 'executable', '/bin/false'),
+                                    ('model', 'transient_retries', 9), ('model', 'schema_repair_attempts', 2)):
             data = source.data['app']
             data[section][key] = value
             (self.case.directory / 'app.yaml').write_text(yaml.safe_dump(data))

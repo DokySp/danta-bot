@@ -722,6 +722,9 @@ class ExternalRuntime:
         # Each call owns its selection; another chat/review or config edit cannot mutate it.
         adapter = copy(self.codex)
         adapter.model_id, adapter.reasoning_effort = settings['model_id'], settings['reasoning_effort']
+        adapter.timeout = settings['timeout_seconds']
+        adapter.run_budget_seconds = (adapter.timeout * (1 + settings['transient_retries'] + settings['schema_repair_attempts'])
+            + settings['retry_delay_seconds'] * settings['transient_retries'] + 30)
         with self.model_probe_lock:
             if adapter.model_id not in self.verified_models:
                 from .adapters.isolation_probe import probe

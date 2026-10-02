@@ -9,6 +9,14 @@ from danta.safety import CredentialError
 
 
 class OperatorReportingTests(unittest.TestCase):
+    def test_service_failure_keeps_original_code_type_stage_time_and_location(self):
+        text = render_notification({'kind': 'SERVICE_WORKER_BLOCKED', 'reason': 'POLICY_CHANGED',
+            'error_type': 'HumanRequired', 'stage': 'QUEUE_TICK', 'occurred_at': '2026-10-02T00:31:06Z',
+            'frames': [{'file': 'config.py', 'line': 260, 'function': '_current_source'}]})
+        for expected in ('POLICY_CHANGED', 'HumanRequired', 'QUEUE_TICK', '2026-10-02 09:31:06 KST', 'config.py:260',
+                         'HTTP 상태 조회는 유지'):
+            self.assertIn(expected, text)
+
     def test_successful_ai_with_failed_revalidation_and_screening_groups_are_distinct(self):
         run = {'run_status':'FAILED','model_status':'SUCCEEDED','decision_status':'REVALIDATION_FAILED',
                'reason':'STALE_DECISION','order_status':'NONE',

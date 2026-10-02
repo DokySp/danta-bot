@@ -1,5 +1,5 @@
 """Service integration uses real SQLite/adapters and fake app/transport; no sockets."""
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import base64
@@ -21,12 +21,12 @@ from danta.adapters import AdapterError, HttpResponse
 from danta.adapters.telegram import COMMANDS, TelegramAdapter
 from danta.application import Application, MarketBundle, fixture_decision
 from danta.cli import main
-from danta.config import HumanRequired, ROOT, canonical, load_config, utcnow
+from danta.config import ConfigurationError, HumanRequired, ROOT, canonical, load_config, utcnow
 from danta.execution import FixtureBroker
 from danta.market import SessionCalendar
 from danta.models import Session
 from danta.safety import CredentialError
-from danta.service import RuntimeHost, Service, app_version, serve
+from danta.service import RuntimeHost, Service, app_version, failure_detail, serve
 from danta.store import Store
 
 
@@ -360,6 +360,22 @@ class ServiceIntegrationTests(unittest.TestCase):
         self.service.queue_tick()
         rows = self.app.store.read("SELECT payload FROM requests WHERE status='ACCEPTED'")
         self.assertEqual(sum(json.loads(row['payload'])['kind'] == 'collect_disclosures' for row in rows), 1)
+
+    def test_disclosure_collection_uses_runtime_collector_without_full_account_refresh(self):
+        bundle = self.app.bundle
+        calls = []
+        class Runtime:
+            def refresh(self):
+                raise AssertionError('collection must not refresh account or quotes')
+            def collect_disclosures(self):
+                calls.append('disclosures')
+                return bundle
+        self.app.refresh = Runtime().refresh
+        payload = {'source': 'scheduler', 'kind': 'collect_disclosures'}
+        self.assertEqual(self.service._dispatch(payload, 'collection'), {'status': 'COLLECTED', 'event_count': 0})
+        self.assertEqual(calls, ['disclosures'])
+        self.app.refresh = lambda: bundle
+        self.assertEqual(self.service._dispatch(payload, 'fixture')['status'], 'COLLECTED')
 
     def test_unsigned_ingress_still_checks_sender_chat_route_and_payload(self):
         for overrides in ({'user_id': 'not-allowed'}, {'chat_id': 'not-allowed'},
@@ -772,7 +788,8 @@ class ServiceIntegrationTests(unittest.TestCase):
         self.receive('/resume', update=3)
         self.service.run_once()
         self.assertEqual(self.last_result()['error_type'], 'HumanRequired')
-        self.assertEqual(self.last_result()['reason'], 'Synthetic drawdown approval missing')
+        self.assertEqual(self.last_result()['reason'], 'HUMAN_REQUIRED')
+        self.assertNotIn('Synthetic drawdown approval missing', canonical(self.last_result()))
 
     def test_reasoning_effort_change_is_durable_approval_request_without_policy_change(self):
         current = self.config.app['model']['reasoning_effort']
@@ -852,6 +869,81 @@ class ServiceIntegrationTests(unittest.TestCase):
                 self.assertTrue(self.service.worker_failed)
             finally:
                 self.service.close()
+
+    def test_configuration_change_blocks_work_but_keeps_health_and_workers_available(self):
+        path = self.directory / 'app.yaml'
+        original = path.read_text()
+        self.receive('/review')
+        data = self.config.data['app']
+        data['execution']['enabled'] = not data['execution']['enabled']
+        path.write_text(yaml.safe_dump(data))
+        blocked, recovered = threading.Event(), threading.Event()
+        record = self.app.store.event
+        def observed(run_id, kind, *args, **kwargs):
+            result = record(run_id, kind, *args, **kwargs)
+            if kind == 'SERVICE_WORKER_BLOCKED':
+                blocked.set()
+            if kind == 'SERVICE_WORKER_RECOVERED':
+                recovered.set()
+            return result
+        with patch.object(self.app.store, 'event', side_effect=observed):
+            self.service.start()
+            self.assertTrue(blocked.wait(3))
+            self.assertFalse(self.service.stop.is_set())
+            self.assertFalse(self.service.worker_failed)
+            host = RuntimeHost(self.config)
+            host.service, host.status = self.service, 'READY'
+            health = host.health()
+            self.assertFalse(health['ready'])
+            self.assertEqual(health['diagnostic']['reason'], 'POLICY_CHANGED')
+            self.assertEqual(health['diagnostic']['stage'], 'QUEUE_TICK')
+            self.assertTrue(health['diagnostic']['frames'])
+            self.assertEqual(self.app.review_calls, 0)
+            path.write_text(original)
+            self.assertTrue(recovered.wait(6))
+            self.assertTrue(host.health()['ready'])
+            self.assertIsNone(self.service.worker_diagnostic)
+
+    def test_request_failure_preserves_safe_adapter_context_in_result_and_notification(self):
+        error = AdapterError('TRANSIENT_FAILURE', diagnostic={
+            'endpoint': 'inquire-balance', 'provider_code': 'EGW00215', 'http_status': 500,
+            'request_stage': 'HTTP_RESPONSE', 'requested_at': self.now.isoformat(),
+            'elapsed_seconds': .086, 'attempt_count': 3, 'provider_message': '요청 한도 초과',
+            'url': SECRET, 'headers': {'Authorization': SECRET}, 'stderr': SECRET})
+        self.receive('/status')
+        with patch.object(self.app, 'status', side_effect=error), redirect_stderr(io.StringIO()) as logs:
+            self.assertTrue(self.service.run_once())
+        result = self.last_result()
+        self.assertEqual(result['reason'], 'TRANSIENT_FAILURE')
+        self.assertEqual(result['stage'], 'DISPATCH_TELEGRAM')
+        self.assertEqual(result['diagnostic']['provider_code'], 'EGW00215')
+        self.assertEqual(result['diagnostic']['attempt_count'], 3)
+        self.assertTrue(result['frames'])
+        text = json.loads(self.app.store.read('SELECT payload FROM outbox ORDER BY id DESC LIMIT 1')[0][0])['text']
+        for expected in ('TRANSIENT_FAILURE', 'EGW00215', '500', 'AdapterError', 'DISPATCH_TELEGRAM'):
+            self.assertIn(expected, text)
+        self.assertNotIn(SECRET, canonical(result) + text + logs.getvalue())
+        self.assertEqual(failure_detail(ConfigurationError(SECRET), stage='QUEUE_TICK')['reason'], 'CONFIGURATION_INVALID')
+        self.assertNotIn(SECRET, canonical(failure_detail(RuntimeError(SECRET), stage='RUN_ONCE')))
+
+    def test_invalid_config_file_does_not_end_diagnostic_service(self):
+        (self.directory / 'app.yaml').write_text('app: [\n')
+        blocked = threading.Event()
+        record = self.app.store.event
+        def observed(run_id, kind, *args, **kwargs):
+            result = record(run_id, kind, *args, **kwargs)
+            if kind == 'SERVICE_WORKER_BLOCKED':
+                blocked.set()
+            return result
+        with patch.object(self.app.store, 'event', side_effect=observed):
+            self.service.start()
+            self.assertTrue(blocked.wait(3))
+            host = RuntimeHost(self.config)
+            host.service, host.status = self.service, 'READY'
+            self.assertEqual(host.health()['diagnostic']['reason'], 'CONFIGURATION_INVALID')
+            self.assertFalse(host.health()['ready'])
+            self.assertFalse(self.service.stop.is_set())
+            self.assertFalse(self.service.worker_failed)
 
     def test_worker_failure_reaches_serve_and_cli_after_cleanup_without_error_text(self):
         data = self.config.data

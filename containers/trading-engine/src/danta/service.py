@@ -6,6 +6,8 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
 import json
+import math
+import re
 import sqlite3
 import os
 from pathlib import Path
@@ -20,8 +22,9 @@ from zoneinfo import ZoneInfo
 from .adapters import AdapterError, http_transport
 from .adapters.scheduler import SchedulePlanner
 from .adapters.telegram import MAX_REQUEST_BYTES, READ_COMMANDS, TelegramAdapter
-from .config import HumanRequired, aware_time, canonical, digest, load_secrets, utcnow
+from .config import ConfigurationError, HumanRequired, aware_time, canonical, digest, load_secrets, utcnow
 from .reporting import render_notification, reported_fee, write_report
+from .safety import CREDENTIAL_TEXT, reject_credentials
 
 
 PORTFOLIO_CONTROLS = frozenset({'add_portfolio_ticker', 'remove_portfolio_ticker',
@@ -46,12 +49,61 @@ def log_event(event, **fields):
     print(canonical({'event': event, **fields}), file=sys.stderr, flush=True)
 
 
+def failure_detail(error, *, stage, now=utcnow):
+    """Preserve actionable codes and adapter metadata without raw exception text."""
+    reason = ('HUMAN_REQUIRED' if isinstance(error, HumanRequired) else
+              'CONFIGURATION_INVALID' if isinstance(error, ConfigurationError) else 'UNEXPECTED_EXCEPTION')
+    if isinstance(error, (HumanRequired, AdapterError)):
+        candidate = str(error)
+        if not re.fullmatch(r'[A-Z][A-Z0-9_]{1,100}(?::[A-Z][A-Z0-9_]{1,100})?', candidate):
+            candidate = candidate.split(':', 1)[0]
+        if re.fullmatch(r'[A-Z][A-Z0-9_]{1,100}(?::[A-Z][A-Z0-9_]{1,100})?', candidate):
+            reason = candidate
+    detail = {'reason': reason, 'error_type': type(error).__name__, 'stage': stage,
+              'occurred_at': now().isoformat(),
+              'frames': [{'file': Path(frame.filename).name, 'line': frame.lineno, 'function': frame.name}
+                         for frame in traceback.extract_tb(error.__traceback__)[-5:]]}
+    if isinstance(error, sqlite3.Error):
+        detail['sqlite_error'] = getattr(error, 'sqlite_errorname', 'UNKNOWN')
+        detail['reason'] = detail['sqlite_error'] if detail['sqlite_error'] != 'UNKNOWN' else 'DATABASE_FAILURE'
+    allowed = {'endpoint', 'http_status', 'provider_code', 'provider_message', 'requested_at',
+               'elapsed_seconds', 'attempt_count', 'transport_error', 'failed_page', 'method', 'tr_id',
+               'request_stage', 'field', 'retry_after_seconds', 'category', 'exit_code', 'stage', 'reason'}
+    diagnostic = {}
+    for key, value in getattr(error, 'diagnostic', {}).items():
+        if key not in allowed or type(value) not in (str, int, float, bool):
+            continue
+        if isinstance(value, float) and not math.isfinite(value):
+            continue
+        if isinstance(value, str):
+            if key == 'provider_message':  # The adapter has already masked its private credentials.
+                value = re.sub(r'https?://\S+|[A-Za-z0-9_.~-]{24,}|\d{6,}', '[비공개]', value)
+                value = CREDENTIAL_TEXT.sub('[비공개]', value)
+                value = ' '.join(value.split())[:240]
+            elif key == 'requested_at':
+                try:
+                    value = aware_time(value).isoformat()
+                except ValueError:
+                    continue
+            elif not re.fullmatch(r'[A-Za-z][A-Za-z0-9_.:-]{0,100}', value):
+                continue
+        try:
+            reject_credentials(value)
+        except ValueError:
+            continue
+        diagnostic[key] = value
+    if diagnostic:
+        detail['diagnostic'] = diagnostic
+    return detail
+
+
 class Service:
     def __init__(self, app, *, telegram=None, clock=utcnow):
         self.app, self.store, self.config, self.clock = app, app.store, app.config, clock
         self.telegram = telegram
         self.stop = threading.Event()
         self.worker_failed = False
+        self.worker_diagnostic = None
         self.threads = []
         self.active_chats = {}
         self.chat_lock = threading.RLock()
@@ -252,9 +304,9 @@ class Service:
                 with self.progress(payload, row['request_id']) as update:
                     result = self._dispatch(payload, row['request_id'], on_progress=update)
         except Exception as error:
-            result = {'status': getattr(error, 'state', 'FAILED'), 'error_type': type(error).__name__}
-            if isinstance(error, HumanRequired):
-                result['reason'] = str(error)
+            result = {'status': getattr(error, 'state', 'FAILED'),
+                      **failure_detail(error, stage='DISPATCH_' + payload['kind'].upper(), now=self.clock)}
+            log_event('SERVICE_REQUEST_FAILED', **result)
         # Review completion persists its result, notification and HTML atomically.
         # Reuse that outcome even when review raised; never send a second summary.
         workflow_result = self._workflow_result(row['request_id'])
@@ -512,7 +564,9 @@ class Service:
         if kind == 'collect_disclosures':
             if self.app.refresh is None:
                 raise HumanRequired('Verified disclosure refresh adapter is unavailable')
-            self.app.bundle = self.app.refresh()
+            runtime = getattr(self.app.refresh, '__self__', None)
+            collect = getattr(runtime, 'collect_disclosures', self.app.refresh)
+            self.app.bundle = collect()
             return {'status': 'COLLECTED', 'event_count': len(self.app.bundle.events)}
         if kind == 'finalize_and_report':
             try:
@@ -666,7 +720,7 @@ class Service:
             with self.store.transaction():
                 self.store.set('outbox_last_outcome:' + str(row['id']),
                     {'status': 'DOCUMENT_BLOCKED' if blocked else 'DELIVERY_UNCONFIRMED',
-                     'error_type': type(error).__name__, 'reason': error.code if blocked else None})
+                     **failure_detail(error, stage='OUTBOX_DELIVERY', now=self.clock)})
         with self.store.transaction():
             self.store.db.execute('UPDATE outbox SET state=? WHERE id=?', (state, row['id']))
         return state == 'DELIVERED'
@@ -676,32 +730,49 @@ class Service:
             self.app.start_monitor(self.config.app['monitoring']['quote_poll_fallback_seconds'])
         def worker(review, chat):
             while not self.stop.wait(.1):
+                stage = 'QUEUE_TICK' if not review else 'RUN_ONCE'
                 try:
                     if not review:
                         self.queue_tick()
+                        if self.worker_diagnostic and not self.worker_failed:
+                            self.worker_diagnostic = None
+                            with self.store.transaction():
+                                self.store.event('service', 'SERVICE_WORKER_RECOVERED',
+                                    {'stage': 'QUEUE_TICK', 'occurred_at': self.clock().isoformat()}, notify=True)
+                    stage = 'RUN_ONCE'
                     self.run_once(review=review, chat=chat)
                 except Exception as error:
-                    self.worker_failed = True
-                    frames = [{'file': Path(frame.filename).name, 'line': frame.lineno, 'function': frame.name}
-                              for frame in traceback.extract_tb(error.__traceback__)[-5:]]
-                    detail = {'error_type': type(error).__name__, 'frames': frames}
-                    if isinstance(error,sqlite3.Error):
-                        detail['sqlite_error'] = getattr(error,'sqlite_errorname','UNKNOWN')
-                    log_event('SERVICE_WORKER_FAILED', **detail)
+                    blocked = stage == 'QUEUE_TICK' and isinstance(error, ConfigurationError)
+                    kind = 'SERVICE_WORKER_BLOCKED' if blocked else 'SERVICE_WORKER_FAILED'
+                    detail = failure_detail(error, stage=stage, now=self.clock)
+                    previous = self.worker_diagnostic or {}
+                    if not self.worker_failed or not blocked:
+                        self.worker_diagnostic = detail
+                    self.worker_failed = self.worker_failed or not blocked
+                    log_event(kind, **detail)
                     try:
                         with self.store.transaction():
-                            self.store.event('service', 'SERVICE_WORKER_FAILED', detail, notify=True)
+                            self.store.event('service', kind, detail,
+                                notify=not blocked or any(previous.get(key) != detail[key]
+                                    for key in ('reason', 'error_type', 'stage')))
                     except sqlite3.Error as journal_error:
-                        log_event('SERVICE_FAILURE_RECORD_FAILED', sqlite_error=getattr(journal_error,'sqlite_errorname','UNKNOWN'))
+                        self.worker_failed = True
+                        log_event('SERVICE_FAILURE_RECORD_FAILED',
+                                  **failure_detail(journal_error, stage='FAILURE_RECORD', now=self.clock))
                     finally:
-                        self.stop.set()
+                        if self.worker_failed:
+                            self.stop.set()
+                    if blocked:
+                        self.stop.wait(5)  # Configuration can recover; every operation still checks authority.
         def notify():
             while not self.stop.wait(1):
                 try:
                     self.outbox_once()
                 except Exception as error:
+                    detail = failure_detail(error, stage='OUTBOX', now=self.clock)
+                    log_event('NOTIFY_BLOCKED', **detail)
                     with self.store.transaction():
-                        self.store.event('service', 'NOTIFY_BLOCKED', {'error_type': type(error).__name__})
+                        self.store.event('service', 'NOTIFY_BLOCKED', detail)
         for name, target, args in [('control', worker, (False, False)), ('review', worker, (True, False)),
                                    ('chat', worker, (True, True)), ('outbox', notify, ())]:
             thread = threading.Thread(target=target, args=args, name='danta-' + name, daemon=True)
@@ -729,24 +800,31 @@ class RuntimeHost:
         self.stop = stop_event or threading.Event()
         self.status = 'STARTING'
         self.issues = []
+        self.diagnostic = None
 
     def health(self):
         status = self.status
         components = {}
+        issues, diagnostic = list(self.issues), self.diagnostic
         if self.stop.is_set():
             status = 'STOPPING'
         elif self.service and (self.service.stop.is_set() or self.service.worker_failed):
             status = 'FAILED'
+            diagnostic = self.service.worker_diagnostic
         elif self.service:
             try:
                 self.service.config.assert_current()
                 self.service.config.require_external('telegram_ingress', self.service.app.approval)
                 health = self.service.app.status()
                 components = {key: health.get(key) for key in ('authentication', 'model_status', 'account_status', 'monitor_status', 'review_status')}
-            except (HumanRequired, ValueError, OSError):
-                status = 'CONFIGURATION_CHANGED_OR_APPROVAL_EXPIRED'
+            except Exception as error:
+                status = ('CONFIGURATION_CHANGED_OR_APPROVAL_EXPIRED' if isinstance(error, ConfigurationError)
+                          else 'RUNTIME_STATUS_FAILED')
+                diagnostic = self.service.worker_diagnostic or failure_detail(error, stage='RUNTIME_HEALTH')
+        if diagnostic and not any(diagnostic['reason'] in issue for issue in issues):
+            issues.append('운영 문제: ' + diagnostic['reason'])
         return {'status': status, 'ready': status == 'READY', 'mode': self.config.mode,
-                'issues': self.issues, 'components': components}
+                'issues': issues, 'components': components, 'diagnostic': diagnostic}
 
     def version(self):
         return {'version': app_version(), 'code_id': self.code_id,
@@ -817,19 +895,21 @@ def handler_for(host):
                 health = host.health()
                 if not health['ready']:
                     self.respond(503, {'accepted': False, 'status': health['status'],
+                        'diagnostic': health['diagnostic'],
                         'reply_text': '트레이딩 엔진은 실행 중이지만 거래 서비스가 준비되지 않았습니다.\n'
                             + '\n'.join(health['issues'] or [health['status']])})
                     return
                 self.respond(202, host.service.receive_http(raw))
             except (AdapterError, HumanRequired, ValueError, OSError) as error:
-                log_event('INGRESS_REJECTED', error_type=type(error).__name__)
+                detail = failure_detail(error, stage='TELEGRAM_INGRESS')
+                log_event('INGRESS_REJECTED', **detail)
                 code = getattr(error, 'code', '')
                 explanations = {'UNKNOWN_COMMAND': '지원하지 않는 명령어입니다. /status에서 운영 메뉴를 확인해 주세요.',
                     'INVALID_ATTACHMENTS': '첨부 파일 형식을 확인할 수 없습니다. UTF-8 텍스트 파일을 보내 주세요.',
                     'ATTACHMENTS_TOO_LARGE': '첨부 텍스트는 합계 32KiB까지 전달할 수 있습니다.',
                     'ATTACHMENTS_REQUIRE_CHAT': '첨부 파일은 명령어 대신 일반 메시지와 함께 보내 주세요.',
                     'TELEGRAM_PAYLOAD_TOO_LARGE': '메시지와 첨부가 너무 큽니다. 나누어 보내 주세요.'}
-                self.respond(400 if code in explanations else 403, {'accepted': False, 'error_type': type(error).__name__,
+                self.respond(400 if code in explanations else 403, {'accepted': False, **detail,
                     'reply_text': explanations.get(code, '요청 권한 또는 운영 설정을 확인할 수 없습니다. /status에서 상태를 확인해 주세요.')})
     return Handler
 
@@ -876,12 +956,9 @@ def serve(config, args=None, *, application_factory=None, stop_event=None):
                         app.close()
                         app = None
                     host.status = 'INITIALIZATION_FAILED'
-                    # Only short engine-defined codes may cross the diagnostic
-                    # boundary; provider bodies and parser exceptions may be private.
-                    import re
-                    reason = str(error) if isinstance(error, (HumanRequired, AdapterError)) and re.fullmatch(r'[A-Z][A-Z0-9_]{1,100}', str(error)) else type(error).__name__
-                    host.issues = ['운영 초기화 실패: ' + reason]
-                    log_event('RUNTIME_INITIALIZATION_FAILED', error_type=type(error).__name__, reason=reason)
+                    host.diagnostic = failure_detail(error, stage='RUNTIME_INITIALIZATION')
+                    host.issues = ['운영 초기화 실패: ' + host.diagnostic['reason']]
+                    log_event('RUNTIME_INITIALIZATION_FAILED', **host.diagnostic)
             log_event('RUNTIME_STATE', **host.health())
             if service or config.app['broker']['capability_manifest'] != 'automatic' or host.stop.wait(30):
                 break
@@ -891,6 +968,7 @@ def serve(config, args=None, *, application_factory=None, stop_event=None):
             config = load_config(config.directory)
             host.config = config
             host.status, host.issues = 'STARTING', []
+            host.diagnostic = None
         while not host.stop.wait(.5):
             if service and service.stop.is_set():
                 break

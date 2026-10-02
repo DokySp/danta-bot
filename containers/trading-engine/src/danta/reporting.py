@@ -325,8 +325,8 @@ def diagnostic_text(data, *, symbols=None):
                         if row.get(key) is not None]
             if row.get('field'):
                 evidence.append('응답 항목: ' + row['field'])
-            if row.get('request_stage'):
-                evidence.append('단계: ' + _value(row['request_stage']))
+            if row.get('request_stage') or row.get('stage'):
+                evidence.append('단계: ' + _value(row.get('request_stage') or row['stage']))
             if row.get('error_type'):
                 evidence.append('예외: ' + row['error_type'])
             if row.get('transport_error'):
@@ -335,6 +335,10 @@ def diagnostic_text(data, *, symbols=None):
                 evidence.append('증권사 응답: ' + row['provider_message'])
             if row.get('elapsed_seconds') is not None:
                 evidence.append(str(row['elapsed_seconds']) + '초')
+            if row.get('attempt_count') is not None:
+                evidence.append('시도 ' + str(row['attempt_count']) + '회')
+            if row.get('requested_at'):
+                evidence.append('조회 시작: ' + _time(row['requested_at']))
             parts.append(text + (' (' + ', '.join(evidence) + ')' if evidence else ''))
         return '; '.join(parts)
     if data.get('reasons'):
@@ -377,6 +381,32 @@ def render_notification(payload, *, symbols=None) -> str:
                  if data.get('checked_at') or data.get('occurred_at') else ''))
     if kind == 'SERVICE_REQUEST_RECOVERED':
         return '재시작으로 중단된 이전 작업은 자동 재실행하지 않았습니다.\n계좌·주문은 감시 루프에서 자동으로 대조합니다. 현재 상태는 /status에서 확인할 수 있습니다.'
+    if kind == 'SERVICE_WORKER_RECOVERED':
+        return '운영 설정을 다시 확인하여 예약 작업 처리를 재개했습니다.\n확인 시각: ' + _time(data.get('occurred_at'))
+    if kind in {'SERVICE_WORKER_FAILED', 'SERVICE_WORKER_BLOCKED', 'NOTIFY_BLOCKED'} or data.get('error_type'):
+        title = {'SERVICE_WORKER_FAILED': '서비스 작업이 중단되었습니다.',
+                 'SERVICE_WORKER_BLOCKED': '운영 설정 확인으로 작업을 보류했습니다.',
+                 'NOTIFY_BLOCKED': '알림 전송을 완료하지 못했습니다.'}.get(kind, '요청 처리에 실패했습니다.')
+        reason = data.get('reason')
+        text = _value(reason) if reason else '원인 코드가 기록되지 않았습니다.'
+        if reason and text != reason:
+            text += ' (' + reason + ')'
+        lines = [title, '원인: ' + text, '예외 종류: ' + str(data.get('error_type', MISSING))]
+        if data.get('stage'):
+            lines.append('실패 단계: ' + data['stage'])
+        if data.get('occurred_at'):
+            lines.append('발생 시각: ' + _time(data['occurred_at']))
+        if data.get('diagnostic'):
+            lines.append('상세 진단: ' + diagnostic_text({'diagnostics': [
+                {'reason': reason, **data['diagnostic']}]}, symbols=symbols))
+        if data.get('frames'):
+            frame = data['frames'][-1]
+            lines.append(f"발생 위치: {frame['file']}:{frame['line']} ({frame['function']})")
+        lines.extend(_lines({key: value for key, value in data.items()
+            if key not in {'kind', 'reason', 'error_type', 'stage', 'occurred_at', 'diagnostic', 'frames'}}, symbols=symbols))
+        if kind == 'SERVICE_WORKER_BLOCKED':
+            lines.append('현재 설정으로 새 거래를 실행하지 않습니다. HTTP 상태 조회는 유지하며 설정을 다시 확인합니다.')
+        return '\n'.join(lines)
     if status == 'CANDIDATE_CONTROLS':
         controls = data['controls']
         return '\n'.join(['종목 제외 설정 · 조회만 수행했습니다.',

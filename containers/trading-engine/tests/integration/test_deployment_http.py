@@ -12,9 +12,9 @@ from unittest.mock import Mock, patch
 from urllib.error import HTTPError
 from urllib.request import Request, build_opener, ProxyHandler
 
-from danta.config import ROOT, load_config
+from danta.config import HumanRequired, ROOT, load_config
 from danta.adapters.telegram import MAX_REQUEST_BYTES
-from danta.service import serve
+from danta.service import log_event, serve
 
 
 class DeploymentHTTPTest(unittest.TestCase):
@@ -111,6 +111,24 @@ class DeploymentHTTPTest(unittest.TestCase):
             self.assertEqual(self.request('/telegram', b'{}', 'text/plain')[0], 403)
             self.assertEqual(self.request('/telegram', b'x' * (MAX_REQUEST_BYTES + 1))[0], 403)
         self.assertIn('INGRESS_REJECTED', logs.getvalue())
+
+    def test_initialization_error_code_reaches_http_without_private_exception_suffix(self):
+        finished = threading.Event()
+        def failed(*_):
+            raise HumanRequired('POLICY_CHANGED: SYNTHETIC_PRIVATE_VALUE_DO_NOT_PRINT')
+        def logged(event, **fields):
+            log_event(event, **fields)
+            if event == 'RUNTIME_INITIALIZATION_FAILED':
+                finished.set()
+        with patch('danta.service.log_event', side_effect=logged), self.running(failed, skip_requirements=True) as logs:
+            self.assertTrue(finished.wait(3))
+            code, health = self.request('/healthz')
+            self.assertEqual(code, 200)
+            self.assertFalse(health['ready'])
+            self.assertEqual(health['diagnostic']['reason'], 'POLICY_CHANGED')
+            self.assertEqual(health['diagnostic']['stage'], 'RUNTIME_INITIALIZATION')
+            self.assertIn('POLICY_CHANGED', canonical_health := json.dumps(health))
+            self.assertNotIn('SYNTHETIC_PRIVATE_VALUE_DO_NOT_PRINT', canonical_health + logs.getvalue())
 
     def test_stop_during_initialization_never_starts_trading_workers(self):
         entered, release = threading.Event(), threading.Event()

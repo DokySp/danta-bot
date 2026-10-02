@@ -148,6 +148,8 @@ def _validate_semantics(data: dict) -> None:
         raise ConfigurationError("Invalid mode/timezone")
     if not 1 <= app["app"]["listen_port"] <= 65535:
         raise ConfigurationError("Invalid listen port")
+    if app['model']['timeout_seconds'] <= 0:
+        raise ConfigurationError('app.model.timeout_seconds: positive integer required')
     if strategy["active_profile"] not in {"research", "live"}:
         raise ConfigurationError("Unknown strategy profile")
     if schedules["calendar_ref"] != "app.market.calendar_manifest" or schedules["timezone"] != "Asia/Seoul":
@@ -210,9 +212,9 @@ def _validate_semantics(data: dict) -> None:
 
 
 def model_reload_hash(data):
-    """Only the model selector and effort may change inside a deployed runtime."""
+    """Only model selection, reasoning effort and timeout may reload between calls."""
     data = json.loads(canonical(data))
-    for key in ('model_id', 'reasoning_effort'):
+    for key in ('model_id', 'reasoning_effort', 'timeout_seconds'):
         data['app']['model'].pop(key)
     return digest(data)
 
