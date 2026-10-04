@@ -9,6 +9,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from .report_styles import OPERATOR_CSS, PAGES
 from .safety import reject_credentials
 
 
@@ -48,11 +49,11 @@ def json_default(value):
     raise TypeError(type(value).__name__)
 
 
-def _document(title: str, body: str) -> str:
+def _document(title: str, body: str, *, operator=False) -> str:
     return ('<!doctype html><html lang="ko"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width,initial-scale=1">'
-            f'<title>{html.escape(title)}</title><style>{CSS}</style></head>'
-            f'<body><main>{body}</main></body></html>')
+            f'<title>{html.escape(title)}</title><style>{CSS}{OPERATOR_CSS if operator else ""}</style></head>'
+            f'<body class="{"operator-report" if operator else "document"}"><main>{body}</main></body></html>')
 
 
 def facts_html(data) -> str:
@@ -571,14 +572,76 @@ def _usage_text(data):
 
 def _table(headers, rows, *, empty='기록이 없습니다.'):
     if not rows:
-        return '<p class="muted">' + html.escape(empty) + '</p>'
-    return ('<table class="report-table"><thead><tr>' + ''.join(f'<th scope="col">{html.escape(h)}</th>' for h in headers)
+        return '<p class="empty-state">' + html.escape(empty) + '</p>'
+    return ('<div class="table-scroll"><table class="report-table"><thead><tr>' + ''.join(f'<th scope="col">{html.escape(h)}</th>' for h in headers)
             + '</tr></thead><tbody>' + ''.join('<tr>' + ''.join(f'<td data-label="{html.escape(label, quote=True)}">{html.escape(str(cell))}</td>' for label, cell in zip(headers, row))
-                                               + '</tr>' for row in rows) + '</tbody></table>')
+                                               + '</tr>' for row in rows) + '</tbody></table></div>')
 
 
 def _details(title, data, symbols=None):
     return '<details><summary>' + html.escape(title) + '</summary><pre>' + html.escape('\n'.join(_lines(data, symbols=symbols))) + '</pre></details>'
+
+
+def _cards(items):
+    return '<div class="cards">' + ''.join(
+        '<div class="card">' + html.escape(label) + '<strong>' + html.escape(value)
+        + '</strong><small>' + html.escape(note) + '</small></div>' for label, value, note in items) + '</div>'
+
+
+def _page(key, title, intro):
+    index = next(i for i, page in enumerate(PAGES, 1) if page[0] == key)
+    return (f'<section class="report-page" id="{key}" aria-labelledby="heading-{key}">'
+            f'<span class="page-number">{index:02d} / {len(PAGES):02d}</span>'
+            f'<h2 id="heading-{key}">{html.escape(title)}</h2><p class="page-intro">{html.escape(intro)}</p>')
+
+
+def _report_header(title, data):
+    status = data['status'] if isinstance(data.get('status'), dict) else data.get('portfolio', {})
+    scope = '대상일: ' + str(data['date']) if data.get('date') else '범위: 이번 실행'
+    return ('<header class="report-header"><div><span class="eyebrow">DANTA · TRADING JOURNAL</span>'
+            '<h1>' + html.escape(title) + '</h1><p class="metadata">'
+            + html.escape(scope) + ' · 생성: '
+            + html.escape(_time(data.get('created_at'))) + '</p></div><span class="report-mode">'
+            + html.escape(_value(status.get('mode', data.get('mode')))) + '</span></header>')
+
+
+def _attention_items(status):
+    items = [_value(reason) for reason in status.get('blocked_reasons', [])]
+    if status.get('account_diagnostics'):
+        items.append('계좌 조회에 확인할 문제가 있습니다. 운영 상태에서 오류와 조회 시각을 확인하세요.')
+    if status.get('monitor_status') == 'MONITOR_DEGRADED' and 'MONITOR_DEGRADED' not in status.get('blocked_reasons', []):
+        items.append('보호 감시에 문제가 기록되어 있습니다. 운영 상태에서 영향과 확인 시각을 확인하세요.')
+    uncertain = sum(row.get('valuation_quality') != 'EXACT' for row in status.get('holdings', []))
+    if uncertain:
+        items.append(f'보유 {uncertain}개 종목의 평가 품질이 미확인 또는 불완전합니다.')
+    return '<ul class="attention-list">' + ''.join('<li>' + html.escape(item) + '</li>' for item in items) + '</ul>' if items else (
+        '<p class="muted">저장된 상태에 별도 확인 사항이 기록되지 않았습니다. 실시간 상태는 /status에서 확인하세요.</p>' if status else
+        '<p class="muted">확인 사항을 판단할 상태 자료가 제공되지 않았습니다.</p>')
+
+
+def _holding_value(row):
+    raw = row.get('value', row.get('value_krw'))
+    value = _number(raw)
+    price = _number(row.get('price', row.get('mark')))
+    quantity = _number(row.get('quantity'))
+    if raw is None and row.get('valuation_quality') == 'EXACT' and price is not None and quantity is not None:
+        value = price * quantity
+    return value
+
+
+def _holdings_chart(holdings, symbols):
+    values = [(row, _holding_value(row)) for row in holdings]
+    valid = [(row, value) for row, value in values if row.get('valuation_quality') == 'EXACT' and value is not None and value >= 0]
+    if not valid or not any(value > 0 for _, value in valid):
+        return ''
+    maximum = max(value for _, value in valid)
+    body = '<figure class="bar-chart"><h3>확인된 보유 평가액 비교</h3>'
+    for row, value in sorted(valid, key=lambda item: item[1], reverse=True):
+        body += ('<div class="bar-row"><div class="bar-label"><span>' + html.escape(_name(row, symbols))
+                 + '</span><strong>' + html.escape(_amount(value)) + '</strong></div>'
+                 + f'<div class="bar-track" aria-hidden="true"><div class="bar-fill" style="width:{value / maximum * 100:.2f}%"></div></div></div>')
+    return body + ('<figcaption class="muted">평가 품질이 확인된 ' + str(len(valid)) + '개 종목만 비교합니다. '
+                   + str(len(holdings) - len(valid)) + '개 종목은 평가 미확인으로 제외했습니다. 현금과 전체 계좌 비중은 포함하지 않습니다.</figcaption></figure>')
 
 
 def _nav_chart(points):
@@ -598,19 +661,30 @@ def _nav_chart(points):
     span = (valid[-1][0] - valid[0][0]).total_seconds() or 1
     coordinates = []
     for at, value, _ in valid:
-        x = 100 + 670 * (at - valid[0][0]).total_seconds() / span
+        x = 145 + 625 * (at - valid[0][0]).total_seconds() / span
         y = 150 if high == low else 240 - float((value - low) / (high - low)) * 190
         coordinates.append(f'{x:.1f},{y:.1f}')
     svg = ('<svg class="chart" viewBox="0 0 800 300" role="img" aria-label="기록된 전략 자산 평가 추이">'
            '<title>전략 자산 평가 추이. 입출금 조정 수익률과 다릅니다.</title>'
-           '<path d="M100 35V245H770" fill="none" stroke="#cbd7e2"/>'
-           f'<polyline points="{" ".join(coordinates)}" fill="none" stroke="#087d86" stroke-width="3"/>'
-           f'<text x="94" y="48" text-anchor="end">{html.escape(_amount(high))}</text>'
-           f'<text x="94" y="244" text-anchor="end">{html.escape(_amount(low))}</text>'
-           f'<text x="100" y="278">{valid[0][0].astimezone(ZoneInfo("Asia/Seoul")).strftime("%m/%d %H:%M")}</text>'
-           f'<text x="770" y="278" text-anchor="end">{valid[-1][0].astimezone(ZoneInfo("Asia/Seoul")).strftime("%m/%d %H:%M")} KST</text></svg>')
+           '<path d="M145 50H770M145 145H770M145 240H770" fill="none" stroke="#dce5d5" stroke-dasharray="4 5"/>')
+    for index in range(1, len(valid)):
+        uncertain_segment = any(point[2].get('quality') != 'EXACT' for point in valid[index - 1:index + 1])
+        svg += (f'<polyline points="{coordinates[index - 1]} {coordinates[index]}" fill="none" stroke="#43765b" '
+                f'stroke-width="3"' + (' stroke-dasharray="5 5"' if uncertain_segment else '') + '/>')
+    for coordinate, (at, value, point) in zip(coordinates, valid):
+        x, y = coordinate.split(',')
+        color = '#43765b' if point.get('quality') == 'EXACT' else '#ab7528'
+        svg += (f'<circle cx="{x}" cy="{y}" r="4" fill="{color}"><title>'
+                + html.escape(_time(at.isoformat()) + ' · ' + _amount(value) + ' · ' + _value(point.get('quality'))) + '</title></circle>')
+    svg += (f'<text x="135" y="48" text-anchor="end">{html.escape(_amount(high))}</text>'
+            f'<text x="135" y="244" text-anchor="end">{html.escape(_amount(low))}</text>'
+            f'<text x="145" y="278">{valid[0][0].astimezone(ZoneInfo("Asia/Seoul")).strftime("%m/%d %H:%M")}</text>'
+            f'<text x="770" y="278" text-anchor="end">{valid[-1][0].astimezone(ZoneInfo("Asia/Seoul")).strftime("%m/%d %H:%M")} KST</text></svg>')
     uncertain = sum(point.get('quality') != 'EXACT' for _, _, point in valid)
-    return svg + f'<p>기록 범위: {html.escape(_amount(low))} ~ {html.escape(_amount(high))}</p>' + f'<p class="muted">제공된 평가 기록 {len(valid)}개 · 품질 미확인/불완전 {uncertain}개. 자산 증감에는 입출금이 포함될 수 있으며 수익률을 뜻하지 않습니다.</p>'
+    return ('<div class="chart-panel"><div class="chart-scroll">' + svg + '</div>'
+            + f'<p>기록 범위: {html.escape(_amount(low))} ~ {html.escape(_amount(high))}</p>'
+            + f'<p class="muted">제공된 평가 기록 {len(valid)}개 · 품질 미확인/불완전 {uncertain}개. '
+              '불완전한 관측은 황색 점과 점선으로 표시합니다. 자산 증감에는 입출금이 포함될 수 있으며 수익률을 뜻하지 않습니다.</p></div>')
 
 
 def _review_outcome(row):
@@ -651,12 +725,27 @@ def _screening_groups(rows):
 def _review_html(run, symbols):
     body = ''
     for row in run.get('review_details', []):
-        body += '<article class="thesis"><h3>' + html.escape(_name(row, symbols)) + '</h3>'
-        body += '<p>' + html.escape(('기존 보유' if row.get('scope') == 'HOLDING' else '신규 후보') + ' · ' + _review_outcome(row)) + '</p>'
+        body += '<article class="thesis"><span class="review-scope">' + ('기존 보유' if row.get('scope') == 'HOLDING' else '신규 후보') + '</span><h3>' + html.escape(_name(row, symbols)) + '</h3>'
+        body += '<p class="review-conclusion">' + html.escape(_review_outcome(row)) + '</p>'
         body += '<p class="metadata">검사 시각: ' + html.escape(_time(row.get('evaluated_at'))) + '</p>'
         if row.get('stage') == 'OUTSIDE_REVIEW_SCOPE':
             body += '<p>이 종목은 공시 영향 검토 대상이 아니므로 AI 판단을 요청하지 않았습니다. 보호 감시 결과와 보유 현황을 참고로 표시합니다.</p></article>'
             continue
+        ai = row.get('ai') or {}
+        if ai:
+            body += '<dl>'
+            for key, label in (
+                ('priority', '검토 우선순위'), ('economic_path', '투자 근거'), ('horizon_case', '예상 기간'),
+                ('priced_in_case', '가격 반영 여부'), ('counterevidence_fact_ids', '반대 근거 참조'),
+                ('invalidation_case', '판단 무효 조건'), ('uncertainties', '불확실성'), ('reason', '보유 판단 이유')):
+                if key in ai:
+                    value = ('\n'.join('• ' + '\n'.join(_lines(item)) for item in ai[key]) or '없음' if isinstance(ai[key], list)
+                             else '\n'.join(_lines(ai[key])) if isinstance(ai[key], dict) else _value(ai[key]))
+                    body += '<dt>' + label + '</dt><dd>' + html.escape(value) + '</dd>'
+            body += '</dl>'
+        else:
+            body += '<p class="muted">AI 판단이 수행되지 않았거나 완료되지 않았습니다.</p>'
+        body += '<details><summary>가격·거래 조건 상세</summary>'
         features, quote = row.get('features') or {}, row.get('quote') or {}
         criteria = run.get('entry_criteria', {})
         universe, signal, order_policy = (criteria.get(key, {}) for key in ('universe', 'signal', 'orders'))
@@ -682,7 +771,7 @@ def _review_html(run, symbols):
                 _time(current.get('observed_at')) + ' / ' + _time(current.get('received_at')), _amount(order_quote.get('quote_age_seconds'),'초')]])
         if row.get('filter_reasons'):
             body += '<p>사전 검사: ' + html.escape(', '.join(_value(reason) for reason in row['filter_reasons'])) + '</p>'
-        body += '<h4>공식 공시 근거</h4>'
+        body += '</details><details><summary>공식 공시 근거 · ' + str(len(row.get('evidence', []))) + '건</summary>'
         for event in row.get('evidence', []):
             body += '<p>' + html.escape(str(event.get('family', '공시')) + ' · 이용 가능 시각: ' + _time(event.get('available_at'))) + '</p>'
             uri = event.get('source_uri', '')
@@ -695,13 +784,7 @@ def _review_html(run, symbols):
         if row.get('facts'):
             body += _table(['근거 참조', '관측 사실', '단위', '출처'], [[str(fact.get('fact_id','')),
                 str(fact.get('value',MISSING)),str(fact.get('unit','')),str(fact.get('source',''))] for fact in row['facts']])
-        ai = row.get('ai') or {}
-        body += _table(['AI 판단 근거', '내용'], [[label, _value(ai[key])] for key, label in (
-            ('priority', '검토 우선순위'), ('economic_path', '투자 근거'), ('horizon_case', '예상 기간'),
-            ('priced_in_case', '가격 반영 여부'), ('counterevidence_fact_ids', '반대 근거 참조'),
-            ('invalidation_case', '판단 무효 조건'), ('uncertainties', '불확실성'), ('reason', '보유 판단 이유')) if key in ai],
-            empty='AI 판단이 수행되지 않았거나 완료되지 않았습니다.')
-        body += '</article>'
+        body += '</details></article>'
     return body
 
 
@@ -713,34 +796,111 @@ def _operational_report(data):
     orders, fills, nav = data.get('orders', []), data.get('fills', []), data.get('nav', [])
     run_trades = not daily and data.get('trade_scope') == 'RUN'
     holdings = status.get('holdings', [])
-    body = f'<p class="metadata">대상일: {html.escape(str(data.get("date", "실행 결과")))} · 생성: {html.escape(_time(data.get("created_at")))}</p>'
-    sections = [('overview', '요약'), ('holdings', '보유 종목'), ('decisions', '판단·근거'), ('trades', '주문·체결'), ('ledger', '자산 기록'), ('diagnostics', '운영 진단')]
-    body += '<nav class="report-nav" aria-label="리포트 바로가기">' + ''.join(f'<a href="#{key}">{name}</a>' for key, name in sections) + '</nav>'
-    body += '<section id="overview"><h2>핵심 요약</h2><div class="cards">'
-    cards = [('운영 모드', _value(status.get('mode', data.get('mode')))), ('보유 종목', f'{len(holdings)}개' if 'holdings' in status else MISSING),
-             ('이번 검토 주문 기록' if run_trades else '주문 기록', f'{len(orders)}건' if 'orders' in data else MISSING),
-             ('이번 검토 체결·정정 기록' if run_trades else '체결·정정 기록', f'{len(fills)}건' if 'fills' in data else MISSING),
-             ('전략 현금', _amount(status.get('cash_krw', status.get('allocated_cash'))))]
-    body += ''.join(f'<div class="card">{html.escape(label)}<strong>{html.escape(value)}</strong></div>' for label, value in cards) + '</div>'
-    body += '<p class="notice">이 보고서는 저장된 관측·판단·체결 기록입니다. 주문 접수와 체결을 구분하며, 누락된 자료를 0원이나 거래 없음으로 간주하지 않습니다. 실제 투자 성과는 별도 검증이 필요합니다.</p>'
+    performance = status.get('performance') or data.get('performance') or {}
+    body = '<div class="report-app">'
+    for key, label in (*PAGES, ('all', '전체 보기')):
+        body += (f'<input class="page-choice" type="radio" name="report-view" id="view-{key}"'
+                 f' aria-label="{label}" aria-controls="{key if key != "all" else "report-pages"}"'
+                 + (' checked' if key == 'overview' else '') + '>')
+    body += '<nav class="report-nav" aria-label="보고서 페이지 선택">' + ''.join(
+        f'<label for="view-{key}">{label}</label>' for key, label in (*PAGES, ('all', '전체 보기'))) + '</nav>'
+    body += '<div class="report-pages" id="report-pages">'
+    body += _page('overview', '핵심 요약', '얼마를 보유하고, 어떤 판단과 거래가 기록됐는지 먼저 확인하세요.')
+    body += _cards([
+        ('전략 현금', _amount(status.get('cash_krw', status.get('allocated_cash'))), '저장된 계좌 관측 기준'),
+        ('보유 종목', f'{len(holdings)}개' if 'holdings' in status else MISSING, '평가 금액과 보호 조건은 보유 자산에서'),
+        ('이번 검토 주문 기록' if run_trades else '주문 기록', f'{len(orders)}건' if 'orders' in data else MISSING, '주문 접수와 체결은 별도 기록'),
+        ('이번 검토 체결·정정 기록' if run_trades else '체결·정정 기록', f'{len(fills)}건' if 'fills' in data else MISSING, '정정 기록 포함 · 거래 수익과 다름'),
+    ])
+    body += '<div class="overview-grid"><article class="overview-block"><h3>' + ('마지막 검토 기록' if daily else '이번 검토의 결론') + '</h3>'
+    if runs:
+        last = runs[-1]
+        body += '<p class="review-lead">' + html.escape(_value(last.get('reason'))) + '</p>'
+        body += '<p class="metadata">검토 시각: ' + html.escape(_time(last.get('created_at'))) + '</p><dl class="status-list">'
+        for key, label in (('run_status', '실행'), ('model_status', 'AI 응답'), ('decision_status', '판단 검증'), ('order_status', '이번 검토의 주문')):
+            body += '<div><dt>' + label + '</dt><dd>' + html.escape(_value(last.get(key))) + '</dd></div>'
+        body += '</dl>'
+    else:
+        body += '<p class="muted">기록된 투자 검토가 없습니다. 보호 매도 여부는 주문·체결 장부에서 확인하세요.</p>'
+    body += '</article><article class="overview-block"><h3>확인할 내용</h3>' + _attention_items(status) + '</article></div>'
     if not daily:
-        body += _table(['항목', '결과'], [[LABELS[key], _value(data[key], key)] for key in ('kind', 'review_scope', 'run_status', 'reason', 'model_status', 'decision_status', 'order_status') if key in data])
-        if data.get('trigger'):
-            body += _details('계기 공시', data['trigger'], symbols)
+        body += _table(['검토 정보', '내용'], [[LABELS[key], _value(data[key], key)] for key in ('kind', 'review_scope') if key in data],
+                       empty='검토 범위 자료가 제공되지 않았습니다.')
         if data.get('review_targets') is not None:
             targets = data['review_targets']
-            body += '<p>확정된 AI 검토 대상: 신규 후보 ' + str(len(targets['candidate_ids'])) + '개 · 보유 종목 ' + str(len(targets['position_ids'])) + '개.</p>'
-        stages = {'input.snapshot.json': '판단 입력 확정', 'candidates.json': '후보 사전 검사', 'proposal.json': 'AI 응답',
-                  'decision.json': 'AI 응답 검증', 'plan.json': '주문·보호 계획', 'execution.json': '주문 실행'}
-        if data.get('unreached_stages'):
-            body += '<p>생성되지 않은 단계 기록: ' + html.escape(', '.join(stages.get(name, name) for name in data['unreached_stages'])) + '.</p>'
-        body += _details('저장된 계좌·평가 확인 상태', {key: status[key] for key in
-            ('as_of', 'reconciled', 'complete', 'account_checked_at', 'account_succeeded_at') if key in status})
-        if data.get('portfolio_diagnostic'):
-            body += _details('보유 평가 문제', data['portfolio_diagnostic'])
-    else:
+            body += '<p class="muted">확정된 AI 검토 대상: 신규 후보 ' + str(len(targets['candidate_ids'])) + '개 · 보유 종목 ' + str(len(targets['position_ids'])) + '개.</p>'
+    scope = ('이번 검토에 연결된 주문·체결만 표시합니다. 보호 감시를 포함한 당일 전체 거래는 /report 에서 확인합니다.' if run_trades else
+             '보호 규칙으로 발생한 매도를 포함한 전체 거래는 주문·체결 장부에 표시합니다.')
+    body += '<p class="reading-note">' + scope + ' 누락된 자료는 0원이나 거래 없음으로 간주하지 않습니다.</p>'
+    body += '</section>' + _page('holdings', '보유 자산', '종목별 평가 금액을 비교하고, 투자 근거와 보호 조건을 확인하세요.')
+    body += _holdings_chart(holdings, symbols)
+    body += _table(['종목', '보유 수량', '평가 단가', '평가 금액', '평가 품질', '가격 기준 시각'],
+        [[_name(row, symbols), _amount(row.get('quantity'), '주'), _amount(row.get('price', row.get('mark'))),
+          _amount(_holding_value(row)), _value(row.get('valuation_quality')), _time(row.get('price_observed_at', row.get('valuation_at')))] for row in holdings],
+        empty='보유 종목이 없습니다.' if 'holdings' in status else '보유 종목 자료가 제공되지 않았습니다.')
+    body += '<h3>보유 계획과 보호 조건</h3>'
+    for thesis in data.get('theses', []):
+        body += '<article class="thesis"><h3>' + html.escape(_name(thesis, symbols)) + '</h3><dl>'
+        for key in ('economic_path', 'current_stop', 'invalidation_case'):
+            body += '<dt>' + LABELS[key] + '</dt><dd>' + html.escape(_value(thesis.get(key), key)) + '</dd>'
+        body += '</dl><details><summary>예상 전개·반대 근거·보유 계획 상세</summary><dl>'
+        for key in ('horizon_case', 'counterevidence', 'max_holding_sessions', 'origin', 'exit_reason'):
+            body += '<dt>' + LABELS[key] + '</dt><dd>' + html.escape(_value(thesis.get(key), key)) + '</dd>'
+        body += '</dl></details></article>'
+    if not data.get('theses'):
+        body += '<p class="muted">종목별 투자 근거·보호 조건이 제공되지 않았습니다.</p>'
+    body += '</section>' + _page('decisions', '투자 판단과 근거', '검토 결과를 먼저 읽고, 종목별 판단 이유와 원문 근거를 펼쳐보세요.')
+    body += _table(['시각', '실행', '모델', '판단', '이번 검토의 주문', '이유'],
+        [[_time(run.get('created_at')), _value(run.get('run_status')), _value(run.get('model_status')),
+          _value(run.get('decision_status')), _value(run.get('order_status')), _value(run.get('reason'))] for run in runs],
+        empty='기록된 투자 검토가 없습니다. 보호 매도 여부는 주문·체결 장부에서 별도로 확인합니다.')
+    body += '<p class="muted">위 주문 결과는 해당 투자 검토의 범위입니다. ' + scope + '</p>'
+    if not daily and data.get('trigger'):
+        body += _details('계기 공시', data['trigger'], symbols)
+    for run in runs:
+        if not run.get('feature_exclusions') and not run.get('review_details'):
+            continue
+        if daily:
+            body += '<details class="review-run"><summary>' + html.escape(_time(run.get('created_at'))) + ' 종목별 검토 · ' + str(len(run.get('review_details', []))) + '개</summary>'
+        if run.get('feature_exclusions'):
+            for group, rows in _screening_groups(run['feature_exclusions']).items():
+                if rows:
+                    body += '<details><summary>' + group + ' (' + str(len(rows)) + '건)</summary>'
+                    body += _table(['종목 또는 출처', '이유'], [[_name(row, symbols) if row.get('instrument_id') else str(row.get('source', '자료 수집')),
+                        ', '.join(_value(reason) for reason in row.get('reasons') or [row.get('reason')])] for row in rows]) + '</details>'
+        body += _review_html(run, symbols)
+        if daily:
+            body += '</details>'
+    body += '</section>' + _page('trades', '이번 검토 주문·체결 기록' if run_trades else '주문·체결 장부',
+        '주문 수량과 실제 누적 체결을 비교하세요. 체결·정정은 별도 표에 모두 보존됩니다.')
+    body += '<h3>주문</h3>' + _table(['시각', '종목', '방향', '주문 수량', '상태', '누적 체결', '누적 체결 금액', '이유'],
+        [[_time(row.get('created_at')), _name(row, symbols), _value(row.get('side')), _amount(row.get('quantity'), '주'),
+          _value(row.get('state')), _amount(row.get('cumulative_quantity'), '주'), _amount(row.get('cumulative_notional')), _value(row.get('reason'))] for row in orders],
+        empty='기록된 주문이 없습니다.' if 'orders' in data else '전체 주문 장부가 제공되지 않았습니다.')
+    body += '<h3>체결·정정</h3>' + _table(['관측 시각', '종목', '방향', '구분', '수량', '금액', '수수료·세금', '이유'],
+        [[_time(row.get('at', row.get('observed_at'))), _name(row, symbols), _value(row.get('side')), '정정' if row.get('correction') else '체결',
+          _amount(row.get('quantity', row.get('quantity_delta')), '주'), _amount(row.get('amount_krw', row.get('notional_delta_krw'))),
+          _amount(row.get('fee_krw', row.get('fee_delta_krw'))), _value(row.get('reason'))] for row in fills],
+        empty='기록된 체결이 없습니다.' if 'fills' in data else '체결 장부가 제공되지 않았습니다.')
+    body += '</section>' + _page('ledger', '자산·성과 기록', '자산 평가 추이와 비용·입출금을 반영한 성과를 구분해서 확인하세요.')
+    body += '<p class="reading-note">성과 자료 완결성: ' + html.escape(_value(performance.get('coverage'))) + '. 누적 성과의 기간은 저장된 평가 기록 전체입니다.</p>'
+    body += _cards([(LABELS[key], _value(performance.get(key), key), note) for key, note in (
+        ('pnl', '누적 손익 · 일일 손익과 다름'), ('twr', '입출금 영향을 조정한 누적 수익률'),
+        ('max_drawdown', '저장된 기간의 최대 낙폭'), ('pnl_after_operating_cost', '운영 비용 미확인 시 확정할 수 없음'))])
+    body += '<h3>기록된 전략 자산 평가 추이</h3>' + _nav_chart(nav)
+    body += _details('누적 성과와 자료 완결성', performance or {'coverage': None, 'pnl': None, 'twr': None})
+    body += '<p class="muted">운영 비용이 미확인이면 비용 차감 후 손익도 확정하지 않습니다. 그래프의 전체 관측값은 아래 원장에서 확인할 수 있습니다.</p>'
+    body += '<details><summary>자산 평가 원장 · ' + str(len(nav)) + '개 기록</summary>'
+    body += _table(['기준 시각', '전략 자산', '평가 품질', '마감 확정'],
+        [[_time(point.get('at')), _amount(point.get('nav')), _value(point.get('quality')), _value(point.get('completed'))] for point in nav],
+        empty='제공된 자산 평가 기록이 없습니다.')
+    body += _details('자산 평가 원본 상세', nav) + '</details>'
+    body += '</section>' + _page('diagnostics', '운영 상태와 진단', '보고서 생성 시 저장된 상태와 과거 사건을 구분해서 확인하세요.')
+    if daily:
+        body += '<h3>저장된 상태</h3>'
         health_keys = ('model_id', 'authentication', 'review_status', 'account_status', 'account_checked_at', 'account_succeeded_at', 'monitor_status', 'monitor_checked_at')
-        body += _table(['현재 상태', '확인 결과'], [[LABELS[key], _value(status[key], key)] for key in health_keys if key in status])
+        body += _table(['현재 상태', '확인 결과'], [[LABELS[key], _value(status[key], key)] for key in health_keys if key in status],
+                       empty='상태 확인 자료가 제공되지 않았습니다.')
         for key in ('chat_model', 'review_model'):
             health = status.get(key, {})
             if key in status:
@@ -750,63 +910,23 @@ def _operational_report(data):
         if status.get('monitor_status') == 'MONITOR_DEGRADED':
             body += '<p class="notice">현재 보호 감시 문제: ' + html.escape(diagnostic_text(status.get('monitor_diagnostic') or {}, symbols=symbols)) + '</p>'
         body += '<p class="muted">일반 대화 성공은 투자 판단 완료를 뜻하지 않습니다. 상태별 확인 시각과 아래 과거 사건을 구분해 보세요.</p>'
+    else:
+        stages = {'input.snapshot.json': '판단 입력 확정', 'candidates.json': '후보 사전 검사', 'proposal.json': 'AI 응답',
+                  'decision.json': 'AI 응답 검증', 'plan.json': '주문·보호 계획', 'execution.json': '주문 실행'}
+        if data.get('unreached_stages'):
+            body += '<p class="notice">생성되지 않은 단계 기록: ' + html.escape(', '.join(stages.get(name, name) for name in data['unreached_stages'])) + '.</p>'
+        body += _details('저장된 계좌·평가 확인 상태', {key: status[key] for key in
+            ('as_of', 'reconciled', 'complete', 'account_checked_at', 'account_succeeded_at') if key in status})
+        if data.get('portfolio_diagnostic'):
+            body += _details('보유 평가 문제', data['portfolio_diagnostic'])
     if any(key in status for key in ('nav_risk_unverified', 'cash_reconciliation', 'new_risk_allowed')):
         body += _details('신규 투자 가능 여부와 현금 대조', {key: status[key] for key in
             ('new_risk_allowed', 'blocked_reasons', 'nav_risk_unverified', 'performance_uncertain', 'cash_reconciliation') if key in status})
-    body += '</section><section id="holdings"><h2>보유 종목</h2>'
-    holding_rows = []
-    for row in holdings:
-        value = row.get('value', row.get('value_krw'))
-        price, quantity = _number(row.get('price', row.get('mark'))), _number(row.get('quantity'))
-        if value is None and row.get('valuation_quality') == 'EXACT' and price is not None and quantity is not None:
-            value = price * quantity
-        holding_rows.append([_name(row, symbols), _amount(row.get('quantity'), '주'), _amount(price),
-            _amount(value), _value(row.get('valuation_quality')), _time(row.get('price_observed_at', row.get('valuation_at')))])
-    body += _table(['종목', '보유 수량', '평가 단가', '평가 금액', '평가 품질', '가격 기준 시각'], holding_rows,
-        empty='보유 종목이 없습니다.' if 'holdings' in status else '보유 종목 자료가 제공되지 않았습니다.')
-    body += '</section><section id="decisions"><h2>판단·근거</h2>'
-    body += _table(['시각', '실행', '모델', '판단', '이번 검토의 주문', '이유'],
-        [[_time(run.get('created_at')), _value(run.get('run_status')), _value(run.get('model_status')),
-          _value(run.get('decision_status')), _value(run.get('order_status')), _value(run.get('reason'))] for run in runs],
-        empty='기록된 투자 검토가 없습니다. 보호 매도 여부는 아래 주문·체결 장부에서 별도로 확인합니다.')
-    body += '<p class="muted">위 주문 결과는 해당 투자 검토의 범위입니다. ' + (
-        '아래 장부도 이번 검토에 연결된 주문·체결만 표시합니다. 보호 감시를 포함한 당일 전체 거래는 /report 에서 확인합니다.' if run_trades else
-        '보호 규칙으로 발생한 매도를 포함한 전체 거래는 주문·체결 장부에 표시합니다.') + '</p>'
-    for run in runs:
-        if run.get('feature_exclusions'):
-            for group,rows in _screening_groups(run['feature_exclusions']).items():
-                if rows:
-                    body += '<details><summary>' + group + ' (' + str(len(rows)) + '건)</summary>'
-                    body += _table(['종목 또는 출처','이유'], [[_name(row,symbols) if row.get('instrument_id') else str(row.get('source','자료 수집')),
-                        ', '.join(_value(reason) for reason in row.get('reasons') or [row.get('reason')])] for row in rows]) + '</details>'
-        if run.get('review_details'):
-            body += '<h3>' + html.escape(_time(run.get('created_at'))) + ' 종목별 검토</h3>' + _review_html(run, symbols)
-    for thesis in data.get('theses', []):
-        body += '<article class="thesis"><h3>' + html.escape(_name(thesis, symbols)) + '</h3><dl>'
-        for key in ('economic_path', 'horizon_case', 'counterevidence', 'invalidation_case', 'current_stop', 'max_holding_sessions', 'origin', 'exit_reason'):
-            body += '<dt>' + LABELS[key] + '</dt><dd>' + html.escape(_value(thesis.get(key), key)) + '</dd>'
-        body += '</dl></article>'
-    if not data.get('theses'):
-        body += '<p class="muted">종목별 투자 근거·보호 조건이 제공되지 않았습니다.</p>'
-    body += '</section><section id="trades"><h2>' + ('이번 검토 주문·체결 기록' if run_trades else '주문·체결 장부') + '</h2><h3>주문</h3>'
-    body += _table(['시각', '종목', '방향', '주문 수량', '상태', '누적 체결', '누적 체결 금액', '이유'],
-        [[_time(row.get('created_at')), _name(row, symbols), _value(row.get('side')), _amount(row.get('quantity'), '주'),
-          _value(row.get('state')), _amount(row.get('cumulative_quantity'), '주'), _amount(row.get('cumulative_notional')), _value(row.get('reason'))] for row in orders],
-        empty='기록된 주문이 없습니다.' if 'orders' in data else '전체 주문 장부가 제공되지 않았습니다.')
-    body += '<h3>체결·정정</h3>' + _table(['관측 시각', '종목', '방향', '구분', '수량', '금액', '수수료·세금', '이유'],
-        [[_time(row.get('at', row.get('observed_at'))), _name(row, symbols), _value(row.get('side')), '정정' if row.get('correction') else '체결',
-          _amount(row.get('quantity', row.get('quantity_delta')), '주'), _amount(row.get('amount_krw', row.get('notional_delta_krw'))),
-          _amount(row.get('fee_krw', row.get('fee_delta_krw'))), _value(row.get('reason'))] for row in fills],
-        empty='기록된 체결이 없습니다.' if 'fills' in data else '체결 장부가 제공되지 않았습니다.')
-    body += '</section><section id="ledger"><h2>자산·성과 기록</h2>' + _nav_chart(nav)
-    performance = status.get('performance') or data.get('performance') or {}
-    body += _details('누적 성과와 자료 완결성', performance or {'coverage': None, 'pnl': None, 'twr': None})
-    body += '<p class="muted">누적 성과의 기간은 저장된 평가 기록 전체입니다. 운영 비용이 미확인이면 비용 차감 후 손익도 확정하지 않습니다.</p>'
-    body += _details('자산 평가 원장', nav)
-    body += '</section><section id="diagnostics"><h2>운영 진단</h2>'
+    body += '<h3>기록된 운영 사건</h3>'
     diagnostics = data.get('diagnostics', [])
     counts = {kind: sum(row.get('kind') == kind for row in diagnostics) for kind in dict.fromkeys(row.get('kind') for row in diagnostics)}
-    body += _table(['사건 종류', '기록 수'], [[_value(kind), str(count)] for kind, count in counts.items()], empty='기록된 운영 장애가 없습니다.')
+    body += _table(['사건 종류', '기록 수'], [[_value(kind), str(count)] for kind, count in counts.items()],
+                   empty='기록된 운영 사건이 없습니다.' if 'diagnostics' in data else '별도로 제공된 진단 기록이 없습니다.')
     body += '<p class="muted">원장에 남은 사건 수입니다. 중복 억제된 알림도 포함하며, 현재 장애 수나 Telegram 메시지 수를 뜻하지 않습니다. 최근 10건을 표시합니다.</p>'
     body += _table(['시각', '종류', '설명'], [[_time(row.get('at', row.get('created_at'))), _value(row.get('kind')),
         render_notification(row, symbols=symbols) if row.get('kind') in {'ACCOUNT_INCOMPLETE', 'ACCOUNT_RECOVERED', 'MONITOR_DEGRADED', 'MONITOR_RECOVERED'} else '\n'.join(_lines(row, symbols=symbols))]
@@ -816,7 +936,7 @@ def _operational_report(data):
     if not daily:
         # Preserve the complete run contract for audit readers and existing exports.
         body += '<details><summary>전체 실행 기록</summary>' + facts_html({key: data[key] for key in ('run_status', 'reason', 'decision_status', 'order_status', 'performance_status') if key in data}) + facts_html(data) + '</details>'
-    body += '</section>'
+    body += '</section></div></div><footer class="report-footer"><span>DANTA · 저장된 관측·판단·체결 기록</span><span>전체 보기에서 모든 페이지를 이어서 읽을 수 있습니다.</span></footer>'
     return body
 
 
@@ -830,15 +950,38 @@ def write_report(data: dict, json_path, html_path, title: str = "실행·성과 
     json_path.parent.mkdir(parents=True, exist_ok=True)
     html_path.parent.mkdir(parents=True, exist_ok=True)
     json_path.write_text(payload + '\n', encoding='utf-8')
-    body = f'<h1>{html.escape(title)}</h1>'
+    operational = 'run_status' in normalized or (isinstance(normalized.get('status'), dict) and 'runs' in normalized)
+    body = _report_header(title, normalized) if operational else f'<h1>{html.escape(title)}</h1>'
     if normalized.get('evidence_status') == 'FIXTURE_ONLY' or normalized.get('provenance') == 'FIXTURE_ONLY':
         body += '<p class="notice">합성 fixture 검증 전용입니다. 실제 투자 성과가 아닙니다. STRATEGY_UNPROVEN</p>'
-    if 'run_status' in normalized or (isinstance(normalized.get('status'), dict) and 'runs' in normalized):
+    if operational:
         body += _operational_report(normalized)
     else:
         body += facts_html(normalized)
-    html_path.write_text(_document(title, body), encoding='utf-8')
+    html_path.write_text(_document(title, body, operator=operational), encoding='utf-8')
     return {"json": str(json_path), "html": str(html_path)}
+
+
+def render_response_html(text: str) -> str:
+    """Readable long Telegram replies, retaining the exact escaped source."""
+    from markdown_it import MarkdownIt
+
+    reject_credentials(text)
+    renderer = MarkdownIt('commonmark', {'html': False, 'linkify': False, 'breaks': True}).enable('table').disable('image')
+    tokens = renderer.parse(text)
+    headings = []
+    for index, token in enumerate(tokens):
+        if token.type == 'heading_open':
+            anchor = f'reply-section-{len(headings) + 1}'
+            token.attrSet('id', anchor)
+            headings.append((anchor, tokens[index + 1].content))
+    body = '<header class="report-header"><div><span class="eyebrow">DANTA · MESSAGE</span><h1>전체 응답</h1></div></header>'
+    if len(headings) > 1:
+        body += '<details><summary>응답 목차</summary><ul>' + ''.join(
+            '<li><a href="#' + anchor + '">' + html.escape(label) + '</a></li>' for anchor, label in headings) + '</ul></details>'
+    body += '<article class="reading-document">' + renderer.renderer.render(tokens, renderer.options, {}) + '</article>'
+    body += '<details><summary>원문 그대로 보기</summary><pre>' + html.escape(text) + '</pre></details>'
+    return _document('전체 응답', body, operator=True)
 
 
 def render_readme(source, output, *, generated_at: datetime | None = None) -> dict:

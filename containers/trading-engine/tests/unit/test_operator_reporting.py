@@ -4,11 +4,89 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from danta.reporting import render_notification, write_report
+from danta.reporting import render_notification, render_response_html, write_report
 from danta.safety import CredentialError
 
 
 class OperatorReportingTests(unittest.TestCase):
+    def test_holdings_comparison_excludes_unverified_values_without_losing_the_ledger(self):
+        rows = [
+            {'name': '확인 종목', 'quantity': 4, 'mark': '12500', 'valuation_quality': 'EXACT'},
+            {'name': '오래된 종목', 'value': '90000', 'valuation_quality': 'STALE'},
+            {'name': '값 없는 종목', 'quantity': 5, 'mark': '20000', 'valuation_quality': 'MISSING'},
+            {'name': '잘못된 평가액', 'quantity': 5, 'mark': '20000', 'value': 'invalid', 'valuation_quality': 'EXACT'},
+        ]
+        data = {'status': {'holdings': rows}, 'runs': [], 'orders': [], 'fills': []}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'daily.html'
+            write_report(data, Path(tmp) / 'daily.json', path)
+            rendered = path.read_text()
+            self.assertEqual(json.loads((Path(tmp) / 'daily.json').read_text()), data)
+        chart = rendered.split('<figure class="bar-chart">')[1].split('</figure>')[0]
+        self.assertIn('50,000원', chart)
+        self.assertIn('3개 종목은 평가 미확인으로 제외', chart)
+        for row in rows[1:]:
+            self.assertNotIn(row['name'], chart)
+            self.assertIn(row['name'], rendered)
+        self.assertNotIn('100,000원', rendered)
+        self.assertIn('90,000원', rendered, 'stale ledger observations must not be erased')
+
+    def test_summary_preserves_missing_data_and_run_scope_across_pages(self):
+        data = {'run_status': 'FAILED', 'model_status': 'SUCCEEDED',
+                'decision_status': 'REVALIDATION_FAILED', 'reason': 'STALE_DECISION',
+                'trade_scope': 'RUN', 'orders': [], 'fills': [],
+                'review_details': [{'name': '<검토 종목>', 'stage': 'AI_PROPOSED',
+                    'ai': {'action': 'ABSTAIN', 'reason': '근거 불완전',
+                           'uncertainties': ['기간 미확인', '가격 미확인']}}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'summary.html'
+            write_report(data, Path(tmp) / 'summary.json', path)
+            rendered = path.read_text()
+        overview = rendered.split('id="overview"')[1].split('</section>')[0]
+        for text in ('판단 검증', 'AI 응답', '최신 조건 대조 실패', '이번 검토 주문 기록',
+                     '0건', '미확인 / 자료 없음', '당일 전체 거래는 /report'):
+            self.assertIn(text, overview)
+        for text in ('실행 검증 미완료', '&lt;검토 종목&gt;', '기간 미확인', '가격 미확인',
+                     '<summary>가격·거래 조건 상세</summary>', '<summary>전체 실행 기록</summary>'):
+            self.assertIn(text, rendered)
+        self.assertNotIn('전략 현금<strong>0원', rendered)
+        self.assertNotIn("[&#x27;기간 미확인&#x27;", rendered)
+
+    def test_chart_marks_uncertain_points_and_keeps_invalid_points_in_ledger(self):
+        data = {'status': {}, 'runs': [], 'nav': [
+            {'at': '2026-10-02T01:00:00Z', 'nav': '1010000', 'quality': 'STALE'},
+            {'at': 'invalid-time', 'nav': '990000', 'quality': 'EXACT'},
+            {'at': '2026-10-02T00:00:00Z', 'nav': '1000000', 'quality': 'EXACT'},
+        ]}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'daily.html'
+            write_report(data, Path(tmp) / 'daily.json', path)
+            rendered = path.read_text()
+        chart = rendered.split('<svg')[1].split('</svg>')[0]
+        self.assertEqual(chart.count('<circle '), 2)
+        self.assertIn('stroke-dasharray="5 5"', chart)
+        self.assertNotIn('990,000원', chart)
+        self.assertIn('990,000원', rendered)
+        self.assertIn('invalid-time (시각 형식 미확인)', rendered)
+        self.assertIn('2026-10-02 10:00:00 KST · 1,010,000원', chart)
+
+    def test_long_reply_formats_markdown_and_retains_safe_original(self):
+        text = ('# 판단 요약\n\n**보유 유지**\n\n## 확인 사항\n\n'
+                '| 항목 | 내용 |\n| --- | --- |\n| 시세 | 확인 필요 |\n\n'
+                '<script>alert(1)</script>\n![외부 이미지](https://example.invalid/track.png)\n'
+                '[실행](javascript:alert(1))\n마지막 원문 공백  ')
+        rendered = render_response_html(text)
+        self.assertIn('<strong>보유 유지</strong>', rendered)
+        self.assertIn('<table>', rendered)
+        self.assertIn('href="#reply-section-2"', rendered)
+        self.assertIn('원문 그대로 보기', rendered)
+        self.assertIn('마지막 원문 공백  </pre>', rendered)
+        self.assertIn('&lt;script&gt;alert(1)&lt;/script&gt;', rendered)
+        for unsafe in ('<script', '<img', 'href="javascript:'):
+            self.assertNotIn(unsafe, rendered)
+        with self.assertRaises(CredentialError):
+            render_response_html('apiKey=not-a-real-secret')
+
     def test_service_failure_keeps_original_code_type_stage_time_and_location(self):
         text = render_notification({'kind': 'SERVICE_WORKER_BLOCKED', 'reason': 'POLICY_CHANGED',
             'error_type': 'HumanRequired', 'stage': 'QUEUE_TICK', 'occurred_at': '2026-10-02T00:31:06Z',

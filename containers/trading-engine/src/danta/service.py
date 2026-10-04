@@ -23,7 +23,7 @@ from .adapters import AdapterError, http_transport
 from .adapters.scheduler import SchedulePlanner
 from .adapters.telegram import MAX_REQUEST_BYTES, READ_COMMANDS, TelegramAdapter
 from .config import ConfigurationError, HumanRequired, aware_time, canonical, digest, load_secrets, utcnow
-from .reporting import render_notification, reported_fee, write_report
+from .reporting import render_notification, render_response_html, reported_fee, write_report
 from .safety import CREDENTIAL_TEXT, reject_credentials
 
 
@@ -706,10 +706,9 @@ class Service:
                 else:
                     text = render_notification(payload, symbols=self._symbols())
                 if len(text) > 3500:
-                    from .reporting import _document
                     with self.store.transaction():
                         self.store.queue_document('long:' + str(row['id']), 'response.html',
-                            _document('전체 응답', '<pre>' + html.escape(text) + '</pre>'), route=route, chat_id=chat)
+                            render_response_html(text), route=route, chat_id=chat)
                     text = text[:1000] + '\n\n전체 내용은 첨부 HTML로 이어서 보내드립니다.'
                 self.telegram.send_message(route, chat, text, reply_markup=payload.get('reply_markup'))
             state = 'DELIVERED'
