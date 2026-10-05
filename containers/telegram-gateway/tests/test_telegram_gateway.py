@@ -559,17 +559,17 @@ class TelegramAttachmentCacheTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             cache = self.make_cache(root)
-            first = cache.store("trading-engine", "chat-1", self.attachment(), b"pdf", now=100)
-            cache.store("trading-engine", "chat-2", self.attachment(file_name="other.pdf"), b"two", now=101)
+            first = cache.store("trading-engine", "chat-1", self.attachment(), b"pdf", now=100, user_id="9")
+            cache.store("trading-engine", "chat-2", self.attachment(file_name="other.pdf"), b"two", now=101, user_id="9")
 
             reloaded = self.make_cache(root)
-            pending = reloaded.list_pending("trading-engine", "chat-1", now=110)
+            pending = reloaded.list_pending("trading-engine", "chat-1", now=110, user_id="9")
 
             self.assertEqual([item.file_name for item in pending], ["report.pdf"])
             self.assertEqual(pending[0].host_path, root / "host" / "trading-engine" / "chat-1" / first.host_path.name)
             reloaded.mark_consumed(pending, now=111)
-            self.assertEqual(reloaded.list_pending("trading-engine", "chat-1", now=112), ())
-            self.assertEqual(len(reloaded.list_pending("trading-engine", "chat-2", now=112)), 1)
+            self.assertEqual(reloaded.list_pending("trading-engine", "chat-1", now=112, user_id="9"), ())
+            self.assertEqual(len(reloaded.list_pending("trading-engine", "chat-2", now=112, user_id="9")), 1)
             self.assertTrue(first.metadata_path.with_suffix(".pdf").exists())
 
     def test_text_payload_reads_container_files_and_preserves_pending_on_invalid_data(self) -> None:
@@ -578,7 +578,7 @@ class TelegramAttachmentCacheTest(unittest.TestCase):
             cache = telegram_gateway.TelegramAttachmentCache(root / 'container', root / 'different-host',
                 ttl_seconds=60, max_file_bytes=65536, max_total_bytes=262144, max_pending=10)
             item = cache.store('trading-engine', '1', self.attachment(file_name='notes.txt', file_size=None),
-                               '한글 메모'.encode(), now=100)
+                               '한글 메모'.encode(), now=100, user_id="9")
             self.assertFalse(item.host_path.exists())
             self.assertEqual(cache.text_payload((item,)), [{'file_name': 'notes.txt', 'content': '한글 메모'}])
             self.assertEqual(json.loads(item.metadata_path.read_text())['status'], 'pending')
@@ -598,17 +598,17 @@ class TelegramAttachmentCacheTest(unittest.TestCase):
             cache = telegram_gateway.TelegramAttachmentCache(root / 'container', root / 'host',
                 ttl_seconds=60, max_file_bytes=65536, max_total_bytes=262144, max_pending=10)
             items = [cache.store('trading-engine', '1', self.attachment(file_name=f'{i}.txt', file_size=None),
-                                 b'a' * 10000, now=100) for i in range(2)]
+                                 b'a' * 10000, now=100, user_id="9") for i in range(2)]
             with self.assertRaisesRegex(ValueError, '32KiB'):
                 cache.store('trading-engine', '1', self.attachment(file_name='too-large.txt', file_size=None),
-                            b'a' * 20000, now=100)
+                            b'a' * 20000, now=100, user_id="9")
             items[1].metadata_path.with_suffix('.txt').write_bytes(b'a' * 25000)
             with self.assertRaisesRegex(ValueError, '32KiB'):
                 cache.text_payload(tuple(items))
-            binary = cache.store('trading-engine', '1', self.attachment(), b'pdf', now=100)
+            binary = cache.store('trading-engine', '1', self.attachment(), b'pdf', now=100, user_id="9")
             with self.assertRaisesRegex(ValueError, 'PDF'):
                 cache.text_payload((binary,))
-            self.assertEqual(len(cache.list_pending('trading-engine', '1', now=101)), 3)
+            self.assertEqual(len(cache.list_pending('trading-engine', '1', now=101, user_id="9")), 3)
 
     def test_sixth_pending_file_is_rejected_without_poisoning_first_five(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -616,15 +616,15 @@ class TelegramAttachmentCacheTest(unittest.TestCase):
             cache = telegram_gateway.TelegramAttachmentCache(root / 'container', root / 'host',
                 ttl_seconds=60, max_file_bytes=65536, max_total_bytes=262144, max_pending=10)
             for i in range(5):
-                cache.store('trading-engine', '1', self.attachment(file_name=f'{i}.txt'), b'txt', now=100)
+                cache.store('trading-engine', '1', self.attachment(file_name=f'{i}.txt'), b'txt', now=100, user_id="9")
             with self.assertRaisesRegex(ValueError, '/new'):
-                cache.store('trading-engine', '1', self.attachment(file_name='sixth.txt'), b'txt', now=100)
-            self.assertEqual(len(cache.text_payload(cache.list_pending('trading-engine', '1', now=101))), 5)
+                cache.store('trading-engine', '1', self.attachment(file_name='sixth.txt'), b'txt', now=100, user_id="9")
+            self.assertEqual(len(cache.text_payload(cache.list_pending('trading-engine', '1', now=101, user_id="9"))), 5)
 
     def test_cleanup_removes_expired_content_and_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cache = self.make_cache(Path(tmp), ttl_seconds=10)
-            item = cache.store("trading-engine", "1", self.attachment(), b"pdf", now=100)
+            item = cache.store("trading-engine", "1", self.attachment(), b"pdf", now=100, user_id="9")
             data_path = item.metadata_path.with_suffix(".pdf")
 
             cache.cleanup_expired(now=111)
@@ -635,11 +635,11 @@ class TelegramAttachmentCacheTest(unittest.TestCase):
     def test_rejects_pending_and_total_capacity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cache = self.make_cache(Path(tmp))
-            cache.store("trading-engine", "1", self.attachment(file_name="a.pdf"), b"123", now=100)
-            cache.store("trading-engine", "1", self.attachment(file_name="b.pdf"), b"456", now=101)
+            cache.store("trading-engine", "1", self.attachment(file_name="a.pdf"), b"123", now=100, user_id="9")
+            cache.store("trading-engine", "1", self.attachment(file_name="b.pdf"), b"456", now=101, user_id="9")
 
             with self.assertRaisesRegex(ValueError, "최대 2개"):
-                cache.store("trading-engine", "1", self.attachment(file_name="c.pdf"), b"789", now=102)
+                cache.store("trading-engine", "1", self.attachment(file_name="c.pdf"), b"789", now=102, user_id="9")
 
     def test_sanitizes_untrusted_document_filename(self) -> None:
         message = {
@@ -665,7 +665,7 @@ class TelegramAttachmentCacheTest(unittest.TestCase):
             (cache.cache_dir / "trading-engine").symlink_to(outside, target_is_directory=True)
 
             with self.assertRaisesRegex(ValueError, "unsafe attachment cache route path"):
-                cache.store("trading-engine", "1", self.attachment(), b"pdf", now=100)
+                cache.store("trading-engine", "1", self.attachment(), b"pdf", now=100, user_id="9")
 
             self.assertEqual(list(outside.iterdir()), [])
 
@@ -694,7 +694,7 @@ class TelegramAttachmentCacheTest(unittest.TestCase):
             metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
             (cache.cache_dir / "trading-engine").symlink_to(outside, target_is_directory=True)
 
-            pending = cache.list_pending("trading-engine", "1", now=110)
+            pending = cache.list_pending("trading-engine", "1", now=110, user_id="9")
 
             self.assertEqual(pending, ())
             self.assertEqual(json.loads(metadata_path.read_text())["status"], "pending")
@@ -759,6 +759,12 @@ class GatewayAttachmentFlowTest(unittest.TestCase):
         app.attachment_cache.max_file_bytes = 20
         app.attachment_cache.text_payload.side_effect = lambda files: [
             {'file_name': item.file_name, 'content': '파일 내용'} for item in files]
+        def freeze_request(payload, files, *, include_attachments=True):
+            body = dict(payload)
+            if files and include_attachments:
+                body['attachments'] = app.attachment_cache.text_payload(files)
+            return telegram_gateway.CachedTelegramRequest(body, files, Path('/request.json'), False)
+        app.attachment_cache.freeze_request.side_effect = freeze_request
         app.append_inbound_conversation_event = Mock()
         app.append_outbound_conversation_event = Mock()
         return app
@@ -1125,6 +1131,268 @@ class GatewayAttachmentFlowTest(unittest.TestCase):
             app.attachment_cache.cleanup_expired.call_args_list,
             [unittest.mock.call(now=100), unittest.mock.call(now=160)],
         )
+
+
+class GatewaySenderAttachmentFlowTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.app = GatewayAttachmentFlowTest.app()
+        self.reload_cache()
+        self.app.router.resolve.side_effect = lambda route, text: telegram_gateway.ResolvedRoute(
+            route, "http://receiver/telegram", text)
+        self.app.engine.post_message.return_value = {"accepted": True}
+        self.client = Mock()
+        self.client.download_file.side_effect = lambda file_id, _limit: file_id.encode()
+        self.client_patch = patch.object(telegram_gateway, "TelegramClient", return_value=self.client)
+        self.client_patch.start()
+        self.addCleanup(self.client_patch.stop)
+
+    def reload_cache(self) -> None:
+        self.app.attachment_cache = telegram_gateway.TelegramAttachmentCache(
+            self.root / "container", self.root / "host", ttl_seconds=60,
+            max_file_bytes=32768, max_total_bytes=262144, max_pending=5)
+
+    def receive(self, update_id: int, user_id: int, *, text: str | None = None,
+                file_id: str | None = None, caption: str | None = None,
+                chat_id: int = -9, route_id: str = "trading-engine") -> None:
+        route = GatewayAttachmentFlowTest.route()
+        route.route_id, route.allowed_chat_ids = route_id, {str(chat_id)}
+        message = {"message_id": update_id, "chat": {"id": chat_id, "type": "group"},
+                   "from": {"id": user_id}}
+        if file_id is not None:
+            message["document"] = {"file_id": file_id, "file_name": f"{file_id}.txt",
+                                   "mime_type": "text/plain"}
+            if caption is not None:
+                message["caption"] = caption
+        else:
+            message["text"] = text
+        self.app.handle_update(route, {"update_id": update_id, "message": message})
+
+    def metadata(self) -> list[dict]:
+        values = [json.loads(path.read_text()) for path in
+                  self.app.attachment_cache.cache_dir.rglob("*.json")]
+        return [item for item in values if item.get("kind") != "request"]
+
+    def assert_sender_files(self, *, caption: bool) -> None:
+        # A may be disallowed by the engine even though the group is allowed.
+        self.receive(10, 7, file_id="sender-a")
+        self.receive(11, 9, file_id="sender-b")
+        self.reload_cache()
+        if caption:
+            self.receive(12, 9, file_id="sender-b-second", caption="분석해줘")
+        else:
+            self.receive(12, 9, text="분석해줘")
+        payload = self.app.engine.post_message.call_args.args[1]
+        expected = [{"file_name": "sender-b.txt", "content": "sender-b"}]
+        if caption:
+            expected.append({"file_name": "sender-b-second.txt", "content": "sender-b-second"})
+        self.assertEqual(payload["user_id"], "9")
+        self.assertEqual(payload["attachments"], expected)
+        statuses = {item["file_name"]: item["status"] for item in self.metadata()}
+        self.assertEqual(statuses["sender-a.txt"], "pending")
+        self.assertEqual(statuses["sender-b.txt"], "consumed")
+        self.receive(13, 7, text="내 파일을 분석해줘")
+        self.assertEqual(self.app.engine.post_message.call_args.args[1]["attachments"],
+                         [{"file_name": "sender-a.txt", "content": "sender-a"}])
+
+    def test_group_prompt_only_uses_current_senders_files_after_restart(self) -> None:
+        self.assert_sender_files(caption=False)
+
+    def test_group_caption_only_uses_current_senders_files_after_restart(self) -> None:
+        self.assert_sender_files(caption=True)
+
+    def test_new_does_not_clear_another_sender_or_chat_or_route(self) -> None:
+        self.receive(20, 7, file_id="sender-a")
+        self.receive(21, 9, file_id="sender-b")
+        self.receive(22, 9, file_id="other-chat", chat_id=-10)
+        self.receive(23, 9, file_id="other-route", route_id="other")
+        self.receive(24, 9, text="/new")
+        statuses = {item["file_name"]: item["status"] for item in self.metadata()}
+        self.assertEqual(statuses, {"sender-a.txt": "pending", "sender-b.txt": "consumed",
+                                    "other-chat.txt": "pending", "other-route.txt": "pending"})
+        for update_id, user_id, name, chat_id, route_id in (
+            (25, 7, "sender-a", -9, "trading-engine"),
+            (26, 9, "other-chat", -10, "trading-engine"),
+            (27, 9, "other-route", -9, "other"),
+        ):
+            self.receive(update_id, user_id, text="분석해줘", chat_id=chat_id, route_id=route_id)
+            self.assertEqual(self.app.engine.post_message.call_args.args[1]["attachments"],
+                             [{"file_name": f"{name}.txt", "content": name}])
+
+    def test_legacy_cache_without_sender_is_not_assigned_to_next_user(self) -> None:
+        self.receive(30, 9, file_id="legacy")
+        path = next(self.app.attachment_cache.cache_dir.rglob("*.json"))
+        metadata = json.loads(path.read_text())
+        metadata.pop("user_id", None)
+        path.write_text(json.dumps(metadata))
+        self.reload_cache()
+        self.receive(31, 9, text="분석해줘")
+        self.assertNotIn("attachments", self.app.engine.post_message.call_args.args[1])
+        self.assertEqual(json.loads(path.read_text())["status"], "pending")
+        self.app.attachment_cache.cleanup_expired(now=metadata["created_at"] + 61)
+        self.assertFalse(path.exists())
+
+    def test_repeated_upload_update_does_not_duplicate_pending_files_after_restart(self) -> None:
+        self.receive(40, 9, file_id="once")
+        self.reload_cache()
+        self.receive(40, 9, file_id="once")
+        self.receive(41, 9, text="분석해줘")
+        self.assertEqual(self.app.engine.post_message.call_args.args[1]["attachments"],
+                         [{"file_name": "once.txt", "content": "once"}])
+        self.receive(40, 9, file_id="once")
+        self.receive(42, 9, text="다음 메시지")
+        self.assertNotIn("attachments", self.app.engine.post_message.call_args.args[1])
+        self.assertEqual(len(self.metadata()), 1)
+
+    def test_repeated_caption_update_does_not_resubmit_consumed_attachment(self) -> None:
+        self.receive(50, 9, file_id="caption", caption="분석해줘")
+        self.reload_cache()
+        self.receive(50, 9, file_id="caption", caption="분석해줘")
+        self.app.engine.post_message.assert_called_once()
+        self.assertEqual(len(self.metadata()), 1)
+
+    def test_conflicting_upload_update_does_not_replace_original_file(self) -> None:
+        self.receive(60, 9, file_id="original")
+        self.receive(60, 9, file_id="changed")
+        self.assertIn("같은 update ID", self.client.send_message.call_args.args[1])
+        self.receive(61, 9, text="분석해줘")
+        self.assertEqual(self.app.engine.post_message.call_args.args[1]["attachments"],
+                         [{"file_name": "original.txt", "content": "original"}])
+
+    def test_accepted_text_replay_does_not_submit_again_or_consume_new_files(self) -> None:
+        self.receive(80, 9, file_id="first")
+        self.receive(81, 9, text="분석해줘")
+        first_payload = self.app.engine.post_message.call_args.args[1]
+        self.receive(82, 9, file_id="later")
+        self.reload_cache()
+        self.app.config.version = "new-gateway-version"
+        self.receive(81, 9, text="분석해줘")
+        self.app.engine.post_message.assert_called_once()
+        self.assertEqual({item["file_name"]: item["status"] for item in self.metadata()},
+                         {"first.txt": "consumed", "later.txt": "pending"})
+        self.receive(83, 9, text="다음 파일")
+        self.assertEqual(self.app.engine.post_message.call_args.args[1]["attachments"],
+                         [{"file_name": "later.txt", "content": "later"}])
+        self.assertEqual(first_payload["attachments"], [{"file_name": "first.txt", "content": "first"}])
+
+    def test_uncertain_text_retry_reuses_original_payload_and_engine_receipt(self) -> None:
+        import sqlite3
+
+        receiver_source = MODULE_PATH.parents[1] / "trading-engine" / "src"
+        with patch.object(sys, "path", [str(receiver_source), *sys.path]):
+            from danta.adapters.telegram import TelegramAdapter
+
+        db = sqlite3.connect(":memory:")
+        self.addCleanup(db.close)
+        receiver = TelegramAdapter(db, enabled=True, allowed_senders=("9",), allowed_chats=("-9",))
+        responses = []
+
+        def post(_url, payload):
+            response, _request = receiver.receive(payload)
+            responses.append(response)
+            if len(responses) == 1:
+                raise RuntimeError("synthetic response lost after durable acceptance")
+            return response
+
+        self.app.engine.post_message.side_effect = post
+        self.receive(90, 9, file_id="first")
+        self.receive(91, 9, text="분석해줘")
+        first_payload = self.app.engine.post_message.call_args.args[1]
+        self.receive(92, 9, file_id="later")
+        self.reload_cache()
+        self.receive(91, 9, text="분석해줘")
+        self.assertEqual(self.app.engine.post_message.call_args.args[1], first_payload)
+        self.assertEqual(responses[0]["request_id"], responses[1]["request_id"])
+        self.assertEqual(db.execute("SELECT count(*) FROM telegram_requests").fetchone()[0], 1)
+        self.assertEqual({item["file_name"]: item["status"] for item in self.metadata()},
+                         {"first.txt": "consumed", "later.txt": "pending"})
+
+    def test_retry_without_original_attachment_does_not_pick_up_new_attachment(self) -> None:
+        self.app.engine.post_message.side_effect = [RuntimeError("synthetic timeout"), {"accepted": True}]
+        self.receive(100, 9, text="안녕")
+        original = self.app.engine.post_message.call_args.args[1]
+        self.receive(101, 9, file_id="later")
+        self.reload_cache()
+        self.receive(100, 9, text="안녕")
+        self.assertEqual(self.app.engine.post_message.call_args.args[1], original)
+        self.assertNotIn("attachments", original)
+        self.assertEqual(self.metadata()[0]["status"], "pending")
+
+    def test_conflicting_text_or_sender_for_update_does_not_reuse_receipt(self) -> None:
+        self.receive(110, 9, text="처음 메시지")
+        for user_id, text in ((9, "다른 메시지"), (7, "처음 메시지")):
+            with self.subTest(user_id=user_id):
+                self.receive(110, user_id, text=text)
+                self.assertIn("같은 update ID", self.client.send_message.call_args.args[1])
+                self.app.engine.post_message.assert_called_once()
+
+    def test_new_replay_keeps_files_uploaded_after_reset(self) -> None:
+        self.receive(120, 9, file_id="first")
+        self.receive(121, 9, text="/new")
+        self.receive(122, 9, file_id="later")
+        self.reload_cache()
+        self.receive(121, 9, text="/new")
+        self.app.engine.post_message.assert_called_once()
+        self.assertEqual({item["file_name"]: item["status"] for item in self.metadata()},
+                         {"first.txt": "consumed", "later.txt": "pending"})
+
+    def test_frozen_request_files_follow_cache_permissions_and_ttl(self) -> None:
+        self.receive(130, 9, text="안녕")
+        request_path = next(self.app.attachment_cache.cache_dir.rglob("update-130.json"))
+        metadata = json.loads(request_path.read_text())
+        body_path = self.app.attachment_cache.cache_dir / metadata["relative_path"]
+        self.assertEqual(request_path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(body_path.stat().st_mode & 0o777, 0o600)
+        self.app.attachment_cache.cleanup_expired(now=metadata["created_at"] + 61)
+        self.assertFalse(request_path.exists())
+        self.assertFalse(body_path.exists())
+
+    def test_request_receipt_write_failure_does_not_submit_or_leave_orphan_body(self) -> None:
+        write = self.app.attachment_cache._write_request_json
+
+        def fail_receipt(path, value):
+            if path.suffix == ".json":
+                raise OSError("synthetic receipt write failure")
+            write(path, value)
+
+        with patch.object(self.app.attachment_cache, "_write_request_json", side_effect=fail_receipt):
+            self.receive(140, 9, text="안녕")
+        self.app.engine.post_message.assert_not_called()
+        self.assertEqual(list(self.app.attachment_cache.cache_dir.rglob("*.wire")), [])
+        self.receive(140, 9, text="안녕")
+        self.app.engine.post_message.assert_called_once()
+
+    def test_engine_rejects_unallowed_sender_without_lending_their_file_to_allowed_sender(self) -> None:
+        import sqlite3
+
+        receiver_source = MODULE_PATH.parents[1] / "trading-engine" / "src"
+        with patch.object(sys, "path", [str(receiver_source), *sys.path]):
+            from danta.adapters import AdapterError
+            from danta.adapters.telegram import TelegramAdapter
+
+        db = sqlite3.connect(":memory:")
+        self.addCleanup(db.close)
+        receiver = TelegramAdapter(db, enabled=True, allowed_senders=("9",), allowed_chats=("-9",))
+
+        def post(_url, payload):
+            try:
+                return receiver.receive(payload)[0]
+            except AdapterError as error:
+                raise telegram_gateway.EngineRequestRejected(error.code) from None
+
+        self.app.engine.post_message.side_effect = post
+        self.receive(70, 7, file_id="unallowed", caption="분석해줘")
+        self.assertEqual(self.client.send_message.call_args.args[1], "SENDER_NOT_ALLOWED")
+        self.receive(71, 9, file_id="allowed")
+        self.receive(72, 9, text="분석해줘")
+        accepted = [json.loads(row[0]) for row in db.execute("SELECT payload FROM telegram_requests")]
+        self.assertEqual(len(accepted), 1)
+        self.assertEqual(accepted[0]["user_id"], "9")
+        self.assertEqual(accepted[0]["attachments"], [{"file_name": "allowed.txt", "content": "allowed"}])
+        self.assertEqual({item["file_name"]: item["status"] for item in self.metadata()},
+                         {"unallowed.txt": "pending", "allowed.txt": "consumed"})
 
 
 class TelegramUpdateTest(unittest.TestCase):
