@@ -191,13 +191,34 @@ class PaperLedger:
                                  - o.commission_charged, Decimal(0)))
                 for o in self.orders.values() if o.side == 'BUY' and o.status in {'PENDING', 'PARTIAL', 'CANCEL_REQUESTED'}]
 
-    def snapshot(self, at: datetime) -> PortfolioSnapshot:
+    def snapshot(self, at: datetime, *, max_age_seconds=5) -> PortfolioSnapshot:
+        holdings = []
+        valuation_at = max((holding.price_observed_at or holding.valuation_at
+                            for holding in self.holdings.values()), default=at)
+        for holding in self.holdings.values():
+            observed_at = holding.price_observed_at or holding.valuation_at
+            fresh = timedelta(0) <= at - observed_at <= timedelta(seconds=max_age_seconds)
+            # A common valuation time is distinct from each source quote's time.
+            # Never make an old mark current merely by requesting a snapshot.
+            holdings.append(holding.model_copy(update={
+                'valuation_at': valuation_at, 'price_observed_at': observed_at,
+                'valuation_quality': holding.valuation_quality if fresh else 'STALE'}))
         return PortfolioSnapshot(account_alias=self.costs.account_alias, strategy_id=self.arm,
-            as_of=at, nav=self.nav, allocated_cash=self.cash, broker_available_cash=self.cash,
-            holdings=list(self.holdings.values()), pending_entries=self.pending_entries(),
-            complete=not self.quality_issues, ownership_verified=True,
+            as_of=valuation_at, nav=self.nav, allocated_cash=self.cash, broker_available_cash=self.cash,
+            holdings=holdings, pending_entries=self.pending_entries(),
+            complete=not self.quality_issues and all(h.valuation_quality == 'EXACT' for h in holdings),
+            ownership_verified=True,
             sector_classification_verified=True, account_state_version=len(self.journal),
             new_risk_paused=self.paused, synthetic=self.costs.synthetic)
+
+    def record_nav(self, at, *, session_id=None, completed=False, quality='EXACT'):
+        point = NavPoint(at, self.nav, session_id, completed, quality)
+        if self.nav_points and self.nav_points[-1].at == at:
+            previous = self.nav_points[-1]
+            self.nav_points[-1] = NavPoint(at, self.nav, session_id or previous.session_id,
+                                           completed or previous.completed, quality)
+        else:
+            self.nav_points.append(point)
 
     def submit(self, order: PaperOrder):
         if self.arm == 'cash':
@@ -273,6 +294,7 @@ class PaperLedger:
         held = self.holdings.get(quote.instrument_id)
         if held:
             held.mark, held.valuation_at = (quote.bid + quote.ask) / 2, quote.observed_at
+            held.price_observed_at = quote.observed_at
             stats = self.trade_stats[held.thesis_id]
             stats['max_price'] = max(stats['max_price'], held.mark)
             stats['min_price'] = min(stats['min_price'], held.mark)
@@ -320,6 +342,7 @@ class PaperLedger:
                     sector=order.sector, thesis_id=thesis.thesis_id, quantity=quantity,
                     sellable_quantity=quantity, mark=price, stop=thesis.current_stop,
                     atr=order.atr, average_entry=price, valuation_at=at, first_fill_session=session_id)
+                self.holdings[symbol].price_observed_at = at
                 self.trade_stats[thesis.thesis_id] = {'buy_gross': gross, 'buy_fee': fee,
                     'sell_gross': Decimal(0), 'sell_cost': Decimal(0), 'max_price': price,
                     'min_price': price, 'buy_quantity': quantity, 'sold_quantity': 0,
@@ -540,7 +563,8 @@ def _review(ledger, manifest, data, input_at, now, latest_quotes):
             if not reentry.allowed:
                 ledger.gates[reentry.reason] += 1
                 continue
-        plan = size_entry(candidate, quote, gate.stop_price, ledger.snapshot(now), ledger.costs,
+        plan = size_entry(candidate, quote, gate.stop_price, ledger.snapshot(now,
+                          max_age_seconds=manifest.research_profile['orders']['quote_max_age_seconds']), ledger.costs,
                           now, manifest.research_profile)
         ledger.gates[plan.reason] += 1
         if plan.quantity == 0:
@@ -625,15 +649,18 @@ def _risk_observation(ledger, manifest, now, latest_quotes, latest_features, com
                 observed_price=holding.mark)
             ledger.theses[holding.thesis_id] = updated
             holding.stop = updated.current_stop
-    if not ledger.quality_issues and ledger.nav > 0:
+    snapshot = ledger.snapshot(now,
+        max_age_seconds=manifest.research_profile['orders']['quote_max_age_seconds'])
+    if snapshot.complete and snapshot.nav > 0:
+        ledger.record_nav(now)
         circuit = ledger.drawdown.observe(ledger.nav / ledger.initial_capital, manifest.research_profile)
-        ledger.paused = circuit['new_risk_paused']
+        ledger.paused = ledger.paused or circuit['new_risk_paused']
         if circuit['cancel_pending_entries']:
             for order in ledger.orders.values():
                 if order.side == 'BUY' and order.status in {'PENDING', 'PARTIAL'}:
                     ledger.request_cancel(order.order_id, now,
                         now + timedelta(milliseconds=manifest.cancel_ack_delay_ms))
-        for reduction in ledger.concentration.observe(ledger.snapshot(now), now, manifest.research_profile):
+        for reduction in ledger.concentration.observe(snapshot, now, manifest.research_profile):
             ledger.reductions[reduction.instrument_id] = reduction
         if ledger.concentration.cancel_pending_entries:
             for order in ledger.orders.values():
@@ -759,23 +786,35 @@ def _run(manifest: EvaluationManifest, slippage_multiplier=1) -> dict:
                         ledger.quality_issues.add('MISSING_SESSION_MARK:' + session.session_id)
                     else:
                         holding.mark, holding.valuation_at = money(mark), session.closes_at
-                ledger.nav_points.append(NavPoint(now, ledger.nav, session.session_id, True,
-                    'EXACT' if not ledger.quality_issues else 'INSUFFICIENT_COVERAGE'))
+                        holding.price_observed_at = session.closes_at
+                ledger.record_nav(now, session_id=session.session_id, completed=True,
+                    quality='EXACT' if not ledger.quality_issues else 'INSUFFICIENT_COVERAGE')
                 if performance(ledger.nav_points, ledger.external_flows)['new_risk_allowed'] is False:
                     ledger.paused = True
                     for order in ledger.orders.values():
                         if order.side == 'BUY' and order.status in {'PENDING', 'PARTIAL'}:
                             ledger.request_cancel(order.order_id, now,
                                 now + timedelta(milliseconds=manifest.cancel_ack_delay_ms))
+    completed_sessions = [session.session_id for session in calendar.sessions
+                          if manifest.starts_at <= session.closes_at <= observation_end]
+    previous_sessions = {session: completed_sessions[index - 1] if index else None
+                         for index, session in enumerate(completed_sessions)}
     arms = {}
     for arm, ledger in ledgers.items():
+        final_snapshot = ledger.snapshot(observation_end,
+            max_age_seconds=manifest.research_profile['orders']['quote_max_age_seconds'])
+        ledger.record_nav(observation_end,
+            quality='EXACT' if final_snapshot.complete else 'INSUFFICIENT_COVERAGE')
         result = performance(ledger.nav_points, ledger.external_flows,
                              manifest.operating_cost_krw if arm == 'full_strategy' else Decimal(0))
         daily = {}
-        for previous, current in zip(ledger.nav_points, ledger.nav_points[1:]):
+        session_points = [ledger.nav_points[0]] + [point for point in ledger.nav_points[1:]
+                                                   if point.completed and point.session_id is not None]
+        for previous, current in zip(session_points, session_points[1:]):
             if current.session_id in daily:
                 raise ValueError('duplicate completed session NAV')
-            daily[current.session_id] = performance([previous, current], ledger.external_flows)['twr']
+            daily[current.session_id] = (performance([previous, current], ledger.external_flows)['twr']
+                if previous.session_id == previous_sessions[current.session_id] else None)
         journal_counts = Counter(item['type'] for item in ledger.journal)
         fills = [item for item in ledger.journal if item['type'] == 'FILL']
         result.update({'daily_returns': daily, 'cash_krw': str(ledger.cash), 'nav_krw': str(ledger.nav),
@@ -804,6 +843,7 @@ def _run(manifest: EvaluationManifest, slippage_multiplier=1) -> dict:
                 for h in ledger.holdings.values()), Decimal(0))),
             'concentration_state': ledger.concentration.state(),
             'new_risk_paused': ledger.paused,
+            'new_risk_allowed': result['new_risk_allowed'] and not ledger.paused,
             'journal_counts': dict(journal_counts), 'journal': ledger.journal,
             'transaction_cost_krw': str(sum((money(fill['commission']) + money(fill['tax']) for fill in fills), Decimal(0))),
             'slippage_accounting': 'embedded in fill prices; never deducted again',
@@ -817,8 +857,7 @@ def _run(manifest: EvaluationManifest, slippage_multiplier=1) -> dict:
         'evidence_status': manifest.evidence_status, 'strategy_status': 'STRATEGY_UNPROVEN',
         'engine_status': 'ENGINE_EXECUTED', 'automatic_live_promotion': False,
         'arm_rules': ARM_RULES, 'slippage_multiplier': str(slippage_multiplier), 'arms': arms,
-        'sessions': [s.session_id for s in calendar.sessions
-                     if manifest.starts_at <= s.closes_at <= max([event.at for event in manifest.timeline], default=manifest.starts_at)],
+        'sessions': completed_sessions,
         'limitations': ['Cash baseline assumes zero interest unless confirmed.',
                          'Current-model historical replay may contain model-training hindsight.',
                          'Fixture observations do not establish real economic performance.']}
@@ -861,7 +900,7 @@ def evaluate_metrics(manifest: EvaluationManifest, replay: dict, stress: dict) -
         failures.append('BOOTSTRAP_LOWER_BOUND_NOT_POSITIVE')
     if full.get('max_drawdown') is None or full['issues'] or technical['issues']:
         reasons.append('DATA_OR_OPERATIONAL_COVERAGE_INCOMPLETE')
-    elif money(full['max_drawdown']) >= Decimal('0.10'):
+    if full.get('max_drawdown') is not None and money(full['max_drawdown']) >= Decimal('0.10'):
         failures.append('RESEARCH_DRAWDOWN_BOUNDARY_REACHED')
     stress_gain = compounded(stress['arms']['full_strategy']['daily_returns'], discovery)
     stress_baseline = compounded(stress['arms']['technical_only']['daily_returns'], discovery)
