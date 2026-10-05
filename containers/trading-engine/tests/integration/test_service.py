@@ -1,4 +1,4 @@
-"""Service integration uses real SQLite/adapters and fake app/transport; no sockets."""
+"""Service integration uses real SQLite/local IPC and fake external transports."""
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -8,6 +8,7 @@ import io
 import json
 import os
 import sqlite3
+import socket
 from pathlib import Path
 import tempfile
 import threading
@@ -25,6 +26,7 @@ from danta.config import ConfigurationError, HumanRequired, ROOT, canonical, loa
 from danta.execution import FixtureBroker
 from danta.market import SessionCalendar
 from danta.models import Session
+from danta.operator import OperatorLease, OperatorServer
 from danta.safety import CredentialError
 from danta.service import RuntimeHost, Service, app_version, failure_detail, serve
 from danta.store import Store
@@ -106,7 +108,12 @@ class ServiceIntegrationTests(unittest.TestCase):
             self.assertFalse(self.service.run_once())
 
     def setUp(self):
-        self.no_network = patch('socket.socket', side_effect=AssertionError('Network forbidden in service tests'))
+        real_socket = socket.socket
+        def local_only(family=socket.AF_INET, *args, **kwargs):
+            if family != socket.AF_UNIX:
+                raise AssertionError('External network forbidden in service tests')
+            return real_socket(family, *args, **kwargs)
+        self.no_network = patch('socket.socket', side_effect=local_only)
         self.no_network.start()
         self.tmp = tempfile.TemporaryDirectory()
         self.now = utcnow()
@@ -944,6 +951,43 @@ class ServiceIntegrationTests(unittest.TestCase):
             self.assertFalse(host.health()['ready'])
             self.assertFalse(self.service.stop.is_set())
             self.assertFalse(self.service.worker_failed)
+
+    def test_serve_exposes_existing_application_to_cli_and_releases_owner_on_stop(self):
+        stop, ready = threading.Event(), threading.Event()
+        errors = []
+        original_start = OperatorServer.start
+        def start_operator(server):
+            result = original_start(server)
+            ready.set()
+            return result
+        def run():
+            try:
+                serve(self.config, application_factory=lambda *_: self.app, stop_event=stop)
+            except BaseException as error:
+                errors.append(error)
+        with patch.object(self.app, 'close') as close, \
+                patch('danta.service.ThreadingHTTPServer', return_value=SimpleNamespace(
+                    server_port=8080, serve_forever=lambda: None, shutdown=lambda: None, server_close=lambda: None)), \
+                patch('danta.service.RuntimeHost.requirements', return_value=[]), \
+                patch('danta.service.Service', side_effect=lambda app: Service(app, telegram=self.adapter)), \
+                patch.object(OperatorServer, 'start', autospec=True, side_effect=start_operator):
+            thread = threading.Thread(target=run)
+            thread.start()
+            try:
+                self.assertTrue(ready.wait(3), errors)
+                with patch('danta.cli.make_application', side_effect=AssertionError('second Application')), \
+                        redirect_stdout(io.StringIO()) as output:
+                    self.assertEqual(main(['--config-dir', str(self.directory), 'status']), 0)
+                self.assertEqual(json.loads(output.getvalue())['status'], 'FAKE_STATUS')
+            finally:
+                stop.set()
+                thread.join(5)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(errors, [])
+            close.assert_called_once()
+        self.assertFalse((self.config.state_dir / 'operator/control.sock').exists())
+        lease = OperatorLease(self.config)
+        lease.close()
 
     def test_worker_failure_reaches_serve_and_cli_after_cleanup_without_error_text(self):
         data = self.config.data

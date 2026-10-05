@@ -23,6 +23,7 @@ from .adapters import AdapterError, http_transport
 from .adapters.scheduler import SchedulePlanner
 from .adapters.telegram import MAX_REQUEST_BYTES, READ_COMMANDS, TelegramAdapter
 from .config import ConfigurationError, HumanRequired, aware_time, canonical, digest, load_secrets, utcnow
+from .operator import OperatorLease, OperatorServer
 from .reporting import render_notification, render_response_html, reported_fee, write_report
 from .safety import CREDENTIAL_TEXT, reject_credentials
 
@@ -586,63 +587,8 @@ class Service:
         raise ValueError('Unknown typed service request')
 
     def _report_data(self, *, session_id=None):
-        now = self.clock()
-        report_at = self.app.bundle.calendar.session(session_id).opens_at if session_id else now
-        day = report_at.astimezone(ZoneInfo('Asia/Seoul')).date()
-        start = datetime.combine(day, time(), ZoneInfo('Asia/Seoul')).astimezone(timezone.utc)
-        end = start + timedelta(days=1)
-        with self.store.lock:
-            journal = [dict(row) for row in self.store.read(
-                'SELECT created_at,run_id,kind,payload FROM journal WHERE created_at>=? AND created_at<? ORDER BY sequence',
-                (start.isoformat(), end.isoformat()))]
-            for row in journal:
-                row['payload'] = json.loads(row['payload'])
-                if row['kind'] == 'INTENT_RESERVED':
-                    intent = row['payload']
-                    intent['intent_id'] = digest([intent['plan_id'], intent['plan_revision'], intent['side']])
-            touched = {row['payload']['intent_id'] for row in journal if row['payload'].get('intent_id')}
-            touched.update(row['payload']['id'] for row in journal if row['kind'] == 'INTENT_RESERVED' and row['payload'].get('id'))
-            orders, by_id = [], {}
-            symbols = self._symbols()
-            for row in self.store.read('SELECT * FROM intents ORDER BY rowid'):
-                raw = dict(row)
-                intent = json.loads(raw['payload'])
-                record = {key: raw[key] for key in ('instrument_id', 'side', 'quantity', 'state', 'cumulative_quantity', 'cumulative_notional')}
-                record.update(reason=intent.get('reason'), run_id=intent.get('run_id'), name=symbols.get(raw['instrument_id']))
-                by_id[raw['id']] = record
-                if raw['id'] in touched:
-                    record['created_at'] = next((item['created_at'] for item in journal
-                        if item['payload'].get('intent_id', item['payload'].get('id')) == raw['id']), None)
-                    orders.append(record)
-            fills = []
-            for row in journal:
-                if row['kind'] in {'CUMULATIVE_FILL', 'FILL_CORRECTION'}:
-                    fill = row['payload']
-                    order = by_id.get(fill.get('intent_id'), {})
-                    fills.append({**{key: order.get(key) for key in ('instrument_id', 'name', 'side', 'reason')},
-                        'at': fill.get('observed_at', row['created_at']), 'quantity': fill.get('quantity_delta'),
-                        'amount_krw': fill.get('notional_delta_krw'), 'fee_krw': reported_fee(fill),
-                        'correction': row['kind'] == 'FILL_CORRECTION'})
-            state = self.app.status()
-            for holding in state.get('holdings', []):
-                holding['name'] = symbols.get(holding['instrument_id'])
-                quote = getattr(self.app.bundle, 'quotes', {}).get(holding['instrument_id'])
-                if quote:
-                    from .strategy import monitor_quote_max_age, quote_fresh
-                    if quote_fresh(quote, now, monitor_quote_max_age(self.app.profile)):
-                        holding.update(price=str(quote.bid), value=str(quote.bid * holding['quantity']),
-                            price_observed_at=quote.observed_at.isoformat(), valuation_quality='EXACT')
-                    else:
-                        holding['valuation_quality'] = 'STALE'
-            return {'schema_version': 1, 'created_at': now.isoformat(), 'date': day.isoformat(),
-                    'config_hash': self.config.config_hash, 'strategy_hash': self.config.strategy_hash,
-                    'code_id': self.app.code_id, 'status': state,
-                    'runs': [row['payload'] for row in journal if row['kind'] == 'RUN_OUTCOME'],
-                    'orders': orders, 'fills': fills, 'instruments': symbols,
-                    'nav': self.store.get('nav_points', []),
-                    'theses': [thesis.model_dump(mode='json') for thesis in self.app.theses()],
-                    'diagnostics': [{'at': row['created_at'], 'kind': row['kind'], **row['payload']} for row in journal
-                        if row['kind'] in {'ACCOUNT_INCOMPLETE', 'ACCOUNT_RECOVERED', 'MONITOR_DEGRADED', 'MONITOR_RECOVERED', 'SERVICE_WORKER_FAILED', 'MODEL_OUTCOME'}]}
+        from .daily_report import collect_daily_report
+        return collect_daily_report(self.app, now=self.clock(), session_id=session_id)
 
     def _report(self, *, session_id=None):
         data = self._report_data(session_id=session_id)
@@ -924,8 +870,28 @@ def serve(config, args=None, *, application_factory=None, stop_event=None):
     server = ThreadingHTTPServer((address, config.app['app']['listen_port']), handler_for(host))
     server.daemon_threads = True
     http_thread = threading.Thread(target=server.serve_forever, name='danta-ingress', daemon=True)
-    app, service = None, None
+    app, service, operator, lease = None, None, None, None
     previous_signals = {}
+    worker_failed = False
+
+    def close_runtime():
+        nonlocal app, service, operator, lease, worker_failed
+        if operator:
+            # An in-flight local command may still use SQLite and the writer.
+            # If draining fails, retain both ownership locks until process exit.
+            operator.close()
+            operator = None
+        if service:
+            service.close()
+            worker_failed = worker_failed or service.worker_failed
+            service = None
+        if app:
+            app.close()
+            app = None
+        if lease:
+            lease.close()
+            lease = None
+
     try:
         if threading.current_thread() is threading.main_thread():
             for number in (signal.SIGTERM, signal.SIGINT):
@@ -939,6 +905,7 @@ def serve(config, args=None, *, application_factory=None, stop_event=None):
                 host.status = 'WAITING_FOR_CONFIGURATION'
             else:
                 try:
+                    lease = OperatorLease(config)
                     app = application_factory(config, args)
                     if not host.stop.is_set() and config.mode in {'live', 'broker_demo'}:
                         app.activate(app.config.config_hash)
@@ -946,14 +913,10 @@ def serve(config, args=None, *, application_factory=None, stop_event=None):
                         service = Service(app)
                         if not host.stop.is_set():
                             service.start()
+                            operator = OperatorServer(app, lease=lease).start()
                             host.service, host.status = service, 'READY'
                 except Exception as error:
-                    if service:
-                        service.close()
-                        service = None
-                    if app:
-                        app.close()
-                        app = None
+                    close_runtime()
                     host.status = 'INITIALIZATION_FAILED'
                     host.diagnostic = failure_detail(error, stage='RUNTIME_INITIALIZATION')
                     host.issues = ['운영 초기화 실패: ' + host.diagnostic['reason']]
@@ -977,11 +940,8 @@ def serve(config, args=None, *, application_factory=None, stop_event=None):
         server.shutdown()
         server.server_close()
         http_thread.join(timeout=5)
-        if service:
-            service.close()
-        if app:
-            app.close()
+        close_runtime()
         for number, previous in previous_signals.items():
             signal.signal(number, previous)
-    if service and service.worker_failed:
+    if worker_failed:
         raise OSError('SERVICE_WORKER_FAILED')

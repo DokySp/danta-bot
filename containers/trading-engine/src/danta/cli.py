@@ -6,8 +6,9 @@ import json
 from pathlib import Path
 
 from .application import Application, MarketBundle, code_identity
-from .config import HumanRequired, ROOT, canonical, load_config, trusted_approval, utcnow
-from .reporting import render_readme, write_report
+from .config import HumanRequired, ROOT, canonical, load_config, trusted_approval
+from .operator import RemoteOperatorError, connect_or_claim, execute_operator, operator_request
+from .reporting import render_readme
 
 
 def parser() -> argparse.ArgumentParser:
@@ -80,6 +81,7 @@ def make_application(config, args):
 def main(argv=None) -> int:
     args = parser().parse_args(argv)
     app = None
+    operator_lease = None
     try:
         config = load_config(args.config_dir)
         default_approval = args.config_dir / "runtime.json"
@@ -124,44 +126,16 @@ def main(argv=None) -> int:
                 envelope = json.loads(args.approval_file.read_text())
                 result = trusted_approval(args.approval_file, config, envelope["id"])
         else:
-            app = make_application(config, args)
-            approval = app.approval
-            if args.command == "run":
-                if config.app["monitoring"]["enabled"]:
-                    app.start_monitor(config.app["monitoring"]["quote_poll_fallback_seconds"])
-                result = app.review(kind=args.kind, event_id=args.event_id, request_key=args.request_key)
-            elif args.command == "reconcile":
-                result = app.reconcile()
-            elif args.command == "status":
-                result = app.status()
-            elif args.command == "pause":
-                result = app.pause()
-            elif args.command == "candidates":
-                command = {"add": "add_portfolio_ticker", "remove": "remove_portfolio_ticker",
-                           "exclude": "add_portfolio_except_ticker", "include": "remove_portfolio_except_ticker"}[args.action]
-                result = app.update_candidate_list(command, args.ticker)
-            elif args.command == "report":
-                date = args.date or app.bundle.now.date().isoformat()
-                from datetime import date as Date
-                Date.fromisoformat(date)
-                rows = app.store.db.execute("SELECT payload FROM journal WHERE kind='RUN_OUTCOME' AND substr(json_extract(payload,'$.created_at'),1,10)=?", (date,)).fetchall()
-                data = {"schema_version": 1, "date": date, "created_at": utcnow().isoformat(), "config_hash": config.config_hash,
-                    "strategy_hash": config.strategy_hash, "code_id": app.code_id, "status": app.status(), "runs": [json.loads(row[0]) for row in rows]}
-                directory = config.state_dir / "reports" / date
-                directory.mkdir(parents=True, exist_ok=True)
-                result = write_report(data, directory / "daily.json", directory / "daily.html", "일일 판단·성과")
-            elif args.command in {"resume", "activate"}:
-                if approval is None or approval["id"] != args.approval:
-                    raise HumanRequired("Matching trusted operator approval required")
-                if args.command == "activate":
-                    app.activate(args.expected_config)
-                else:
-                    app.resume()
-                result = {"status": args.command.upper(), "approval_id": approval["id"]}
-            else:
-                raise ValueError("Unknown command")
+            request = operator_request(args, config)
+            result, operator_lease = connect_or_claim(config, request)
+            if operator_lease is not None:
+                app = make_application(config, args)
+                result = execute_operator(app, request)
         print(canonical(result))
         return 0
+    except RemoteOperatorError as error:
+        print(canonical({key: value for key, value in error.response.items() if key not in {"ok", "exit_code"}}))
+        return error.response["exit_code"]
     except HumanRequired as error:
         print(canonical({"status": error.state, "reason": str(error)}))
         return 2
@@ -171,3 +145,5 @@ def main(argv=None) -> int:
     finally:
         if app:
             app.close()
+        if operator_lease:
+            operator_lease.close()
