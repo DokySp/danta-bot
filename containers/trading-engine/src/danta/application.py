@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 
 from .accounting import ExternalFlow, NavPoint, performance, strategy_nav
 from .config import Config, HumanRequired, ROOT, aware_time, canonical, digest, utcnow, validate_activation
-from .decision import DecisionProposal, freeze_input, unreviewed_positions, validate_proposal
+from .decision import DecisionProposal, document_scope, freeze_documents, freeze_input, order_evidence_hash, unreviewed_positions, validate_proposal
 from .execution import Executor, FixtureBroker, OrderIntent
 from .market import EventRegistry, SessionCalendar, TickTable, calculate_features
 from .models import Candidate, CostSchedule, DailyBar, EventRecord, Holding, Instrument, InvestmentThesis, MarketFact, PendingEntry, PortfolioSnapshot, Quote, Session
@@ -267,8 +267,10 @@ class Application:
         if not self.bundle.calendar.active(now):
             raise ValueError("INVALID_ORDER_SESSION")
         if intent.side == "BUY":
-            current_evidence = digest([[event for event in self.bundle.events if event.instrument_id == intent.instrument_id],
-                                       [fact for fact in self.bundle.facts if fact.instrument_id == intent.instrument_id]])
+            current_documents = freeze_documents(self.bundle.data.get('raw_documents', {}), {intent.instrument_id}, now)
+            current_evidence = order_evidence_hash(
+                [event for event in self.bundle.events if event.instrument_id == intent.instrument_id],
+                [fact for fact in self.bundle.facts if fact.instrument_id == intent.instrument_id], current_documents)
             if not intent.evidence_hash or current_evidence != intent.evidence_hash:
                 raise ValueError("STALE_DECISION_EVIDENCE")
             controls = self.store.get("candidate_controls", {"removed": [], "excluded": []})
@@ -811,7 +813,7 @@ class Application:
             frozen = freeze_input(run_id=run_id, config_hash=self.config.config_hash, strategy_hash=self.config.strategy_hash, code_id=self.code_id,
                 now=bundle.now, session_id=session.session_id, profile=self.profile, portfolio=self.portfolio(), candidates=candidates, events=bundle.events,
                 facts=bundle.facts, theses=theses, scope="FULL" if kind == "full_review" else "PARTIAL", reviewed_positions=affected,
-                previous_theses=self.theses())
+                previous_theses=self.theses(), raw_documents=bundle.data.get('raw_documents', {}))
             result['review_targets'] = frozen['review_targets']
             save("input.snapshot.json", frozen)
             result['feature_exclusions'] = [{**row, 'reason':'DAILY_HISTORY_NOT_COLLECTED' if row.get('reason') == repr(row.get('instrument_id')) else row.get('reason')}
@@ -852,8 +854,11 @@ class Application:
             evidence_scope = {event["instrument_id"] for event in frozen["events"]} | {fact["instrument_id"] for fact in frozen["facts"]} | held_ids | {candidate.instrument.instrument_id for candidate in candidates}
             current_facts_hash = digest([[event for event in current_bundle.events if event.instrument_id in evidence_scope],
                 [fact for fact in current_bundle.facts if fact.instrument_id in evidence_scope]])
+            current_documents = freeze_documents(current_bundle.data.get('raw_documents', {}), document_scope(frozen),
+                max(current_bundle.now, self.clock()))
             decision = validate_proposal(proposal_value, frozen, current_account_version=self.store.get("account_version"),
-                current_facts_hash=current_facts_hash, completed_at=completed_at, now=max(current_bundle.now, self.clock()),
+                current_facts_hash=current_facts_hash, current_documents_hash=digest(current_documents),
+                completed_at=completed_at, now=max(current_bundle.now, self.clock()),
                 maximum_age_seconds=self.profile["orders"]["decision_max_age_seconds"])
             self.bundle = current_bundle
             save("decision.json", {"proposal": decision, "completed_at": completed_at, "valid_until": decision_deadline,
@@ -925,8 +930,11 @@ class Application:
                     side="BUY", quantity=plan.quantity, limit_price=plan.entry_price,
                     expires_at=min(plan.expires_at, decision_deadline), reason="ENTRY_ACCEPTED",
                     account_version=self.store.get("account_version"), policy_hash=self.config.config_hash, reserve_cash=plan.reserved_cash, reserve_risk=plan.total_risk,
-                    evidence_hash=digest([[event for event in frozen["events"] if event["instrument_id"] == instrument_id],
-                                          [fact for fact in frozen["facts"] if fact["instrument_id"] == instrument_id]]))
+                    evidence_hash=order_evidence_hash(
+                        [event for event in frozen["events"] if event["instrument_id"] == instrument_id],
+                        [fact for fact in frozen["facts"] if fact["instrument_id"] == instrument_id],
+                        {key: value for key, value in frozen['document_manifest'].items()
+                         if value['instrument_id'] == instrument_id}))
                 order = self.executor.submit(intent, self.bundle.now)
                 orders.append(order)
                 if self.broker.environment == "fixture" and order["state"] == "ACKNOWLEDGED":

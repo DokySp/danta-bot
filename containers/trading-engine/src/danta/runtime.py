@@ -25,7 +25,7 @@ from .adapters.disclosures import DartAdapter, ORIGIN
 from .adapters.kis import BASE_URLS, MASTER_ORIGIN, KisAdapter, KisCredentials, KisTokenCache
 from .application import MarketBundle, code_identity
 from .config import HumanRequired, ROOT, aware_time, canonical, digest, load_secrets, utcnow
-from .decision import DecisionProposal, validate_proposal
+from .decision import DecisionProposal, document_scope, freeze_documents, validate_proposal
 from .market import EventRegistry, SessionCalendar, calculate_features
 from .models import CostSchedule, DailyBar, EventRecord, Instrument, MarketFact, Quote, Session
 from .portfolio import buy_commission, sell_cost, slippage
@@ -150,6 +150,10 @@ class RuntimeState:
 
     def save_disclosure(self, receipt, record):
         from .disclosure_cache import write_record
+        # The provider hash covers original bytes; this hash covers decoded tool text.
+        record = {**record, 'documents': {key: dict(document, content_sha256=hashlib.sha256(
+            document['content'].encode('utf-8')).hexdigest()) if 'content' in document else document
+            for key, document in record.get('documents', {}).items()}}
         with self.lock:
             return write_record(self.cache_db, receipt, record)
 
@@ -892,11 +896,73 @@ class ExternalRuntime:
         self.kis.close()
         self.state.close()
 
+    def _official_ir_documents(self, receipt, record, now):
+        from .adapters.disclosures import linked_official_ir_urls
+
+        domains = self.config.app['market']['official_ir_domains']
+        if not domains:
+            return record
+        scope_hash = digest({'version': 1, 'domains': sorted(domains)})
+        if record.get('official_ir_scope') == scope_hash and (record.get('official_ir_complete') or
+                (now - aware_time(record['official_ir_checked_at'])).total_seconds() < 180):
+            return record
+        documents = self.state.disclosure_documents(receipt)
+        originals = [item for item in documents.values() if item.get('interpretation_status') == 'RAW_OFFICIAL_DOCUMENT']
+        urls, rejected = linked_official_ir_urls(originals, domains)
+        diagnostics = []
+        common = {'source': 'OFFICIAL_IR', 'instrument_id': record['event']['instrument_id'], 'receipt_id': receipt}
+        if rejected:
+            diagnostics.append({**common, 'reason': 'OFFICIAL_IR_LINK_OUTSIDE_ALLOWED_SCOPE',
+                                'link_count': rejected, 'affects_current_evidence': False})
+        if len(urls) > 8:
+            diagnostics.append({**common, 'reason': 'OFFICIAL_IR_LINK_LIMIT',
+                                'link_count': len(urls), 'affects_current_evidence': True})
+        retry = False
+        retained = {item['source'] for item in documents.values()
+                    if item.get('interpretation_status') == 'RAW_OFFICIAL_IR_DOCUMENT'}
+        for url in urls[:8]:
+            if url in retained:
+                continue  # Keep the first observed version and its original availability.
+            try:
+                result = self.dart.read_official_ir(url)
+                if result.quality != 'COMPLETE' or len(result.records) != 1:
+                    raise AdapterError('OFFICIAL_IR_FETCH_INCOMPLETE')
+                item = result.records[0]
+                observed_at = aware_time(result.retrieved_at.isoformat()).isoformat()
+                identity = 'official-ir:' + receipt + ':' + digest(url) + ':' + item['sha256']
+                documents[identity] = {'fact_id': identity, 'instrument_id': record['event']['instrument_id'],
+                    'corp_code': record['receipt']['corp_code'], 'receipt_id': receipt, 'source': item['url'],
+                    'sha256': item['sha256'], 'content': item['text'], 'published_at': None,
+                    'observed_at': observed_at, 'available_at': observed_at,
+                    'timing_quality': 'UNCERTAIN', 'interpretation_status': 'RAW_OFFICIAL_IR_DOCUMENT'}
+            except AdapterError as error:
+                retry = retry or error.code not in {'OFFICIAL_IR_UNSUPPORTED_FORMAT', 'OFFICIAL_IR_UNSUPPORTED_ENCODING',
+                                                    'OFFICIAL_IR_DOCUMENT_SIZE_LIMIT'}
+                diagnostics.append({**common, 'reason': error.code, 'source_url_sha256': digest(url),
+                                    'affects_current_evidence': True, **error.diagnostic})
+        return self.state.save_disclosure(receipt, {**record, 'documents': documents,
+            'official_ir_scope': scope_hash, 'official_ir_checked_at': now.isoformat(),
+            'official_ir_complete': not retry, 'official_ir_diagnostics': diagnostics})
+
+    def _document_allowed(self, document, instrument_ids):
+        from .adapters.disclosures import official_ir_url
+
+        if document['instrument_id'] not in instrument_ids:
+            return False
+        if document.get('interpretation_status') != 'RAW_OFFICIAL_IR_DOCUMENT':
+            return True
+        try:
+            official_ir_url(document['source'], self.config.app['market']['official_ir_domains'])
+            return True
+        except AdapterError:
+            return False
+
     def _events(self,instruments,now,*,since=None):
         from .adapters import FetchResult
         from .disclosure_parser import PARSER_VERSION, correction_reference, official_event_family, parse_official_event, resolve_correction_parent
         from .market import DataQualityError
-        self.disclosure_diagnostics = list(self.state.data.get("disclosure_diagnostics",[]))
+        self.disclosure_diagnostics = [row for row in self.state.data.get("disclosure_diagnostics",[])
+                                      if row.get('source') != 'OFFICIAL_IR']
         settings = self.manifest["disclosures"]
         cached = self.state.data.setdefault("disclosure_records",{})
         pending = self.state.data.setdefault('disclosure_pending_documents', {})
@@ -1013,7 +1079,8 @@ class ExternalRuntime:
                 try:
                     if previous:
                         originals = tuple({'content': item['content'].encode('utf-8'), 'sha256': item['sha256']}
-                                          for item in self.state.disclosure_documents(receipt).values())
+                                          for item in self.state.disclosure_documents(receipt).values()
+                                          if item.get('interpretation_status') != 'RAW_OFFICIAL_IR_DOCUMENT')
                         document = FetchResult(originals, 'COMPLETE', aware_time(previous['event']['observed_at']))
                     else:
                         document = self.dart.read_disclosure(receipt)
@@ -1101,7 +1168,7 @@ class ExternalRuntime:
                     keys += ['events','disclosure_records']
                 self.state.save(keys)
         events,facts,documents = [],[],{}
-        for record in cached.values():
+        for receipt, record in list(cached.items()):
             event = EventRecord.model_validate_json(canonical(record["event"]))
             if event.instrument_id not in scope:
                 continue
@@ -1112,23 +1179,40 @@ class ExternalRuntime:
                 recent = False
             if event.instrument_id not in held and not recent:
                 continue
+            if any('content_sha256' not in document for document in record['documents'].values()):
+                originals = self.state.disclosure_documents(receipt)
+                if set(originals) != set(record['documents']):
+                    raise AdapterError('DISCLOSURE_CACHE_MISSING')
+                record = self.state.save_disclosure(receipt, {**record, 'documents': originals})
+            record = self._official_ir_documents(receipt, record, now)
+            cached[receipt] = record
+            ir_diagnostics = record.get('official_ir_diagnostics', []) if self.config.app['market']['official_ir_domains'] else []
+            self.disclosure_diagnostics.extend(ir_diagnostics)
             events.append(event)
             facts.extend(MarketFact.model_validate_json(canonical(fact)) for fact in record["facts"])
-            documents.update(record["documents"])
+            documents.update({key: value for key, value in record['documents'].items()
+                              if self._document_allowed(value, scope)})
             if coverage.get(event.instrument_id) == "COMPLETE_NO_EVENT":
                 coverage[event.instrument_id] = "COMPLETE"
             if recent and record.get('parse_reason') != 'OBSERVATION_ONLY_EVENT_FAMILY' and (
                     event.timing_quality == "UNCERTAIN" or not event.primary_source_complete):
                 coverage[event.instrument_id] = "PARTIAL"
+            if recent and any(item['affects_current_evidence'] for item in ir_diagnostics):
+                coverage[event.instrument_id] = 'PARTIAL'
+        with self.state.lock:
+            previous = [row for row in self.state.data.get('disclosure_diagnostics', [])
+                        if scoped and row.get('instrument_id') not in scope]
+            diagnostics = list({canonical(row): row for row in previous + self.disclosure_diagnostics}.values())
+            if self.state.data.get('disclosure_diagnostics') != diagnostics:
+                self.state.data['disclosure_diagnostics'] = diagnostics
+                self.state.save(('disclosure_diagnostics',))
         return events,facts,coverage,documents
 
     def refresh_decision(self, frozen):
         """Recheck the decision's issuers and account without rebuilding the universe."""
         with self.collect_lock:
             self.config.assert_current()
-            scope = ({row['instrument_id'] for row in frozen['events'] + frozen['facts']} |
-                     {row['instrument']['instrument_id'] for row in frozen['candidates']} |
-                     set(frozen['reviewed_positions']))
+            scope = {row['instrument_id'] for row in frozen['events'] + frozen['facts']} | document_scope(frozen)
             current = self.refresh_protection()
             instruments = [current.instruments[symbol] for symbol in sorted(scope)]
             events, facts, coverage, documents = self._events(instruments, self.clock(),
@@ -1141,7 +1225,8 @@ class ExternalRuntime:
             bundle.data = {**current.data, 'events':[row.model_dump(mode='json') for row in bundle.events],
                 'facts':[row.model_dump(mode='json') for row in bundle.facts],
                 'coverage':{**current.data['coverage'], **coverage},
-                'raw_documents':{**current.data['raw_documents'], **documents}}
+                'raw_documents':{**{key: value for key, value in current.data['raw_documents'].items()
+                                   if value['instrument_id'] not in scope}, **documents}}
             return self._publish(bundle)
 
     def _account(self, *, allow_idle=False):
@@ -1273,7 +1358,8 @@ class ExternalRuntime:
                 'events': [row.model_dump(mode='json') for row in events],
                 'facts': [row.model_dump(mode='json') for row in facts],
                 'coverage': coverage, 'raw_documents': documents,
-                'runtime_diagnostics': [row for row in previous.data['runtime_diagnostics'] if row.get('source') != 'DART']
+                'runtime_diagnostics': [row for row in previous.data['runtime_diagnostics']
+                                        if row.get('source') not in {'DART', 'OFFICIAL_IR'}]
                     + self.disclosure_diagnostics}
             return self._publish(MarketBundle(data, self.profile, mode=self.config.mode))
 
@@ -1429,6 +1515,33 @@ class ExternalRuntime:
                                       for row in [*bundle.exclusions,*diagnostics]}.values())
             return self._publish(bundle)
 
+    def _frozen_documents(self, frozen, instrument_ids):
+        if 'document_manifest' not in frozen:
+            return {}  # Legacy inputs confer no original-document authority.
+        try:
+            manifest = freeze_documents(frozen.get('document_manifest', {}), set(instrument_ids),
+                                        aware_time(frozen['created_at']))
+            if manifest != frozen.get('document_manifest', {}):
+                raise AdapterError('FROZEN_DOCUMENT_SCOPE_MISMATCH')
+            documents = {}
+            for receipt in sorted({document['receipt_id'] for document in manifest.values()}):
+                cached = self.state.disclosure_documents(receipt)
+                for key, expected in manifest.items():
+                    if expected['receipt_id'] != receipt:
+                        continue
+                    actual = cached.get(key)
+                    if not isinstance(actual, dict) or not isinstance(actual.get('content'), str):
+                        raise AdapterError('FROZEN_DOCUMENT_MISSING')
+                    if ({field: value for field, value in actual.items() if field != 'content'} != expected or
+                            hashlib.sha256(actual['content'].encode('utf-8')).hexdigest() != expected['content_sha256']):
+                        raise AdapterError('FROZEN_DOCUMENT_CHANGED')
+                    if not self._document_allowed(actual, instrument_ids):
+                        raise AdapterError('FROZEN_DOCUMENT_SCOPE_MISMATCH')
+                    documents[key] = actual
+            return documents
+        except (ValueError, KeyError, TypeError):
+            raise AdapterError('FROZEN_DOCUMENT_INVALID') from None
+
     def decide(self,frozen,*,on_progress=None):
         self.config.require_external("model_call",self.approval)
         codex = self._model_for_call()
@@ -1436,12 +1549,8 @@ class ExternalRuntime:
         if store is None:
             raise AdapterError("MODEL_JOURNAL_STORE_UNBOUND")
         enriched = dict(frozen)
-        ids = sorted({item["instrument"]["instrument_id"] for item in frozen["candidates"]} |
-                     set(frozen["reviewed_positions"]) | {item["instrument_id"] for item in frozen["theses"]} |
-                     {item["instrument_id"] for name in ("holdings","pending_entries") for item in frozen["portfolio"].get(name,[])})
-        documents = self.latest_bundle.data.get("raw_documents",{}) if self.latest_bundle else {}
-        receipts = {value["receipt_id"] for value in documents.values() if value["instrument_id"] in ids}
-        documents = {key: value for receipt in receipts for key, value in self.state.disclosure_documents(receipt).items()}
+        ids = sorted(document_scope(frozen))
+        documents = self._frozen_documents(frozen, ids)
         enriched["tool_records"] = {
             "events":{event["event_id"]:event for event in frozen["events"]},
             "facts":{**{fact["fact_id"]:fact for fact in frozen["facts"]},**documents},
@@ -1458,7 +1567,8 @@ class ExternalRuntime:
         def validate_at_completion(value):
             completed_at = self.clock()
             return validate_proposal(value,frozen,current_account_version=frozen["portfolio"]["account_state_version"],
-                current_facts_hash=digest([frozen["events"],frozen["facts"]]),completed_at=completed_at,now=completed_at)
+                current_facts_hash=digest([frozen["events"],frozen["facts"]]),
+                current_documents_hash=digest(frozen.get('document_manifest', {})), completed_at=completed_at,now=completed_at)
         result = codex.run(enriched,frozen["output_contract"],attempt_root=attempt_root,
             prompt=(ROOT/"prompts/portfolio_decision.md").read_text(),validate_schema=lambda value:DecisionProposal.model_validate(value),
             validate_semantic=validate_at_completion,on_progress=on_progress,

@@ -156,7 +156,8 @@ def prepare_application(source, *, kis_transport=None, dart_transport=None, mode
             authorize=authorize, token_provider=token, clock=clock, ws_connector=ws_connector)
         dart = DartAdapter(api_key=secrets.get(source.app["market"]["dart_key_env"], ""), mode="live",
             authorize=authorize, official_ir_domains=source.app["market"]["official_ir_domains"],
-            transport=dart_transport or http_transport(allowed_origins={ORIGIN}, network_enabled=True))
+            transport=dart_transport or http_transport(allowed_origins={ORIGIN,
+                *("https://" + host for host in source.app["market"]["official_ir_domains"])}, network_enabled=True))
         state = RuntimeState(source.state_dir / "state.sqlite")
         now = clock()
         template = {"account_alias": grant["account_alias"], "bootstrap": {"whole_account": True, "account_identity": identity,

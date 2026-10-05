@@ -7,6 +7,8 @@ from datetime import date, datetime, timezone
 from urllib.parse import urlsplit
 
 from . import AdapterError
+from ..config import aware_time
+from ..decision import DOCUMENT_METADATA_FIELDS, freeze_documents
 from ..models import Candidate, EventRecord, InvestmentThesis, MarketFact
 from ..safety import CredentialError, reject_credentials
 
@@ -16,10 +18,10 @@ ID_TOOLS = {"get_event": ("events", "event_id"), "get_fact": ("facts", "fact_id"
 SNAPSHOT_FIELDS = frozenset({"schema_version", "run_id", "created_at", "config_hash", "strategy_hash", "code_id", "session_id",
     "review_scope", "reviewed_positions", "strategy_contract", "portfolio", "theses", "events", "facts", "candidates",
     "pending_orders", "missing_data", "output_contract", "material_hash", "input_snapshot_id", "tool_scope", "tool_records", "conversation",
-    "account_context", "attachments", "review_targets", "reentry_theses"})
+    "account_context", "attachments", "review_targets", "reentry_theses", "document_manifest"})
 RECORD_FIELDS = {"events": set(EventRecord.model_fields), "facts": set(MarketFact.model_fields),
                  "candidates": set(Candidate.model_fields), "theses": set(InvestmentThesis.model_fields)}
-DOCUMENT_FIELDS = {"fact_id", "instrument_id", "source", "sha256", "content", "receipt_id", "available_at", "interpretation_status"}
+DOCUMENT_FIELDS = DOCUMENT_METADATA_FIELDS | {'content'}
 DOCUMENT_PAGE_CHARS = 16000
 
 
@@ -119,6 +121,22 @@ def validate_snapshot(snapshot):
                 _record_in_scope(collection, record, instrument_ids, identifier)
             elif identifier not in instrument_ids or not isinstance(record, list):
                 raise AdapterError("INSTRUMENT_NOT_ALLOWED")
+    if 'document_manifest' in snapshot:
+        try:
+            manifest = freeze_documents(snapshot['document_manifest'], set(instrument_ids), aware_time(snapshot['created_at']))
+        except (ValueError, TypeError, KeyError):
+            raise AdapterError('INVALID_DOCUMENT_MANIFEST') from None
+        if manifest != snapshot['document_manifest']:
+            raise AdapterError('INSTRUMENT_NOT_ALLOWED')
+        if 'tool_records' in snapshot:
+            documents = {key: value for key, value in records.get('facts', {}).items() if 'content' in value}
+            if set(documents) != set(manifest):
+                raise AdapterError('FROZEN_DOCUMENT_SET_MISMATCH')
+            for key, document in documents.items():
+                if (not isinstance(document['content'], str) or
+                        {field: value for field, value in document.items() if field != 'content'} != manifest[key] or
+                        hashlib.sha256(document['content'].encode('utf-8')).hexdigest() != manifest[key]['content_sha256']):
+                    raise AdapterError('FROZEN_DOCUMENT_CHANGED')
 
 
 class MarketTools:

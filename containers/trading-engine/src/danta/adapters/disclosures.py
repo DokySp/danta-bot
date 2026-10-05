@@ -5,12 +5,61 @@ import io
 import re
 import zipfile
 from datetime import date
+from html.parser import HTMLParser
 from urllib.parse import urlencode, urlsplit
 from xml.etree import ElementTree
 
 from . import AdapterError, FetchResult, http_transport, require_http_ok, utcnow
 
 ORIGIN = "https://opendart.fss.or.kr"
+OFFICIAL_IR_MAX_BYTES = 32 * 1024 * 1024
+
+
+def official_ir_url(url, domains):
+    try:
+        parsed = urlsplit(url)
+        if (not isinstance(url, str) or len(url) > 2048 or any(char.isspace() or ord(char) < 32 for char in url)
+                or parsed.scheme != 'https' or parsed.hostname not in domains
+                or parsed.port not in {None, 443} or parsed.username or parsed.password or parsed.fragment):
+            raise ValueError
+    except (TypeError, ValueError):
+        raise AdapterError('OFFICIAL_IR_URL_NOT_ALLOWED') from None
+    return parsed._replace(netloc=parsed.hostname).geturl()
+
+
+def linked_official_ir_urls(documents, domains):
+    """Only explicit links in the verified issuer's original; never crawl children."""
+    class Links(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.urls, self.skip = set(), 0
+
+        def handle_starttag(self, tag, attrs):
+            if tag in {'script', 'style'}:
+                self.skip += 1
+            if not self.skip and tag == 'a':
+                link = dict(attrs).get('href')
+                if link and (link.lower().startswith(('http:', 'https:')) or link.startswith('//')):
+                    self.urls.add(link)
+
+        def handle_endtag(self, tag):
+            if tag in {'script', 'style'}:
+                self.skip = max(0, self.skip - 1)
+
+        def handle_data(self, text):
+            if not self.skip:
+                self.urls.update(re.findall(r'https?://[^\s<>"\']+', text, re.IGNORECASE))
+
+    links = Links()
+    for document in documents:
+        links.feed(document['content'])
+    allowed, rejected = set(), 0
+    for url in links.urls:
+        try:
+            allowed.add(official_ir_url(url, domains))
+        except AdapterError:
+            rejected += 1
+    return sorted(allowed), rejected
 
 
 class DartAdapter:
@@ -118,11 +167,24 @@ class DartAdapter:
         return FetchResult(tuple(result.values()), "COMPLETE" if result else "FETCH_FAILED", utcnow())
 
     def read_official_ir(self, url, *, published_at=None):
-        parsed = urlsplit(url)
-        if parsed.scheme != "https" or parsed.hostname not in self.domains or parsed.port not in {None, 443} or parsed.username or parsed.password or parsed.fragment:
-            raise AdapterError("OFFICIAL_IR_URL_NOT_ALLOWED")
-        body = self._get(url).body
-        return FetchResult(({"url": url, "content": body, "sha256": hashlib.sha256(body).hexdigest(), "published_at": published_at},),
+        url = official_ir_url(url, self.domains)
+        response = self._get(url)
+        body = response.body
+        if len(body) > OFFICIAL_IR_MAX_BYTES:
+            raise AdapterError('OFFICIAL_IR_DOCUMENT_SIZE_LIMIT')
+        content_type = response.headers.get('content-type', '').lower()
+        media_type = content_type.split(';', 1)[0].strip()
+        if (media_type not in {'', 'text/plain', 'text/html', 'text/xml', 'application/xml', 'application/xhtml+xml'}
+                or body.startswith((b'%PDF', b'PK', b'\x1f\x8b')) or b'\x00' in body):
+            raise AdapterError('OFFICIAL_IR_UNSUPPORTED_FORMAT')
+        charset = re.search(r'charset\s*=\s*["\']?([\w-]+)', content_type)
+        encoding = charset.group(1) if charset else 'utf-8-sig'
+        try:
+            text = body.decode(encoding)
+        except (LookupError, UnicodeError):
+            raise AdapterError('OFFICIAL_IR_UNSUPPORTED_ENCODING') from None
+        return FetchResult(({"url": url, "content": body, 'text': text,
+                            "sha256": hashlib.sha256(body).hexdigest(), "published_at": published_at},),
                            "COMPLETE" if body else "FETCH_FAILED", utcnow(), metadata={"published_at_verified": False})
 
 

@@ -10,6 +10,49 @@ from .config import HumanRequired, aware_time, canonical, digest
 from .models import Candidate, EventRecord, InvestmentThesis, MarketFact, PortfolioSnapshot, StrictModel
 
 
+DOCUMENT_METADATA_FIELDS = frozenset({'fact_id', 'instrument_id', 'receipt_id', 'source', 'sha256',
+    'content_sha256', 'available_at', 'interpretation_status', 'corp_code', 'published_at', 'observed_at', 'timing_quality'})
+
+
+def document_scope(frozen: dict) -> set[str]:
+    return ({item['instrument']['instrument_id'] for item in frozen.get('candidates', [])} |
+            {item['instrument_id'] for item in frozen.get('theses', [])} |
+            set(frozen.get('reviewed_positions', [])) |
+            {item['instrument_id'] for name in ('holdings', 'pending_entries')
+             for item in frozen.get('portfolio', {}).get(name, [])})
+
+
+def freeze_documents(raw_documents: dict | None, instrument_ids: set[str], now: datetime) -> dict:
+    """Bind only scoped original metadata; bodies stay in the receipt cache."""
+    if raw_documents is None:
+        return {}
+    if not isinstance(raw_documents, dict):
+        raise ValueError('INVALID_DOCUMENT_MANIFEST')
+    manifest = {}
+    for key, document in raw_documents.items():
+        if not isinstance(document, dict):
+            raise ValueError('INVALID_DOCUMENT_MANIFEST')
+        if document.get('instrument_id') not in instrument_ids:
+            continue
+        if (set(document) - DOCUMENT_METADATA_FIELDS or document.get('fact_id') != key or
+                any(not isinstance(document.get(field), str) or not document[field]
+                    for field in ('fact_id', 'instrument_id', 'receipt_id', 'source', 'available_at', 'interpretation_status')) or
+                any(not isinstance(document.get(field), str) or len(document[field]) != 64 or
+                    any(char not in '0123456789abcdef' for char in document[field])
+                    for field in ('sha256', 'content_sha256'))):
+            raise ValueError('INVALID_DOCUMENT_MANIFEST')
+        for field in ('available_at', 'observed_at', 'published_at'):
+            if document.get(field) is not None and aware_time(document[field]) > now:
+                raise ValueError('FUTURE_EVIDENCE')
+        manifest[key] = dict(document)
+    return manifest
+
+
+def order_evidence_hash(events, facts, documents):
+    # Preserve persisted intent hashes when no original documents were reviewed.
+    return digest([events, facts] + ([documents] if documents else []))
+
+
 class CandidateReview(StrictModel):
     instrument_id: str
     verdict: Literal["ACCEPT", "VETO", "WATCH", "INSUFFICIENT_DATA"]
@@ -49,7 +92,7 @@ def freeze_input(*, run_id: str, config_hash: str, strategy_hash: str, code_id: 
                  now: datetime, session_id: str, profile: dict, portfolio: PortfolioSnapshot,
                  candidates: list[Candidate], events: list[EventRecord], facts: list[MarketFact],
                  theses: list[InvestmentThesis], scope: str = "FULL", reviewed_positions: list[str] | None = None,
-                 previous_theses: list[InvestmentThesis] = ()) -> dict:
+                 previous_theses: list[InvestmentThesis] = (), raw_documents: dict | None = None) -> dict:
     if scope not in {"FULL", "PARTIAL"}:
         raise ValueError("Unknown review scope")
     active_positions = list(dict.fromkeys(item.instrument_id for item in [*portfolio.holdings, *portfolio.pending_entries]))
@@ -59,6 +102,7 @@ def freeze_input(*, run_id: str, config_hash: str, strategy_hash: str, code_id: 
     instrument_ids = {candidate.instrument.instrument_id for candidate in candidates} | {thesis.instrument_id for thesis in theses}
     events = [event for event in events if event.instrument_id in instrument_ids]
     facts = [fact for fact in facts if fact.instrument_id in instrument_ids]
+    documents = freeze_documents(raw_documents, instrument_ids | set(active_positions) | set(reviewed_positions), now)
     for obj in [*events, *facts]:
         if obj.available_at > now:
             raise ValueError("FUTURE_EVIDENCE")
@@ -76,7 +120,7 @@ def freeze_input(*, run_id: str, config_hash: str, strategy_hash: str, code_id: 
     data = {"schema_version": 1, "run_id": run_id, "created_at": now, "config_hash": config_hash,
             "strategy_hash": strategy_hash, "code_id": code_id, "session_id": session_id,
             "review_scope": scope, "reviewed_positions": reviewed_positions, "strategy_contract": profile,
-            "portfolio": portfolio, "theses": theses, "events": events, "facts": facts,
+            "portfolio": portfolio, "theses": theses, "events": events, "facts": facts, "document_manifest": documents,
             "candidates": candidates, "pending_orders": portfolio.pending_entries,
             "missing_data": [candidate.instrument.instrument_id for candidate in candidates if candidate.coverage not in {"COMPLETE", "COMPLETE_NO_EVENT"}],
             "review_targets": {"candidate_ids": candidate_ids, "position_ids": reviewed_positions},
@@ -85,7 +129,8 @@ def freeze_input(*, run_id: str, config_hash: str, strategy_hash: str, code_id: 
     # account state, event freshness and qualification, not just source text.
     material = {"session_id": session_id, "account_state_version": portfolio.account_state_version,
                 "strategy_hash": strategy_hash, "config_hash": config_hash,
-                "theses": theses, "reentry_theses": list(previous.values()), "events": events, "facts": facts, "candidate_qualification": [
+                "theses": theses, "reentry_theses": list(previous.values()), "events": events, "facts": facts,
+                "document_manifest": documents, "candidate_qualification": [
                     [candidate.instrument.instrument_id, candidate.coverage, candidate.event_ids, candidate.features.last_session_id]
                     for candidate in candidates]}
     data["material_hash"] = digest(material)
@@ -96,7 +141,7 @@ def freeze_input(*, run_id: str, config_hash: str, strategy_hash: str, code_id: 
 
 def validate_proposal(value: dict, frozen: dict, *, current_account_version: int,
                       current_facts_hash: str, completed_at: datetime, now: datetime,
-                      maximum_age_seconds: int = 120) -> DecisionProposal:
+                      maximum_age_seconds: int = 120, current_documents_hash: str | None = None) -> DecisionProposal:
     proposal = DecisionProposal.model_validate(value)
     if proposal.human_question:
         raise HumanRequired(proposal.human_question)
@@ -108,6 +153,10 @@ def validate_proposal(value: dict, frozen: dict, *, current_account_version: int
         raise ValueError("STALE_ACCOUNT_VERSION")
     if not 0 <= (now - completed_at).total_seconds() <= maximum_age_seconds or current_facts_hash != digest([frozen["events"], frozen["facts"]]):
         raise ValueError("STALE_DECISION")
+    documents = frozen.get('document_manifest', {})
+    if ((documents and current_documents_hash is None) or
+            current_documents_hash is not None and current_documents_hash != digest(documents)):
+        raise ValueError('STALE_DECISION')
     candidates = {item["instrument"]["instrument_id"]: item for item in frozen["candidates"]}
     candidate_ids = [item.instrument_id for item in proposal.candidate_reviews]
     position_ids = [item.instrument_id for item in proposal.position_reviews]

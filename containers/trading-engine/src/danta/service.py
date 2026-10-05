@@ -274,19 +274,21 @@ class Service:
     def _review_job(payload):
         return payload['kind'] in REVIEWS | {'collect_disclosures', 'finalize_and_report'} or payload.get('command') in {'review', 'chat'}
 
-    def run_once(self, *, review=False, chat=None):
+    def run_once(self, *, review=False, chat=None, collect=None):
         row = None
         # Idle workers are readers. Take the writer lock only to claim actual work.
         candidates = self.store.read("SELECT * FROM requests WHERE request_key LIKE 'service:%' AND status='ACCEPTED' ORDER BY rowid")
         candidates = [candidate for candidate in candidates if
                       self._review_job(json.loads(candidate['payload'])) == review and
-                      (chat is None or (json.loads(candidate['payload']).get('command') == 'chat') == chat)]
+                      (chat is None or (json.loads(candidate['payload']).get('command') == 'chat') == chat) and
+                      (collect is None or (json.loads(candidate['payload'])['kind'] == 'collect_disclosures') == collect)]
         if not candidates:
             return False
         with self.store.transaction():
             for candidate in candidates:
                 payload = json.loads(candidate['payload'])
-                if self._review_job(payload) == review and (chat is None or (payload.get('command') == 'chat') == chat):
+                if (self._review_job(payload) == review and (chat is None or (payload.get('command') == 'chat') == chat)
+                        and (collect is None or (payload['kind'] == 'collect_disclosures') == collect)):
                     claimed = self.store.db.execute("UPDATE requests SET status='RUNNING' WHERE request_id=? AND status='ACCEPTED'", (candidate['request_id'],))
                     if claimed.rowcount:
                         row = dict(candidate)
@@ -673,7 +675,7 @@ class Service:
     def start(self):
         if self.config.app['monitoring']['enabled']:
             self.app.start_monitor(self.config.app['monitoring']['quote_poll_fallback_seconds'])
-        def worker(review, chat):
+        def worker(review, chat, collect):
             while not self.stop.wait(.1):
                 stage = 'QUEUE_TICK' if not review else 'RUN_ONCE'
                 try:
@@ -685,7 +687,7 @@ class Service:
                                 self.store.event('service', 'SERVICE_WORKER_RECOVERED',
                                     {'stage': 'QUEUE_TICK', 'occurred_at': self.clock().isoformat()}, notify=True)
                     stage = 'RUN_ONCE'
-                    self.run_once(review=review, chat=chat)
+                    self.run_once(review=review, chat=chat, collect=collect)
                 except Exception as error:
                     blocked = stage == 'QUEUE_TICK' and isinstance(error, ConfigurationError)
                     kind = 'SERVICE_WORKER_BLOCKED' if blocked else 'SERVICE_WORKER_FAILED'
@@ -718,8 +720,9 @@ class Service:
                     log_event('NOTIFY_BLOCKED', **detail)
                     with self.store.transaction():
                         self.store.event('service', 'NOTIFY_BLOCKED', detail)
-        for name, target, args in [('control', worker, (False, False)), ('review', worker, (True, False)),
-                                   ('chat', worker, (True, True)), ('outbox', notify, ())]:
+        for name, target, args in [('control', worker, (False, False, False)), ('review', worker, (True, False, False)),
+                                   ('chat', worker, (True, True, False)), ('disclosures', worker, (True, False, True)),
+                                   ('outbox', notify, ())]:
             thread = threading.Thread(target=target, args=args, name='danta-' + name, daemon=True)
             thread.start()
             self.threads.append(thread)

@@ -102,6 +102,25 @@ class FakeApp:
 
 
 class ServiceIntegrationTests(unittest.TestCase):
+    def test_disclosure_collection_runs_while_model_review_is_blocked(self):
+        collected = threading.Event()
+        class Runtime:
+            def refresh(inner):
+                return self.app.bundle
+            def collect_disclosures(inner):
+                collected.set()
+                return self.app.bundle
+        self.app.refresh = Runtime().refresh
+        self.app.review_release.clear()
+        deadline = (self.now + timedelta(minutes=10)).isoformat()
+        self.receive('/review')
+        self.service.start()
+        self.assertTrue(self.app.review_entered.wait(2))
+        self.app.store.accept_request('service:disclosure-during-review',
+            {'source': 'scheduler', 'kind': 'collect_disclosures'}, deadline=deadline)
+        self.assertTrue(collected.wait(2), 'collection must not wait for the model to finish')
+        self.assertFalse(self.app.review_release.is_set())
+
     def test_idle_worker_does_not_take_ledger_writer_lock(self):
         with patch.object(self.app.store,'transaction',side_effect=AssertionError('idle writer lock')):
             self.assertFalse(self.service.run_once(review=True))
