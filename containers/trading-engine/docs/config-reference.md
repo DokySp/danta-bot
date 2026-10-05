@@ -2,7 +2,9 @@
 
 기준은 [README §12](../README.md)와 배포 밖에 두는 세 YAML이다. 비밀값은 사용자 요청에 따라 별도 `secrets.yaml`로 읽는다. 전체 키·기본값은 [app.yaml](../config/app.yaml),
 [strategy.yaml](../config/strategy.yaml), [schedules.yaml](../config/schedules.yaml)에 있다.
-현재 기본값은 `offline` / `research`이며 실제 연결·운용 승인은 포함하지 않는다.
+현재 운영 설정은 `live` / `research`이며 `live_mandate`가 전체 계좌 운용을 승인한다.
+`research`는 전략 프로필 이름으로 offline 실행을 뜻하지 않는다. 합성 검증용 offline 설정은
+`tests/fixtures/config/`에 분리되어 있으며 아래 표는 저장소 운영 설정을 설명한다.
 
 ## 로딩과 변경
 
@@ -15,7 +17,7 @@ danta --config-dir ./config config diff --against ./config.snapshot.json
 승인이나 재시작을 수행하지 않는다. 상대 `app.state_dir`는 설정 디렉터리의 부모를 기준으로
 해석한다. 환경변수로 전략 비율을 덮어쓰는 경로는 없다.
 
-자동 운영 배포의 `model.model_id`·`model.reasoning_effort`는 다음 AI 호출부터 다시 읽는다.
+자동 운영 배포의 `model.model_id`·`model.reasoning_effort`·`model.timeout_seconds`는 다음 AI 호출부터 다시 읽는다.
 Luna·Terra·Sol·Astra 전환에 재시작이 필요 없고, 진행 중인 호출과 그 기록은 이전 값을 유지한다.
 새 모델은 처음 사용할 때 로컬 격리 검사를 통과해야 한다. 나머지 설정 변경과 별도 hash 승인
 실행에는 이 예외를 적용하지 않으며, 기존 정책 변경 차단을 유지한다.
@@ -47,20 +49,20 @@ simulation slippage 값은 거부한다. 평가 비교군·60/30/20 표본·boot
 
 | 영역 | 기본값 / 의미 | 외부 실행에서 필요한 확인 |
 |---|---|---|
-| app | `offline`, `Asia/Seoul`, 계좌 별칭 null, `127.0.0.1:8080` | 실제 모드/계좌와 bind/수신 경계 |
+| app | `live`, `Asia/Seoul`, `kis-primary`, `0.0.0.0:8080` | 실제 계좌 관측과 전용 Docker 네트워크 수신 경계 |
 | model | `codex_cli`, `gpt-6-astra`/`xhigh`/`chatgpt`, attempt별 timeout 1200초(20분) | 다음 호출에서 모델·추론 설정 적용. 실제 로그인·모델 접근·격리 증거·모델 사용 승인 검증 |
 | model 재시도 | transient 1회/5초, schema 교정 1회, fallback false | quota reset 미확인은 운영자 확인, 다른 모델 자동 교체 없음 |
-| broker | `kis`, 환경/manifest/rate-limit null | 모의/실전 endpoint, 계좌 귀속, 제공자 필드·한도 검증 |
+| broker | `kis`, `real`, manifest `automatic`, `kis-standard` | 실전 endpoint, 계좌 귀속, 제공자 필드·한도 검증 |
 | broker 비밀 참조 | `KIS_ACCOUNT_REF`, `KIS_APP_KEY`, `KIS_APP_SECRET` 이름 | 값은 private secrets.yaml에서만 읽으며 정책 YAML·image에는 넣지 않음 |
-| market | OpenDART, 공식 IR 목록 빈 값, calendar/corporate action null | DART 권한, 승인 도메인, 실제 세션·기업행위 출처 |
-| execution | enabled false, single writer true | 실행 활성화와 승인 capability가 함께 필요 |
-| monitoring | enabled false, 호가/활성주문 5초, idle계좌 60초 | 최신성/호출량/보호 실행 가능성 검증 |
-| telegram | enabled/ingress false, sender/chat 빈 목록, route `trading-engine`, `default_chat_id: null` | 같은 Docker 네트워크·송신/수신/제어 승인 및 허용 sender/chat. 송신이 활성화되고 허용 chat이 여러 개면 자동 알림·리포트 수신지를 `default_chat_id`로 지정 |
+| market | OpenDART, 공식 IR 도메인 빈 목록, calendar `automatic`, corporate action null | DART 권한, 승인 도메인, 실제 세션·기업행위 출처 |
+| execution | enabled true, single writer true | 실행 활성화와 승인 capability가 함께 필요 |
+| monitoring | enabled true, 호가/활성주문 5초, idle계좌 60초 | 최신성/호출량/보호 실행 가능성 검증 |
+| telegram | enabled/ingress true, sender/chat은 secrets에서 해석, route `trading-engine`, `default_chat_id: null` | 같은 Docker 네트워크·송신/수신/제어 승인 및 허용 sender/chat. 송신이 활성화되고 허용 chat이 여러 개면 자동 알림·리포트 수신지를 `default_chat_id`로 지정 |
 | storage | SQLite, 로컬 filesystem 필수, raw 보존 기간 null | writable 로컬 상태 디렉터리·백업/복원, 보존 정책 |
 | observability | redaction/attempt usage/structured events true | 실제 운영 검증을 합성 성공으로 표시하지 않음 |
 
 모델 호출 전체 예산은 `timeout_seconds × (1 + transient_retries + schema_repair_attempts)`에
-재시도 대기와 인증·준비 여유 30초를 더한다. 기본값은 최대 1,835초이며 재시도는 해당
+재시도 대기와 인증·준비 여유 30초를 더한다. 현재 설정은 최대 3,635초이며 재시도는 해당
 일시 오류·형식 오류가 발생할 때만 수행한다. `TIMEOUT`은 자동 재시도하지 않는다.
 판단 유효 120초는 모델 완료부터 계산하고, 실행 전 계좌·근거·시장 시간·호가를 다시 검증한다.
 초기 시세 연결 대기는 최대 30초, WebSocket 연결과 handshake는 각각 10초, 구독 ACK는 15초다.
@@ -78,7 +80,8 @@ transport도 이 경우에만 내부 `FIXTURE_ONLY` 표지를 사용한다. 외�
 ## strategy.yaml
 
 `strategy.id=catalyst_trend_swing`, `active_profile=research`, 연구 상태는
-`unproven_hypothesis`다. 아래 값은 연구 가정이며 개인 자금·손실 승인이 아니다.
+`unproven_hypothesis`다. 아래 값은 연구 가정이며, 현재 운용은 별도의 명시적
+`live_mandate.accepted_risk_policy: configured_profile` 승인을 근거로 한다.
 
 | 연구 영역 | 정확한 기본값 |
 |---|---|
@@ -104,19 +107,20 @@ transport도 이 경우에만 내부 `FIXTURE_ONLY` 표지를 사용한다. 외�
 미확인 비용을 0으로 채우지 않는다. 명시된 synthetic fixture의 가상 비용과 실제 비용을
 구분한다. 전략 산식/경계의 기준은 [README §3~6](../README.md)이며 표는 이를 대체하지 않는다.
 
-`live_mandate`는 pending_user 상태이며 자본/필요시점/계좌소유/기존보유·주문인수/
-accepted_strategy_hash/완전한 risk policy/밤보유/주문종류/비용배분/신뢰승인 ID가 모두 null이다.
-live에서 research 값을 자동 상속하지 않는다. 실제 승인에는 완전한 정책, 일치하는 코드·모델·
-prompt·설정 hash, 계좌·소유·단일writer·저장소·복원·격리·비용·달력·호가·보호 증거가 필요하다.
+`live_mandate`는 approved이며 전체 계좌 자금·보유를 startup에서 관측하고 기존 보유를
+인수·보호한다. 기존 활성 주문은 없어야 하며 configured_profile, 밤 보유, 지정가·시장가,
+브로커 실제 현금과 명시적 주문 전 비용 추정 사용을 승인했다. 임의의 다른 계좌·정책 승인은 아니다.
+자동 배포는 이 정책과 실제 계좌·모델·격리·시장 관측에서 runtime 증거를 만들며, 수동
+manifest 경로에는 별도의 신뢰 승인과 hash 검증이 필요하다. 운영비 배분 미확정과 전략 수익성은 남는다.
 
 ## schedules.yaml
 
-스케줄은 기본 disabled이며 `app.market.calendar_manifest`를 참조한다.
+운영 스케줄은 enabled이며 `app.market.calendar_manifest: automatic`을 참조한다.
 휴일/지연 개장/단축장은 고정 평일 시간이 아닌 검증된 해당 세션 개장·종료시각을 사용한다.
 
 | job | 트리거 |
 |---|---|
-| finalize_day | 연속장 종료+30분 |
+| finalize_day | 연속장 종료+530분, 현재 정규시장 기준 다음 날 00:10 한국시간 |
 | portfolio_review | 연속장 개장+20분 |
 | disclosures | 세션 중180초 |
 | material_event | 검증사건, 기업/사건 중복 최대30초 합치기 |

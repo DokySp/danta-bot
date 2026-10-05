@@ -1,8 +1,9 @@
 # 실행·복구 안내
 
-현재 상태는 `STRATEGY_UNPROVEN`, `EXTERNAL_INTEGRATION_UNVERIFIED`,
-`LIVE_NOT_AUTHORIZED`다. 코드·합성 검증 완료와 실제 연결·거래·배포 승인은 다르다.
-기본 설정은 offline, 실행/스케줄/보호 감시/Telegram ingress 비활성이다.
+저장소의 `config/`는 승인된 전체 계좌 `live` 운용 설정이다. 실행·스케줄·보호 감시·
+Telegram ingress가 활성화되어 있으므로 합성 검증에 이 디렉터리를 사용하지 않는다.
+합성 검증은 `tests/fixtures/config/`를 명시한다. `STRATEGY_UNPROVEN`은 운용 승인과
+별개이며, 로컬 검증만으로 실제 서버의 연결·활성화·투자 성과를 확인했다고 보고하지 않는다.
 
 ## 로컬 검증
 
@@ -10,17 +11,17 @@ Python 3.12 환경에서 `requirements.lock`을 설치하고 `pip install --no-d
 --no-build-isolation -e .`로 CLI를 연결한다.
 
 ```sh
-danta doctor
-danta config validate
-danta run --kind full_review
-danta status
-danta replay --manifest tests/fixtures/evaluation-synthetic.json
-danta evaluate --manifest tests/fixtures/evaluation-synthetic.json
+danta --config-dir tests/fixtures/config doctor
+danta --config-dir tests/fixtures/config config validate
+danta --config-dir tests/fixtures/config run --kind full_review
+danta --config-dir tests/fixtures/config status
+danta --config-dir tests/fixtures/config replay --manifest tests/fixtures/evaluation-synthetic.json
+danta --config-dir tests/fixtures/config evaluate --manifest tests/fixtures/evaluation-synthetic.json
 python -m unittest discover -s tests/unit
 python -m unittest discover -s tests/integration
 ```
 
-기본 `run`은 제공 합성 snapshot 한 번을 처리한다. 실제 시장·계좌·모델 결과가 아니다.
+위 fixture 설정의 `run`은 제공 합성 snapshot 한 번을 처리한다. 실제 시장·계좌·모델 결과가 아니다.
 `serve`는 관리용 HTTP를 먼저 열고 거래 서비스 준비 항목을 검사한다. `/version`은
 계좌·모델 초기화에 의존하지 않는다. `/healthz`는 HTTP 생존 상태이며 `/readyz`는 거래 접수
 준비 여부를 200/503으로 구분한다. offline이나 누락된 설정은 Docker 로그와 Telegram
@@ -31,9 +32,21 @@ live 활성화를 부여하지 않는다.
 ## 프로세스와 저장소
 
 하나의 Application과 Store를 사용한다. HTTP는 허용 사용자·권한 검증·영속 접수 후 202 응답을 보내고
-모델 호출을 기다리지 않는다. 느린 심사, 일반 대화, 빠른 제어, 알림 전송은 별도 worker이며, 보호·대사는
+모델 호출을 기다리지 않는다. 느린 심사, 공시 수집, 일반 대화, 빠른 제어, 알림 전송은 별도 worker이며, 보호·대사는
 `Application.start_monitor`가 별도 실행한다. `/pause`, `/stop`, `/schedule_off`는 보호와
 대사를 끄지 않는다. 단일 writer는 같은 실제 계좌·모드의 공유 파일 잠금으로 보장한다.
+
+운영 CLI의 `run/reconcile/status/pause/resume/activate/candidates/report`는 같은 UID의
+`state_dir/operator/control.sock`으로 실행 중인 Application을 사용한다. 운영 디렉터리는
+0700, 소켓은 0600이며 양쪽에서 peer UID를 확인한다. 서비스와 CLI는 Application 생성 전부터
+종료 후까지 owner 잠금을 유지하므로 시작·종료 중 두 번째 writer를 만들지 않는다.
+서비스가 없고 owner 잠금도 비어 있을 때만 CLI 단독 Application을 생성한다. 소켓 오류나
+요청 전송 후 timeout은 자동 재실행하지 않는다. 결과 불명인 `run`은 원장·요청 키를 먼저
+확인한다. 활성 요청을 종료하지 못하면 writer 잠금을 유지한 채 종료 실패를 보고한다.
+
+CLI와 Telegram·스케줄 보고서는 같은 한국 날짜 원장 수집 함수를 사용한다. 심사 실행 밖에서
+발생한 보호 주문·체결·정정도 포함한다. 이전 날짜 보고서의 보유 현황은 현재 상태이며,
+그 날짜의 보유를 역산한 스냅샷으로 표시하지 않는다.
 
 보호 감시는 마지막으로 검증한 종목·일봉·달력·공시를 재사용하며 보유/미체결 종목의 계좌와
 호가만 갱신한다. 전체 공시 수집이 지연돼도 이 경로는 기다리지 않는다. 공시 조회 실패는
@@ -52,6 +65,19 @@ WAL 파일만 복사하거나 활성 DB 파일을 덮어쓰지 않는다. 재시
 접수 중 프로세스가 죽어 durable queue 연결이 불명한 Telegram 요청은 새 update로 다시
 제출해야 한다. 이미 확정된 동일 update/본문은 중복 실행하지 않고 동일 request ID를 반환한다.
 같은 ID의 다른 본문은 거절한다. 재시작 시 기한 지난 재량 요청은 실행하지 않는다.
+
+미체결 매수도 정기 심사의 position 대상이다. 공식 근거 무효화가 확인되면 첫 체결이 없어도
+잔량을 취소하며, 취소와 첫 체결이 경합하면 대사 후 실제 체결분만 보호한다. UNKNOWN·수량 귀속
+불명 상태는 임의 취소 성공이나 청산 성공으로 표시하지 않는다.
+
+공식 IR은 확인된 회사의 DART 원문에 직접 적힌 HTTPS 링크 중 `official_ir_domains`와 정확히
+일치하는 도메인만 조회한다. 현재 기본값은 빈 목록이므로 활성화되지 않았다. 하위 페이지 탐색,
+PDF 해석, IR 원문의 사건·재무수치 자동 확정은 지원하지 않는다. 텍스트/HTML/XML 원문과 회사 ID,
+hash, 최초 수집 시각을 보존하며 미확인 공개시각은 null/UNCERTAIN으로 유지한다. 허용된 링크의
+수집 실패·미지원 형식은 진단과 해당 최근 근거의 PARTIAL coverage에 반영한다.
+심사에 제공할 원문 목록·메타데이터·원본과 텍스트 hash를 먼저 고정한다. 도구 조회 때의
+원문 누락·변조, 모델 대기 중 원문 변경, 마지막 매수 전송 전 원문 변경은 주문을 차단한다.
+IR 원문을 읽을 수 있어도 구조화된 fact/event 근거 ID로 자동 승격하지 않는다.
 
 ## Telegram의 추가 운영 조건
 
@@ -104,7 +130,13 @@ JSON 이스케이프·원문 메타데이터를 포함한 요청 전송 한도�
 Telegram 송신 성공 후 응답이 유실되면 재시도 첨부가 중복될 수 있다. 3,500자를 넘는 텍스트는 요약과 전체 HTML로 전달한다.
 동일 운영 경고는 15분 내 중복 알림을 억제하되 원장 기록은 보존한다. 보호 감시는 정상 상태가 60초 지속된 뒤 복구로 표시한다.
 
-`/new`는 채팅 세션과 대기 첨부만 초기화한다. `/review`는 기존 권한 범위의 동일 심사 workflow만 요청한다.
+gateway의 대기 첨부와 `/new` 정리는 route·chat·sender별로 분리한다. 발신자 정보가 없는
+구형 캐시는 전달하지 않고 기존 TTL로 정리한다. 최초 전송 본문·첨부 선택을 로컬 디스크에
+저장하므로 같은 update의 응답 유실·재시작 재전송에는 같은 본문을 사용한다. 엔진의 확정 접수는
+재전송하지 않으며, 새로운 대기 파일을 이전 요청에 합치지 않는다. 캐시 TTL 이후 동일 ID의
+본문 충돌은 엔진이 거부하며 요청 성공을 임의 복구하지 않는다.
+
+`/new`는 채팅 세션과 요청 발신자의 대기 첨부만 초기화한다. `/review`는 기존 권한 범위의 동일 심사 workflow만 요청한다.
 네 종목 목록 명령은 ticker 인자 한 개와 `telegram_control` 승인이 필요하다. 현재 universe에
 있는 종목의 후보 포함·제외만 변경하며, 보유 수량·전략 진입 기준·보호 청산을 우회하지 않는다.
 offline 외 모드에서는 공통 Application이 후보 범위 변경용 `candidate_control` 권한도 검사한다.
@@ -172,10 +204,13 @@ Codex CLI는 image에 포함하며 기본 `model.executable: codex`를 사용한
 컨테이너에서 운영 CLI를 직접 실행할 때는 `docker compose exec --user 10001:10001
 trading-engine danta ...`처럼 일반 사용자를 지정한다.
 로그인도 이 Compose와 같은 인증 volume을 사용한다. `docker compose down -v`는 인증을 지우므로
-사용하지 않는다. 기본 model/effort는 `gpt-5.6-sol`/`xhigh`, 인증 방식은 `chatgpt`다.
+사용하지 않는다. 현재 운영 model/effort는 `gpt-6-astra`/`xhigh`, 인증 방식은 `chatgpt`다.
 
-비밀값은 `config/secrets.yaml`, 승인과 운영 정보는 `config/runtime.json`과
-`config/runtime-manifest.json`에 둔다. `danta`는 외부 모드에서 config의 runtime.json을 자동으로
+비밀값은 `config/secrets.yaml`에 둔다. 현재 `capability_manifest: automatic` 운영 설정은
+명시된 live_mandate와 실제 관측으로 승인·운영 정보를 준비하며 수동 `runtime.json`이나
+`runtime-manifest.json`을 요구하지 않는다. 별도 manifest를 지정하는 수동 연결 모드에서만
+승인과 운영 정보를 `config/runtime.json`과 `config/runtime-manifest.json`에 둔다.
+이 수동 모드의 `danta`는 외부 모드에서 config의 runtime.json을 자동으로
 찾아 검증한다. `--approval-file`을 명시하면 해당 파일을 우선 사용한다. offline 실행은 기본
 승인을 읽지 않으며, `approvals show`는 모드와 관계없이 저장된 승인을 검증해 보여준다.
 승인 파일이 없거나 만료·설정 hash 불일치이면 외부 실행을 허용하지 않는다.
@@ -189,6 +224,8 @@ live/demo 서비스는 시작 시 같은 승인·대사 검사를 거쳐 자동 
 `KIS_PROD_TYPE`, 미설정 시 `01`을 적용하여 `KIS_ACCOUNT_REF`로 이전한다. 발급 토큰 캐시는
 옮기지 않으며 새 cache가 만료시각을 관리한다. 실제 값을 출력하거나 Git에 올리지 않는다.
 비밀값·정책 변경은 다음 프로세스 시작에 적용되며 config hash가 바뀌면 승인도 갱신해야 한다.
+자동 운영의 모델 ID·effort·timeout만 호출 사이 재로딩을 허용한다. 이 예외로 거래 정책이나
+실행 권한을 갱신하지 않는다.
 
 컨테이너 안 실행 파일의 SHA-256과 제한 도구 probe 결과를 runtime-manifest.json에 연결한다.
 호스트의 npm launcher hash를 컨테이너 native binary 증거로 사용하지 않는다. 2026-09-14의

@@ -13,6 +13,11 @@ PYTHONPATH=src python -m danta.safety src schemas migrations prompts README.md s
 `합성`은 해당 fixture 조건에서 재현되는 assertion이다. `사람/운영`은
 실제 승인·환경·향후 관측이 필요하다. 외부 검증을 건너뛰고 모드를 올리는 우회는 없다.
 
+2026-10-06에 README 전체 절과 실제 진입 경로를 다시 대조한 결과는
+[명세 경로 재감사](spec-path-audit-20261006.md)에 기록했다. 아래 S/O/E/I 행은 개별 assertion의
+목록이며 전체 외부 기능 완료표가 아니다. 추가된 실제 CLI·gateway·공시 수집·리플레이 회귀와
+남은 부분 구현/운영 미검증 항목을 함께 읽는다.
+
 ## 전략 S01~S24
 
 각 행은 [test_strategy.py](../tests/unit/test_strategy.py)의 `test_sNN_…`에 직접 대응한다.
@@ -130,7 +135,7 @@ full strategy 전용 의미무효화, 비순환 paired bootstrap 재현성을 �
 |---|---|---|
 | I01 | engine `test_O01_I01`; image의 명시적 새 source/fixture allowlist | clean Docker build/run 결과는 status에 별도 기록 |
 | I02 | Docker 데몬 불가 당시 status/decisions 중단 기록 | 이후 핵심 명세/진행 불가도 사용자에게 즉시 보고하는 작업 규칙 |
-| I03 | null live_mandate·trusted approval gate | 실제 자금/인수/밤보유/손실/비용 승인은 사람 판단이며 미승인 |
+| I03 | live_mandate·trusted approval gate | 현재 전체 계좌/기존 보유 인수/밤 보유/위험·비용 정책은 명시 승인됨. 미승인 조건 거부는 합성 검증하며 운영 활성화·성과 검증과 구분 |
 | I04 | engine `test_O03_I04`; validate_activation 완전 live policy 검사 | 연구값 자동 상속 없음 |
 | I05 | evaluation `test_i05_report_preserves_readme_hash_tables_code_and_escapes_raw_html` | 원문 hash/표/코드·native 접힘목차; 최종 화면 QA는 status |
 | I06 | evaluation E11/E12, report FIXTURE_ONLY, doctor 상태 | 엔진검증·STRATEGY_UNPROVEN·LIVE_NOT_AUTHORIZED 분리 |
