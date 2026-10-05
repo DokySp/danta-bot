@@ -23,7 +23,7 @@ from .market import EventRegistry, SessionCalendar, TickTable, calculate_feature
 from .models import Candidate, CostSchedule, DailyBar, EventRecord, Holding, Instrument, InvestmentThesis, MarketFact, PendingEntry, PortfolioSnapshot, Quote, Session
 from .portfolio import buy_commission, size_entry
 from .reporting import write_report
-from .risk import ConcentrationMonitor, DrawdownCircuit, evaluate_exit, update_trailing_stop
+from .risk import ConcentrationMonitor, DrawdownCircuit, evaluate_exit, thesis_invalidations, update_trailing_stop
 from .safety import reject_credentials
 from .store import Store
 from .strategy import assess_entry, monitor_quote_max_age, quote_fresh, rank_candidates, reentry_eligibility
@@ -416,6 +416,32 @@ class Application:
             # Evidence may contain bank statement text; keep it out of error messages.
             raise HumanRequired('CASH_RECONCILIATION_EVIDENCE_INVALID') from None
 
+    def _invalidation_events(self, thesis, bundle):
+        records = {event.event_id: event for event in bundle.events}
+        records.update({item['event_id']: EventRecord.model_validate_json(canonical(item))
+                        for item in self.store.get('invalidation_evidence:' + thesis.thesis_id, [])})
+        return thesis_invalidations(thesis, list(records.values()), bundle.now)
+
+    def _protect_pending_entries(self, bundle, run_id):
+        results = []
+        with self.executor.dispatch_lock:
+            theses = {thesis.thesis_id: thesis for thesis in self.theses()}
+            for row in self.store.working():
+                thesis = theses.get(row['thesis_id'])
+                if row['side'] != 'BUY' or thesis is None or not self._invalidation_events(thesis, bundle):
+                    continue
+                if not self.store.get('reconciled') or not self.store.get('ownership_complete') or row['state'] == 'UNKNOWN':
+                    results.append({'instrument_id': row['instrument_id'], 'action': 'RECONCILE_REQUIRED', 'quantity': 0})
+                    continue
+                self.executor.invalidate_unsubmitted_entries(run_id, 'EXIT_THESIS_INVALID', thesis_id=thesis.thesis_id)
+                if row['state'] not in {'PLANNED', 'VALIDATED'}:
+                    self.executor.cancel(row['id'], bundle.now)
+                    # A cancellation acknowledgement may race with the first fill.
+                    self.reconcile()
+                results.append({'instrument_id': row['instrument_id'], 'action': 'EXIT_THESIS_INVALID',
+                                'quantity': 0, 'reasons': ['EXIT_THESIS_INVALID'], 'cancel_pending_entries': True})
+        return results
+
     def protect(self, *, allow_idle_account=False, run_id="protection") -> list[dict]:
         """Called independently of the review thread and model quota circuit."""
         refresh = self.protection_refresh or self.refresh
@@ -424,7 +450,8 @@ class Application:
             if "account_snapshot" in self.bundle.data:
                 self.executor.reconcile(self.bundle.data["account_snapshot"])
                 self._sync_theses()
-        bundle, results = self.bundle, []
+        bundle = self.bundle
+        results = self._protect_pending_entries(bundle, run_id)
         snapshot = self.portfolio()
         self.record_nav()
         reductions = {item.instrument_id: item for item in self.concentration.observe(snapshot, bundle.now, self.profile)}
@@ -443,14 +470,12 @@ class Application:
                         self.profile, observed_price=quote.bid if quote and quote_fresh(quote, bundle.now, monitor_quote_max_age(self.profile)) and
                             (thesis.protection_started_at is None or quote.observed_at >= thesis.protection_started_at) else None)
                 self._save_thesis(thesis)
-                invalidations = {event.event_id: event for event in bundle.events if event.event_id in thesis.invalidating_event_ids}
-                invalidations.update({item["event_id"]: EventRecord.model_validate_json(canonical(item))
-                    for item in self.store.get("invalidation_evidence:" + thesis.thesis_id, [])})
+                invalidations = self._invalidation_events(thesis, bundle)
             plan = evaluate_exit(thesis, holding, quote, bundle.calendar, bundle.now, self.profile,
                 features=features, account_complete=self.store.get("reconciled") and self.store.get("ownership_complete"),
                 orders_known=all(row["state"] not in {"UNKNOWN", "CANCEL_REQUESTED"} for row in self.store.working()),
                 tradable=holding.instrument_id in bundle.instruments and bundle.instruments[holding.instrument_id].status == "NORMAL" and bundle.instruments[holding.instrument_id].status_verified,
-                invalidating_events=list(invalidations.values()),
+                invalidating_events=invalidations,
                 reduction_quantity=max(0, holding.quantity - targets[holding.instrument_id]) if holding.instrument_id in targets else 0)
             results.append(plan.model_dump(mode="json"))
             if self.config.mode == "shadow":

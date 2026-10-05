@@ -52,8 +52,9 @@ def freeze_input(*, run_id: str, config_hash: str, strategy_hash: str, code_id: 
                  previous_theses: list[InvestmentThesis] = ()) -> dict:
     if scope not in {"FULL", "PARTIAL"}:
         raise ValueError("Unknown review scope")
-    reviewed_positions = reviewed_positions if reviewed_positions is not None else [holding.instrument_id for holding in portfolio.holdings]
-    if scope == "FULL" and set(reviewed_positions) != {holding.instrument_id for holding in portfolio.holdings}:
+    active_positions = list(dict.fromkeys(item.instrument_id for item in [*portfolio.holdings, *portfolio.pending_entries]))
+    reviewed_positions = reviewed_positions if reviewed_positions is not None else active_positions
+    if scope == "FULL" and set(reviewed_positions) != set(active_positions):
         raise ValueError("FULL_REVIEW_POSITION_OMITTED")
     instrument_ids = {candidate.instrument.instrument_id for candidate in candidates} | {thesis.instrument_id for thesis in theses}
     events = [event for event in events if event.instrument_id in instrument_ids]

@@ -220,9 +220,9 @@ class Executor:
         return [self.cancel(row["id"], now) for row in self.store.working()
                 if row["side"] == "BUY" and row["expires_at"] and aware_time(row["expires_at"]) <= now]
 
-    def invalidate_unsubmitted_entries(self, run_id: str, reason: str) -> None:
+    def invalidate_unsubmitted_entries(self, run_id: str, reason: str, *, thesis_id: str | None = None) -> None:
         with self.store.transaction():
-            changed = self.store.db.execute("UPDATE intents SET state='INVALIDATED',reserve_cash='0',reserve_risk='0' WHERE side='BUY' AND state IN ('PLANNED','VALIDATED')").rowcount
+            changed = self.store.db.execute("UPDATE intents SET state='INVALIDATED',reserve_cash='0',reserve_risk='0' WHERE side='BUY' AND state IN ('PLANNED','VALIDATED') AND (? IS NULL OR thesis_id=?)", (thesis_id, thesis_id)).rowcount
             if changed:
                 self.store.bump_version()
                 self.store.event(run_id, "UNSUBMITTED_ENTRIES_INVALIDATED", {"reason": reason})

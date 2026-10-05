@@ -34,6 +34,16 @@ def update_trailing_stop(thesis: InvestmentThesis, features: FeatureSnapshot,
     return thesis.model_copy(update={"mfe_price": mfe, "current_stop": stop})
 
 
+def thesis_invalidations(thesis: InvestmentThesis, events: list[EventRecord], now: datetime) -> list[EventRecord]:
+    """The same verified invalidation applies before and after the first fill."""
+    return [event for event in events if event.instrument_id == thesis.instrument_id and
+            event.official and event.primary_source_complete and event.source_hash and event.fact_ids and
+            event.available_at <= now and
+            (event.event_id in thesis.invalidating_event_ids or event.correction_of in thesis.event_ids) and
+            (event.polarity == "NEGATIVE" or event.withdrawn or
+             event.event_id in thesis.invalidating_event_ids and event.correction_of in thesis.event_ids)]
+
+
 def evaluate_exit(thesis: InvestmentThesis, holding: Holding, quote: Quote | None,
                   calendar: SessionCalendar, now: datetime, research_profile: dict, *,
                   features: FeatureSnapshot | None = None, account_complete: bool = True,
@@ -65,11 +75,7 @@ def evaluate_exit(thesis: InvestmentThesis, holding: Holding, quote: Quote | Non
     elif fresh_trade and quote.last <= stop:
         reasons.append("EXIT_PROTECTION")
         kind, observed_at = "SAME_VENUE_TRADE", quote.last_observed_at
-    invalid = [e for e in invalidating_events if e.instrument_id == holding.instrument_id and
-               e.official and e.primary_source_complete and e.source_hash and e.fact_ids and e.available_at <= now and
-               (e.event_id in thesis.invalidating_event_ids or e.correction_of in thesis.event_ids) and
-               (e.polarity == "NEGATIVE" or e.withdrawn or
-                e.event_id in thesis.invalidating_event_ids and e.correction_of in thesis.event_ids)]
+    invalid = thesis_invalidations(thesis, invalidating_events, now)
     if invalid:
         reasons.append("EXIT_THESIS_INVALID")
     # An expired session remains overdue even after close, during a halt, or on restart.

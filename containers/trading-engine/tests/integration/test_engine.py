@@ -27,6 +27,63 @@ from danta.store import Store
 
 
 class EngineCase(unittest.TestCase):
+    def test_pending_only_thesis_is_reviewed_and_canceled_when_invalidated(self):
+        app = Application(self.config, self.bundle)
+        try:
+            with patch.object(app.broker, 'fill'):
+                initial = app.review()
+            self.assertEqual(initial['order_status'], 'ACKNOWLEDGED')
+            self.assertEqual(app.store.quantity('TEST:AAA'), 0)
+            buy = app.store.working()[0]
+            thesis = app.theses()[0]
+            correction = self.bundle.events[0].model_copy(update={
+                'event_id': 'pending-official-correction', 'polarity': 'NEGATIVE',
+                'correction_of': None})
+            self.bundle.events.append(correction)
+            reviewed = []
+            def decide(frozen):
+                reviewed.extend(frozen['reviewed_positions'])
+                proposal = fixture_decision(frozen)
+                proposal['position_reviews'][0].update(action='EXIT_THESIS_INVALID',
+                    changed_event_ids=[correction.event_id], reason=thesis.invalidation_case)
+                return proposal
+            app.decide = decide
+            result = app.review()
+            self.assertEqual(reviewed, ['TEST:AAA'])
+            self.assertEqual(result['decision_status'], 'VALID')
+            self.assertEqual(app.broker.cancel_requests, 1)
+            self.assertEqual(app.store.order(buy['id'])['state'], 'CANCELED')
+            self.assertEqual(app.store.quantity('TEST:AAA'), 0)
+            self.assertFalse(app.store.working())
+        finally:
+            app.close()
+
+    def test_pending_invalidation_reconciles_fill_during_cancel_before_exit(self):
+        app = Application(self.config, self.bundle)
+        try:
+            with patch.object(app.broker, 'fill'):
+                app.review()
+            buy = app.store.working()[0]
+            thesis = app.theses()[0]
+            correction = self.bundle.events[0].model_copy(update={
+                'event_id': 'late-fill-correction', 'polarity': 'NEGATIVE',
+                'correction_of': thesis.event_ids[0]})
+            with app.store.transaction():
+                app._save_thesis(thesis.model_copy(update={'invalidating_event_ids': [correction.event_id]}))
+                app.store.set('invalidation_evidence:' + thesis.thesis_id, [correction.model_dump(mode='json')])
+            cancel = app.broker.cancel
+            def fill_then_cancel(request):
+                app.broker.fill(buy['broker_id'], 2, D(buy['limit_price']), D(0), self.bundle.now)
+                return cancel(request)
+            with patch.object(app.broker, 'cancel', side_effect=fill_then_cancel):
+                app.protect()
+            self.assertEqual(app.store.order(buy['id'])['state'], 'PARTIAL_CANCELED')
+            sells = [row for row in app.store.working() if row['side'] == 'SELL']
+            self.assertEqual([row['quantity'] for row in sells], [2])
+            self.assertEqual(app.broker.cancel_requests, 1)
+        finally:
+            app.close()
+
     def test_early_and_partial_reports_keep_known_account_and_distinguish_review_scope(self):
         app = Application(self.config, self.bundle)
         try:
