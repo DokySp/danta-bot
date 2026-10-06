@@ -6,6 +6,18 @@ host; local tests do not prove real order execution or strategy returns. The exa
 values in `tests/contract/test_runtime.py` are deliberately fake. They are not a
 fee schedule, market calendar, model identity, credential, or live approval.
 
+Before a review, full collection supplies the account snapshot for reconciliation.
+The following protection pass may reuse that successful snapshot only within the
+existing idle-account age limit, with no working orders, ledger change or order
+invalidation; quotes are still refreshed. Post-model validation and order preflight
+continue to require fresh account reads. This removes redundant reads without
+raising the KIS request budget or bypassing provider cooldown.
+
+Whole-account order history collapses repeated rows only when every raw provider
+field matches for the same account/date/venue/order key. Conflicting rows still
+make the account incomplete (`DUPLICATE_BROKER_ORDER`); their fills are never summed
+or selected arbitrarily. Different dates and venues retain separate identities.
+
 ## Automatic deployment: the production default
 
 The approved production YAML selects `live`, `capability_manifest: automatic`,

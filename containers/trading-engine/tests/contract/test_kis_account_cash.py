@@ -63,6 +63,27 @@ def order(**changes):
 
 
 class KisAccountContracts(unittest.TestCase):
+    def test_identical_history_rows_are_counted_once_but_conflicts_remain_incomplete(self):
+        port = self.port()
+        original = order()
+        port.adapter.orders = [original, dict(original)]
+        census = port.census()
+        self.assertTrue(census['complete'])
+        self.assertEqual(len(census['orders']), 1)
+        for changed in ({'ord_gno_brno': '002'}, {'tot_ccld_qty': '1', 'tot_ccld_amt': '100', 'rmn_qty': '1'},
+                        {'orgn_odno': '999'}, {'provider_extra': 'different'}):
+            with self.subTest(changed=changed):
+                port.adapter.orders = [original, {**original, **changed}]
+                census = port.census()
+                self.assertFalse(census['complete'])
+                self.assertEqual(census['errors'], ['DUPLICATE_BROKER_ORDER'])
+                self.assertEqual(census['orders'], [])
+        for changed in ({'ord_dt': '20260917'}, {'excg_id_dvsn_cd': 'NXT'}):
+            port.adapter.orders = [original, {**original, **changed}]
+            census = port.census()
+            self.assertTrue(census['complete'])
+            self.assertEqual(len(census['orders']), 2)
+
     def test_buying_power_failure_reaches_account_order_and_operator_diagnostics(self):
         port = self.port()
         port.latest_bundle = SimpleNamespace(quotes={'KRX:000002':SimpleNamespace(observed_at=NOW)},

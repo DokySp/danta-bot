@@ -13,6 +13,7 @@ from contextlib import redirect_stderr
 from datetime import timedelta
 from decimal import Decimal as D
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 import yaml
 
@@ -23,10 +24,50 @@ from danta.decision import freeze_input, validate_proposal
 from danta.market import SessionCalendar
 from danta.execution import Executor, FixtureBroker, OrderIntent, needed_quantity
 from danta.reporting import render_notification
+from danta.runtime import KisBrokerPort
 from danta.store import Store
 
 
 class EngineCase(unittest.TestCase):
+    def test_review_reuses_fresh_idle_account_but_revalidates_after_model(self):
+        for changed_during_collection in (False, True):
+            with self.subTest(changed_during_collection=changed_during_collection):
+                bundle = MarketBundle(self.data, self.config.research, mode='offline')
+                broker = KisBrokerPort(SimpleNamespace(environment='demo'), {}, None, clock=lambda: bundle.now)
+                broker.environment = 'fixture'  # Only the real snapshot cache is exercised; no provider I/O.
+                reads, decision_reads = [], []
+                def account():
+                    reads.append(True)
+                    return {'complete': True, 'ownership_complete': True, 'orders': []}
+                broker._snapshot = account
+                def refresh():
+                    bundle.data['account_snapshot'] = broker.snapshot()
+                    if changed_during_collection:
+                        app.store.bump_version()
+                    return bundle
+                def protection_refresh(*, allow_idle_account=False):
+                    bundle.data['account_snapshot'] = broker.snapshot(maximum_age_seconds=60 if allow_idle_account else 0)
+                    return bundle
+                def decide(frozen):
+                    decision_reads.append(len(reads))
+                    proposal = fixture_decision(frozen)
+                    for review in proposal['candidate_reviews']:
+                        review['verdict'] = 'WATCH'
+                    return proposal
+                app = Application(self.config, bundle, broker=broker, refresh=refresh,
+                    protection_refresh=protection_refresh, decide=decide,
+                    decision_refresh=lambda _frozen: protection_refresh())
+                try:
+                    result = app.review()
+                    expected = 2 if changed_during_collection else 1
+                    self.assertEqual(decision_reads, [expected])
+                    self.assertEqual(len(reads), expected + 2)  # post-model validation and protection
+                    self.assertEqual(result['decision_status'], 'VALID')
+                    self.assertEqual(result['order_status'], 'NONE')
+                finally:
+                    app.close()
+                    shutil.rmtree(self.config.state_dir)
+
     def test_pending_only_thesis_is_reviewed_and_canceled_when_invalidated(self):
         app = Application(self.config, self.bundle)
         try:

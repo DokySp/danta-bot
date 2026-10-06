@@ -83,6 +83,20 @@ class NavFinalizationTests(unittest.TestCase):
         order.update(cumulative_fees=fees, revision=order['revision'] + 1)
         self.assertEqual(self.app.finalize_nav()['status'], 'NAV_FINALIZED')
 
+    def test_unclassified_cash_is_not_reported_as_missing_settlement_costs(self):
+        self.app.store.set('performance_uncertain', True)
+        result = self.app.finalize_nav()
+        self.assertEqual(result['status'], 'NAV_NOT_FINALIZED')
+        self.assertIn('CASH_FLOW_UNCLASSIFIED', result['issues'])
+        self.assertNotIn('SETTLEMENT_COSTS_UNCONFIRMED', result['issues'])
+        self.assertEqual(self.completed(), [])
+        order = next(iter(self.app.broker.orders.values()))
+        order.update(cumulative_fees=None, revision=order['revision'] + 1)
+        result = self.app.finalize_nav()
+        self.assertIn('CASH_FLOW_UNCLASSIFIED', result['issues'])
+        self.assertIn('SETTLEMENT_COSTS_UNCONFIRMED', result['issues'])
+        self.assertEqual(self.completed(), [])
+
     def test_after_midnight_finalizes_previous_close_within_catchup_window(self):
         self.bundle.now = self.session.closes_at + timedelta(hours=10)
         self.assertGreater(self.bundle.now.astimezone(ZoneInfo('Asia/Seoul')).date(),

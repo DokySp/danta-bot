@@ -377,8 +377,8 @@ class Application:
                         thesis = thesis.model_copy(update={"exited_at": thesis.exited_at or self.bundle.now, "exit_reason": json.loads(sells[0])["reason"]})
                 self._save_thesis(thesis)
 
-    def reconcile(self) -> dict:
-        result = self.executor.reconcile()
+    def reconcile(self, snapshot: dict | None = None) -> dict:
+        result = self.executor.reconcile(snapshot)
         self._sync_theses()
         try:
             self._resolve_cash_evidence()
@@ -628,8 +628,10 @@ class Application:
             with self.store.lock:
                 if not self.store.get("reconciled") or not self.store.get("ownership_complete"):
                     issues.append("ACCOUNT_RECONCILIATION_REQUIRED")
-                if (not self.store.get("costs_complete", False) and not self.store.get("account_cash_reconciled", False)) or self.store.get("performance_uncertain", False):
+                if not self.store.get("costs_complete", False) and not self.store.get("account_cash_reconciled", False):
                     issues.append("SETTLEMENT_COSTS_UNCONFIRMED")
+                if self.store.get("performance_uncertain", False):
+                    issues.append("CASH_FLOW_UNCLASSIFIED")
                 if any(row["state"] in {"SUBMITTING", "UNKNOWN", "CANCEL_REQUESTED"} for row in self.store.working()):
                     issues.append("ORDER_RECONCILIATION_REQUIRED")
                 quantities, marks, sources = {}, {}, {}
@@ -731,10 +733,15 @@ class Application:
         try:
             if on_progress:
                 on_progress('계좌·주문 상태와 보호 조건을 확인하고 있습니다.')
-            self.reconcile()
             if self.protection_refresh and self.refresh:
                 self.bundle = self.refresh()
-            protection = self.protect(run_id=run_id)
+                self.reconcile(self.bundle.data.get('account_snapshot'))
+                # Full collection already read the broker. Reuse only the bounded,
+                # unchanged idle snapshot; protection still refreshes its quotes.
+                protection = self.protect(allow_idle_account=True, run_id=run_id)
+            else:
+                self.reconcile()
+                protection = self.protect(run_id=run_id)
             active_thesis_ids = {row["thesis_id"] for row in self.store.holdings() + self.store.working()}
             theses = [thesis for thesis in self.theses() if thesis.exited_at is None and thesis.thesis_id in active_thesis_ids]
             held_ids = {thesis.instrument_id for thesis in theses}

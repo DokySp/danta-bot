@@ -445,7 +445,7 @@ class KisBrokerPort:
             if sum(values.values(), Decimal(0)) != valuation:
                 raise ValueError("ACCOUNT_VALUATION_RECONCILIATION_FAILED")
             active = {(str(row["ord_gno_brno"]), str(row["odno"])) for row in cancelable.records if _quantity(row["psbl_qty"])}
-            normalized, keys = [], set()
+            normalized, records_by_key = [], {}
             for record in orders.records:
                 day = date.fromisoformat(str(record["ord_dt"]))
                 venues = {record[key] for key in ("excg_id_dvsn_cd", "excg_id_dvsn_Cd") if record.get(key)}
@@ -475,9 +475,14 @@ class KisBrokerPort:
                         "first_fill_at": None, "fill_time_quality": "FIRST_OBSERVED" if cumulative else "UNKNOWN",
                         "fill_session_id": day.isoformat()}
                 item["key"] = item["namespace"]+":"+broker_id
-                if item["key"] in keys:
-                    raise ValueError("DUPLICATE_BROKER_ORDER")
-                keys.add(item["key"])
+                record_hash = digest(record)
+                if item["key"] in records_by_key:
+                    # Repeated history rows must agree in every provider field,
+                    # including fields not used by our normalization.
+                    if records_by_key[item["key"]] != record_hash:
+                        raise ValueError("DUPLICATE_BROKER_ORDER")
+                    continue
+                records_by_key[item["key"]] = record_hash
                 item["fingerprint"] = self.order_fingerprint(item)
                 item["terminal"] = status in {"FILLED", "CANCELED", "REJECTED", "EXPIRED", "PARTIAL_CANCELED"}
                 normalized.append(item)
