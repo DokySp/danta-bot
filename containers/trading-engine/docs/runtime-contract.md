@@ -370,6 +370,20 @@ the interval doubles up to one second (never below the configured interval), and
 only halves after 30 minutes without another limit response. Exponential global
 cooldown and bounded priority queues still apply. This is a local pacing policy,
 not a claim about the provider's quota; no failed order is replayed.
+Dispatch ownership now lasts through synchronous HTTP completion, with the next
+interval measured from completion. A thread paused just before raw I/O cannot be
+overtaken into a burst. The queue lock stays available during I/O so priority,
+bounded queue waits and authorization/expiry checks at dispatch still apply.
+KIS GET reads retry a rate-limit failure once after the greater of the remaining
+shared cooldown and numeric provider `Retry-After`, only when that wait is at most
+10 seconds. Without an indicated cooldown, the local delay is five seconds. The
+rate retry budget is shared across all pages; only the failed cursor is replayed.
+Direct buying-power reads use the same policy. Every failure retains safe provider
+diagnostics and attempt counts. A second failure or longer cooldown remains
+incomplete and blocks dependent actions; POST submissions/cancellations never retry.
+This follows the [KIS flow notice dated 2026-04-20](https://apiportal.koreainvestment.com/community/10000000-0000-0011-0000-000000000001/post/d0d1a83f-6f8d-4437-9700-6d26702fd989),
+which notes that individual calls can be rejected within the published allowance.
+The notice does not establish a separate one-second balance-query quota.
 
 The paper port is an independent simulated broker. It fills only on a later,
 fresh quote observation, within verified displayed depth, the fixed buy limit,

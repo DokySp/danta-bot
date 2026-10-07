@@ -51,7 +51,7 @@ class KisPaginationContracts(unittest.TestCase):
                 adapter = KisAdapter(environment='real',
                     credentials=KisCredentials('12345678', '00', private, private, private), transport=transport)
                 output = io.StringIO()
-                with redirect_stderr(output), self.assertRaises(AdapterError) as raised:
+                with redirect_stderr(output), patch('danta.adapters.kis.time.sleep'), self.assertRaises(AdapterError) as raised:
                     adapter.read_buying_power('005930', '100')
                 detail = raised.exception.diagnostic
                 self.assertEqual(raised.exception.code, expected)
@@ -64,13 +64,15 @@ class KisPaginationContracts(unittest.TestCase):
                 if isinstance(body, dict):
                     self.assertEqual(detail['provider_code'], body['msg_cd'])
                     self.assertIn('[비공개]', detail['provider_message'])
-                record = json.loads(output.getvalue())
-                self.assertEqual(record['event'], 'KIS_REQUEST_FAILED')
+                records = [json.loads(line) for line in output.getvalue().splitlines()]
+                self.assertEqual(len(records), 2 if expected == 'RATE_LIMITED' else 1)
+                self.assertTrue(all(record['event'] == 'KIS_REQUEST_FAILED' for record in records))
+                self.assertEqual(records[-1]['attempt_count'], len(records))
                 for secret in (private, '12345678', '1234-5678', '12/345/678', '12.345.678', 'example.com', 'CANO='):
                     self.assertNotIn(secret, output.getvalue() + str(detail))
 
     @patch('danta.adapters.kis.time.sleep')
-    def test_rate_limit_preserves_cause_without_immediate_read_retries(self, sleep):
+    def test_persistent_rate_limit_preserves_cause_after_one_delayed_retry(self, sleep):
         calls = []
         private = 'private-' + 'z'*32
         def transport(*args):
@@ -79,10 +81,10 @@ class KisPaginationContracts(unittest.TestCase):
         transport.fixture_only = True
         adapter = KisAdapter(environment='real',credentials=KisCredentials('12345678','00',private,private,private),transport=transport)
         result = adapter.read_account()
-        self.assertEqual(calls,['GET'])
-        sleep.assert_not_called()
+        self.assertEqual(calls,['GET', 'GET'])
+        sleep.assert_called_once_with(5)
         self.assertEqual(result.metadata['provider_code'],'EGW00215')
-        self.assertEqual(result.metadata['attempt_count'],1)
+        self.assertEqual(result.metadata['attempt_count'],2)
         self.assertEqual(result.metadata['error'],'RATE_LIMITED')
         self.assertIn('처리 오류',result.metadata['provider_message'])
         self.assertNotIn(private,str(result.metadata))
@@ -126,7 +128,8 @@ class KisPaginationContracts(unittest.TestCase):
                 self.assertEqual(calls[1][0][f"CTX_AREA_NK{width}"], [first[f"ctx_area_nk{width}"]])
                 self.assertEqual(calls[1][1]["tr_cont"], "N")
 
-    def test_incomplete_pages_never_become_complete(self):
+    @patch('danta.adapters.kis.time.sleep')
+    def test_incomplete_pages_never_become_complete(self, _sleep):
         page = {"rt_cd": "0", "output1": [{"fixture": "first"}], "ctx_area_fk100": "next", "ctx_area_nk100": "key"}
         cases = [
             ([(page, "M"), (page, "F")], {}, "PARTIAL", "REPEATED_CURSOR"),
@@ -157,6 +160,34 @@ class KisPaginationContracts(unittest.TestCase):
         self.assertEqual(len(result.records), 2)
         self.assertEqual(calls[1], calls[2])
         sleep.assert_called_once_with(0.5)
+
+    @patch('danta.adapters.kis.time.sleep')
+    def test_rate_recovery_keeps_cursor_and_is_bounded_across_pages(self, sleep):
+        first = {'rt_cd': '0', 'output1': [{'fixture': 'first'}], 'ctx_area_fk100': ' next ', 'ctx_area_nk100': ' key '}
+        second = dict(first, output1=[{'fixture': 'second'}], ctx_area_fk100='third')
+        limited = ({'rt_cd': '1', 'msg_cd': 'EGW00215'}, '')
+        for last, quality, count in ((({'rt_cd': '0', 'output1': [{'fixture': 'last'}]}, 'D'), 'COMPLETE', 3),
+                                     (limited, 'PARTIAL', 2)):
+            sleep.reset_mock()
+            adapter, calls = self.adapter([(first, 'M'), limited, (second, 'M'), last])
+            result = adapter.read_account()
+            self.assertEqual(result.quality, quality)
+            self.assertEqual(len(result.records), count)
+            self.assertEqual(calls[1], calls[2], 'retry must replay exactly the failed cursor')
+            self.assertEqual(len(calls), 4, 'a later page must not get another rate retry')
+            sleep.assert_called_once_with(5)
+            if quality == 'PARTIAL':
+                self.assertEqual(result.metadata['failed_page'], 3)
+                self.assertEqual(result.metadata['provider_code'], 'EGW00215')
+
+    @patch('danta.adapters.kis.time.sleep')
+    def test_transient_then_rate_failure_preserves_total_page_attempt_count(self, sleep):
+        adapter, calls = self.adapter([AdapterError('TRANSIENT_FAILURE'),
+                                      ({'rt_cd': '1', 'msg_cd': 'EGW00215'}, '')])
+        result = adapter.read_account()
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(result.metadata['attempt_count'], 3)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [.5, 5])
 
     @patch('danta.adapters.kis.time.sleep')
     def test_exhausted_read_preserves_safe_diagnostics_and_auth_is_not_retried(self, sleep):

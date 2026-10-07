@@ -184,12 +184,17 @@ class PriorityTransport:
             raise HumanRequired("Approved rate/monitor budget is required")
         self.condition = threading.Condition()
         self.queue, self.sequence, self.next_at = [], 0, 0.0
+        self.inflight = False
         self.cooldown_until = 0.0
         self.effective_interval = self.interval
         self.pacing_changed_at = 0.0
         self.rate_limit_failures = 0
         self.rate_limit_diagnostic = {}
         self.fixture_only = getattr(transport, "fixture_only", False)
+
+    def cooldown_remaining_seconds(self):
+        with self.condition:
+            return max(0.0, self.cooldown_until - time.monotonic())
 
     def __call__(self, method, url, headers=None, body=None, timeout=15, *, before_send=None):
         priority = 0 if "/trading/" in url or "inquire-asking-price" in url or "inquire-price?" in url else 1
@@ -208,7 +213,7 @@ class PriorityTransport:
             ticket = (priority, self.sequence)
             self.queue.append(ticket)
             deadline = time.monotonic()+self.maximum_wait
-            while min(self.queue) != ticket or time.monotonic() < self.next_at:
+            while True:
                 if time.monotonic() < self.cooldown_until:
                     self.queue.remove(ticket)
                     self.condition.notify_all()
@@ -219,36 +224,45 @@ class PriorityTransport:
                 if remaining <= 0:
                     self.queue.remove(ticket)
                     self.condition.notify_all()
-                    raise AdapterError("MONITOR_DEGRADED_RATE_BUDGET")
+                    raise AdapterError("MONITOR_DEGRADED_RATE_BUDGET", diagnostic={
+                        'request_stage': 'RATE_QUEUE', 'request_sent': False})
+                if not self.inflight and min(self.queue) == ticket and time.monotonic() >= self.next_at:
+                    break
                 self.condition.wait(min(remaining, max(self.next_at-time.monotonic(), 0.01)))
             self.queue.remove(ticket)
-            self.next_at = time.monotonic()+self.effective_interval
-            self.condition.notify_all()
-        if before_send is not None:
-            before_send()
-        response = self.transport(method, url, headers, body, timeout)
+            self.inflight = True
         try:
-            code = response.json().get('msg_cd')
-        except (AdapterError, AttributeError):
-            code = None
-        limited = isinstance(code, str) and code in {'EGW00201', 'EGW00215'}
-        if response.status == 429 or limited:
+            if before_send is not None:
+                before_send()
+            response = self.transport(method, url, headers, body, timeout)
+            try:
+                code = response.json().get('msg_cd')
+            except (AdapterError, AttributeError):
+                code = None
+            limited = isinstance(code, str) and code in {'EGW00201', 'EGW00215'}
+            if response.status == 429 or limited:
+                with self.condition:
+                    self.rate_limit_failures = min(self.rate_limit_failures + 1, 5)
+                    # This is a local adaptive policy, not an assumed provider quota.
+                    self.effective_interval = max(self.interval, min(1.0, self.effective_interval * 2))
+                    self.pacing_changed_at = time.monotonic()
+                    headers_lower = {key.lower(): value for key, value in response.headers.items()}
+                    retry = headers_lower.get('retry-after', '')
+                    delay = max(min(5 * 2 ** (self.rate_limit_failures-1), 60),
+                                min(int(retry), 86400) if retry.isdigit() else 0)
+                    self.cooldown_until = max(self.cooldown_until, time.monotonic()+delay)
+                    self.next_at = max(self.next_at, self.cooldown_until)
+                    self.rate_limit_diagnostic = {}
+                    if limited:
+                        self.rate_limit_diagnostic['provider_code'] = code
+            return response
+        finally:
             with self.condition:
-                self.rate_limit_failures = min(self.rate_limit_failures + 1, 5)
-                # This is a local adaptive policy, not an assumed provider quota.
-                self.effective_interval = max(self.interval, min(1.0, self.effective_interval * 2))
-                self.pacing_changed_at = time.monotonic()
-                headers_lower = {key.lower(): value for key, value in response.headers.items()}
-                retry = headers_lower.get('retry-after', '')
-                delay = max(min(5 * 2 ** (self.rate_limit_failures-1), 60),
-                            min(int(retry), 86400) if retry.isdigit() else 0)
-                self.cooldown_until = max(self.cooldown_until, time.monotonic()+delay)
-                self.next_at = max(self.next_at, self.cooldown_until)
-                self.rate_limit_diagnostic = {}
-                if limited:
-                    self.rate_limit_diagnostic['provider_code'] = code
+                # Keep ownership through raw I/O, including preemption before send.
+                # Queue waiters can still enqueue, prioritize and time out during I/O.
+                self.next_at = max(self.next_at, time.monotonic()+self.effective_interval)
+                self.inflight = False
                 self.condition.notify_all()
-        return response
 
     request_checked = __call__
 

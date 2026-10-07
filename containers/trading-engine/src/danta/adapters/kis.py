@@ -41,6 +41,13 @@ class KisCredentials:
             raise AdapterError("INVALID_ACCOUNT_REFERENCE")
 
 
+@dataclass
+class _ReadRetryBudget:
+    """At most one rate recovery across all pages of a read operation."""
+    rate_retries: int = 1
+    attempts: int = 0
+
+
 @dataclass(frozen=True)
 class BrokerResult:
     status: str
@@ -237,7 +244,21 @@ class KisAdapter:
         if self.mode == "live" and self.environment != "real" or self.mode == "broker_demo" and self.environment != "demo":
             raise AdapterError("BROKER_ENVIRONMENT_MISMATCH")
 
-    def _request(self, path, tr_id, params, *, post=False, continuation="", valid_until=None):
+    def _request(self, path, tr_id, params, *, post=False, continuation="", valid_until=None, read_budget=None):
+        budget = read_budget or _ReadRetryBudget()
+        while True:
+            budget.attempts += 1
+            try:
+                return self._request_once(path, tr_id, params, post=post, continuation=continuation,
+                                          valid_until=valid_until, attempt_count=budget.attempts)
+            except AdapterError as error:
+                delay = error.diagnostic.get('retry_after_seconds', 5)
+                if post or error.code != 'RATE_LIMITED' or not budget.rate_retries or not 0 <= delay <= 10:
+                    raise
+                budget.rate_retries -= 1
+                time.sleep(delay)
+
+    def _request_once(self, path, tr_id, params, *, post, continuation, valid_until, attempt_count):
         operation = "broker_write" if post else "broker_read" if path.startswith(TRADING) else "market_read"
         c = self.credentials
         def before_send():
@@ -267,7 +288,7 @@ class KisAdapter:
                        "appkey": c.app_key, "appsecret": c.app_secret, "custtype": "P", "tr_id": tr_id, "tr_cont": continuation}
             args = ("POST" if post else "GET", self.base_url + path + ("" if post else "?" + urlencode(params)),
                     headers, json.dumps(params).encode() if post else None, 15)
-            if post and hasattr(self.transport, "request_checked"):
+            if hasattr(self.transport, "request_checked"):
                 response = self.transport.request_checked(*args, before_send=before_send)
             else:
                 before_send()
@@ -284,7 +305,13 @@ class KisAdapter:
         except AdapterError as error:
             error.diagnostic.update(endpoint=path.rsplit('/',1)[-1], requested_at=requested_at,
                                     method='POST' if post else 'GET', tr_id=tr_id, request_stage=error.diagnostic.get('request_stage', stage),
-                                    elapsed_seconds=round(time.monotonic()-started,3))
+                                    elapsed_seconds=round(time.monotonic()-started,3), attempt_count=attempt_count)
+            if error.code == 'RATE_LIMITED':
+                remaining = getattr(type(self.transport), 'cooldown_remaining_seconds', None)
+                delay = remaining(self.transport) if remaining is not None else 0
+                retry = next((value for key, value in response.headers.items() if key.lower() == 'retry-after'), '') if response else ''
+                error.diagnostic['retry_after_seconds'] = max(delay, error.diagnostic.get('retry_after_seconds', 0),
+                    min(int(retry), 86400) if retry.isdigit() else 0, 5 if not delay else 0)
             if response is not None:
                 error.diagnostic['http_status'] = response.status
                 try:
@@ -325,14 +352,16 @@ class KisAdapter:
         rows, summaries, seen = [], [], set()
         metadata = {"endpoint": path.rsplit("/", 1)[-1], "summaries": summaries}
         cursor = cursor or ("", "")
+        read_budget = _ReadRetryBudget()
         try:
             for _ in range(self.max_pages):
                 if cursor in seen:
                     raise AdapterError("REPEATED_CURSOR")
                 seen.add(cursor)
+                read_budget.attempts = 0
                 for attempt in range(3):
                     try:
-                        data, headers = self._request(path, tr, {**params, f"CTX_AREA_FK{cursor_width}": cursor[0], f"CTX_AREA_NK{cursor_width}": cursor[1]}, continuation="N" if any(cursor) else "")
+                        data, headers = self._request(path, tr, {**params, f"CTX_AREA_FK{cursor_width}": cursor[0], f"CTX_AREA_NK{cursor_width}": cursor[1]}, continuation="N" if any(cursor) else "", read_budget=read_budget)
                         break
                     except (AdapterError, OSError) as error:
                         code = error.code if isinstance(error, AdapterError) else 'TRANSPORT_FAILED'
@@ -340,7 +369,7 @@ class KisAdapter:
                         delay = details.get('retry_after_seconds', 0.5 * (2 ** attempt))
                         # Replay only the failed read page; submissions are never retried here.
                         if isinstance(error,AdapterError):
-                            error.diagnostic['attempt_count'] = attempt + 1
+                            error.diagnostic['attempt_count'] = read_budget.attempts
                         if attempt == 2 or code not in {'TRANSIENT_FAILURE', 'TRANSPORT_FAILED'} or delay > 2:
                             raise
                         time.sleep(delay)

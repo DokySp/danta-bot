@@ -3,6 +3,7 @@ import importlib.util
 from pathlib import Path
 import shutil
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 import yaml
@@ -67,6 +68,34 @@ class AutomaticDeploymentTests(unittest.TestCase):
                     app.store.set('monitor_healthy_since', (app.bundle.now - timedelta(seconds=61)).isoformat())
                     app.protect()
                     self.assertFalse(app.store.get('monitor_degraded'))
+                    # Exercise the deployed HTTP -> account -> protection -> ledger path.
+                    transport = app.broker.adapter.transport
+                    original_send = transport.transport
+                    now, failures, sleeps = [time.monotonic()], [], []
+                    def limited_once(method, url, *args):
+                        if 'inquire-balance?' in url:
+                            failures.append(url)
+                            if len(failures) == 1:
+                                return adapters.HttpResponse(500, b'{"msg_cd":"EGW00215"}')
+                        return original_send(method, url, *args)
+                    def advance(delay):
+                        now[0] += delay
+                    def sleep(delay):
+                        sleeps.append(delay)
+                        advance(delay)
+                    previous_errors = app.store.read("SELECT COUNT(*) FROM journal WHERE kind IN ('ACCOUNT_INCOMPLETE','MONITOR_DEGRADED')")[0][0]
+                    with patch.object(transport, 'transport', side_effect=limited_once), \
+                            patch('danta.runtime.time.monotonic', side_effect=lambda: now[0]), \
+                            patch.object(transport.condition, 'wait', side_effect=advance), \
+                            patch('danta.adapters.kis.time.sleep', side_effect=sleep):
+                        app.protect()
+                    self.assertEqual(len(failures), 2)
+                    self.assertEqual(sleeps, [5])
+                    self.assertTrue(app.store.get('account_cash_reconciled'))
+                    self.assertFalse(app.store.get('monitor_degraded'))
+                    self.assertEqual(app.store.read("SELECT COUNT(*) FROM journal WHERE kind IN ('ACCOUNT_INCOMPLETE','MONITOR_DEGRADED')")[0][0], previous_errors)
+                    # The synthetic monotonic jump must not postpone later real-clock calls.
+                    transport.next_at = transport.cooldown_until = 0
                     changed = dict(data, model={**data['model'], 'model_id': 'gpt-5.6-luna', 'reasoning_effort': 'medium'})
                     (config_dir/'app.yaml').write_text(yaml.safe_dump(changed))
                     app.config.assert_current()
