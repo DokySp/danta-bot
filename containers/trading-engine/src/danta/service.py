@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 from .adapters import AdapterError, http_transport
 from .adapters.scheduler import SchedulePlanner
 from .adapters.telegram import MAX_REQUEST_BYTES, READ_COMMANDS, TelegramAdapter
-from .config import ConfigurationError, HumanRequired, aware_time, canonical, digest, load_secrets, utcnow
+from .config import AccountObservationIncomplete, ConfigurationError, HumanRequired, aware_time, canonical, digest, load_secrets, utcnow
 from .operator import OperatorLease, OperatorServer
 from .reporting import render_notification, render_response_html, reported_fee, write_report
 from .safety import CREDENTIAL_TEXT, reject_credentials
@@ -107,6 +107,7 @@ class Service:
         self.worker_diagnostic = None
         self.threads = []
         self.active_chats = {}
+        self.legacy_account_retry_cache = {}
         self.chat_lock = threading.RLock()
         self.scheduler = self.config.data['schedules']['scheduler']
         monitoring = self.config.app['monitoring']
@@ -216,6 +217,40 @@ class Service:
                 return True
         return False
 
+    def _legacy_account_retry_evidence(self, request_id, result):
+        """Old generic human errors are retryable only with contemporaneous read diagnostics."""
+        key = (request_id, canonical(result))
+        if key not in self.legacy_account_retry_cache:
+            self.legacy_account_retry_cache[key] = self._read_legacy_account_evidence(*key)
+        return self.legacy_account_retry_cache[key]
+
+    def _read_legacy_account_evidence(self, request_id, serialized_result):
+        failure = self.store.db.execute(
+            "SELECT sequence,created_at FROM journal WHERE run_id=? AND kind='SERVICE_RESULT' AND payload=? ORDER BY sequence DESC LIMIT 1",
+            (request_id, serialized_result)).fetchone()
+        if failure is None:
+            return False
+        lower = max(1, failure['sequence'] - 128)
+        boundary = self.store.db.execute('SELECT created_at FROM journal WHERE sequence=?', (lower,)).fetchone()
+        if lower > 1 and boundary and aware_time(boundary['created_at']) >= aware_time(failure['created_at']) - timedelta(seconds=5):
+            return False  # A truncated incident window is insufficient evidence.
+        observations = self.store.db.execute(
+            "SELECT payload FROM journal WHERE kind='ACCOUNT_INCOMPLETE' AND sequence BETWEEN ? AND ? "
+            "AND julianday(created_at) BETWEEN julianday(?) - 5.0/86400 AND julianday(?) ORDER BY sequence DESC",
+            (lower, failure['sequence'] - 1, failure['created_at'], failure['created_at'])).fetchall()
+        retryable = {'DUPLICATE_BROKER_ORDER', 'TRANSPORT_FAILED', 'AUTH_TRANSPORT_FAILED',
+                     'RATE_LIMITED', 'TRANSIENT_FAILURE', 'MONITOR_DEGRADED_RATE_BUDGET',
+                     'BROKER_PAGINATION_INCOMPLETE', 'ACCOUNT_SUMMARY_CHANGED_DURING_PAGINATION'}
+        if not observations:
+            return False
+        for observation in observations:
+            diagnostics = json.loads(observation['payload']).get('diagnostics', [])
+            if not diagnostics or any(
+                    (item.get('detail') or item.get('reason')) not in retryable if isinstance(item, dict)
+                    else item not in retryable for item in diagnostics):
+                return False
+        return True
+
     def queue_tick(self):
         """Calendar job identity is durable; no catch-up review after its deadline."""
         now = self.clock()
@@ -226,48 +261,80 @@ class Service:
         session = calendar.active(now)
         if session is None:
             session = next((s for s in reversed(calendar.sessions) if s.closes_at <= now < s.closes_at + timedelta(hours=12)), None)
-        if session is None:
+        finalization_sessions = {s.session_id: s for s in calendar.sessions
+            if (s.daily_bar_available_at or s.closes_at) <= now
+            < (s.daily_bar_available_at or s.closes_at) + timedelta(hours=12)}
+        if session is None and not finalization_sessions:
             return 0
         queued = 0
         with self.store.lock:
             discretionary = self.store.get('discretionary_schedule', self.scheduler['enabled']) and not self.store.get('paused', False)
             scheduled = self.store.db.execute(
-                "SELECT request_id,request_key,status,result FROM requests WHERE request_key LIKE 'service:schedule:%'").fetchall()
+                "SELECT request_id,request_key,payload,status,result FROM requests WHERE request_key LIKE 'service:schedule:%'").fetchall()
             seen = {row['request_key'][len('service:schedule:'):] for row in scheduled}
             for row in scheduled:
                 result = json.loads(row['result']) if row['result'] else {}
-                if (self.scheduler['enabled'] and row['status'] == 'COMPLETE'
-                        and row['request_key'].startswith('service:schedule:' + session.session_id + ':')
-                        and result.get('status') == 'NAV_NOT_FINALIZED' and result.get('retry_at')
-                        and aware_time(result['retry_at']) <= now
-                        < aware_time(self.store.get('service_deadline:' + row['request_id']))):
+                payload = json.loads(row['payload'])
+                deadline = self.store.get('service_deadline:' + row['request_id'])
+                if not (self.scheduler['enabled'] and row['status'] == 'COMPLETE'
+                        and payload.get('source') == 'scheduler' and payload.get('kind') == 'finalize_and_report'
+                        and payload.get('session_id') in finalization_sessions
+                        and deadline and now < aware_time(deadline)):
+                    continue
+                # Older releases persisted incomplete account reads as terminal human errors.
+                # Recover only that known finalization call site, never auth or trading failures.
+                legacy_account_failure = (result.get('status') == 'WAITING_FOR_HUMAN'
+                    and result.get('reason') == 'HUMAN_REQUIRED'
+                    and result.get('error_type') == 'HumanRequired'
+                    and result.get('stage') == 'DISPATCH_FINALIZE_AND_REPORT'
+                    and bool(result.get('frames'))
+                    and result['frames'][-1].get('file') == 'runtime.py'
+                    and result['frames'][-1].get('function') == '_account'
+                    and self._legacy_account_retry_evidence(row['request_id'], result))
+                retry_at = result.get('retry_at')
+                retry_due = (result.get('status') == 'NAV_NOT_FINALIZED' and retry_at
+                             and aware_time(retry_at) <= now) or legacy_account_failure
+                if retry_due:
                     self.store.db.execute("UPDATE requests SET status='ACCEPTED' WHERE request_id=?", (row['request_id'],))
                     queued += 1
-        events = [{'event_id': event.event_id, 'verified_at': event.available_at, 'verified': True}
-                  for event in self.app.bundle.events if event.official and event.primary_source_complete
-                  and event.timing_quality in {'EXACT', 'FIRST_COLLECTED', 'DATE_ONLY'}
-                  and session.opens_at <= event.available_at <= now]
-        intents = self.planner.due(now, session_id=session.session_id,
-            continuous_open=session.opens_at, continuous_close=session.closes_at,
-            enabled=self.scheduler['enabled'], discretionary_enabled=discretionary,
-            last_seen=seen, events=events)
-        for intent in intents:
-            # start_monitor owns the regular protection/reconciliation loop.
-            if intent.kind in {'risk_monitor', 'reconcile'}:
-                continue
-            if intent.kind in PROTECTION and not self.config.app['monitoring']['enabled']:
-                continue
-            payload = {'source': 'scheduler', 'kind': intent.kind, **intent.payload,
-                       'session_id': session.session_id,
-                       'due_at': intent.due_at.isoformat(), 'expires_at': intent.expires_at.isoformat()}
-            # A worker must not claim the request before its deadline is durable.
-            with self.store.lock:
-                if payload['kind'] == 'collect_disclosures' and self._busy(payload):
+        sessions = dict(finalization_sessions)
+        if session is not None:
+            sessions[session.session_id] = session
+        for candidate in sessions.values():
+            events = [{'event_id': event.event_id, 'verified_at': event.available_at, 'verified': True}
+                      for event in self.app.bundle.events if event.official and event.primary_source_complete
+                      and event.timing_quality in {'EXACT', 'FIRST_COLLECTED', 'DATE_ONLY'}
+                      and candidate.opens_at <= event.available_at <= now]
+            intents = self.planner.due(now, session_id=candidate.session_id,
+                continuous_open=candidate.opens_at, continuous_close=candidate.closes_at,
+                enabled=self.scheduler['enabled'], discretionary_enabled=discretionary,
+                last_seen=seen, events=events)
+            for intent in intents:
+                # Additional completed sessions are eligible for reports only.
+                if candidate != session and intent.kind != 'finalize_and_report':
                     continue
-                request_id, fresh = self.store.accept_request('service:schedule:' + intent.key, payload,
-                    deadline=intent.expires_at.isoformat())
-            if fresh:
-                queued += 1
+                # start_monitor owns the regular protection/reconciliation loop.
+                if intent.kind in {'risk_monitor', 'reconcile'}:
+                    continue
+                if intent.kind in PROTECTION and not self.config.app['monitoring']['enabled']:
+                    continue
+                expires_at = intent.expires_at
+                if intent.kind == 'finalize_and_report':
+                    if candidate.session_id not in finalization_sessions:
+                        continue
+                    expires_at = min(expires_at, (candidate.daily_bar_available_at or candidate.closes_at)
+                                     + timedelta(hours=12))
+                payload = {'source': 'scheduler', 'kind': intent.kind, **intent.payload,
+                           'session_id': candidate.session_id,
+                           'due_at': intent.due_at.isoformat(), 'expires_at': expires_at.isoformat()}
+                # A worker must not claim the request before its deadline is durable.
+                with self.store.lock:
+                    if payload['kind'] == 'collect_disclosures' and self._busy(payload):
+                        continue
+                    request_id, fresh = self.store.accept_request('service:schedule:' + intent.key, payload,
+                        deadline=expires_at.isoformat())
+                if fresh:
+                    queued += 1
         return queued
 
     @staticmethod
@@ -574,6 +641,8 @@ class Service:
         if kind == 'finalize_and_report':
             try:
                 finalization = self.app.finalize_nav()
+            except AccountObservationIncomplete:
+                finalization = {'status': 'NAV_NOT_FINALIZED', 'issues': ['ACCOUNT_OBSERVATION_INCOMPLETE']}
             except AdapterError as error:
                 if error.code not in {'TRANSPORT_FAILED', 'AUTH_TRANSPORT_FAILED', 'RATE_LIMITED',
                                       'TRANSIENT_FAILURE', 'MONITOR_DEGRADED_RATE_BUDGET'}:

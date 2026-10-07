@@ -13,7 +13,7 @@ from danta.adapters import AdapterError, FetchResult, HttpResponse
 from danta.adapters.kis import BrokerResult, KisAdapter, KisCredentials
 from danta.execution import Executor, FixtureBroker, OrderIntent
 from danta.runtime import ExternalRuntime, KisBrokerPort
-from danta.config import HumanRequired
+from danta.config import AccountObservationIncomplete, HumanRequired
 from danta.reporting import render_notification
 from danta.store import Store
 
@@ -25,8 +25,10 @@ class AccountFixture:
     environment = "real"
 
     def __init__(self):
+        self.now = NOW
         self.summary = {"prvs_rcdl_excc_amt":"1000", "tot_evlu_amt":"1200", "evlu_amt_smtl_amt":"200",
                         "nass_amt":"1200", "tot_loan_amt":"0", "cma_evlu_amt":"0"}
+        self.positions = ({"pdno":"000001", "hldg_qty":"2", "ord_psbl_qty":"2", "prpr":"100", "evlu_amt":"200"},)
         self.orders, self.reservations, self.cancelable = [], [], []
         self.power = {"nrcvb_buy_amt":"100", "nrcvb_buy_qty":"1", "max_buy_amt":"100000"}
         self.writes, self.power_symbol = [], None
@@ -35,8 +37,8 @@ class AccountFixture:
         return FetchResult(tuple(rows), "COMPLETE", NOW)
 
     def read_account(self):
-        return FetchResult(({"pdno":"000001", "hldg_qty":"2", "ord_psbl_qty":"2", "prpr":"100", "evlu_amt":"200"},),
-                           "COMPLETE", NOW, metadata={"summaries":[[dict(self.summary)], [dict(self.summary)]]})
+        return FetchResult(self.positions,
+                           "COMPLETE", self.now, metadata={"summaries":[[dict(self.summary)], [dict(self.summary)]]})
 
     def read_orders(self, *_): return self.result(self.orders)
     def read_cancelable_orders(self): return self.result(self.cancelable)
@@ -63,6 +65,45 @@ def order(**changes):
 
 
 class KisAccountContracts(unittest.TestCase):
+    def test_midnight_rollover_observations_do_not_become_permanent_cash_adjustments(self):
+        port = self.port()
+        port.clock = lambda: port.adapter.now
+        port.adapter.positions = ()
+        port.adapter.summary.update(tot_evlu_amt='1000', nass_amt='1000', evlu_amt_smtl_amt='0')
+        with tempfile.TemporaryDirectory() as directory, Store(Path(directory)/'state.sqlite', mode='offline',
+                account_identity=directory, initial_cash=D(1000)) as store:
+            port.bind_store(store)
+            executor = Executor(store, port, mode='live', authorize=lambda *_: None, preflight=lambda *_: None)
+            runtime = SimpleNamespace(broker=port, config=SimpleNamespace(require_external=lambda *_: None),
+                                      approval={}, clock=lambda: port.adapter.now)
+            executor.reconcile(ExternalRuntime._account(runtime)[0])
+            prior = [{'observed_at': NOW.isoformat(), 'amount': '-200', 'classification': 'UNCLASSIFIED_CASH_FLOW'}]
+            store.set('unclassified_cash_adjustments', prior)
+            store.set('performance_uncertain', True)
+            for minute, cash in ((4, '537'), (61, '1000'), (69, '1000')):
+                port.adapter.now = NOW.replace(hour=15, minute=0) + timedelta(minutes=minute)
+                port.adapter.summary.update(prvs_rcdl_excc_amt=cash, tot_evlu_amt=cash,
+                                            nass_amt=cash, dnca_tot_amt='500', nxdy_excc_amt='750')
+                with self.assertRaises(AccountObservationIncomplete):
+                    ExternalRuntime._account(runtime)
+                self.assertEqual(store.get('cash_krw'), '1000')
+                self.assertEqual(store.get('unclassified_cash_adjustments'), prior)
+                self.assertFalse(store.get('account_cash_reconciled'))
+            self.assertEqual(store.get('account_diagnostics')[0]['cash_fields']['nxdy_excc_amt'], '750')
+            port.adapter.now = NOW.replace(hour=16, minute=10)
+            executor.reconcile(ExternalRuntime._account(runtime)[0])
+            self.assertTrue(store.get('account_cash_reconciled'))
+            self.assertEqual(store.get('unclassified_cash_adjustments'), prior)
+            self.assertTrue(store.get('performance_uncertain'))
+            self.assertEqual(store.get('account_cash_observation')['cash_fields']['dnca_tot_amt'], '500')
+            # A persistent difference outside the rollover window still blocks new risk.
+            port.adapter.now += timedelta(minutes=1)
+            port.adapter.summary.update(prvs_rcdl_excc_amt='900', tot_evlu_amt='900', nass_amt='900')
+            executor.reconcile(ExternalRuntime._account(runtime)[0])
+            self.assertEqual(store.get('unclassified_cash_adjustments')[-1]['amount'], '-100')
+            self.assertTrue(store.get('performance_uncertain'))
+            self.assertEqual(port.adapter.writes, [])
+
     def test_identical_history_rows_are_counted_once_but_conflicts_remain_incomplete(self):
         port = self.port()
         original = order()
@@ -126,13 +167,17 @@ class KisAccountContracts(unittest.TestCase):
             runtime = SimpleNamespace(broker=port, config=SimpleNamespace(require_external=lambda *_:None),
                                       approval={}, clock=lambda:NOW)
             error = AdapterError('TRANSIENT_FAILURE', diagnostic={'http_status':500, 'provider_code':'EGW00215'})
-            with patch.object(port.adapter, 'read_buying_power', side_effect=error), self.assertRaises(HumanRequired) as raised:
+            with patch.object(port.adapter, 'read_buying_power', side_effect=error), self.assertRaises(AccountObservationIncomplete) as raised:
                 ExternalRuntime._account(runtime)
             self.assertEqual(raised.exception.diagnostics[0]['provider_code'], 'EGW00215')
             journal = store.read("SELECT payload FROM journal WHERE kind='ACCOUNT_INCOMPLETE'")
             self.assertEqual(len(journal), 1)
             self.assertEqual(json.loads(journal[0][0])['diagnostics'], raised.exception.diagnostics)
             self.assertEqual(store.read('SELECT COUNT(*) FROM outbox')[0][0], 0)
+            with patch.object(port.adapter, 'read_buying_power', side_effect=AdapterError('AUTH_FAILED')), \
+                    self.assertRaises(HumanRequired) as authorization:
+                ExternalRuntime._account(runtime)
+            self.assertNotIsInstance(authorization.exception, AccountObservationIncomplete)
 
 
     def port(self):

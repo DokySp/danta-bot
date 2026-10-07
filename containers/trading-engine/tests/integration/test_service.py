@@ -22,12 +22,13 @@ from danta.adapters import AdapterError, HttpResponse
 from danta.adapters.telegram import COMMANDS, TelegramAdapter
 from danta.application import Application, MarketBundle, fixture_decision
 from danta.cli import main
-from danta.config import ConfigurationError, HumanRequired, ROOT, canonical, load_config, utcnow
+from danta.config import AccountObservationIncomplete, ConfigurationError, HumanRequired, ROOT, canonical, load_config, utcnow
 from danta.execution import FixtureBroker
 from danta.market import SessionCalendar
 from danta.models import Session
 from danta.operator import OperatorLease, OperatorServer
 from danta.safety import CredentialError
+from danta.runtime import ExternalRuntime
 from danta.service import RuntimeHost, Service, app_version, failure_detail, serve
 from danta.store import Store
 
@@ -646,6 +647,120 @@ class ServiceIntegrationTests(unittest.TestCase):
             self.assertFalse(self.service.run_once(review=True))
             self.assertEqual(finalize.call_count, 1)
         self.assertEqual(self.app.store.db.execute('SELECT COUNT(*) FROM outbox').fetchone()[0], 0)
+
+    def finalization_calendar(self):
+        opening = datetime(2026, 10, 6, 0, tzinfo=timezone.utc)
+        completed = Session(session_id='2026-10-06', ordinal=0, opens_at=opening,
+            closes_at=opening + timedelta(hours=6, minutes=20),
+            daily_bar_available_at=opening + timedelta(hours=15))
+        today = Session(session_id='2026-10-07', ordinal=1, opens_at=opening + timedelta(days=1),
+            closes_at=opening + timedelta(days=1, hours=6, minutes=20),
+            daily_bar_available_at=opening + timedelta(days=1, hours=15))
+        self.app.bundle.calendar = SessionCalendar([completed, today], provenance='synthetic', verified=True, synthetic=True)
+        self.service.scheduler['enabled'] = True
+        self.app.store.set('paused', True)
+        self.service.planner.jobs = [job for job in self.service.planner.jobs if job['kind'] == 'finalize_and_report']
+        self.service.planner.jobs[0]['trigger']['minutes'] = 530
+        return completed
+
+    def test_incomplete_account_finalization_recovers_during_next_active_session(self):
+        completed = self.finalization_calendar()
+        self.now = completed.daily_bar_available_at + timedelta(minutes=10)
+        error = AccountObservationIncomplete('External account observations incomplete: RATE_LIMITED')
+        with patch.object(self.app, 'finalize_nav', side_effect=[error,
+                {'status': 'NAV_FINALIZED', 'point': {'session_id': completed.session_id}}]) as finalize:
+            self.assertEqual(self.service.queue_tick(), 1)
+            self.assertTrue(self.service.run_once(review=True))
+            self.assertEqual(self.last_result()['finalization']['issues'], ['ACCOUNT_OBSERVATION_INCOMPLETE'])
+            self.assertEqual(self.app.store.db.execute('SELECT COUNT(*) FROM outbox').fetchone()[0], 0)
+            self.now = completed.opens_at + timedelta(days=1, minutes=20)
+            self.assertEqual(self.service.queue_tick(), 1)
+            self.assertTrue(self.service.run_once(review=True))
+            self.assertEqual(self.last_result()['status'], 'REPORT_READY')
+            self.assertEqual(self.last_result()['report']['date'], completed.session_id)
+            self.assertEqual(finalize.call_count, 2)
+        self.assertEqual(self.service.queue_tick(), 0)
+        self.assertEqual(self.app.store.db.execute('SELECT COUNT(*) FROM outbox').fetchone()[0], 1)
+        self.assertEqual(self.app.review_calls, 0)
+
+    def test_finalization_catches_up_before_open_and_expires_at_bar_window_end(self):
+        completed = self.finalization_calendar()
+        self.now = completed.daily_bar_available_at + timedelta(hours=8)
+        self.assertEqual(self.service.queue_tick(), 1)
+        self.assertTrue(self.service.run_once(review=True))
+        self.assertEqual(self.last_result()['status'], 'NAV_NOT_FINALIZED')
+        self.now = completed.daily_bar_available_at + timedelta(hours=12)
+        self.assertEqual(self.service.queue_tick(), 0)
+        self.assertFalse(self.service.run_once(review=True))
+
+    def test_previous_release_account_failure_is_recovered_but_operator_failure_is_not(self):
+        completed = self.finalization_calendar()
+        self.now = completed.daily_bar_available_at + timedelta(minutes=10)
+        self.assertEqual(self.service.queue_tick(), 1)
+        row = self.app.store.db.execute('SELECT request_id,payload FROM requests').fetchone()
+        failure = {'status': 'WAITING_FOR_HUMAN', 'reason': 'HUMAN_REQUIRED', 'error_type': 'HumanRequired',
+                   'stage': 'DISPATCH_FINALIZE_AND_REPORT', 'occurred_at': self.now.isoformat(),
+                   'frames': [{'file': 'runtime.py', 'function': '_account', 'line': 1248}]}
+        operator_id, _ = self.app.store.accept_request('service:schedule:operator-failure',
+            json.loads(row['payload']), deadline=(completed.daily_bar_available_at + timedelta(hours=12)).isoformat())
+        with patch('danta.store.utcnow', return_value=self.now), self.app.store.transaction():
+            self.app.store.event('account', 'ACCOUNT_INCOMPLETE', {'diagnostics': [
+                {'reason': 'DUPLICATE_BROKER_ORDER', 'detail': 'DUPLICATE_BROKER_ORDER'}]})
+            self.app.store.event(row['request_id'], 'SERVICE_RESULT', failure)
+            self.app.store.db.execute("UPDATE requests SET status='COMPLETE',result=? WHERE request_id=?",
+                (canonical(failure), row['request_id']))
+            operator_failure = {**failure, 'frames': [{'file': 'config.py', 'function': 'require_external', 'line': 1}]}
+            self.app.store.db.execute("UPDATE requests SET status='COMPLETE',result=? WHERE request_id=?",
+                (canonical(operator_failure), operator_id))
+        self.now = completed.daily_bar_available_at + timedelta(hours=8)
+        self.app.finalize_nav = lambda: {'status': 'NAV_FINALIZED', 'point': {'session_id': completed.session_id}}
+        self.assertEqual(self.service.queue_tick(), 1)
+        self.assertEqual(self.service.queue_tick(), 0)
+        self.assertTrue(self.service.run_once(review=True))
+        result = json.loads(self.app.store.db.execute('SELECT result FROM requests WHERE request_id=?',
+            (row['request_id'],)).fetchone()[0])
+        self.assertEqual(result['status'], 'REPORT_READY')
+        self.assertEqual(self.service.queue_tick(), 0)
+        self.assertEqual(self.app.store.db.execute('SELECT COUNT(*) FROM outbox').fetchone()[0], 1)
+
+    def test_legacy_account_errors_without_recoverable_journal_evidence_do_not_retry(self):
+        completed = self.finalization_calendar()
+        self.now = completed.daily_bar_available_at + timedelta(minutes=10)
+        self.assertEqual(self.service.queue_tick(), 1)
+        request_id = self.app.store.db.execute('SELECT request_id FROM requests').fetchone()[0]
+        for diagnostics in (['AUTH_FAILED'], None, ['UNKNOWN_REASON'],
+                            [{'reason': 'NO_MARGIN_BUYING_POWER_UNVERIFIED', 'detail': 'AUTH_FAILED'}],
+                            ['DUPLICATE_BROKER_ORDER', 'AUTH_FAILED']):
+            with self.subTest(diagnostics=diagnostics):
+                self.now += timedelta(seconds=10)
+                failure = {'status': 'WAITING_FOR_HUMAN', 'reason': 'HUMAN_REQUIRED', 'error_type': 'HumanRequired',
+                    'stage': 'DISPATCH_FINALIZE_AND_REPORT', 'occurred_at': self.now.isoformat(),
+                    'frames': [{'file': 'runtime.py', 'function': '_account', 'line': 1248}]}
+                with patch('danta.store.utcnow', return_value=self.now), self.app.store.transaction():
+                    if diagnostics:
+                        self.app.store.event('account', 'ACCOUNT_INCOMPLETE', {'diagnostics': diagnostics})
+                    self.app.store.event(request_id, 'SERVICE_RESULT', failure)
+                    self.app.store.db.execute("UPDATE requests SET status='COMPLETE',result=? WHERE request_id=?",
+                        (canonical(failure), request_id))
+                self.now += timedelta(minutes=5)
+                self.assertEqual(self.service.queue_tick(), 0)
+                self.assertFalse(self.service.run_once(review=True))
+        self.assertEqual(self.app.store.db.execute('SELECT COUNT(*) FROM outbox').fetchone()[0], 0)
+
+    def test_current_provider_authorization_failure_cannot_match_legacy_recovery(self):
+        completed = self.finalization_calendar()
+        self.now = completed.daily_bar_available_at + timedelta(minutes=10)
+        runtime = SimpleNamespace(broker=SimpleNamespace(store=self.app.store, snapshot=lambda: {
+            'complete': False, 'errors': ['AUTH_FAILED'], 'diagnostics': [{'detail': 'AUTH_FAILED'}]}),
+            config=SimpleNamespace(require_external=lambda *_: None), approval={}, clock=lambda: self.now)
+        self.app.finalize_nav = lambda: ExternalRuntime._account(runtime)
+        self.assertEqual(self.service.queue_tick(), 1)
+        self.assertTrue(self.service.run_once(review=True))
+        self.assertEqual(self.last_result()['reason'], 'ACCOUNT_AUTHORIZATION_REQUIRED')
+        self.assertEqual(self.last_result()['frames'][-1]['function'], '_account')
+        self.now += timedelta(minutes=5)
+        self.assertEqual(self.service.queue_tick(), 0)
+        self.assertFalse(self.service.run_once(review=True))
 
     def test_document_delivery_rechecks_destination_approval_and_secret_content(self):
         synthetic_value = 'synthetic-private<&>value-for-document-test'

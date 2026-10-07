@@ -24,7 +24,7 @@ from .adapters.codex_cli import CodexAdapter
 from .adapters.disclosures import DartAdapter, ORIGIN
 from .adapters.kis import BASE_URLS, MASTER_ORIGIN, KisAdapter, KisCredentials, KisTokenCache
 from .application import MarketBundle, code_identity
-from .config import HumanRequired, ROOT, aware_time, canonical, digest, load_secrets, utcnow
+from .config import AccountObservationIncomplete, HumanRequired, ROOT, aware_time, canonical, digest, load_secrets, utcnow
 from .decision import DecisionProposal, document_scope, freeze_documents, validate_proposal
 from .market import EventRegistry, SessionCalendar, calculate_features
 from .models import CostSchedule, DailyBar, EventRecord, Instrument, MarketFact, Quote, Session
@@ -185,6 +185,8 @@ class PriorityTransport:
         self.condition = threading.Condition()
         self.queue, self.sequence, self.next_at = [], 0, 0.0
         self.cooldown_until = 0.0
+        self.effective_interval = self.interval
+        self.pacing_changed_at = 0.0
         self.rate_limit_failures = 0
         self.rate_limit_diagnostic = {}
         self.fixture_only = getattr(transport, "fixture_only", False)
@@ -192,6 +194,12 @@ class PriorityTransport:
     def __call__(self, method, url, headers=None, body=None, timeout=15, *, before_send=None):
         priority = 0 if "/trading/" in url or "inquire-asking-price" in url or "inquire-price?" in url else 1
         with self.condition:
+            # Retain learned pacing across intermittent failures. One successful call
+            # (or the end of a short cooldown) does not establish a healthy request rate.
+            if self.pacing_changed_at and time.monotonic() - self.pacing_changed_at >= 1800:
+                self.effective_interval = max(self.interval, self.effective_interval / 2)
+                self.rate_limit_failures = 0
+                self.pacing_changed_at = time.monotonic()
             if time.monotonic() < self.cooldown_until:
                 raise AdapterError('RATE_LIMITED', diagnostic={**self.rate_limit_diagnostic,
                     'retry_after_seconds': round(self.cooldown_until-time.monotonic(), 3),
@@ -214,7 +222,7 @@ class PriorityTransport:
                     raise AdapterError("MONITOR_DEGRADED_RATE_BUDGET")
                 self.condition.wait(min(remaining, max(self.next_at-time.monotonic(), 0.01)))
             self.queue.remove(ticket)
-            self.next_at = time.monotonic()+self.interval
+            self.next_at = time.monotonic()+self.effective_interval
             self.condition.notify_all()
         if before_send is not None:
             before_send()
@@ -226,9 +234,10 @@ class PriorityTransport:
         limited = isinstance(code, str) and code in {'EGW00201', 'EGW00215'}
         if response.status == 429 or limited:
             with self.condition:
-                if time.monotonic() - self.cooldown_until >= 60:
-                    self.rate_limit_failures = 0
                 self.rate_limit_failures = min(self.rate_limit_failures + 1, 5)
+                # This is a local adaptive policy, not an assumed provider quota.
+                self.effective_interval = max(self.interval, min(1.0, self.effective_interval * 2))
+                self.pacing_changed_at = time.monotonic()
                 headers_lower = {key.lower(): value for key, value in response.headers.items()}
                 retry = headers_lower.get('retry-after', '')
                 delay = max(min(5 * 2 ** (self.rate_limit_failures-1), 60),
@@ -426,6 +435,17 @@ class KisBrokerPort:
             if not summaries or any(value != summaries[0] for value in summaries):
                 raise ValueError("ACCOUNT_SUMMARY_CHANGED_DURING_PAGINATION")
             summary = summaries[0]
+            cash_fields = {key: str(_decimal(account.metadata['summaries'][0][0][key]))
+                           for key in ('dnca_tot_amt', 'nxdy_excc_amt', *fields)
+                           if account.metadata['summaries'][0][0].get(key) not in (None, '')}
+            observed = account.retrieved_at.astimezone(SEOUL)
+            # Repeated live observations rolled cash out at 00:04 and back by 01:03.
+            # Defer this known unstable interval; do not invent transfers/corrections.
+            if observed.hour == 0 or (observed.hour == 1 and observed.minute < 10):
+                return {'complete': False, 'errors': ['ACCOUNT_CASH_ROLLOVER_WINDOW'],
+                        'diagnostics': [{'endpoint': 'balance', 'reason': 'ACCOUNT_CASH_ROLLOVER_WINDOW',
+                                         'observed_at': account.retrieved_at.isoformat(), 'cash_fields': cash_fields}],
+                        'orders': [], 'reservations': []}
             cash, nav, valuation = (_decimal(summary[key]) for key in fields[:3])
             if nav != cash + valuation or _decimal(summary["nass_amt"]) != nav:
                 raise ValueError("ACCOUNT_NAV_RECONCILIATION_FAILED")
@@ -503,6 +523,7 @@ class KisBrokerPort:
             return {"complete": True, "errors": [], "quantities": quantities, "sellable_quantities": sellable,
                     "prices": prices, "economic_cash": str(cash), "account_nav": str(nav),
                     "account_observed_at": account.retrieved_at.isoformat(), "daily_costs": daily_costs,
+                    "cash_fields": cash_fields,
                     "cost_quality": cost_quality, "orders": normalized,
                     "reservations": [row for row in reservations.records if self._active_reservation(row, today)]}
         except (AdapterError, ValueError, KeyError, TypeError, ArithmeticError) as error:
@@ -553,7 +574,7 @@ class KisBrokerPort:
                 "broker_available_cash": str(available), "broker_cash_reserves_orders": not errors, "whole_account": True,
                 "account_cash": {"cash_krw": census["economic_cash"], "observed_at": census["account_observed_at"],
                                  "source": "KIS:inquire-balance:prvs_rcdl_excc_amt", "daily_costs": census["daily_costs"],
-                                 "cost_quality": census["cost_quality"]}}
+                                 "cost_quality": census["cost_quality"], "cash_fields": census["cash_fields"]}}
 
     def snapshot(self, *, maximum_age_seconds=0):
         # Coalesce concurrent readers without holding a cache or ledger lock
@@ -1248,7 +1269,13 @@ class ExternalRuntime:
                     store.set('account_checked_at', self.clock().isoformat())
                     store.set('account_diagnostics', diagnostics)
                     store.event('account', 'ACCOUNT_INCOMPLETE', {'diagnostics': diagnostics})
-            error = HumanRequired("External account observations incomplete: "+",".join(account.get("errors",[])))
+            authorization_failed = any(code in AUTH_ERRORS for code in account.get('errors', [])) or any(
+                isinstance(item, dict) and (item.get('reason') in AUTH_ERRORS or item.get('detail') in AUTH_ERRORS)
+                for item in diagnostics)
+            error_type = HumanRequired if authorization_failed else AccountObservationIncomplete
+            reason = ('ACCOUNT_AUTHORIZATION_REQUIRED' if authorization_failed else
+                      "External account observations incomplete: "+",".join(account.get("errors",[])))
+            error = error_type(reason)
             error.diagnostics = diagnostics
             raise error
         return account,account.get('refresh_order',time.monotonic_ns())

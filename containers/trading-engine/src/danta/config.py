@@ -29,6 +29,10 @@ class HumanRequired(ConfigurationError):
         super().__init__(reason)
 
 
+class AccountObservationIncomplete(HumanRequired):
+    """An account read failed; a later read may recover without operator changes."""
+
+
 class StrictLoader(yaml.SafeLoader):
     pass
 

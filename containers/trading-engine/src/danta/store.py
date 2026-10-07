@@ -340,6 +340,7 @@ class Store:
             self.set("account_cash_reconciled", True)
             self.set("account_cash_observation", {"cash_krw": str(cash), "observed_at": observed_at.isoformat(),
                      "source": observation["source"], "daily_costs": old_costs | costs,
+                     "cash_fields": observation.get("cash_fields", {}),
                      "cost_quality": observation.get("cost_quality", "UNCONFIRMED")})
             if previous is None or cash != old_cash or gross or applied_fees or cost_delta:
                 self.bump_version()

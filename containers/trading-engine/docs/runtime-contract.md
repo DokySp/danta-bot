@@ -51,6 +51,16 @@ slippage each side. These are estimates, not a verified customer commission agre
 or actual order-level costs. Broker account cash and reported daily fees/taxes are
 reconciled separately; unknown order-level facts remain unknown. An unexplained cash change is never matched to a later fee solely by equal amount; exact performance stays unavailable until the cash-flow identity is established.
 
+KIS cash observations from 00:00 up to 01:10 Seoul time are incomplete
+(`ACCOUNT_CASH_ROLLOVER_WINDOW`) and cannot update ledger cash or create cash-flow
+adjustments. This local deferral policy covers five observed overnight reversals
+between about 00:04 and 01:03; it is not a verified provider maintenance guarantee.
+After the window, fresh observations use the normal reconciliation rules, so a
+persistent difference still requires evidence. Existing unclassified adjustments
+are never automatically cleared. Numeric deposit/next-day/provisional-settlement
+fields are retained alongside the chosen cash field for diagnosis; they are not
+assumed interchangeable or combined using an inferred formula.
+
 `deployment_sources` fully pages both KOSPI and KOSDAQ index histories and requires
 the observed historical trading dates to agree. Current/future open dates use KIS
 `CTCA0903R`, paging until every requested calendar day is observed, including closed
@@ -68,7 +78,13 @@ Prepared sessions expose `daily_bar_available_at` at the following Seoul midnigh
 Daily-history collection uses that boundary, separate from the continuous-order
 cutoff, so the unfinished closing-auction/special-session daily bar is never cached
 as complete. The production finalization/report schedule is the next day at 00:10
-Seoul time. Observed adjusted stock HLC values and index HLC values must each pass
+Seoul time. Incomplete account reads and deferred cash observations retry every
+five minutes until the completed session's daily-bar availability plus 12 hours,
+including before the next open and during the next session. Known older terminal
+account-read failures on this report path are recoverable within the same window
+only when the failure's journal context confirms a retryable read diagnostic;
+operator authorization failures and trading requests are not replayed. A successful
+report is queued once. Observed adjusted stock HLC values and index HLC values must each pass
 exact ordered session coverage and numeric consistency checks before feature use.
 This establishes a current provider snapshot; `point_in_time_adjustment_verified`
 remains false and does not become archival historical PIT evidence.
@@ -349,6 +365,11 @@ positions and candidates passing the deterministic event/technical filters,
 without an arbitrary top-N claim. A shared priority request budget puts trading
 and quote requests before bulk history work. Quote age above the approved five
 seconds remains observable and cannot authorize new risk.
+Provider rate-limit responses retain a learned request interval across cooldowns:
+the interval doubles up to one second (never below the configured interval), and
+only halves after 30 minutes without another limit response. Exponential global
+cooldown and bounded priority queues still apply. This is a local pacing policy,
+not a claim about the provider's quota; no failed order is replayed.
 
 The paper port is an independent simulated broker. It fills only on a later,
 fresh quote observation, within verified displayed depth, the fixed buy limit,

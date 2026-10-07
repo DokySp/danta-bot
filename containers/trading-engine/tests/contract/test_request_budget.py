@@ -9,6 +9,34 @@ from danta.runtime import PriorityTransport
 
 
 class RequestBudgetContracts(unittest.TestCase):
+    def test_intermittent_limits_slow_actual_requests_and_decay_only_after_healthy_window(self):
+        now = [100.0]
+        sent = []
+        limited = HttpResponse(500, b'{"msg_cd":"EGW00215"}')
+        healthy = HttpResponse(200, b'{"rt_cd":"0"}')
+        replies = iter([limited, limited, healthy, healthy, healthy, healthy])
+        def source(*_):
+            sent.append(now[0])
+            return next(replies)
+        with patch('danta.runtime.time.monotonic', side_effect=lambda: now[0]):
+            transport = PriorityTransport(source, minimum_interval_seconds='.25', maximum_queue_seconds='2')
+            with patch.object(transport.condition, 'wait', side_effect=lambda delay: now.__setitem__(0, now[0] + delay)):
+                transport('GET', 'https://fixture/trading/inquire-balance')
+                now[0] = 180  # The old 60-second reset discarded this failure history.
+                transport('GET', 'https://fixture/trading/inquire-balance')
+                self.assertEqual(transport.rate_limit_failures, 2)
+                now[0] = 190
+                transport('GET', 'https://fixture/trading/inquire-balance')
+                transport('GET', 'https://fixture/quotations/inquire-price')
+                self.assertEqual(sent[-2:], [190, 191])
+                now[0] = 900
+                transport('GET', 'https://fixture/trading/inquire-balance')
+                self.assertEqual(transport.effective_interval, 1)
+                now[0] = 1980
+                transport('GET', 'https://fixture/trading/inquire-balance')
+                self.assertEqual(transport.effective_interval, .5)
+        self.assertEqual(len(sent), 6, 'rate failures must never replay a request')
+
     def test_post_limit_response_preserves_uncertainty_and_does_not_retry(self):
         for status, expected in ((200, 'REJECTED'), (500, 'UNKNOWN')):
             source = Mock(spec=[], return_value=HttpResponse(status, b'{"rt_cd":"1","msg_cd":"EGW00215"}'))
