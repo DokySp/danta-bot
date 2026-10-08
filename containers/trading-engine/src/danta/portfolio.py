@@ -160,9 +160,6 @@ def size_entry(candidate: Candidate, quote: Quote, stop: Decimal,
     if not quantity:
         return blocked("NO_FEASIBLE_SIZE")
     friction = roundtrip_friction(costs, quantity, entry, quote.bid)
-    if friction > quantity*(entry-stop)*Decimal(research_profile["orders"]["maximum_roundtrip_friction_to_initial_r"]):
-        # Reducing quantity cannot improve friction/share for rate + minimum-fee costs.
-        return blocked("ROUNDTRIP_FRICTION_TOO_HIGH")
     total_risk = entry_risk(costs, quantity, entry, stop, candidate.features.atr14, gap)
     return EntryPlan(**{**empty, "quantity": quantity, "reason": "SIZED",
                         "unit_risk": total_risk/quantity, "total_risk": total_risk,

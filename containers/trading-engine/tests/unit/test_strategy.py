@@ -273,11 +273,15 @@ class StrategyContractTests(unittest.TestCase):
         self.assertEqual(size_entry(candidate, quote, D(9750), invalid, self.costs, self.now, self.profile).reason,
                          "PORTFOLIO_QUALITY_INSUFFICIENT")
 
-    def test_s11_unknown_or_excessive_costs_block_only_entry(self):
+    def test_s11_verified_costs_are_recorded_without_a_friction_gate(self):
         stop = self.assess().stop_price
         self.assertEqual(size_entry(self.candidate,self.quote,stop,self.snapshot,None,self.now,self.profile).reason,"COSTS_UNVERIFIED")
         costly = self.costs.model_copy(update={"buy_commission_rate":D("0.1")})
-        self.assertEqual(size_entry(self.candidate,self.quote,stop,self.snapshot,costly,self.now,self.profile).reason,"ROUNDTRIP_FRICTION_TOO_HIGH")
+        plan = size_entry(self.candidate,self.quote,stop,self.snapshot,costly,self.now,self.profile)
+        self.assertEqual(plan.reason, "SIZED")
+        self.assertGreater(plan.quantity, 0)
+        self.assertGreater(plan.expected_roundtrip_friction, plan.quantity * (plan.entry_price - stop) * D("0.15"))
+        self.assertEqual(plan.reserved_cash, plan.quantity * plan.entry_price * D("1.1"))
         thesis = synthetic_thesis(self.case)
         quote = self.quote.model_copy(update={"bid":D(9999),"ask":D(10000)})
         self.assertEqual(evaluate_exit(thesis,synthetic_holding(self.case,thesis),quote,self.calendar,self.now,self.profile).action,"EXIT_PROTECTION")
