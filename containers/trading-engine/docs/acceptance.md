@@ -32,9 +32,9 @@ PYTHONPATH=src python -m danta.safety src schemas migrations prompts README.md s
 | S06 | 결정론적 추세/RS/지수 게이트 | 합성: deterministic_gates_override_accept |
 | S07 | 추격 상한 초과 대기, 자동 재호가 없음 | 합성: chase_cap_waits_without_repricing |
 | S08 | 초기 stop/ATR/호가단위 경계 | 합성: invalid_initial_stop_and_tick_boundary |
-| S09 | 위험수량50과 다른 상한32 | 합성: risk_budget_and_other_cap |
+| S09 | 가용 현금으로 수량 결정, 위험예산·투자비중 상한 없음 | 합성: cash_size_has_no_risk_budget_cap + small_account_can_buy_above_former_risk_and_exposure_caps |
 | S10 | 0주·현금부족 강제주문 없음 | 합성: no_forced_one_share_and_exact_nonlinear_costs |
-| S11 | 미확인/과다 비용은 진입 차단, 보호 별도 | 합성: unknown_or_excessive_costs |
+| S11 | 미확인 비용은 차단, 검증된 비용은 기록하며 왕복마찰 비율로 차단하지 않음 | 합성: verified_costs_are_recorded_without_a_friction_gate |
 | S12 | 작은 가격 소음으로 목표수량 변경 없음 | 합성: price_noise_keeps_fixed_quantity |
 | S13 | 모델과 독립된 보호·오래된 체결가 거부 | 합성: protection_precedes_model |
 | S14 | MFE1R 활성화·stop 비하향 | 합성: trailing_requires_mfe |
@@ -45,11 +45,11 @@ PYTHONPATH=src python -m danta.safety src schemas migrations prompts README.md s
 | S19 | 무효근거의 별도 공식 해소 사건 필요 | 합성: invalidated_contract_requires_distinct_official_resolution |
 | S20 | 기존 부분계획 완료·물타기 금지 | 합성: partial_plan_completion_only |
 | S21 | 가격상승22%에서 재조정 없음 | 합성: price_appreciation_to_twenty_two_percent |
-| S22 | 두 관측·단일축소계획·교차한도 이중매도 없음 | 합성: two_valid_observations + overlapping_concentration_groups |
+| S22 | 비중 참고값 기록, 자동 축소 없음·이전 미실행 목표 해제 | 합성: concentration_is_advisory_even_after_restart + advisory_concentration_retires_old_targets_after_restart |
 | S23 | 외부흐름 보정낙폭·매수취소·보호유지 | 합성: drawdown_pauses_entries |
 | S24 | 새 부정사건/가격으로 결정 stale | 합성: negative_event_or_price_change |
 
-추가로 실제 수신이 미래인 quote, 예약위험/슬롯, strict bool/NaN/time 경계, 완료 원문의
+추가로 실제 수신이 미래인 quote, 예약현금/슬롯, strict bool/NaN/time 경계, 완료 원문의
 증거 갱신을 검사한다. [test_disclosure_parser.py](../tests/unit/test_disclosure_parser.py)는
 합성 공식 표의 명시된 단위/기간/비교기준, guidance의 예측 표시, 계약조건, 정정 부모를
 검사한다. 실제 공시 서식 전체 지원은 인증하지 않았다.

@@ -76,27 +76,26 @@ class EvaluationRiskReplayTests(unittest.TestCase):
             self.assertEqual(set(full['daily_returns']), {session_id})
             self.assertEqual(Decimal(full['daily_returns'][session_id]), Decimal(full['twr']))
 
-    def test_asynchronous_fresh_quotes_confirm_and_fill_concentration_reductions(self):
+    def test_asynchronous_fresh_quotes_record_concentration_without_reductions(self):
         data = self.manifest(two_positions=True)
         self.quote(data, 3, 'TEST:AAA', 10559, ask_quantity=1000)
         self.quote(data, 4, 'TEST:BBB', 10559, ask_quantity=1000)
         self.quote(data, 10, 'TEST:AAA', 80000)
         self.quote(data, 11, 'TEST:BBB', 80000)
         self.quote(data, 15, 'TEST:AAA', 80000)
-        confirmed_at = self.quote(data, 16, 'TEST:BBB', 80000)
+        self.quote(data, 16, 'TEST:BBB', 80000)
         self.quote(data, 17, 'TEST:AAA', 80000, bid_quantity=1000)
         self.quote(data, 18, 'TEST:BBB', 80000, bid_quantity=1000)
 
         full = self.replay(data)['arms']['full_strategy']
         reductions = [item for item in full['journal'] if item['type'] == 'PROTECTION_OBSERVATION'
                       and item['action'] == 'REDUCE_TO_LIMIT']
-        self.assertEqual({item['instrument_id'] for item in reductions}, {'TEST:AAA', 'TEST:BBB'})
-        for symbol in ('TEST:AAA', 'TEST:BBB'):
-            self.assertEqual(min(item['at'] for item in reductions if item['instrument_id'] == symbol),
-                             confirmed_at)
+        self.assertEqual(reductions, [])
         sells = [item for item in full['journal'] if item['type'] == 'FILL' and item['side'] == 'SELL']
-        self.assertEqual({item['instrument_id'] for item in sells}, {'TEST:AAA', 'TEST:BBB'})
-        self.assertEqual(len(sells), 2)
+        self.assertEqual(sells, [])
+        reference = full['concentration_state']['reference']
+        self.assertEqual(set(reference['position_weights']), {'issuer-AAA', 'issuer-BBB'})
+        self.assertTrue(reference['above_reference'])
         self.assertFalse(full['concentration_state']['active_plan'])
 
     def test_stale_other_position_does_not_count_as_valid_concentration_observation(self):
@@ -112,7 +111,7 @@ class EvaluationRiskReplayTests(unittest.TestCase):
         self.assertFalse(any(item['type'] == 'FILL' and item['side'] == 'SELL'
                              for item in full['journal']))
 
-    def test_same_timestamp_quotes_share_one_nav_sample_and_do_not_double_count_confirmation(self):
+    def test_same_timestamp_quotes_share_one_nav_sample_and_advisory_state(self):
         data = self.manifest(two_positions=True)
         self.quote(data, 3, 'TEST:AAA', 10559, ask_quantity=1000)
         self.quote(data, 4, 'TEST:BBB', 10559, ask_quantity=1000)
@@ -123,8 +122,9 @@ class EvaluationRiskReplayTests(unittest.TestCase):
         self.assertTrue(full['performance_index'])
         self.assertEqual(len(full['performance_index']),
                          len({point['at'] for point in full['performance_index']}))
-        self.assertTrue(full['concentration_state']['observations'])
-        self.assertTrue(all(count == 1 for count, _ in full['concentration_state']['observations'].values()))
+        self.assertEqual(full['concentration_state']['observations'], {})
+        self.assertEqual(full['concentration_state']['mode'], 'advisory')
+        self.assertTrue(full['concentration_state']['reference'])
 
     def test_unrelated_quote_does_not_confirm_the_same_position_valuation_twice(self):
         data = self.manifest()

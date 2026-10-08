@@ -165,10 +165,6 @@ def _validate_semantics(data: dict) -> None:
             for key, value in values.items():
                 if type(value) is int and value <= 0:
                     raise ConfigurationError(f"{section}.{key}: positive integer required")
-    limits = profile["portfolio"]
-    for kind in ("position", "sector", "gross"):
-        if Decimal(limits[f"entry_{kind}_weight"]) >= Decimal(limits[f"trim_{kind}_trigger"]):
-            raise ConfigurationError("Trim trigger must exceed entry limit")
     if profile["universe"]["boards"] not in (["KOSPI"], ["KOSDAQ"], ["KOSPI", "KOSDAQ"]):
         raise ConfigurationError("Unsupported boards")
     fixed = {

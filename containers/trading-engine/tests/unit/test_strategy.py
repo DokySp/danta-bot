@@ -222,14 +222,14 @@ class StrategyContractTests(unittest.TestCase):
         with self.assertRaises(DataQualityError):
             bands.require_environment(synthetic=False, now=self.now)
 
-    def test_s09_risk_budget_and_other_cap(self):
+    def test_s09_cash_size_has_no_risk_budget_cap(self):
         candidate = self.candidate.model_copy(update={"features": self.candidate.features.model_copy(update={"atr14": D(500)})})
         quote = self.quote.model_copy(update={"ask": D(10000), "bid": D(10000)})
         snapshot = self.snapshot.model_copy(update={"broker_available_cash": D(320000)})
         plan = size_entry(candidate, quote, D(9750), snapshot, self.costs, self.now, self.profile)
-        self.assertEqual(plan.risk_budget, D(25000))
+        self.assertIsNone(plan.risk_budget)
         self.assertEqual(plan.unit_risk, D(500))
-        self.assertEqual(plan.q_risk, 50)
+        self.assertIsNone(plan.q_risk)
         self.assertEqual(plan.quantity, 32)
         self.assertEqual(plan.reserved_cash, D(320000))
 
@@ -245,7 +245,42 @@ class StrategyContractTests(unittest.TestCase):
         plan = size_entry(candidate, quote, D(9750), snapshot, costs, self.now, self.profile)
         self.assertEqual(plan.quantity,31)
         self.assertEqual(plan.reserved_cash,D(310100))
-        self.assertLessEqual(plan.total_risk,plan.risk_budget)
+        self.assertGreater(plan.total_risk, 0)
+        self.assertIsNone(plan.risk_budget)
+
+    def test_small_account_can_buy_above_former_risk_and_exposure_caps(self):
+        candidate = self.candidate.model_copy(update={"features": self.candidate.features.model_copy(update={"atr14": D(5000)})})
+        quote = self.quote.model_copy(update={"ask": D(381500), "bid": D(381500)})
+        holding = synthetic_holding(self.case, quantity=1, mark=D(555150)).model_copy(update={
+            "instrument_id": "TEST:BBB", "issuer_id": "issuer-BBB", "stop": D(500000)})
+        snapshot = self.snapshot.model_copy(update={"nav": D(1442126), "allocated_cash": D(886976),
+            "broker_available_cash": D(886976), "holdings": [holding]})
+        plan = size_entry(candidate, quote, D(300000), snapshot, self.costs, self.now, self.profile)
+        self.assertEqual(plan.quantity, 2)
+        self.assertGreater(plan.target_weight, D('0.20'))
+        self.assertGreater(plan.total_risk, snapshot.nav * D('0.0025'))
+        self.assertGreater(current_planned_risk(snapshot, self.costs, self.profile), snapshot.nav * D('0.01'))
+        self.assertGreater(holding.mark + plan.reserved_cash, snapshot.nav * D('0.80'))
+        # A second candidate can only use the remaining cash, even in the same sector.
+        other = self.candidate.model_copy(update={"instrument": self.candidate.instrument.model_copy(update={
+            "instrument_id": "TEST:CCC", "issuer_id": "issuer-CCC"})})
+        other_quote = quote.model_copy(update={"instrument_id": "TEST:CCC", "ask": D(6000), "bid": D(6000)})
+        plans = allocate_entries([candidate, other], {"TEST:AAA": quote, "TEST:CCC": other_quote},
+            {"TEST:AAA": D(300000), "TEST:CCC": D(5500)}, snapshot, self.costs, self.now, self.profile)
+        self.assertEqual([p.quantity for p in plans], [2, 20])
+        self.assertLessEqual(sum(p.reserved_cash for p in plans), snapshot.broker_available_cash)
+
+    def test_missing_pending_risk_does_not_block_verified_cash_sizing(self):
+        pending = PendingEntry(instrument_id="TEST:BBB", issuer_id="issuer-BBB", sector="other",
+            thesis_id="pending", plan_id="pending", remaining_quantity=1, entry_price=D(10000),
+            unit_risk=D(500), reserved_cash=D(10100))
+        snapshot = self.snapshot.model_copy(update={"allocated_cash": D(320000),
+            "broker_available_cash": D(320000), "pending_entries": [pending]})
+        quote = self.quote.model_copy(update={"ask": D(10000), "bid": D(10000)})
+        costs = self.costs.model_copy(update={"minimum_buy_commission": D(100)})
+        plan = size_entry(self.candidate, quote, D(9750), snapshot, costs, self.now, self.profile)
+        self.assertEqual(plan.quantity, 30)
+        self.assertEqual(plan.reserved_cash, D(300100))
 
     def test_cash_reservations_are_deducted_once_only_when_broker_reflection_is_known(self):
         candidate = self.candidate.model_copy(update={"features": self.candidate.features.model_copy(update={"atr14": D(500)})})
@@ -372,7 +407,7 @@ class StrategyContractTests(unittest.TestCase):
         self.assertEqual(monitor.observe(snapshot,later,self.profile),[])
         self.assertFalse(monitor.active_plan)
 
-    def test_s22_two_valid_observations_fix_one_trim_plan(self):
+    def test_s22_concentration_is_advisory_even_after_restart(self):
         holding = synthetic_holding(self.case,quantity=260,mark=D(10000))
         snapshot = self.snapshot.model_copy(update={"holdings":[holding]})
         monitor = ConcentrationMonitor()
@@ -383,9 +418,11 @@ class StrategyContractTests(unittest.TestCase):
         snapshot = snapshot.model_copy(update={"as_of":later,"holdings":[holding.model_copy(update={"valuation_at":later})]})
         restored = ConcentrationMonitor(monitor.state())
         reductions = restored.observe(snapshot,later,self.profile)
-        self.assertEqual(len(reductions),1)
-        self.assertEqual(reductions[0].quantity,60)
-        self.assertEqual(reductions[0].target_quantity,200)
+        self.assertEqual(reductions, [])
+        self.assertFalse(restored.active_plan)
+        self.assertFalse(restored.cancel_pending_entries)
+        self.assertEqual(restored.state()['reference']['position_weights']['issuer-AAA'], '0.26')
+        self.assertEqual(restored.state()['reference']['above_reference'], ['issuer:issuer-AAA'])
         self.assertEqual(restored.observe(snapshot,later,self.profile),[])
         self.assertFalse(entry_plan_completion_allowed(synthetic_thesis(self.case).model_copy(update={"reduced_quantity":60}),"p1","p1",40,0,60))
 
@@ -441,7 +478,7 @@ class StrategyContractTests(unittest.TestCase):
         self.assertFalse(registry.ingest(duplicate)[1])
         self.assertEqual(len(registry.records),1)
 
-    def test_overlapping_concentration_groups_do_not_double_sell(self):
+    def test_overlapping_concentration_groups_only_record_reference_weights(self):
         holdings = []
         for suffix in "ABC":
             holding = synthetic_holding(self.case,quantity=31,mark=D(10000)).model_copy(update={
@@ -453,23 +490,22 @@ class StrategyContractTests(unittest.TestCase):
         later = self.now+timedelta(seconds=5)
         snapshot = snapshot.model_copy(update={"as_of":later,"holdings":[h.model_copy(update={"valuation_at":later}) for h in holdings]})
         plans = monitor.observe(snapshot,later,self.profile)
-        by_id = {p.instrument_id:p for p in plans}
-        self.assertEqual(by_id["TEST:A"].quantity,31)
-        self.assertEqual(by_id["TEST:B"].quantity,11)
-        self.assertEqual(by_id["TEST:C"].quantity,11)
-        self.assertEqual(sum(p.target_quantity for p in plans),40)
-        self.assertTrue(all(p.quantity <= 31 for p in plans))
+        self.assertEqual(plans, [])
+        self.assertEqual(monitor.state()['reference']['sector_weights']['synthetic-sector'], '0.93')
+        self.assertIn('sector:synthetic-sector', monitor.state()['reference']['above_reference'])
+        self.assertFalse(monitor.active_plan)
 
-    def test_aggregate_risk_and_pending_slots_remain_reserved(self):
+    def test_pending_cash_and_slots_remain_reserved_without_aggregate_risk_cap(self):
         candidate = self.candidate.model_copy(update={"features":self.candidate.features.model_copy(update={"atr14":D(500)})})
         quote = self.quote.model_copy(update={"ask":D(10000),"bid":D(10000)})
-        # The new risk budget allows 50, but previous unfilled risk leaves only 10.
+        # Pending risk is recorded but no longer consumes a NAV-based risk allowance.
         pending = PendingEntry(instrument_id="TEST:BBB",issuer_id="issuer-BBB",sector="other",
                                thesis_id="b",plan_id="b",remaining_quantity=10,entry_price=D(10000),
                                unit_risk=D(9500),reserved_cash=D(100000),reserved_risk=D(95000))
         snapshot = self.snapshot.model_copy(update={"pending_entries":[pending]})
         plan = size_entry(candidate,quote,D(9750),snapshot,self.costs,self.now,self.profile)
-        self.assertEqual(plan.quantity,10)
+        self.assertEqual(plan.quantity,250)
+        self.assertGreater(plan.total_risk + pending.reserved_risk, snapshot.nav * D('0.01'))
         all_pending = [pending.model_copy(update={"instrument_id":"TEST:"+str(i),"issuer_id":"issuer-"+str(i),
                                                    "reserved_risk":D(1)}) for i in range(5)]
         snapshot = self.snapshot.model_copy(update={"pending_entries":all_pending})

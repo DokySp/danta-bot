@@ -1,4 +1,4 @@
-"""Risk-based integer sizing with current holdings and unfilled resource reservations."""
+"""Cash-based integer sizing with current holdings and unfilled cash reservations."""
 from __future__ import annotations
 
 from datetime import datetime, timedelta
@@ -91,11 +91,10 @@ def size_entry(candidate: Candidate, quote: Quote, stop: Decimal,
         raise DataQualityError("MISSING_ASK")
     entry, instrument = quote.ask, candidate.instrument
     p = research_profile["portfolio"]
-    risk_budget = snapshot.nav * Decimal(p["entry_risk_fraction"])
     empty = dict(instrument_id=instrument.instrument_id, quantity=0, entry_price=entry,
-                 stop_price=stop, risk_budget=risk_budget, unit_risk=None,
+                 stop_price=stop, risk_budget=None, unit_risk=None,
                  total_risk=ZERO, reserved_cash=ZERO, expected_roundtrip_friction=ZERO,
-                 target_weight=ZERO, q_risk=0,
+                 target_weight=ZERO, q_risk=None,
                  expires_at=now + timedelta(seconds=research_profile["orders"]["entry_expiry_seconds"]))
 
     def blocked(reason: str) -> EntryPlan:
@@ -118,35 +117,20 @@ def size_entry(candidate: Candidate, quote: Quote, stop: Decimal,
     except DataQualityError as error:
         return blocked(str(error))
     assert costs is not None
-    if any(e.reserved_risk is None for e in snapshot.pending_entries) and (
-            costs.minimum_buy_commission > 0 or costs.minimum_sell_commission > 0):
-        return blocked("PENDING_NONLINEAR_RISK_UNVERIFIED")
-    issuer_values, sector_values, gross = exposures(snapshot)
+    issuer_values, _, _ = exposures(snapshot)
     if len([v for v in issuer_values.values() if v > 0]) >= p["max_issuers"]:
         return blocked("NO_ISSUER_SLOT")
     gap = Decimal(p["gap_buffer_atr"])
-    # Linear rate estimate is only a starting cap; exact minimum fees are checked below.
-    unit = (entry-stop + entry*costs.buy_commission_rate + stop*(costs.sell_commission_rate+costs.sell_tax_rate) +
-            stop*costs.sell_slippage_bps/10000 + gap*candidate.features.atr14)
-    q_risk = floor_quantity(risk_budget / unit)
-    empty.update(unit_risk=unit, q_risk=q_risk)
-    residual_risk = snapshot.nav*Decimal(p["aggregate_planned_risk_fraction"]) - current_planned_risk(snapshot, costs, research_profile)
     reserved_cash = sum((e.reserved_cash for e in snapshot.pending_entries), ZERO)
     cash = min(snapshot.allocated_cash - reserved_cash,
                snapshot.broker_available_cash - (reserved_cash - snapshot.broker_reflected_reserve_cash))
-    cap = min(q_risk,
-              floor_quantity((snapshot.nav*Decimal(p["entry_position_weight"])-issuer_values.get(instrument.issuer_id, ZERO))/entry),
-              floor_quantity((snapshot.nav*Decimal(p["entry_sector_weight"])-sector_values.get(instrument.sector, ZERO))/entry),
-              floor_quantity((snapshot.nav*Decimal(p["entry_gross_weight"])-gross)/entry),
-              floor_quantity(residual_risk/unit), floor_quantity(cash/entry),
+    cap = min(floor_quantity(cash/entry),
               floor_quantity(candidate.features.adtv20*Decimal(p["max_plan_adtv_fraction"])/entry))
     if cap <= 0:
         return blocked("NO_FEASIBLE_SIZE")
 
     def exact_feasible(q: int) -> bool:
-        total_risk = entry_risk(costs, q, entry, stop, candidate.features.atr14, gap)
-        return (total_risk <= risk_budget and total_risk <= residual_risk and
-                q*entry + buy_commission(costs, q, entry) <= cash)
+        return q*entry + buy_commission(costs, q, entry) <= cash
 
     # All cost functions are nondecreasing: binary search avoids per-share decrement loops.
     low, high = 0, cap

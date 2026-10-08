@@ -253,6 +253,8 @@ def _time(value):
 
 
 def _value(value, key=''):
+    if value is None and key in {'risk_budget', 'q_risk'}:
+        return '한도 없음'
     if value is None or value == '':
         return MISSING
     if key == 'review_scope':

@@ -29,6 +29,30 @@ from danta.store import Store
 
 
 class EngineCase(unittest.TestCase):
+    def test_advisory_concentration_retires_old_targets_after_restart(self):
+        app = Application(self.config, self.bundle)
+        try:
+            app.review()
+            held = app.store.quantity('TEST:AAA')
+            self.assertGreater(held, 0)
+            self.assertIsNone(app.theses()[0].risk_budget)
+            with app.store.transaction():
+                app.store.set('concentration_targets', {'TEST:AAA': 0})
+                app.store.set('concentration_state', {'active_plan': True, 'cancel_pending_entries': True,
+                    'observations': {'issuer:issuer-AAA': [2, self.bundle.now.isoformat()]}})
+            broker = app.broker
+            app.close()
+            app = Application(self.config, self.bundle, broker=broker)
+            plans = app.protect()
+            self.assertFalse(any(plan['action'] == 'REDUCE_TO_LIMIT' for plan in plans))
+            self.assertFalse(any(row['side'] == 'SELL' for row in app.store.working()))
+            self.assertEqual(app.store.quantity('TEST:AAA'), held)
+            self.assertEqual(app.store.get('concentration_targets'), {})
+            self.assertEqual(app.store.get('concentration_state')['mode'], 'advisory')
+            self.assertIsNone(app.theses()[0].risk_budget)
+        finally:
+            app.close()
+
     def test_review_reuses_fresh_idle_account_but_revalidates_after_model(self):
         for changed_during_collection in (False, True):
             with self.subTest(changed_during_collection=changed_during_collection):
@@ -731,7 +755,7 @@ class EngineCase(unittest.TestCase):
                 load_config(self.config_dir)
         app_file.write_text(original)
         strategy_file = self.config_dir / "strategy.yaml"
-        strategy_file.write_text(strategy_file.read_text().replace('entry_risk_fraction: "0.0025"', 'entry_risk_fraction: "1.01"'))
+        strategy_file.write_text(strategy_file.read_text().replace('reference_position_weight: "0.20"', 'reference_position_weight: "1.01"'))
         with self.assertRaises(ConfigurationError):
             load_config(self.config_dir)
 

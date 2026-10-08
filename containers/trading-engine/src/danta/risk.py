@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from decimal import Decimal, ROUND_CEILING
+from decimal import Decimal
 
 from .market import SessionCalendar, TickTable
 from .models import DailyBar, EventRecord, ExitPlan, FeatureSnapshot, Holding, InvestmentThesis, PortfolioSnapshot, Quote, Reduction
@@ -114,84 +114,44 @@ def evaluate_exit(thesis: InvestmentThesis, holding: Holding, quote: Quote | Non
 
 
 class ConcentrationMonitor:
-    """Serializable observations; caller persists state and the fixed plan atomically."""
+    """Persist exposure references without cancelling buys or generating sell plans."""
     def __init__(self, state: dict | None = None):
         state = state or {}
-        self.observations: dict[str, tuple[int, datetime]] = {
-            key: (item[0], datetime.fromisoformat(item[1])) for key, item in state.get("observations", {}).items()}
-        self.active_plan = bool(state.get("active_plan", False))
-        self.cancel_pending_entries = bool(state.get("cancel_pending_entries", False))
+        # Legacy observations and active trim plans must not regain authority.
+        self.active_plan = False
+        self.cancel_pending_entries = False
+        self.reference = state.get("reference", {})
         self.last_valid_at = datetime.fromisoformat(state["last_valid_at"]) if state.get("last_valid_at") else None
 
     def state(self) -> dict:
-        return {"observations": {key: [count, at.isoformat()] for key, (count, at) in self.observations.items()},
-                "active_plan": self.active_plan, "cancel_pending_entries": self.cancel_pending_entries,
+        return {"observations": {}, "active_plan": False, "cancel_pending_entries": False,
+                "mode": "advisory", "reference": self.reference,
                 "last_valid_at": self.last_valid_at.isoformat() if self.last_valid_at else None}
 
     def completed(self) -> None:
         self.active_plan = False
         self.cancel_pending_entries = False
-        self.observations.clear()
 
     def observe(self, snapshot: PortfolioSnapshot, now: datetime, research_profile: dict) -> list[Reduction]:
-        if self.active_plan or not snapshot_valid(snapshot, now):
+        if not snapshot_valid(snapshot, now):
             return []
-        # Re-fetching the same valuation is not a second independent observation.
-        at = snapshot.as_of
-        if self.last_valid_at is not None and at <= self.last_valid_at:
+        if self.last_valid_at is not None and snapshot.as_of <= self.last_valid_at:
             return []
-        self.last_valid_at = at
+        self.last_valid_at = snapshot.as_of
         p = research_profile["portfolio"]
-        issuers, sectors, gross = exposures(snapshot)
-        crossed = {"issuer:"+key for key, value in issuers.items() if value > snapshot.nav*Decimal(p["trim_position_trigger"])}
-        crossed |= {"sector:"+key for key, value in sectors.items() if value > snapshot.nav*Decimal(p["trim_sector_trigger"])}
-        if gross > snapshot.nav*Decimal(p["trim_gross_trigger"]):
-            crossed.add("gross")
-        self.observations = {key: item for key, item in self.observations.items() if key in crossed}
-        confirmed = set()
-        for key in crossed:
-            count, previous = self.observations.get(key, (0, at))
-            if not count or (at-previous).total_seconds() >= p["trim_min_observation_gap_seconds"]:
-                count += 1
-                self.observations[key] = (count, at)
-            if count >= p["trim_confirmation_observations"]:
-                confirmed.add(key)
-        if not confirmed:
-            return []
-        self.active_plan = True
-        self.cancel_pending_entries = bool(snapshot.pending_entries)
-        # Pending buys are cancelled first. Targets below are for reconciled held shares.
-        quantities = {h.instrument_id: h.quantity for h in snapshot.holdings}
-        reductions = {h.instrument_id: 0 for h in snapshot.holdings}
-        reasons: dict[str, list[str]] = {h.instrument_id: [] for h in snapshot.holdings}
-
-        def trim(group, target: Decimal, reason: str) -> None:
-            total = sum((quantities[h.instrument_id]*h.mark for h in group), Decimal(0))
-            for holding in sorted(group, key=lambda h: (-h.quantity*h.mark, h.instrument_id)):
-                excess = total-target
-                if excess <= 0:
-                    break
-                needed = int((excess/holding.mark).to_integral_value(rounding=ROUND_CEILING))
-                quantity = min(needed, quantities[holding.instrument_id], holding.sellable_quantity-reductions[holding.instrument_id])
-                if quantity <= 0:
-                    continue
-                quantities[holding.instrument_id] -= quantity
-                reductions[holding.instrument_id] += quantity
-                total -= quantity*holding.mark
-                reasons[holding.instrument_id].append(reason)
-
-        for issuer in sorted(issuers):
-            if "issuer:"+issuer in confirmed:
-                trim([h for h in snapshot.holdings if h.issuer_id == issuer], snapshot.nav*Decimal(p["entry_position_weight"]), "POSITION_CONCENTRATION")
-        for sector in sorted(sectors):
-            if "sector:"+sector in confirmed:
-                trim([h for h in snapshot.holdings if h.sector == sector], snapshot.nav*Decimal(p["entry_sector_weight"]), "SECTOR_CONCENTRATION")
-        if "gross" in confirmed:
-            trim(snapshot.holdings, snapshot.nav*Decimal(p["entry_gross_weight"]), "GROSS_CONCENTRATION")
-        return [Reduction(instrument_id=h.instrument_id, thesis_id=h.thesis_id,
-                          quantity=reductions[h.instrument_id], target_quantity=quantities[h.instrument_id],
-                          reasons=reasons[h.instrument_id], frozen_nav=snapshot.nav)
-                for h in snapshot.holdings if reductions[h.instrument_id]]
+        issuers, sectors, _ = exposures(snapshot)
+        position_reference = Decimal(p["reference_position_weight"])
+        sector_reference = Decimal(p["reference_sector_weight"])
+        self.reference = {
+            "position_weights": {key: str(value / snapshot.nav) for key, value in issuers.items()},
+            "sector_weights": {key: str(value / snapshot.nav) for key, value in sectors.items()},
+            "reference_position_weight": str(position_reference),
+            "reference_sector_weight": str(sector_reference),
+            "above_reference": sorted(
+                ["issuer:"+key for key, value in issuers.items() if value > snapshot.nav*position_reference] +
+                ["sector:"+key for key, value in sectors.items() if value > snapshot.nav*sector_reference]),
+        }
+        return []
 
 
 class DrawdownCircuit:

@@ -386,13 +386,6 @@ class Application:
         except HumanRequired as error:
             # Invalid recovery evidence must not interrupt account/protection work.
             self.store.set('cash_reconciliation_error', str(error))
-        if self.concentration.active_plan and not any(row["side"] == "SELL" for row in self.store.working()):
-            targets = self.store.get("concentration_targets", {})
-            if targets and all(self.store.quantity(symbol) <= quantity for symbol, quantity in targets.items()):
-                self.concentration.completed()
-                with self.store.transaction():
-                    self.store.set("concentration_state", self.concentration.state())
-                    self.store.set("concentration_targets", {})
         return result
 
     def _resolve_cash_evidence(self) -> None:
@@ -456,12 +449,11 @@ class Application:
         results = self._protect_pending_entries(bundle, run_id)
         snapshot = self.portfolio()
         self.record_nav()
-        reductions = {item.instrument_id: item for item in self.concentration.observe(snapshot, bundle.now, self.profile)}
+        self.concentration.observe(snapshot, bundle.now, self.profile)
         with self.store.transaction():
             self.store.set("concentration_state", self.concentration.state())
-            if reductions:
-                self.store.set("concentration_targets", {symbol: self.store.quantity(symbol) - item.quantity for symbol, item in reductions.items()})
-        targets = self.store.get("concentration_targets", {})
+            # Retire unsent targets from the former concentration policy on upgrade.
+            self.store.set("concentration_targets", {})
         for holding in snapshot.holdings:
             quote = bundle.quotes.get(holding.instrument_id)
             features = bundle.features.get(holding.instrument_id)
@@ -477,8 +469,7 @@ class Application:
                 features=features, account_complete=self.store.get("reconciled") and self.store.get("ownership_complete"),
                 orders_known=all(row["state"] not in {"UNKNOWN", "CANCEL_REQUESTED"} for row in self.store.working()),
                 tradable=holding.instrument_id in bundle.instruments and bundle.instruments[holding.instrument_id].status == "NORMAL" and bundle.instruments[holding.instrument_id].status_verified,
-                invalidating_events=invalidations,
-                reduction_quantity=max(0, holding.quantity - targets[holding.instrument_id]) if holding.instrument_id in targets else 0)
+                invalidating_events=invalidations)
             results.append(plan.model_dump(mode="json"))
             if self.config.mode == "shadow":
                 continue

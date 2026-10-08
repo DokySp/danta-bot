@@ -294,7 +294,8 @@ class InvestmentThesis(StrictModel):
     initial_r_price: Positive
     average_entry: Positive
     planned_quantity: Quantity
-    risk_budget: Positive
+    # Historical theses retain their old budget; new cash-sized entries have no cap.
+    risk_budget: Positive | None
     strategy_hash: str
     policy_hash: str
     created_at: AwareTime
@@ -350,13 +351,13 @@ class EntryPlan(StrictModel):
     reason: str
     entry_price: Positive
     stop_price: Positive
-    risk_budget: Nonnegative
+    risk_budget: Nonnegative | None
     unit_risk: Positive | None
     total_risk: Nonnegative
     reserved_cash: Nonnegative
     expected_roundtrip_friction: Nonnegative
     target_weight: Nonnegative
-    q_risk: Quantity
+    q_risk: Quantity | None
     expires_at: AwareTime
 
 

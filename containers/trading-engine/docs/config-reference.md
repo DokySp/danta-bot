@@ -90,9 +90,9 @@ transport도 이 경우에만 내부 `FIXTURE_ONLY` 표지를 사용한다. 외�
 | 사건 | earnings_quality/official_guidance/material_contract, 최대5세션, 원문 필수 |
 | 특징 | SMA20/60, SMA20 기울기5세션, RS20 > 0, ATR14 단순 평균 true range, 지수 종가≥SMA60 |
 | 추격/기회기간 | 전일종가+0.75ATR, SMA20+2ATR 상한, 3~20세션 |
-| 진입 위험 | 건별 NAV의0.25%, 합계 계획위험1%, 최대5기업 |
-| 진입 비중 | 종목20%, 업종40%, 총80% |
-| 축소 발동 | 종목25%, 업종50%, 총90% 초과, 유효관측2회·최소5초 간격 |
+| 진입 수량 | 가용 현금·매수 수수료로 계산, 건별·합계 위험예산 상한 없음, 최대5기업 |
+| 비중 참고값 | `reference_position_weight` 종목20%, `reference_sector_weight` 업종40%, 총투자비중 상한 없음 |
+| 비중 초과 | 참고값만 기록, 진입 차단·매수 취소·자동 축소 없음 |
 | 주문 참여/갭 | 계획/ADTV 최대0.0005, gap buffer 0.50ATR |
 | 초기 보호 | low5/2ATR 상한, 최소 stop 거리0.75ATR |
 | 추적/추세 | MFE 1R부터 2ATR trailing, stop 비하향, 연속2완성 종가<SMA20 청산 |

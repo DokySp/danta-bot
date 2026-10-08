@@ -19,7 +19,7 @@ nav{background:#eaf1f8;padding:18px;border-radius:8px}nav ul{list-style:none;pad
 .report-table td{display:grid;grid-template-columns:96px minmax(0,1fr);gap:10px;border:0;min-width:0}
 .report-table td:before{content:attr(data-label);font-weight:600;color:#43586c}}
 @media print{body{max-width:none;padding:0;background:white;font-size:10pt}main{padding:0}nav{display:none}pre{white-space:pre-wrap}table{display:table;font-size:8pt}tr,blockquote{break-inside:avoid}a{color:inherit}h2,h3{break-after:avoid}}
-</style></head><body class="document"><main><p class="metadata">원본: README.md<br>SHA-256: <code>8787720620ebaee7d14ac1699ee066907e42f175fef75ed1824556be6b2699ae</code><br>생성시각: 2026-10-08T09:20:58.178063+09:00</p><p class="notice">구현 명세를 렌더링한 보고서입니다. 연구 가설·설정 예시는 실제 투자 성과, 검증 완료 또는 실거래 승인이 아닙니다.</p><nav aria-label="절별 바로가기"><details><summary>전체 목차 (93개 절)</summary><ul><li class="level-1"><a href="#section-1">trading-engine — 투자 전략과 거래 시스템 구현 명세</a></li><li class="level-2"><a href="#section-2">현재 배포 설정</a></li><li class="level-2"><a href="#section-3">1. 사람이 먼저 읽을 요약</a></li><li class="level-3"><a href="#section-4">1.1 어떤 방식으로 수익을 추구하는가</a></li><li class="level-3"><a href="#section-5">1.2 구조의 중심</a></li><li class="level-3"><a href="#section-6">1.3 완료의 의미</a></li><li class="level-2"><a href="#section-7">2. 해결할 문제와 설계 요구사항</a></li><li class="level-2"><a href="#section-8">3. 기본 투자 전략: 사건 확인형 추세 스윙</a></li><li class="level-3"><a href="#section-9">3.1 전략 가설과 그 한계</a></li><li class="level-3"><a href="#section-10">3.2 숫자의 성격</a></li><li class="level-3"><a href="#section-11">3.3 후보 모집단과 자료</a></li><li class="level-3"><a href="#section-12">3.4 사건 분류</a></li><li class="level-3"><a href="#section-13">3.5 지표의 정확한 정의</a></li><li class="level-3"><a href="#section-14">3.6 신규 진입의 순서</a></li><li class="level-2"><a href="#section-15">4. 진입 가격·수량·자금 배분</a></li><li class="level-3"><a href="#section-16">4.1 초기 보호 가격</a></li><li class="level-3"><a href="#section-17">4.2 비용과 계획 위험</a></li><li class="level-3"><a href="#section-18">4.3 최종 수량</a></li><li class="level-3"><a href="#section-19">4.4 작은 수량 예시</a></li><li class="level-2"><a href="#section-20">5. 보유·축소·청산·재진입</a></li><li class="level-3"><a href="#section-21">5.1 진입 시 남길 투자 계획</a></li><li class="level-3"><a href="#section-22">5.2 청산 우선순위</a></li><li class="level-3"><a href="#section-23">5.3 이익 보호와 보호 가격 갱신</a></li><li class="level-3"><a href="#section-24">5.4 위험 축소와 불필요한 리밸런싱의 구분</a></li><li class="level-3"><a href="#section-25">5.5 당일 변동과 반증의 처리</a></li><li class="level-3"><a href="#section-26">5.6 재진입 자격</a></li><li class="level-2"><a href="#section-27">6. 하루의 거래 흐름과 판단 주기</a></li><li class="level-3"><a href="#section-28">6.1 시간은 시장 세션에 상대적으로 정의</a></li><li class="level-3"><a href="#section-29">6.2 무엇이 LLM 재심사를 발생시키는가</a></li><li class="level-3"><a href="#section-30">6.3 판단 지연과 변경 없는 실행</a></li><li class="level-3"><a href="#section-31">6.4 대표 상황</a></li><li class="level-2"><a href="#section-32">7. 프로그램 구조와 역할</a></li><li class="level-3"><a href="#section-33">7.1 확정 기술 구성</a></li><li class="level-3"><a href="#section-34">7.2 의존성 방향</a></li><li class="level-2"><a href="#section-35">8. 데이터·판단 계약</a></li><li class="level-3"><a href="#section-36">8.1 공통 규칙</a></li><li class="level-3"><a href="#section-37">8.2 AI에 전달할 입력</a></li><li class="level-3"><a href="#section-38">8.3 AI 출력</a></li><li class="level-3"><a href="#section-39">8.4 전략 상태</a></li><li class="level-2"><a href="#section-40">9. 주문 생명주기와 실행 정확성</a></li><li class="level-3"><a href="#section-41">9.1 한 경로로만 주문을 변경</a></li><li class="level-3"><a href="#section-42">9.2 신규 주문과 계획 만료</a></li><li class="level-3"><a href="#section-43">9.3 목표와 미체결의 관계</a></li><li class="level-3"><a href="#section-44">9.4 주문 상태</a></li><li class="level-3"><a href="#section-45">9.5 영속성과 동시성</a></li><li class="level-2"><a href="#section-46">10. Codex 실행 어댑터와 프롬프트</a></li><li class="level-3"><a href="#section-47">10.1 호출 계약</a></li><li class="level-3"><a href="#section-48">10.2 실패 분류</a></li><li class="level-3"><a href="#section-49">10.3 구현할 판단 프롬프트의 본문 계약</a></li><li class="level-3"><a href="#section-50">10.4 권한 격리</a></li><li class="level-2"><a href="#section-51">11. 외부 연결과 사용자 기능</a></li><li class="level-3"><a href="#section-52">11.1 기본 기능 범위</a></li><li class="level-3"><a href="#section-53">11.2 KIS·DART·공식 원문 어댑터</a></li><li class="level-3"><a href="#section-54">11.3 Telegram wire contract</a></li><li class="level-3"><a href="#section-55">11.4 배포 경계</a></li><li class="level-2"><a href="#section-56">12. Config: 세 파일, 하나의 실행 기준</a></li><li class="level-3"><a href="#section-57">12.1 설정 원칙</a></li><li class="level-3"><a href="#section-58">12.2 app.yaml</a></li><li class="level-3"><a href="#section-59">12.3 strategy.yaml</a></li><li class="level-3"><a href="#section-60">12.4 schedules.yaml</a></li><li class="level-3"><a href="#section-61">12.5 모드와 활성화</a></li><li class="level-2"><a href="#section-62">13. 원장·성과 계산</a></li><li class="level-3"><a href="#section-63">13.1 귀속과 시작점</a></li><li class="level-3"><a href="#section-64">13.2 계산 계약</a></li><li class="level-3"><a href="#section-65">13.3 수익이 없을 때 원인을 분해할 지표</a></li><li class="level-3"><a href="#section-66">13.4 모델 비용</a></li><li class="level-2"><a href="#section-67">14. 산출물과 보고서</a></li><li class="level-3"><a href="#section-68">14.1 실행별 기록</a></li><li class="level-3"><a href="#section-69">14.2 사람용 실행/성과 화면의 순서</a></li><li class="level-3"><a href="#section-70">14.3 이 README로 만드는 설계 report.html</a></li><li class="level-2"><a href="#section-71">15. 전략 검증: 프로그램이 정상인 것과 돈을 버는 것은 다르다</a></li><li class="level-3"><a href="#section-72">15.1 실험을 먼저 고정한다</a></li><li class="level-3"><a href="#section-73">15.2 비교군의 정확한 정의</a></li><li class="level-3"><a href="#section-74">15.3 시뮬레이션의 체결 계약</a></li><li class="level-3"><a href="#section-75">15.4 판정 기준</a></li><li class="level-3"><a href="#section-76">15.5 수익이 나지 않을 때의 연구 순서</a></li><li class="level-2"><a href="#section-77">16. 검증 사례와 인수 기준</a></li><li class="level-3"><a href="#section-78">16.1 전략 테스트</a></li><li class="level-3"><a href="#section-79">16.2 운영·보안 테스트</a></li><li class="level-3"><a href="#section-80">16.3 성과·실험 테스트</a></li><li class="level-3"><a href="#section-81">16.4 명세 독립성과 사람 판단 테스트</a></li><li class="level-2"><a href="#section-82">17. 작업 권한·질문·중단</a></li><li class="level-3"><a href="#section-83">17.1 누가 무엇을 결정하는가</a></li><li class="level-3"><a href="#section-84">17.2 실제 중단 절차</a></li><li class="level-3"><a href="#section-85">17.3 시작 시 확인할 것</a></li><li class="level-3"><a href="#section-86">17.4 금지할 입력과 행동</a></li><li class="level-2"><a href="#section-87">18. 구현 순서·최종 제출물</a></li><li class="level-3"><a href="#section-88">18.1 구현 순서</a></li><li class="level-3"><a href="#section-89">18.2 필요한 CLI</a></li><li class="level-3"><a href="#section-90">18.3 최종 제출물</a></li><li class="level-2"><a href="#section-91">19. 실거래 전환과 운영 복구</a></li><li class="level-2"><a href="#section-92">20. 근거와 외부 규격</a></li><li class="level-2"><a href="#section-93">21. 구현자에게 전달할 시작 지시</a></li></ul></details></nav><h1 id="section-1">trading-engine — 투자 전략과 거래 시스템 구현 명세</h1>
+</style></head><body class="document"><main><p class="metadata">원본: README.md<br>SHA-256: <code>250ccbb40f02f10d90aa9cc3022017db4bb49c847fb02c621994c37d894a7cea</code><br>생성시각: 2026-10-08T09:46:47.149649+09:00</p><p class="notice">구현 명세를 렌더링한 보고서입니다. 연구 가설·설정 예시는 실제 투자 성과, 검증 완료 또는 실거래 승인이 아닙니다.</p><nav aria-label="절별 바로가기"><details><summary>전체 목차 (93개 절)</summary><ul><li class="level-1"><a href="#section-1">trading-engine — 투자 전략과 거래 시스템 구현 명세</a></li><li class="level-2"><a href="#section-2">현재 배포 설정</a></li><li class="level-2"><a href="#section-3">1. 사람이 먼저 읽을 요약</a></li><li class="level-3"><a href="#section-4">1.1 어떤 방식으로 수익을 추구하는가</a></li><li class="level-3"><a href="#section-5">1.2 구조의 중심</a></li><li class="level-3"><a href="#section-6">1.3 완료의 의미</a></li><li class="level-2"><a href="#section-7">2. 해결할 문제와 설계 요구사항</a></li><li class="level-2"><a href="#section-8">3. 기본 투자 전략: 사건 확인형 추세 스윙</a></li><li class="level-3"><a href="#section-9">3.1 전략 가설과 그 한계</a></li><li class="level-3"><a href="#section-10">3.2 숫자의 성격</a></li><li class="level-3"><a href="#section-11">3.3 후보 모집단과 자료</a></li><li class="level-3"><a href="#section-12">3.4 사건 분류</a></li><li class="level-3"><a href="#section-13">3.5 지표의 정확한 정의</a></li><li class="level-3"><a href="#section-14">3.6 신규 진입의 순서</a></li><li class="level-2"><a href="#section-15">4. 진입 가격·수량·자금 배분</a></li><li class="level-3"><a href="#section-16">4.1 초기 보호 가격</a></li><li class="level-3"><a href="#section-17">4.2 비용과 계획 위험</a></li><li class="level-3"><a href="#section-18">4.3 최종 수량</a></li><li class="level-3"><a href="#section-19">4.4 작은 수량 예시</a></li><li class="level-2"><a href="#section-20">5. 보유·축소·청산·재진입</a></li><li class="level-3"><a href="#section-21">5.1 진입 시 남길 투자 계획</a></li><li class="level-3"><a href="#section-22">5.2 청산 우선순위</a></li><li class="level-3"><a href="#section-23">5.3 이익 보호와 보호 가격 갱신</a></li><li class="level-3"><a href="#section-24">5.4 비중 참고값과 낙폭 중단</a></li><li class="level-3"><a href="#section-25">5.5 당일 변동과 반증의 처리</a></li><li class="level-3"><a href="#section-26">5.6 재진입 자격</a></li><li class="level-2"><a href="#section-27">6. 하루의 거래 흐름과 판단 주기</a></li><li class="level-3"><a href="#section-28">6.1 시간은 시장 세션에 상대적으로 정의</a></li><li class="level-3"><a href="#section-29">6.2 무엇이 LLM 재심사를 발생시키는가</a></li><li class="level-3"><a href="#section-30">6.3 판단 지연과 변경 없는 실행</a></li><li class="level-3"><a href="#section-31">6.4 대표 상황</a></li><li class="level-2"><a href="#section-32">7. 프로그램 구조와 역할</a></li><li class="level-3"><a href="#section-33">7.1 확정 기술 구성</a></li><li class="level-3"><a href="#section-34">7.2 의존성 방향</a></li><li class="level-2"><a href="#section-35">8. 데이터·판단 계약</a></li><li class="level-3"><a href="#section-36">8.1 공통 규칙</a></li><li class="level-3"><a href="#section-37">8.2 AI에 전달할 입력</a></li><li class="level-3"><a href="#section-38">8.3 AI 출력</a></li><li class="level-3"><a href="#section-39">8.4 전략 상태</a></li><li class="level-2"><a href="#section-40">9. 주문 생명주기와 실행 정확성</a></li><li class="level-3"><a href="#section-41">9.1 한 경로로만 주문을 변경</a></li><li class="level-3"><a href="#section-42">9.2 신규 주문과 계획 만료</a></li><li class="level-3"><a href="#section-43">9.3 목표와 미체결의 관계</a></li><li class="level-3"><a href="#section-44">9.4 주문 상태</a></li><li class="level-3"><a href="#section-45">9.5 영속성과 동시성</a></li><li class="level-2"><a href="#section-46">10. Codex 실행 어댑터와 프롬프트</a></li><li class="level-3"><a href="#section-47">10.1 호출 계약</a></li><li class="level-3"><a href="#section-48">10.2 실패 분류</a></li><li class="level-3"><a href="#section-49">10.3 구현할 판단 프롬프트의 본문 계약</a></li><li class="level-3"><a href="#section-50">10.4 권한 격리</a></li><li class="level-2"><a href="#section-51">11. 외부 연결과 사용자 기능</a></li><li class="level-3"><a href="#section-52">11.1 기본 기능 범위</a></li><li class="level-3"><a href="#section-53">11.2 KIS·DART·공식 원문 어댑터</a></li><li class="level-3"><a href="#section-54">11.3 Telegram wire contract</a></li><li class="level-3"><a href="#section-55">11.4 배포 경계</a></li><li class="level-2"><a href="#section-56">12. Config: 세 파일, 하나의 실행 기준</a></li><li class="level-3"><a href="#section-57">12.1 설정 원칙</a></li><li class="level-3"><a href="#section-58">12.2 app.yaml</a></li><li class="level-3"><a href="#section-59">12.3 strategy.yaml</a></li><li class="level-3"><a href="#section-60">12.4 schedules.yaml</a></li><li class="level-3"><a href="#section-61">12.5 모드와 활성화</a></li><li class="level-2"><a href="#section-62">13. 원장·성과 계산</a></li><li class="level-3"><a href="#section-63">13.1 귀속과 시작점</a></li><li class="level-3"><a href="#section-64">13.2 계산 계약</a></li><li class="level-3"><a href="#section-65">13.3 수익이 없을 때 원인을 분해할 지표</a></li><li class="level-3"><a href="#section-66">13.4 모델 비용</a></li><li class="level-2"><a href="#section-67">14. 산출물과 보고서</a></li><li class="level-3"><a href="#section-68">14.1 실행별 기록</a></li><li class="level-3"><a href="#section-69">14.2 사람용 실행/성과 화면의 순서</a></li><li class="level-3"><a href="#section-70">14.3 이 README로 만드는 설계 report.html</a></li><li class="level-2"><a href="#section-71">15. 전략 검증: 프로그램이 정상인 것과 돈을 버는 것은 다르다</a></li><li class="level-3"><a href="#section-72">15.1 실험을 먼저 고정한다</a></li><li class="level-3"><a href="#section-73">15.2 비교군의 정확한 정의</a></li><li class="level-3"><a href="#section-74">15.3 시뮬레이션의 체결 계약</a></li><li class="level-3"><a href="#section-75">15.4 판정 기준</a></li><li class="level-3"><a href="#section-76">15.5 수익이 나지 않을 때의 연구 순서</a></li><li class="level-2"><a href="#section-77">16. 검증 사례와 인수 기준</a></li><li class="level-3"><a href="#section-78">16.1 전략 테스트</a></li><li class="level-3"><a href="#section-79">16.2 운영·보안 테스트</a></li><li class="level-3"><a href="#section-80">16.3 성과·실험 테스트</a></li><li class="level-3"><a href="#section-81">16.4 명세 독립성과 사람 판단 테스트</a></li><li class="level-2"><a href="#section-82">17. 작업 권한·질문·중단</a></li><li class="level-3"><a href="#section-83">17.1 누가 무엇을 결정하는가</a></li><li class="level-3"><a href="#section-84">17.2 실제 중단 절차</a></li><li class="level-3"><a href="#section-85">17.3 시작 시 확인할 것</a></li><li class="level-3"><a href="#section-86">17.4 금지할 입력과 행동</a></li><li class="level-2"><a href="#section-87">18. 구현 순서·최종 제출물</a></li><li class="level-3"><a href="#section-88">18.1 구현 순서</a></li><li class="level-3"><a href="#section-89">18.2 필요한 CLI</a></li><li class="level-3"><a href="#section-90">18.3 최종 제출물</a></li><li class="level-2"><a href="#section-91">19. 실거래 전환과 운영 복구</a></li><li class="level-2"><a href="#section-92">20. 근거와 외부 규격</a></li><li class="level-2"><a href="#section-93">21. 구현자에게 전달할 시작 지시</a></li></ul></details></nav><h1 id="section-1">trading-engine — 투자 전략과 거래 시스템 구현 명세</h1>
 <p>대상: <code>DokySp/danta-bot</code>의 <code>containers/trading-engine/</code> · 작성일: 2026-09-13 · 배포 정책 갱신: 2026-09-21 · 시간대: Asia/Seoul</p>
 <p>구현자: 사용자가 별도로 실행하는 Codex GPT-6 Astra Ultra. 개발 모델 지정은 운영 매매 모델·effort·실거래 권한 지정과 다르다.</p>
 <p><strong>이 README 하나로 새 코드를 구현한다. 투자 전략·데이터·판단·주문·성과 평가를 함께 구현하며, 거래 인프라만 만들고 전략을 추후 과제로 남기지 않는다.</strong> 기존 trading-engine 소스·프롬프트·Git 이력·백업·옛 이미지·원본 실행 로그는 읽거나 복원하지 않는다. 공식 외부 API 문서 확인과 새 코드 검증은 수행한다.</p>
@@ -252,24 +252,19 @@ Codex 로그인과 로컬 격리 검사를 수행하고, 공시 원문 수집은
 <td>미체결 신규 진입도 슬롯 사용</td>
 </tr>
 <tr>
-<td>신규 진입의 계획 위험</td>
-<td style="text-align:right">전략 NAV의 0.25% 이하</td>
-<td>보호 가격까지의 거리와 비용·갭 완충을 반영한 수량 상한</td>
+<td>신규 진입·포트폴리오 계획 위험</td>
+<td style="text-align:right">수량 상한 없음</td>
+<td>보호 가격까지의 거리와 비용·갭 완충은 참고 위험으로 기록</td>
 </tr>
 <tr>
-<td>포트폴리오 계획 위험</td>
-<td style="text-align:right">전략 NAV의 1.00% 이하</td>
-<td>기존+미체결+제안 포지션의 계획 위험 합계. 실제 최대손실 보장 아님</td>
+<td>종목/업종 비중</td>
+<td style="text-align:right">참고값 20% / 40%</td>
+<td>보유+미체결 기준으로 기록하며 진입 차단·축소 매도에 사용하지 않음</td>
 </tr>
 <tr>
-<td>신규 주문 후 종목/업종/총노출</td>
-<td style="text-align:right">각각 20% / 40% / 80% 이하</td>
-<td>현재+미체결 기준 신규 위험 확대를 차단하는 강제 게이트</td>
-</tr>
-<tr>
-<td>가격 상승에 따른 별도 축소 경계</td>
-<td style="text-align:right">종목 25% / 업종 50% / 총노출 90%</td>
-<td>경계 초과 시 §5의 계획된 축소. 매 틱 20/40/80에 맞추지 않음</td>
+<td>총투자비중</td>
+<td style="text-align:right">별도 상한 없음</td>
+<td>실제 주문 가능 현금과 미체결 예약액을 반영</td>
 </tr>
 <tr>
 <td>연구 낙폭 중단 기준</td>
@@ -370,33 +365,27 @@ R_price = E - S0
           + 매수 수수료(E) + 예상 매도 수수료/세금(S0)
           + 예상 보호 매도 슬리피지
           + 0.5 * ATR14(D)                 # 연구상 갭 완충 가정
-
-risk_budget = strategy_NAV * 0.0025
-q_risk = floor(risk_budget / unit_risk)
 </code></pre>
 <p>갭 완충은 손실 상한이 아니다. 예상 슬리피지는 별도 추정값이며 실제 체결 결과로 검증한다. 수익률 보고에서는 실제 체결가에 이미 반영된 스프레드·슬리피지를 다시 차감하지 않는다.</p>
 <p>왕복 마찰은 무가격변동 가정의 매수 ask→매도 bid 스프레드, 양방향 수수료·매도세금·슬리피지를 합쳐 기록한다. 초기 가격 위험거리 대비 비용의 크기로 신규 진입을 제한하지 않는다. 실제 비용 정산과 수수료를 포함한 주문 가능 현금 검사는 유지한다.</p>
 <h3 id="section-18">4.3 최종 수량</h3>
 <pre><code class="language-text">q_new = max(0, min(
-  q_risk,
-  현재 잔여 종목/업종/총노출 한도에서 가능한 정수 수량,
-  포트폴리오 잔여 계획 위험에서 가능한 정수 수량,
   주문 가능 현금 - 기존 예약 자원으로 가능한 정수 수량,
   ADTV20 * 0.0005 / E 로 가능한 정수 수량
 ))
 </code></pre>
-<p>현금은 승인된 전략 배정 범위로 제한한다. 현재 정책은 전체 계좌 현금을 배정하며, KIS의 실제 주문 가능 현금도 별도 상한으로 함께 쓴다. D+정산일을 임의 가정해 자금을 미리 쓰지 않는다. 미체결 매수는 현금·노출·위험·슬롯을 예약한다. 같은 전략의 미체결 매도는 실제 확인 전 현금 유입으로 간주하지 않는다.</p>
-<p>포트폴리오 계획 위험은 현재 시점에서 보호 매도까지의 추가 하락을 기준으로 계산한다. 보유 수량에는 <code>max(현재 유효 평가가격 - 현재 보호가격, 0) + 예상 매도 비용/슬리피지 + 0.5×현재 ATR</code>를 적용한다. 이미 낸 매수 비용은 다시 더하지 않는다. 미체결 신규 매수 잔량에는 §4.2의 unit_risk를 적용하고 체결된 수량과 겹치지 않게 한다. 1%는 신규 위험을 허용하는 게이트이며, 보유 중 이 수치만 넘었다고 별도 자동 매도 규칙을 만들어내지 않는다. 보호·집중·낙폭 규칙은 각각 적용한다.</p>
+<p>현금은 승인된 전략 배정 범위로 제한한다. 현재 정책은 전체 계좌 현금을 배정하며, KIS의 실제 주문 가능 현금도 별도 상한으로 함께 쓴다. D+정산일을 임의 가정해 자금을 미리 쓰지 않는다. 미체결 매수는 현금·기업 슬롯을 예약하며 노출·계획 위험은 참고값으로 기록한다. 같은 전략의 미체결 매도는 실제 확인 전 현금 유입으로 간주하지 않는다.</p>
+<p>포트폴리오 계획 위험은 현재 시점에서 보호 매도까지의 추가 하락을 기준으로 계산한다. 보유 수량에는 <code>max(현재 유효 평가가격 - 현재 보호가격, 0) + 예상 매도 비용/슬리피지 + 0.5×현재 ATR</code>를 적용한다. 이미 낸 매수 비용은 다시 더하지 않는다. 미체결 신규 매수 잔량에는 §4.2의 unit_risk를 적용하고 체결된 수량과 겹치지 않게 한다. 건별 0.25%·합계 1% 위험예산을 수량 상한으로 사용하지 않는다. 신규 계획의 <code>risk_budget</code>·<code>q_risk</code>는 null(한도 없음)이며, 이전 기록의 위험예산은 보존한다. 보호·낙폭 규칙은 계속 적용한다.</p>
 <p>노출 계산에는 검증된 동일 시점 전략 NAV·평가가격·업종 분류를 쓴다. 보유와 미체결 매수는 포함하고 미체결 매도는 체결 전 차감하지 않는다. 업종은 데이터 공급자의 일관된 공식 분류 하나로 고정해 manifest에 남긴다. 업종/가격/계좌가 미확인이면 새 위험을 허용하지 않는다.</p>
-<p>수수료가 주문금액별/최소금액별로 비선형이면 위 per-share 식은 초기 수량 후보 계산에만 쓴다. 최종 수량에서 정확한 주문 단위 비용·예약 현금·각 게이트를 다시 계산해 모두 만족할 때까지 정수 수량을 줄인다. 단순 floor 이후 비용 때문에 한도를 넘는 주문을 허용하지 않는다.</p>
+<p>수수료가 주문금액별/최소금액별로 비선형이면 정확한 주문 단위 매수 수수료와 예약 현금을 다시 계산해 가용 현금을 넘지 않는 정수 수량을 정한다. 비용은 위험예산이나 왕복 마찰 비율에 따른 진입 차단에 쓰지 않는다.</p>
 <p>기업당 1개 thesis를 유지한다. <strong>기본 전략은 보유 중 추가매수·물타기를 하지 않는다.</strong> 같은 진입 계획의 부분체결 잔량은 추가매수가 아니라 이미 승인된 수량의 완료다. 미래에 피라미딩을 연구하려면 별도 정책 변경과 비교 실험이 필요하다.</p>
 <p>최종 수량과 목표비중은 프로그램이 계산해 기록한다. AI는 임의 금액을 주문하거나, 체결된 수량을 자기 판단으로 수정할 수 없다. 큰 후보를 우선했다가 다음 후보 자금이 부족해지는 배정 효과도 실험 결과의 일부로 기록한다.</p>
 <h3 id="section-19">4.4 작은 수량 예시</h3>
-<p>가상 NAV 1,000만 원, 1주당 계획 위험 500원이라면 진입 위험 예산 25,000원에서 <code>q_risk=50주</code>다. 다른 한도가 32주라면 최종 계획은 최대 32주다. 종목 가격이 높아 1주도 살 수 없으면 거래하지 않는다. ‘토큰을 썼으니 최소 1주는 사자’는 규칙을 만들지 않는다.</p>
+<p>가상 주문 가능 현금 32만 원, 주가 1만 원, 매수 수수료 0원이고 거래 참여 한도에 걸리지 않으면 32주다. 주문당 최소 매수 수수료가 100원이면 31주다. 계획 위험이나 종목·업종·총투자비중을 이유로 이 수량을 더 줄이지 않는다. 종목 가격이 높아 1주도 살 수 없으면 거래하지 않는다. ‘토큰을 썼으니 최소 1주는 사자’는 규칙을 만들지 않는다.</p>
 <p>이 예시는 산식 검증용이며 실제 운용 자금·종목 가격·허용 위험의 승인값이 아니다.</p>
 <h2 id="section-20">5. 보유·축소·청산·재진입</h2>
 <h3 id="section-21">5.1 진입 시 남길 투자 계획</h3>
-<p>첫 주문 전에 <code>InvestmentThesis</code>에 다음을 고정한다: 사건 ID와 원문, 진입 근거, 3~20세션 내 작용 경로, 반증, 초기 보호 가격, 추세/기간 청산 조건, first-fill 기준 최대 보유 기한, 계획 수량, 위험 예산, 전략/정책 hash. 첫 체결이 없으면 보유 기간을 시작하지 않는다.</p>
+<p>첫 주문 전에 <code>InvestmentThesis</code>에 다음을 고정한다: 사건 ID와 원문, 진입 근거, 3~20세션 내 작용 경로, 반증, 초기 보호 가격, 추세/기간 청산 조건, first-fill 기준 최대 보유 기한, 계획 수량, 위험예산 한도 없음, 전략/정책 hash. 첫 체결이 없으면 보유 기간을 시작하지 않는다.</p>
 <p>사업이 좋은지와 현재 가격의 진입 매력이 있는지는 구분한다. 진입 뒤 손실이 났다고 최대 보유일을 연장하거나 장기 가치투자 thesis로 이름을 바꾸지 않는다. 중요한 새 사건이 나타나도 현재 거래의 시계와 위험 예산을 리셋하지 않는다.</p>
 <h3 id="section-22">5.2 청산 우선순위</h3>
 <table>
@@ -441,12 +430,6 @@ q_risk = floor(risk_budget / unit_risk)
 </tr>
 <tr>
 <td style="text-align:right">5</td>
-<td>종목/업종/총노출의 별도 축소 경계 초과</td>
-<td>§5.4의 <code>REDUCE_TO_LIMIT</code></td>
-<td>없음</td>
-</tr>
-<tr>
-<td style="text-align:right">6</td>
 <td>위 조건 없음, 새로운 무효화 사실 없음</td>
 <td><code>KEEP_QUANTITY</code></td>
 <td>정기/사건 검토에서 근거 유지 확인</td>
@@ -462,11 +445,9 @@ q_risk = floor(risk_budget / unit_risk)
 </code></pre>
 <p>아직 완성 세션이 없으면 초기 보호 가격을 유지한다. 보호 가격은 내리지 않는다. 새 보호 가격이 현재 유효 시세 이상이면 다음 감시에서 청산 조건으로 취급하고, 시세 위에 조용히 stop을 옮겨 ‘보호 중’으로만 표시하지 않는다.</p>
 <p>기본 전략에는 고정 수익률을 채우기 위한 부분 익절이나 필수 2R 익절이 없다. 수익 방향이 이어지면 보호 가격을 올려 추적하고, 위 청산 조건을 따른다. AI가 더 낙관적인 장기 목표가를 제시해도 보호를 해제하지 못한다.</p>
-<h3 id="section-24">5.4 위험 축소와 불필요한 리밸런싱의 구분</h3>
-<p>신규 주문의 20/40/80% 게이트와 보유 중 25/50/90% 축소 경계는 다르다. 전자는 새 위험을 늘릴 때의 한도, 후자는 가격 변화로 집중이 커졌을 때 작동하는 연구 정책이다. 모두 전략 NAV를 분모로 사용하며 자산 누락 상태에서 계산하지 않는다.</p>
-<p>보유 중 축소 경계를 유효한 두 번의 연속 평가에서 초과하면, 신규 매수 잔량을 먼저 정리하고 종목 20%·업종 40%·총노출 80% 안으로 <strong>해당 조건에 필요한 만큼만</strong> 줄이는 계획을 고정한다. 두 평가는 최소 5초 간격으로 하며, 중간 미확인 평가는 확인 횟수에 포함하지 않는다. 축소 중에는 가격 변화마다 새 축소 의도를 중복 생성하지 않는다.</p>
-<p>여러 종목 중 축소 순서는 해당 초과 그룹 내 <code>현재 평가금액 내림차순 → 종목 ID</code>다. 한 계획이 여러 초과를 동시에 해소하면 수량을 합산하지 않는다. 현재 주문/체결 반영 후 목표 잔량을 계산한다. 축소한 양을 같은 thesis에서 자동으로 다시 매수하지 않는다. 이는 명시적 경계 위반 처리이지 매번 목표비중에 맞추는 상시 리밸런싱이 아니다.</p>
-<p>축소 계획은 관측 시점 NAV를 고정해 종목 초과 → 업종 초과 → 총노출 초과 순으로 가상 잔량을 갱신한다. 초과 금액을 선택 종목의 현재 유효가격으로 나눈 뒤 올림한 정수 수량만큼, 해당 전략 매도 가능 수량 내에서 줄인다. 앞 단계의 축소를 다음 단계에 먼저 반영해 중복 매도를 방지한다. 이는 가격·매도비용 때문에 체결 후 비율이 정확히 목표가 된다는 보장은 아니며, 이후 다시 별도 축소 경계를 넘을 때만 새 평가를 한다.</p>
+<h3 id="section-24">5.4 비중 참고값과 낙폭 중단</h3>
+<p>종목 20%·업종 40%는 참고값이다. 검증된 동일 시점 NAV를 분모로 보유·미체결 매수의 비중과 참고값 초과 여부를 기록한다. 이 값으로 신규 매수를 차단하거나 미체결 매수를 취소하거나 보유를 축소하지 않는다. 총투자비중 상한과 별도 집중 축소 경계는 없다.</p>
+<p>정책 변경 전에 저장된 미실행 집중 축소 목표도 새 보호 감시에서 해제한다. 이미 제출된 주문은 정상 대사하며, 손절·근거 무효화·보유 기한·추세 청산은 유지한다.</p>
 <p>연구 낙폭 10% 도달 시 신규 위험 확대를 중단하고 미체결 매수를 취소하며 기존 보유의 보호·기간·추세 청산을 유지한다. 전량 매도 정책은 아니다. 손실이 10%에서 멈춘다는 보장도 아니다. 재개는 사람 판단을 요구하며 다음 날 자동 리셋하지 않는다.</p>
 <h3 id="section-25">5.5 당일 변동과 반증의 처리</h3>
 <p>당일 -1%, 외국인 순매도, 새 기사 한 건만으로 무조건 매도하지 않는다. 아래 중 무엇인지 구분한다.</p>
@@ -641,7 +622,7 @@ q_risk = floor(risk_budget / unit_risk)
 │   ├── market.py                     # 수집·특징·세션·데이터 품질
 │   ├── strategy.py                   # 후보·진입·청산·재진입 조건
 │   ├── decision.py                   # AI 입력·출력·의미 검증
-│   ├── portfolio.py                  # 순위→위험 예산→목표수량
+│   ├── portfolio.py                  # 순위→가용 현금→목표수량
 │   ├── risk.py                       # 모델과 독립된 보호·집중·낙폭
 │   ├── execution.py                  # 주문 변경의 유일한 경로
 │   ├── accounting.py                 # 귀속·NAV·현금흐름·비용
@@ -1195,16 +1176,8 @@ strategy:
       - 20
     portfolio:
       max_issuers: 5
-      entry_risk_fraction: '0.0025'
-      aggregate_planned_risk_fraction: '0.0100'
-      entry_position_weight: '0.20'
-      entry_sector_weight: '0.40'
-      entry_gross_weight: '0.80'
-      trim_position_trigger: '0.25'
-      trim_sector_trigger: '0.50'
-      trim_gross_trigger: '0.90'
-      trim_confirmation_observations: 2
-      trim_min_observation_gap_seconds: 5
+      reference_position_weight: '0.20'
+      reference_sector_weight: '0.40'
       max_plan_adtv_fraction: '0.0005'
       gap_buffer_atr: '0.50'
       pyramiding: false
@@ -1591,8 +1564,8 @@ drawdown_t = 1 - performance_index_t / max(performance_index_0 ... performance_i
 </tr>
 <tr>
 <td>S09</td>
-<td>위험 예산 25,000원·unit risk 500원</td>
-<td>q_risk 50, 다른 한도 32면 최대 32</td>
+<td>현금 32만 원·주가 1만 원·수수료 0원</td>
+<td>32주, 위험예산·투자비중으로 추가 축소 없음</td>
 </tr>
 <tr>
 <td>S10</td>
@@ -1656,8 +1629,8 @@ drawdown_t = 1 - performance_index_t / max(performance_index_0 ... performance_i
 </tr>
 <tr>
 <td>S22</td>
-<td>종목 25% 초과가 두 유효 관측에서 확인</td>
-<td>20% 목표 축소 1개 계획, 중복/되사기 없음</td>
+<td>종목·업종 비중이 참고값을 초과</td>
+<td>참고값 초과 기록, 매수 취소·축소 매도 없음</td>
 </tr>
 <tr>
 <td>S23</td>
